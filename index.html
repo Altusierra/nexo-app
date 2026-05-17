@@ -146,6 +146,17 @@ tr:hover td{background:var(--card2)}
 .alert-blue{background:var(--blue-bg);color:var(--blue);border:1px solid #1e3a5f}
 .alert-yellow{background:#2a1f06;color:#fbbf24;border:1px solid #78350f}
 
+/* ASIGNADOR — estados */
+.asig-pill{display:inline-block;padding:3px 8px;border-radius:5px;font-size:10px;font-weight:600;white-space:nowrap}
+.asig-despachar{background:#0d2818;color:#22c55e;border:1px solid #16532a}
+.asig-confirmar{background:#0a1f3a;color:#60a5fa;border:1px solid #1e3a5f}
+.asig-subir{background:#2a1f06;color:#fbbf24;border:1px solid #78350f}
+.asig-cancelar{background:#2a0a1a;color:#f87171;border:1px solid #7f1d1d}
+.asig-flete{background:#2a0a0a;color:#fca5a5;border:1px solid #7f1d1d}
+.asig-sincobertura{background:#1f1f1f;color:#a3a3a3;border:1px solid #404040}
+.asig-row-error{background:#2a0a0a !important}
+.asig-stat{padding:8px 14px;border-radius:8px;font-size:12px;font-weight:600;display:inline-block;margin:0 6px 6px 0}
+
 /* DIVIDER */
 .divider{height:1px;background:var(--border);margin:20px 0}
 
@@ -338,7 +349,7 @@ function showApp(){
   syncMobRole()
   renderNav()
   const rol=currentRol()
-  const defaultPage=rol==='admin'?'admin-home':(rol==='auxiliar'?'aux-home':'admin-home')
+  const defaultPage=rol==='admin'?'admin-home':(rol==='auxiliar'?'aux-asignador':'admin-home')
   navigate(defaultPage)
   renderImpersonateBar()
 }
@@ -382,6 +393,7 @@ const NAV={
     {id:'admin-actividad',icon:'🕒',label:'Actividad'},
   ],
   auxiliar:[
+    {id:'aux-asignador',icon:'📍',label:'Asignador'},
     {id:'aux-home',icon:'🏠',label:'Inicio'},
     {id:'aux-reporte',icon:'📝',label:'Reporte del día'},
     {id:'aux-pedidos',icon:'📦',label:'Mis pedidos'},
@@ -418,7 +430,7 @@ window.startImpersonate=(u)=>{
   renderNav()
   renderImpersonateBar()
   const rol=impersonating.rol
-  navigate(rol==='admin'?'admin-home':(rol==='auxiliar'?'aux-home':'admin-home'))
+  navigate(rol==='admin'?'admin-home':(rol==='auxiliar'?'aux-asignador':'admin-home'))
 }
 
 window.stopImpersonate=()=>{
@@ -454,6 +466,7 @@ function render(page){
     'admin-productos':pageAdminProductos,
     'admin-usuarios':pageAdminUsuarios,
     'admin-actividad':pageAdminActividad,
+    'aux-asignador':pageAuxAsignador,
     'aux-home':pageAuxHome,
     'aux-reporte':pageAuxReporte,
     'aux-pedidos':pageAuxPedidos,
@@ -1048,6 +1061,371 @@ async function pageAdminActividad(c){
     </table></div>`
   }
   loadActividad()
+}
+
+// ── AUXILIAR: ASIGNADOR ────────────────────────────────────
+let _asignCache=null
+async function cargarAsignDataSiNecesario(){
+  if(_asignCache)return _asignCache
+  const[ciudades,maestros,celdas,keywords]=await Promise.all([
+    sb.from('ciudades_dropi').select('id,key_norm,nombre_dropi,departamento'),
+    sb.from('maestros').select('id,codigo,nombre,niveles,es_default'),
+    sb.from('maestro_ciudades').select('maestro_id,ciudad_id,d1,d2,d3,d4,flete_envia,flete_coord,flete_inter'),
+    sb.from('maestro_keywords').select('keyword,maestro_id')
+  ])
+  if(ciudades.error||maestros.error||celdas.error||keywords.error){
+    throw new Error(ciudades.error?.message||maestros.error?.message||celdas.error?.message||keywords.error?.message||'Error cargando data')
+  }
+  // Index ciudades por key_norm
+  const D={},cityById={}
+  for(const c of ciudades.data){D[c.key_norm]={id:c.id,nombre:c.nombre_dropi,dept:c.departamento};cityById[c.id]=c}
+  // Index maestros por id y por código
+  const masterById={},masterByCode={}
+  for(const m of maestros.data){masterById[m.id]=m;masterByCode[m.codigo]=m}
+  // Index celdas por (maestro_id, ciudad_id)
+  const M={}
+  for(const m of maestros.data)M[m.codigo]={}
+  for(const x of celdas.data){
+    const code=masterById[x.maestro_id]?.codigo
+    const city=cityById[x.ciudad_id]
+    if(!code||!city)continue
+    M[code][city.key_norm]={d1:x.d1,d2:x.d2,d3:x.d3,d4:x.d4,fe:x.flete_envia,fc:x.flete_coord,fi:x.flete_inter}
+  }
+  // Keywords (lowercase) → código maestro
+  const kw={}
+  for(const k of keywords.data){
+    const code=masterById[k.maestro_id]?.codigo
+    if(code)kw[k.keyword.toLowerCase()]=code
+  }
+  _asignCache={D,M,kw,masterByCode}
+  return _asignCache
+}
+
+function _norm(s){
+  if(!s)return ''
+  return s.toUpperCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^A-Z0-9 ]/g,' ').replace(/\s+/g,' ').trim()
+}
+function _lev(a,b){
+  const m=a.length,n=b.length,dp=Array.from({length:m+1},(_,i)=>Array.from({length:n+1},(_,j)=>i===0?j:j===0?i:0))
+  for(let i=1;i<=m;i++)for(let j=1;j<=n;j++)
+    dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]:1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1])
+  return dp[m][n]
+}
+function _normDept(d){
+  if(!d)return null
+  const n=_norm(d)
+  const map={'VALLE DEL CAUCA':'VALLE','NARINO':'NARINO','NARIÑO':'NARINO','SAN ANDRES':'SAN ANDRES','ARCHIPIELAGO DE SAN ANDRES':'SAN ANDRES','BOGOTA DC':'CUNDINAMARCA','BOGOTA D C':'CUNDINAMARCA','DISTRITO CAPITAL':'CUNDINAMARCA','LA GUAJIRA':'LA GUAJIRA','NORTE DE SANTANDER':'NORTE DE SANTANDER'}
+  return map[n]||n
+}
+function _fuzzy(D,q,dept){
+  const dn=dept?_normDept(dept):null
+  if(dn){
+    const cands={}
+    for(const k of Object.keys(D))if(_norm(D[k].dept)===dn)cands[k]=D[k]
+    if(!Object.keys(cands).length)return{key:null,match:null,reason:'DEPT_NO_ENCONTRADO'}
+    if(cands[q])return{key:q,match:'Exacto',reason:'OK'}
+    if(q.length>=4){
+      let pfx=null,pd=999
+      for(const k of Object.keys(cands))if(k.startsWith(q)){const d=_lev(q,k);if(d<pd){pd=d;pfx=k}}
+      if(pfx)return{key:pfx,match:'Fuzzy',reason:'OK'}
+    }
+    let best=null,bd=999
+    for(const k of Object.keys(cands)){const d=_lev(q,k);if(d<bd&&(k.startsWith(q)||q.startsWith(k)||d<=1)){bd=d;best=k}}
+    return best?{key:best,match:'Fuzzy',reason:'OK'}:{key:null,match:null,reason:'CIUDAD_NO_ENCONTRADA'}
+  }
+  if(D[q])return{key:q,match:'Exacto',reason:'OK'}
+  let pfx=null,pd=999
+  for(const k of Object.keys(D))if(k.startsWith(q)){const d=_lev(q,k);if(d<pd){pd=d;pfx=k}}
+  if(pfx)return{key:pfx,match:'Fuzzy',reason:'OK'}
+  let best=null,bd=999
+  for(const k of Object.keys(D)){const d=_lev(q,k),mx=Math.max(q.length,k.length);if(d<bd&&d<=Math.max(1,Math.floor(mx*0.35))){bd=d;best=k}}
+  return best?{key:best,match:'Fuzzy',reason:'OK'}:{key:null,match:null,reason:'SIN_COBERTURA'}
+}
+function _getDec(m,q,niveles){
+  if(!m)return 'S'
+  if(niveles===4){if(q<=1)return m.d1;if(q===2)return m.d2;if(q===3)return m.d3;return m.d4}
+  if(q<=1)return m.d1;if(q===2)return m.d2;return m.d3
+}
+function _bestC(m){
+  if(m.fe!==null&&m.fc!==null)return m.fe<=m.fc?'Envia':'Coordinadora'
+  if(m.fe!==null)return 'Envia'
+  if(m.fc!==null)return 'Coordinadora'
+  return null
+}
+function _getState(m,qty,isI,niveles){
+  if(!m)return{state:'SIN_COBERTURA',carrier:'—',alt:''}
+  const car=_bestC(m)
+  if(isI){
+    if(m.fi===null)return{state:'SIN_COBERTURA',carrier:'—',alt:''}
+    const d=_getDec(m,qty,niveles)
+    if(d==='C')return{state:'CANCELAR',carrier:'—',alt:''}
+    if(d==='E')return{state:'DESPACHAR',carrier:'Interrapidisimo',alt:''}
+    if(d==='N'&&qty<=1){
+      const d2=_getDec(m,2,niveles),d3=_getDec(m,3,niveles)
+      if(d2==='E'&&d3==='E')return{state:'LLAMAR_SUBIR',carrier:'Interrapidisimo',alt:'2u o 3u'}
+      if(d2==='E')return{state:'LLAMAR_SUBIR',carrier:'Interrapidisimo',alt:'2u'}
+      if(d3==='E')return{state:'LLAMAR_SUBIR',carrier:'Interrapidisimo',alt:'3u'}
+    }
+    return{state:'LLAMAR_CONFIRMAR',carrier:'Interrapidisimo',alt:''}
+  }
+  if(m.fe===null&&m.fc===null)return m.fi!==null?{state:'SIN_COBERTURA',carrier:'Solo Interrapidisimo',alt:''}:{state:'SIN_COBERTURA',carrier:'—',alt:''}
+  const d=_getDec(m,qty,niveles)
+  if(d==='E')return{state:'DESPACHAR',carrier:car,alt:''}
+  if(d==='C')return{state:'CANCELAR',carrier:'—',alt:''}
+  if(d==='N'||d==='S'){
+    if(qty<=1){
+      const d2=_getDec(m,2,niveles),d3=_getDec(m,3,niveles)
+      if(d2==='E'&&d3==='E')return{state:'LLAMAR_SUBIR',carrier:car,alt:'2u o 3u'}
+      if(d2==='E')return{state:'LLAMAR_SUBIR',carrier:car,alt:'2u'}
+      if(d3==='E')return{state:'LLAMAR_SUBIR',carrier:car,alt:'3u'}
+    }
+    return{state:'LLAMAR_CONFIRMAR',carrier:car,alt:''}
+  }
+  return{state:'LLAMAR_CONFIRMAR',carrier:car,alt:''}
+}
+function _stateText(s,alt){return{'DESPACHAR':'DESPACHAR','LLAMAR_CONFIRMAR':'LLAMAR CONFIRMAR DATOS','LLAMAR_SUBIR':'LLAMAR SUBIR A '+alt,'CANCELAR':'CANCELAR','SIN_COBERTURA':'SIN COBERTURA'}[s]||s}
+function _stateEmoji(s,fuzzy){const base={'DESPACHAR':'📦✅','LLAMAR_CONFIRMAR':'📋','LLAMAR_SUBIR':'📞','CANCELAR':'🚫','SIN_COBERTURA':'🚫📍'}[s]||'—';return(s==='DESPACHAR'&&fuzzy==='Fuzzy'?'📍':'')+base}
+function _stateBadge(s,alt,match){
+  const pin=(s==='DESPACHAR'&&match==='Fuzzy')?'📍':''
+  const mp={'DESPACHAR':['pill-green','📦✅ DESPACHAR'],'LLAMAR_CONFIRMAR':['pill-blue','📋 LLAMAR CONFIRMAR'],'LLAMAR_SUBIR':['pill-amber','📞 LLAMAR SUBIR '+alt],'CANCELAR':['pill-red','🚫 CANCELAR'],'SIN_COBERTURA':['pill-red','🚫📍 SIN COBERTURA']}
+  const[cls,label]=mp[s]||['pill-red','—']
+  return`<span class="pill ${cls}">${pin}${label}</span>`
+}
+
+function _parseFecha(s){
+  // Acepta M/D/YYYY o M-D-YYYY (con o sin cero). Rechaza YYYY-M-D.
+  if(!s)return null
+  const t=s.trim()
+  // Rechazar YYYY-... explícitamente
+  if(/^\d{4}[-/]/.test(t))return null
+  const m=t.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/)
+  if(!m)return null
+  const mm=parseInt(m[1]),dd=parseInt(m[2]),yy=parseInt(m[3])
+  if(mm<1||mm>12||dd<1||dd>31)return null
+  return `${yy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`
+}
+
+function _parseLineaAsignador(linea){
+  // Acepta formato viejo (3-4 campos) y nuevo (7-8 campos)
+  const partes=linea.split(/[,;\t]+/).map(p=>p.trim())
+  // Quitar partes vacías al final pero no en medio
+  while(partes.length&&partes[partes.length-1]==='')partes.pop()
+  const n=partes.length
+  if(n===0)return{tipo:'vacio'}
+  if(n>=3&&n<=4){
+    // Formato viejo: CIUDAD, UNIDADES, DPTO, [carrier]
+    const ciudad=partes[0],qty=parseInt(partes[1])||1,dept=partes[2]
+    const carrier=(n===4&&partes[3])?partes[3]:''
+    const isI=carrier.toUpperCase().includes('INTERRAP')
+    return{tipo:'viejo',ciudad,qty,dept,isI,raw:linea}
+  }
+  if(n>=7&&n<=8){
+    // Formato nuevo: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, ID_ANUNCIO, [carrier]
+    const ciudad=partes[0],qty=parseInt(partes[1])||1,dept=partes[2]
+    const tel=partes[3].replace(/\D/g,''),fechaRaw=partes[4],producto=partes[5]
+    const adId=partes[6]||''
+    const carrier=(n===8&&partes[7])?partes[7]:''
+    const isI=carrier.toUpperCase().includes('INTERRAP')
+    const errores=[]
+    if(!ciudad)errores.push('CIUDAD')
+    if(!qty||qty<1)errores.push('UNIDADES')
+    if(!dept)errores.push('DPTO')
+    if(!tel||tel.length<7)errores.push('TELEFONO')
+    if(!producto)errores.push('PRODUCTO')
+    const fechaIso=_parseFecha(fechaRaw)
+    if(!fechaIso)errores.push('FECHA (use M/D/YYYY)')
+    return{tipo:'nuevo',ciudad,qty,dept,tel,fecha:fechaIso,fechaRaw,producto,adId,isI,carrier,errores,raw:linea}
+  }
+  return{tipo:'invalido',campos:n,raw:linea}
+}
+
+async function pageAuxAsignador(c){
+  c.innerHTML=`<div class="page-title">📍 Asignador</div>
+    <div class="page-sub">Procesa órdenes del día y asigna carrier por ciudad</div>
+    <div id="asign-content"><div class="loading">Cargando data...</div></div>`
+
+  try{
+    const{D,M,kw,masterByCode}=await cargarAsignDataSiNecesario()
+    const kwList=Object.keys(kw).sort()
+    const kwHtml=kwList.length
+      ? kwList.map(k=>`<span class="pill pill-blue" style="margin-right:4px">${k} → ${kw[k]}</span>`).join('')
+      : '<span style="color:var(--muted)">Sin keywords. Por defecto todo va a GEN (genérico).</span>'
+
+    document.getElementById('asign-content').innerHTML=`
+      <div class="card" style="margin-bottom:14px">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:6px"><strong>Palabras reconocidas en la columna PRODUCTO:</strong></div>
+        <div>${kwHtml}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:8px">Cualquier otra palabra → procesa como genérico (3 niveles).</div>
+      </div>
+
+      <div class="card">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px">
+          <strong>Formato (1 línea por orden):</strong> <code>CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, ID_ANUNCIO, [carrier]</code><br>
+          ID_ANUNCIO vacío = orgánico · carrier opcional · fecha en formato M/D/YYYY
+        </div>
+        <textarea id="asign-input" placeholder="MEDELLIN, 2, ANTIOQUIA, 3018022316, 5/17/2026, Colageno, 120243626234290122
+BOGOTA, 3, CUNDINAMARCA, 3018022317, 5/17/2026, Triflex, ,
+CARTAGENA, 2, BOLIVAR, 3018022318, 5/17/2026, Colageno, , INTERRAPIDISIMO" style="width:100%;min-height:140px;padding:10px;font-family:monospace;font-size:12px;border:1px solid var(--border);border-radius:8px;background:var(--card2);color:var(--text);resize:vertical"></textarea>
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+          <button class="btn-sm btn-primary" onclick="procesarAsignador()">▶ Procesar y guardar</button>
+          <button class="btn-sm btn-outline" onclick="limpiarAsignador()">Limpiar</button>
+        </div>
+        <div id="asign-msg" style="margin-top:10px"></div>
+      </div>
+
+      <div id="asign-resultado" style="margin-top:18px"></div>
+    `
+  }catch(e){
+    document.getElementById('asign-content').innerHTML=`<div class="alert alert-red">Error cargando data del asignador: ${e.message}</div>`
+  }
+}
+
+window.limpiarAsignador=()=>{
+  document.getElementById('asign-input').value=''
+  document.getElementById('asign-msg').innerHTML=''
+  document.getElementById('asign-resultado').innerHTML=''
+}
+
+let _ultimosResultados=[]
+
+window.procesarAsignador=async()=>{
+  const txt=document.getElementById('asign-input').value
+  const lineas=txt.split('\n').map(l=>l.trim()).filter(Boolean)
+  const msg=document.getElementById('asign-msg')
+  const resEl=document.getElementById('asign-resultado')
+  if(!lineas.length){msg.innerHTML='<div class="alert alert-red">No hay líneas para procesar</div>';return}
+
+  // PASO 1: parsear todas las líneas y separar válidas / errores
+  const parsed=lineas.map(_parseLineaAsignador)
+  const conErrores=[]
+  parsed.forEach((p,i)=>{
+    if(p.tipo==='nuevo'&&p.errores.length>0)conErrores.push({linea:i+1,raw:p.raw,faltan:p.errores})
+    else if(p.tipo==='invalido')conErrores.push({linea:i+1,raw:p.raw,faltan:[`Número de campos inválido (${p.campos}). Debe ser 7-8 (formato nuevo) o 3-4 (formato viejo).`]})
+  })
+
+  if(conErrores.length>0){
+    msg.innerHTML=`<div class="alert alert-red"><strong>❌ ${conErrores.length} línea(s) con errores. Corrige antes de procesar:</strong><ul style="margin-top:6px;margin-left:14px;font-size:12px">
+      ${conErrores.map(e=>`<li><strong>Línea ${e.linea}:</strong> falta ${e.faltan.join(', ')}<br><code style="font-size:10px;color:var(--muted)">${e.raw}</code></li>`).join('')}
+    </ul></div>`
+    return
+  }
+
+  // PASO 2: procesar todas las líneas con el asignador
+  msg.innerHTML='<div class="alert alert-blue">Procesando…</div>'
+  const{D,M,kw,masterByCode}=await cargarAsignDataSiNecesario()
+  const filas=[]
+  const mapeosAGuardar=[]
+  for(const p of parsed){
+    if(p.tipo==='vacio')continue
+    const q=_norm(p.ciudad)
+    const df=_fuzzy(D,q,p.dept)
+    let estado,carrier,alt='',match='—',ciudadDropi='—',deptoDropi='—'
+    let codeMaestro='GEN'
+    if(p.tipo==='nuevo'){
+      const palabra=p.producto.toLowerCase().trim()
+      // Buscar keyword contenida en el producto
+      for(const k of Object.keys(kw)){
+        if(palabra.includes(k)){codeMaestro=kw[k];break}
+      }
+    }
+    const maestro=masterByCode[codeMaestro]||masterByCode['GEN']
+    const niveles=maestro?.niveles||3
+    if(!df||!df.key){
+      estado='SIN_COBERTURA';carrier='—';match='❌'
+    }else{
+      const mv=M[codeMaestro]?.[df.key]||M['GEN']?.[df.key]
+      const r=_getState(mv,p.qty,p.isI,niveles)
+      estado=r.state;carrier=r.carrier;alt=r.alt;match=df.match
+      ciudadDropi=D[df.key].nombre;deptoDropi=D[df.key].dept
+    }
+    filas.push({raw:p,ciudadDropi,deptoDropi,estado,carrier,alt,match,maestro:codeMaestro})
+
+    // Solo encolar para guardar si es formato nuevo válido
+    if(p.tipo==='nuevo'&&p.tel&&p.fecha&&p.producto){
+      mapeosAGuardar.push({
+        fecha:p.fecha,
+        telefono:p.tel,
+        ad_id:p.adId||null,
+        producto:p.producto,
+        ciudad:ciudadDropi!=='—'?ciudadDropi:p.ciudad,
+        estado_inicial:estado,
+        es_organico:!p.adId
+      })
+    }
+  }
+  _ultimosResultados=filas
+
+  // PASO 3: guardar en sistema (con detección de duplicados)
+  let guardadas=0,duplicadas=0
+  if(mapeosAGuardar.length>0){
+    // Buscar duplicados existentes en BD
+    const telefonos=[...new Set(mapeosAGuardar.map(m=>m.telefono))]
+    const{data:existentes}=await sb.from('mapeos').select('telefono,fecha,producto,ad_id').in('telefono',telefonos)
+    const keySet=new Set((existentes||[]).map(e=>`${e.telefono}|${e.fecha}|${(e.producto||'').toLowerCase().trim()}|${e.ad_id||''}`))
+    const nuevos=[]
+    const vistosEnEsteBatch=new Set()
+    for(const m of mapeosAGuardar){
+      const k=`${m.telefono}|${m.fecha}|${(m.producto||'').toLowerCase().trim()}|${m.ad_id||''}`
+      if(keySet.has(k)||vistosEnEsteBatch.has(k)){duplicadas++;continue}
+      vistosEnEsteBatch.add(k)
+      nuevos.push(m)
+    }
+    if(nuevos.length>0){
+      const{error}=await sb.from('mapeos').insert(nuevos)
+      if(error){msg.innerHTML=`<div class="alert alert-red">Error guardando: ${error.message}</div>`;return}
+      guardadas=nuevos.length
+      logAction('asignador_procesado',{guardadas,duplicadas,total:lineas.length}).catch(()=>{})
+    }
+  }
+
+  // PASO 4: render resultado
+  msg.innerHTML=`<div class="alert alert-green">
+    ✅ ${filas.length} línea(s) procesada(s) — CSV listo para copiar a Dropi<br>
+    💾 ${guardadas} venta(s) guardada(s) en sistema${duplicadas>0?` &nbsp;·&nbsp; ⚠️ ${duplicadas} ya estaban registradas`:''}
+  </div>`
+
+  // Resumen por estado
+  const counts={}
+  for(const f of filas)counts[f.estado]=(counts[f.estado]||0)+1
+  const resumenItems=[['DESPACHAR','pill-green','📦 Despachar'],['LLAMAR_CONFIRMAR','pill-blue','📋 Llamar'],['LLAMAR_SUBIR','pill-amber','📞 Subir'],['CANCELAR','pill-red','🚫 Cancelar'],['SIN_COBERTURA','pill-red','🚫 Sin cobertura']]
+  const resumenHtml=resumenItems.filter(([k])=>counts[k]).map(([k,cls,l])=>`<span class="pill ${cls}" style="margin-right:6px">${l}: ${counts[k]}</span>`).join('')
+
+  resEl.innerHTML=`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+      <div>${resumenHtml}</div>
+      <button class="btn-sm btn-primary" onclick="copiarCSVAsignador()">📋 Copiar CSV</button>
+    </div>
+    <div class="table-wrap"><table>
+      <tr><th>Ciudad</th><th>Uds.</th><th>Departamento</th><th>Ciudad Dropi</th><th>Decisión</th><th>Transportadora</th><th>Match</th></tr>
+      ${filas.map(f=>`<tr>
+        <td data-label="Ciudad">${f.raw.ciudad}${f.raw.tipo==='nuevo'&&f.raw.tel?`<br><span style="font-size:10px;color:var(--muted)">📞 ${f.raw.tel}${f.raw.adId?' · ad':' · ORG'}</span>`:''}</td>
+        <td data-label="Uds.">${f.raw.qty}u</td>
+        <td data-label="Dpto">${f.deptoDropi}</td>
+        <td data-label="Dropi">${f.ciudadDropi}</td>
+        <td data-label="Decisión">${_stateBadge(f.estado,f.alt,f.match)}</td>
+        <td data-label="Carrier">${f.carrier}</td>
+        <td data-label="Match" style="font-size:10px;color:var(--muted)">${f.match}</td>
+      </tr>`).join('')}
+    </table></div>
+  `
+}
+
+window.copiarCSVAsignador=()=>{
+  if(!_ultimosResultados.length)return
+  const h='Ciudad ingresada\tUds.\tDEPARTAMENTO\tCIUDAD\t¿Enviar?\tTRANSPORTADORA\tMatch'
+  const rows=_ultimosResultados.map(f=>[
+    f.raw.ciudad,f.raw.qty+'u',f.deptoDropi,f.ciudadDropi,_stateText(f.estado,f.alt),f.carrier==='—'?'':f.carrier,f.match
+  ].join('\t'))
+  const txt=[h,...rows].join('\n')
+  navigator.clipboard.writeText(txt).then(()=>{
+    const msg=document.getElementById('asign-msg')
+    msg.innerHTML='<div class="alert alert-green">✅ Copiado al portapapeles — Pega en Dropi</div>'
+  }).catch(()=>{
+    const ta=document.createElement('textarea')
+    ta.value=txt;ta.style.position='fixed';ta.style.opacity='0'
+    document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta)
+    alert('Copiado al portapapeles')
+  })
 }
 
 async function pageAuxHome(c){

@@ -150,6 +150,14 @@ tr:hover td{background:var(--card2)}
 /* LOADING */
 .loading{text-align:center;padding:40px;color:var(--muted);font-size:13px}
 
+/* MODAL */
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;display:flex;align-items:center;justify-content:center;padding:20px}
+.modal-box{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:24px;width:100%;max-width:480px;max-height:90vh;overflow-y:auto}
+.modal-title{font-size:16px;font-weight:600;margin-bottom:4px}
+.modal-sub{font-size:12px;color:var(--muted);margin-bottom:18px}
+.modal-actions{display:flex;gap:8px;margin-top:18px;justify-content:flex-end}
+.tag-rol{display:inline-block;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:600;background:var(--card2);color:var(--text);text-transform:uppercase;letter-spacing:.05em}
+
 /* RESPONSIVE */
 @media(max-width:768px){
   .shell{grid-template-columns:1fr}
@@ -229,17 +237,19 @@ window.login=async()=>{
   }
   const{error}=await sb.auth.signInWithPassword({email,password:pwd})
   if(error){err.textContent='Credenciales inválidas';reset()}
+  else{logAction('login',{metodo:input.includes('@')?'email':'username'}).catch(()=>{})}
 }
 
-window.logout=async()=>{await sb.auth.signOut()}
+window.logout=async()=>{await logAction('logout',{}).catch(()=>{});await sb.auth.signOut()}
 
 async function loadMe(uid){
   try{
     const{data,error}=await sb.rpc('get_my_profile')
     if(error){console.error('loadMe error:',error);return false}
     if(!data){console.warn('loadMe: sin perfil');return false}
-    const{data:bData}=await sb.from('usuarios').select('bloqueado').eq('id',data.id).maybeSingle()
+    const{data:bData}=await sb.from('usuarios').select('bloqueado,rol,hora_inicio,hora_fin').eq('id',data.id).maybeSingle()
     if(bData?.bloqueado){console.warn('Usuario bloqueado');return false}
+    if(!dentroDeHorario(bData?.rol,bData?.hora_inicio,bData?.hora_fin)){console.warn('Fuera de horario');return false}
     me=data
     return true
   }catch(e){console.error('loadMe exception:',e);return false}
@@ -285,6 +295,8 @@ const NAV={
     {id:'admin-reportes',icon:'📋',label:'Reportes'},
     {id:'admin-gasto',icon:'💰',label:'Gasto Ads'},
     {id:'admin-productos',icon:'📦',label:'Productos'},
+    {id:'admin-usuarios',icon:'👥',label:'Equipo'},
+    {id:'admin-actividad',icon:'🕒',label:'Actividad'},
   ],
   auxiliar:[
     {id:'aux-home',icon:'🏠',label:'Inicio'},
@@ -306,8 +318,9 @@ function renderNav(){
 let currentPage=''
 window.navigate=async function(page){
   if(me?.id){
-    const{data:bData}=await sb.from('usuarios').select('bloqueado').eq('id',me.id).maybeSingle()
+    const{data:bData}=await sb.from('usuarios').select('bloqueado,rol,hora_inicio,hora_fin').eq('id',me.id).maybeSingle()
     if(bData?.bloqueado){await sb.auth.signOut().catch(()=>{});return}
+    if(!dentroDeHorario(bData?.rol,bData?.hora_inicio,bData?.hora_fin)){await sb.auth.signOut().catch(()=>{});return}
   }
   currentPage=page
   document.querySelectorAll('.sb-item').forEach(el=>el.classList.remove('active'))
@@ -323,6 +336,8 @@ function render(page){
     'admin-reportes':pageAdminReportes,
     'admin-gasto':pageAdminGasto,
     'admin-productos':pageAdminProductos,
+    'admin-usuarios':pageAdminUsuarios,
+    'admin-actividad':pageAdminActividad,
     'aux-home':pageAuxHome,
     'aux-reporte':pageAuxReporte,
     'aux-pedidos':pageAuxPedidos,
@@ -337,6 +352,23 @@ function render(page){
 // ── UTILS ──────────────────────────────────────────────────
 const fmt=n=>new Intl.NumberFormat('es-CO').format(Math.round(n||0))
 const today=()=>new Date().toISOString().split('T')[0]
+function dentroDeHorario(rol,hora_inicio,hora_fin){
+  if(rol==='admin')return true
+  if(!hora_inicio||!hora_fin)return true
+  const d=new Date()
+  const ahora=d.getHours()*60+d.getMinutes()
+  const [hi,mi]=hora_inicio.split(':').map(Number)
+  const [hf,mf]=hora_fin.split(':').map(Number)
+  const inicio=hi*60+mi,fin=hf*60+mf
+  return inicio<=fin
+    ?(ahora>=inicio&&ahora<=fin)
+    :(ahora>=inicio||ahora<=fin)
+}
+async function logAction(accion,detalles){
+  try{
+    await sb.rpc('log_action',{p_accion:accion,p_detalles:detalles||{},p_user_agent:navigator.userAgent.slice(0,200)})
+  }catch(e){console.warn('logAction fail:',e)}
+}
 
 async function getReporteHoy(){
   try{
@@ -499,7 +531,7 @@ async function pageAdminGasto(c){
       {fecha,producto_id:prod_id,monto,usuario_id:me.id},{onConflict:'fecha,producto_id'})
     const msg=document.getElementById('g-msg')
     if(error){msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`}
-    else{msg.innerHTML='<div class="alert alert-green">✅ Gasto guardado</div>';loadGastoHist()}
+    else{msg.innerHTML='<div class="alert alert-green">✅ Gasto guardado</div>';loadGastoHist();logAction('gasto_registrado',{fecha,producto_id:prod_id,monto}).catch(()=>{})}
   }
 
   async function loadGastoHist(){
@@ -551,11 +583,276 @@ async function pageAdminProductos(c){
     }).eq('id',id)
     const msg=document.getElementById('pmsg-'+id)
     if(error)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`
-    else{msg.innerHTML='<div class="alert alert-green">✅ Guardado</div>';await loadProductos()}
+    else{msg.innerHTML='<div class="alert alert-green">✅ Guardado</div>';await loadProductos();logAction('producto_editado',{producto_id:id}).catch(()=>{})}
   }
 }
 
-// ── AUXILIAR: HOME ─────────────────────────────────────────
+// ── ADMIN: USUARIOS (gestión del equipo) ───────────────────
+async function pageAdminUsuarios(c){
+  c.innerHTML=`<div class="page-title">Gestión del equipo</div>
+    <div class="page-sub">Crear, editar, bloquear y administrar usuarios</div>
+    <div style="margin-bottom:16px">
+      <button class="btn-sm btn-primary" onclick="modalUserCreate()">➕ Agregar usuario</button>
+    </div>
+    <div id="us-list"><div class="loading">Cargando...</div></div>`
+  loadUsuarios()
+}
+
+async function loadUsuarios(){
+  const{data,error}=await sb.from('usuarios').select('*').order('rol').order('nombre')
+  const el=document.getElementById('us-list')
+  if(!el)return
+  if(error){el.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+  if(!data?.length){el.innerHTML='<div class="alert alert-blue">Sin usuarios</div>';return}
+  el.innerHTML=`<div class="table-wrap"><table>
+    <tr>
+      <th>Nombre</th><th>Usuario</th><th>Rol</th><th>Estado</th>
+      <th>Horario</th><th>Contraseña (nota)</th><th>Acciones</th>
+    </tr>
+    ${data.map(u=>{
+      const horario=u.hora_inicio&&u.hora_fin?`${u.hora_inicio.slice(0,5)} — ${u.hora_fin.slice(0,5)}`:'—'
+      const estado=u.bloqueado
+        ?'<span class="pill pill-red">🔴 Bloqueado</span>'
+        :'<span class="pill pill-green">✅ Activo</span>'
+      return `<tr>
+        <td>${u.nombre||'—'}</td>
+        <td style="font-family:monospace;font-size:12px">${u.username||'<span style="color:var(--subtle)">—</span>'}</td>
+        <td><span class="tag-rol">${u.rol||'—'}</span></td>
+        <td>${estado}</td>
+        <td style="font-family:monospace;font-size:12px">${horario}</td>
+        <td style="font-family:monospace;font-size:12px;color:var(--muted)">${u.password_nota||'—'}</td>
+        <td style="white-space:nowrap">
+          <button class="btn-sm btn-outline" onclick='modalUserEdit(${JSON.stringify(u).replace(/'/g,"&#39;")})'>Editar</button>
+          <button class="btn-sm btn-outline" onclick='modalUserPassword(${JSON.stringify({id:u.id,nombre:u.nombre}).replace(/'/g,"&#39;")})'>🔑</button>
+          <button class="btn-sm ${u.bloqueado?'btn-green':'btn-red'}" onclick="toggleBlockUser('${u.id}','${(u.nombre||'').replace(/'/g,"\\'")}',${u.bloqueado})">${u.bloqueado?'Desbloquear':'Bloquear'}</button>
+        </td>
+      </tr>`
+    }).join('')}
+  </table></div>`
+}
+
+function closeModal(){
+  const m=document.getElementById('user-modal')
+  if(m)m.remove()
+}
+
+function openModal(html){
+  closeModal()
+  const div=document.createElement('div')
+  div.id='user-modal'
+  div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()">${html}</div>`
+  div.onclick=closeModal
+  document.body.appendChild(div)
+}
+
+window.modalUserCreate=()=>{
+  openModal(`
+    <div class="modal-title">Crear usuario</div>
+    <div class="modal-sub">Si dejas el correo vacío se generará uno interno automáticamente</div>
+    <div class="form-grid" style="gap:12px">
+      <div class="fld"><label>Nombre completo *</label><input type="text" id="nu-nombre" placeholder="Juan Pérez"></div>
+      <div class="fld"><label>Usuario * (login)</label><input type="text" id="nu-username" placeholder="auxiliar1" autocapitalize="off"></div>
+      <div class="fld"><label>Rol *</label>
+        <select id="nu-rol">
+          <option value="auxiliar">Auxiliar Logístico</option>
+          <option value="trafficker">Trafficker</option>
+          <option value="gestor">Gestor Ecommerce</option>
+          <option value="agente">Agente de Ventas</option>
+          <option value="admin">Admin</option>
+        </select></div>
+      <div class="fld"><label>Correo (opcional)</label><input type="email" id="nu-email" placeholder="opcional@correo.com"></div>
+      <div class="fld"><label>Contraseña * (mín 6)</label><input type="text" id="nu-pwd" placeholder="contraseña inicial"></div>
+      <div class="fld"><label>Nota de contraseña (visible solo admin)</label><input type="text" id="nu-nota" placeholder="opcional"></div>
+      <div class="form-grid g2">
+        <div class="fld"><label>Hora inicio (opcional)</label><input type="time" id="nu-hi"></div>
+        <div class="fld"><label>Hora fin (opcional)</label><input type="time" id="nu-hf"></div>
+      </div>
+    </div>
+    <div id="nu-msg" style="margin-top:10px"></div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
+      <button class="btn-sm btn-primary" id="nu-save" onclick="doCreateUser()">Crear usuario</button>
+    </div>`)
+}
+
+window.doCreateUser=async()=>{
+  const get=id=>document.getElementById(id).value.trim()
+  const payload={
+    nombre:get('nu-nombre'),
+    username:get('nu-username').toLowerCase(),
+    rol:get('nu-rol'),
+    email:get('nu-email')||undefined,
+    password:document.getElementById('nu-pwd').value,
+    password_nota:get('nu-nota')||undefined,
+    hora_inicio:get('nu-hi')||undefined,
+    hora_fin:get('nu-hf')||undefined
+  }
+  const msg=document.getElementById('nu-msg')
+  const btn=document.getElementById('nu-save')
+  if(!payload.nombre||!payload.username||!payload.password){
+    msg.innerHTML='<div class="alert alert-red">Completa los campos obligatorios</div>';return
+  }
+  btn.disabled=true;btn.textContent='Creando...'
+  const{data,error}=await sb.functions.invoke('manage-user',{body:{action:'create_user',payload}})
+  if(error||data?.error){
+    msg.innerHTML=`<div class="alert alert-red">${data?.error||error.message}</div>`
+    btn.disabled=false;btn.textContent='Crear usuario'
+    return
+  }
+  logAction('usuario_creado',{username:payload.username,rol:payload.rol}).catch(()=>{})
+  closeModal();loadUsuarios()
+}
+
+window.modalUserEdit=(u)=>{
+  openModal(`
+    <div class="modal-title">Editar usuario</div>
+    <div class="modal-sub">${u.nombre||u.username||u.id}</div>
+    <div class="form-grid" style="gap:12px">
+      <div class="fld"><label>Nombre completo</label><input type="text" id="eu-nombre" value="${u.nombre||''}"></div>
+      <div class="fld"><label>Usuario (login)</label><input type="text" id="eu-username" value="${u.username||''}" autocapitalize="off"></div>
+      <div class="fld"><label>Rol</label>
+        <select id="eu-rol">
+          <option value="auxiliar" ${u.rol==='auxiliar'?'selected':''}>Auxiliar Logístico</option>
+          <option value="trafficker" ${u.rol==='trafficker'?'selected':''}>Trafficker</option>
+          <option value="gestor" ${u.rol==='gestor'?'selected':''}>Gestor Ecommerce</option>
+          <option value="agente" ${u.rol==='agente'?'selected':''}>Agente de Ventas</option>
+          <option value="admin" ${u.rol==='admin'?'selected':''}>Admin</option>
+        </select></div>
+      <div class="fld"><label>Nota de contraseña</label><input type="text" id="eu-nota" value="${u.password_nota||''}"></div>
+      <div class="form-grid g2">
+        <div class="fld"><label>Hora inicio</label><input type="time" id="eu-hi" value="${u.hora_inicio?u.hora_inicio.slice(0,5):''}"></div>
+        <div class="fld"><label>Hora fin</label><input type="time" id="eu-hf" value="${u.hora_fin?u.hora_fin.slice(0,5):''}"></div>
+      </div>
+    </div>
+    <div id="eu-msg" style="margin-top:10px"></div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
+      <button class="btn-sm btn-primary" id="eu-save" onclick="doEditUser('${u.id}')">Guardar cambios</button>
+    </div>`)
+}
+
+window.doEditUser=async(user_id)=>{
+  const get=id=>document.getElementById(id).value.trim()
+  const fields={
+    nombre:get('eu-nombre'),
+    username:get('eu-username').toLowerCase()||null,
+    rol:get('eu-rol'),
+    password_nota:get('eu-nota')||null,
+    hora_inicio:get('eu-hi')||null,
+    hora_fin:get('eu-hf')||null
+  }
+  const msg=document.getElementById('eu-msg')
+  const btn=document.getElementById('eu-save')
+  btn.disabled=true;btn.textContent='Guardando...'
+  const{data,error}=await sb.functions.invoke('manage-user',{body:{action:'update_user',payload:{user_id,fields}}})
+  if(error||data?.error){
+    msg.innerHTML=`<div class="alert alert-red">${data?.error||error.message}</div>`
+    btn.disabled=false;btn.textContent='Guardar cambios'
+    return
+  }
+  logAction('usuario_editado',{user_id}).catch(()=>{})
+  closeModal();loadUsuarios()
+}
+
+window.modalUserPassword=(u)=>{
+  openModal(`
+    <div class="modal-title">Cambiar contraseña</div>
+    <div class="modal-sub">${u.nombre||u.id}</div>
+    <div class="form-grid" style="gap:12px">
+      <div class="fld"><label>Nueva contraseña (mín 6)</label><input type="text" id="pw-new" placeholder="••••••••"></div>
+      <div class="fld"><label>Actualizar también la nota</label><input type="text" id="pw-nota" placeholder="opcional"></div>
+    </div>
+    <div id="pw-msg" style="margin-top:10px"></div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
+      <button class="btn-sm btn-primary" id="pw-save" onclick="doChangePwd('${u.id}')">Cambiar</button>
+    </div>`)
+}
+
+window.doChangePwd=async(user_id)=>{
+  const new_password=document.getElementById('pw-new').value
+  const password_nota=document.getElementById('pw-nota').value.trim()
+  const msg=document.getElementById('pw-msg')
+  const btn=document.getElementById('pw-save')
+  if(!new_password||new_password.length<6){
+    msg.innerHTML='<div class="alert alert-red">Mínimo 6 caracteres</div>';return
+  }
+  btn.disabled=true;btn.textContent='Cambiando...'
+  const payload={user_id,new_password}
+  if(password_nota)payload.password_nota=password_nota
+  const{data,error}=await sb.functions.invoke('manage-user',{body:{action:'change_password',payload}})
+  if(error||data?.error){
+    msg.innerHTML=`<div class="alert alert-red">${data?.error||error.message}</div>`
+    btn.disabled=false;btn.textContent='Cambiar'
+    return
+  }
+  logAction('password_cambiado',{user_id}).catch(()=>{})
+  closeModal();loadUsuarios()
+}
+
+window.toggleBlockUser=async(user_id,nombre,actualmenteBloqueado)=>{
+  const accion=actualmenteBloqueado?'desbloquear':'bloquear'
+  if(!confirm(`¿Seguro que quieres ${accion} a ${nombre||'este usuario'}?`))return
+  const{data,error}=await sb.functions.invoke('manage-user',{body:{action:'toggle_block',payload:{user_id,bloqueado:!actualmenteBloqueado}}})
+  if(error||data?.error){alert(data?.error||error.message);return}
+  logAction(actualmenteBloqueado?'usuario_desbloqueado':'usuario_bloqueado',{user_id}).catch(()=>{})
+  loadUsuarios()
+}
+
+// ── ADMIN: ACTIVIDAD (audit log) ───────────────────────────
+async function pageAdminActividad(c){
+  c.innerHTML=`<div class="page-title">Registro de actividad</div>
+    <div class="page-sub">Últimas 200 acciones del equipo</div>
+    <div class="form-grid g2" style="max-width:500px;margin-bottom:16px">
+      <div class="fld"><label>Filtrar por usuario</label>
+        <select id="act-user" onchange="loadActividad()">
+          <option value="">Todos</option>
+        </select></div>
+      <div class="fld"><label>Filtrar por acción</label>
+        <select id="act-accion" onchange="loadActividad()">
+          <option value="">Todas</option>
+          <option value="login">login</option>
+          <option value="logout">logout</option>
+          <option value="reporte_guardado">reporte_guardado</option>
+          <option value="jornada_cerrada">jornada_cerrada</option>
+          <option value="gasto_registrado">gasto_registrado</option>
+          <option value="producto_editado">producto_editado</option>
+          <option value="reservado_confirmado">reservado_confirmado</option>
+        </select></div>
+    </div>
+    <div id="act-list"><div class="loading">Cargando...</div></div>`
+
+  // Cargar lista de usuarios para el filtro
+  const{data:users}=await sb.from('usuarios').select('id,nombre').order('nombre')
+  const sel=document.getElementById('act-user')
+  ;(users||[]).forEach(u=>{
+    const o=document.createElement('option');o.value=u.id;o.textContent=u.nombre||u.id;sel.appendChild(o)
+  })
+
+  window.loadActividad=async()=>{
+    const fUser=document.getElementById('act-user').value
+    const fAccion=document.getElementById('act-accion').value
+    let q=sb.from('audit_log').select('*,usuarios(nombre)').order('created_at',{ascending:false}).limit(200)
+    if(fUser)q=q.eq('usuario_id',fUser)
+    if(fAccion)q=q.eq('accion',fAccion)
+    const{data,error}=await q
+    const el=document.getElementById('act-list')
+    if(error){el.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+    if(!data?.length){el.innerHTML='<div class="alert alert-blue">Sin actividad</div>';return}
+    el.innerHTML=`<div class="table-wrap"><table>
+      <tr><th>Fecha</th><th>Usuario</th><th>Acción</th><th>Detalles</th></tr>
+      ${data.map(r=>`<tr>
+        <td style="white-space:nowrap;font-family:monospace;font-size:11px">${new Date(r.created_at).toLocaleString('es-CO')}</td>
+        <td>${r.usuarios?.nombre||'—'}</td>
+        <td><span class="pill pill-blue">${r.accion}</span></td>
+        <td style="font-family:monospace;font-size:11px;color:var(--muted)">${r.detalles?JSON.stringify(r.detalles):''}</td>
+      </tr>`).join('')}
+    </table></div>`
+  }
+  loadActividad()
+}
+
 async function pageAuxHome(c){
   c.innerHTML=`<div class="page-title">Bienvenido, ${me?.nombre||''}</div>
     <div class="page-sub">Hoy: ${new Date().toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long'})}</div>
@@ -647,7 +944,7 @@ async function pageAuxReporte(c){
       .upsert(payload,{onConflict:'fecha,producto_id,usuario_id'})
     const msg=document.getElementById('r-msg')
     if(error)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`
-    else msg.innerHTML='<div class="alert alert-green">✅ Reporte guardado correctamente</div>'
+    else{msg.innerHTML='<div class="alert alert-green">✅ Reporte guardado correctamente</div>';logAction('reporte_guardado',{fecha:payload.fecha,producto_id:prod_id,total:payload.ord_1u+payload.ord_2u+payload.ord_3u+payload.ord_4u}).catch(()=>{})}
   }
 }
 
@@ -752,6 +1049,7 @@ async function pageAuxReservado(c){
     else{
       el.innerHTML='<div class="alert alert-green">✅ Reservado confirmado</div>'
       document.getElementById('res-tel').value=''
+      logAction('reservado_confirmado',{mapeo_id:id}).catch(()=>{})
     }
   }
 }
@@ -819,6 +1117,7 @@ async function pageAuxCierre(c){
         <div class="sem-dot"></div>
         <div><div class="sem-title">¡Jornada cerrada! ✅</div>
         <div class="sem-msg">${new Date().toLocaleTimeString('es-CO')} — Buen trabajo hoy.</div></div></div>`
+      logAction('jornada_cerrada',{reporte_id:rep.id}).catch(()=>{})
     }
   }
 

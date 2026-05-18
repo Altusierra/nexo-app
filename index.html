@@ -395,11 +395,10 @@ const NAV={
   ],
   auxiliar:[
     {id:'aux-asignador',icon:'📍',label:'Asignador'},
-    {id:'aux-home',icon:'🏠',label:'Inicio'},
-    {id:'aux-reporte',icon:'📝',label:'Reporte del día'},
-    {id:'aux-pedidos',icon:'📦',label:'Mis pedidos'},
-    {id:'aux-reservado',icon:'🔍',label:'Confirmar reservado'},
     {id:'aux-dropi',icon:'📊',label:'Cruce Dropi'},
+    {id:'aux-seguimiento',icon:'🚚',label:'Seguimiento'},
+    {id:'aux-reporte',icon:'📝',label:'Reporte del día'},
+    {id:'aux-reservado',icon:'🔍',label:'Confirmar reservado'},
     {id:'aux-cierre',icon:'✅',label:'Cerrar jornada'},
   ]
 }
@@ -469,11 +468,10 @@ function render(page){
     'admin-usuarios':pageAdminUsuarios,
     'admin-actividad':pageAdminActividad,
     'aux-asignador':pageAuxAsignador,
-    'aux-home':pageAuxHome,
     'aux-reporte':pageAuxReporte,
-    'aux-pedidos':pageAuxPedidos,
     'aux-reservado':pageAuxReservado,
     'aux-dropi':pageAuxDropi,
+    'aux-seguimiento':pageAuxSeguimiento,
     'aux-cierre':pageAuxCierre,
   }
   const fn=pages[page]
@@ -1221,19 +1219,16 @@ function _parseFecha(s){
 }
 
 function _parseLineaAsignador(linea){
-  // Acepta formato viejo (3-4 campos) y nuevo (7-8 campos)
+  // Formato obligatorio: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, ID_ANUNCIO, [carrier]
   const partes=linea.split(/[,;\t]/).map(p=>p.trim())
   // Quitar partes vacías al final: para formato nuevo (7+) no bajar de 7, para viejo no bajar de 3
   while(partes.length>7&&partes[partes.length-1]==='')partes.pop()
   if(partes.length<=6)while(partes.length>3&&partes[partes.length-1]==='')partes.pop()
   const n=partes.length
   if(n===0)return{tipo:'vacio'}
-  if(n>=3&&n<=4){
-    // Formato viejo: CIUDAD, UNIDADES, DPTO, [carrier]
-    const ciudad=partes[0],qty=parseInt(partes[1])||1,dept=partes[2]
-    const carrier=(n===4&&partes[3])?partes[3]:''
-    const isI=carrier.toUpperCase().includes('INTERRAP')
-    return{tipo:'viejo',ciudad,qty,dept,isI,raw:linea}
+  if(n>=3&&n<=6){
+    // Formato viejo o incompleto: faltan campos obligatorios
+    return{tipo:'invalido',campos:n,raw:linea,msg:'Faltan campos. Formato: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, ID_ANUNCIO, [carrier]'}
   }
   if(n>=7&&n<=8){
     // Formato nuevo: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, ID_ANUNCIO, [carrier]
@@ -1316,7 +1311,7 @@ window.procesarAsignador=async()=>{
   const conErrores=[]
   parsed.forEach((p,i)=>{
     if(p.tipo==='nuevo'&&p.errores.length>0)conErrores.push({linea:i+1,raw:p.raw,faltan:p.errores})
-    else if(p.tipo==='invalido')conErrores.push({linea:i+1,raw:p.raw,faltan:[`Número de campos inválido (${p.campos}). Debe ser 7-8 (formato nuevo) o 3-4 (formato viejo).`]})
+    else if(p.tipo==='invalido')conErrores.push({linea:i+1,raw:p.raw,faltan:[p.msg||`Número de campos inválido (${p.campos}). Formato: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, ID_ANUNCIO, [carrier]`]})
   })
 
   if(conErrores.length>0){
@@ -1474,70 +1469,206 @@ async function pageAuxHome(c){
 
 // ── AUXILIAR: REPORTE ──────────────────────────────────────
 async function pageAuxReporte(c){
-  const rep=await getReporteHoy()
-  const prod=productos[0]||{}
-  c.innerHTML=`<div class="page-title">Reporte del día</div>
-    <div class="page-sub">${today()}</div>
-    <div class="card" style="max-width:700px">
-      <div class="section-title">Producto</div>
-      <div class="fld" style="margin-bottom:16px"><select id="r-prod">
-        ${productos.map(p=>`<option value="${p.id}" ${rep?.producto_id===p.id?'selected':''}>${p.nombre}</option>`).join('')}
-      </select></div>
-      <div class="section-title">Órdenes confirmadas (del reporte Dropi)</div>
-      <div class="form-grid g4">
-        <div class="fld"><label>Órdenes 1 unidad</label><input type="number" id="r-1u" value="${rep?.ord_1u||0}" min="0"></div>
-        <div class="fld"><label>Órdenes 2 unidades</label><input type="number" id="r-2u" value="${rep?.ord_2u||0}" min="0"></div>
-        <div class="fld"><label>Órdenes 3 unidades</label><input type="number" id="r-3u" value="${rep?.ord_3u||0}" min="0"></div>
-        <div class="fld"><label>Órdenes 4 unidades</label><input type="number" id="r-4u" value="${rep?.ord_4u||0}" min="0"></div>
-      </div>
-      <div class="divider"></div>
-      <div class="section-title">Estado de órdenes</div>
-      <div class="form-grid g3">
-        <div class="fld"><label>✅ Confirmados</label><input type="number" id="r-conf" value="${rep?.confirmados||0}" min="0"></div>
-        <div class="fld"><label>❌ Cancelados</label><input type="number" id="r-canc" value="${rep?.cancelados||0}" min="0"></div>
-        <div class="fld"><label>⏳ Pendientes</label><input type="number" id="r-pend" value="${rep?.pendientes||0}" min="0"></div>
-      </div>
-      <div class="divider"></div>
-      <div class="section-title">Conversaciones</div>
-      <div class="form-grid g2">
-        <div class="fld"><label>Conversaciones ayer (real)</label><input type="number" id="r-conv" value="${rep?.conversaciones||0}" min="0"></div>
-        <div class="fld"><label>Conversaciones hoy (aprox.)</label><input type="number" id="r-conv-ap" value="${rep?.conversaciones_aprox||0}" min="0"></div>
-      </div>
-      <div class="divider"></div>
-      <div class="fld"><label>Nota (opcional)</label>
-        <textarea id="r-nota" rows="2" style="resize:vertical">${rep?.nota||''}</textarea></div>
-      <div style="margin-top:16px;display:flex;gap:10px">
-        <button class="btn-full btn-primary" onclick="saveReporte()">
-          ${rep?'Actualizar reporte':'Guardar reporte'}
-        </button>
-      </div>
-      <div id="r-msg" style="margin-top:10px"></div>
-    </div>`
+  c.innerHTML=`<div class="page-title">📝 Reporte del día</div>
+    <div class="page-sub">Datos automáticos de Dropi + ventas manuales</div>
+    <div class="fld" style="max-width:200px;margin-bottom:14px">
+      <label>Fecha</label>
+      <input type="date" id="rep-fecha" value="${today()}" onchange="cargarReporteData(this.value)">
+    </div>
+    <div id="rep-content"><div class="loading">Cargando...</div></div>`
+  window._ventaIdx=0
+  cargarReporteData(today())
+}
 
-  window.saveReporte=async()=>{
-    const prod_id=document.getElementById('r-prod').value
-    const prod_nom=productos.find(p=>p.id===prod_id)?.nombre||''
-    const payload={
-      fecha:today(),producto_id:prod_id,producto_nombre:prod_nom,
-      ord_1u:parseInt(document.getElementById('r-1u').value)||0,
-      ord_2u:parseInt(document.getElementById('r-2u').value)||0,
-      ord_3u:parseInt(document.getElementById('r-3u').value)||0,
-      ord_4u:parseInt(document.getElementById('r-4u').value)||0,
-      confirmados:parseInt(document.getElementById('r-conf').value)||0,
-      cancelados:parseInt(document.getElementById('r-canc').value)||0,
-      pendientes:parseInt(document.getElementById('r-pend').value)||0,
-      conversaciones:parseInt(document.getElementById('r-conv').value)||0,
-      conversaciones_aprox:parseInt(document.getElementById('r-conv-ap').value)||0,
-      nota:document.getElementById('r-nota').value,
-      usuario_id:me.id,
-      updated_at:new Date().toISOString()
-    }
-    const{error}=await sb.from('reportes_diarios')
-      .upsert(payload,{onConflict:'fecha,producto_id,usuario_id'})
-    const msg=document.getElementById('r-msg')
-    if(error)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`
-    else{msg.innerHTML='<div class="alert alert-green">✅ Reporte guardado correctamente</div>';logAction('reporte_guardado',{fecha:payload.fecha,producto_id:prod_id,total:payload.ord_1u+payload.ord_2u+payload.ord_3u+payload.ord_4u}).catch(()=>{})}
+const _autoStyle='background:rgba(0,180,80,0.08);border:1px solid rgba(0,180,80,0.2);color:var(--text);cursor:not-allowed'
+
+async function cargarReporteData(fecha){
+  const el=document.getElementById('rep-content')
+  if(!el)return
+  el.innerHTML='<div class="loading">Cargando...</div>'
+  const esHoy=fecha===today()
+
+  // 1. Auto: mapeos agrupados por producto
+  const{data:mapeos}=await sb.from('mapeos').select('*').eq('fecha_dropi',fecha)
+  const porProd={}
+  let totConf=0,totCanc=0,totPend=0,totOrd=0
+  if(mapeos)for(const m of mapeos){
+    const prod=m.producto||'Sin producto'
+    if(!porProd[prod])porProd[prod]={ord:0,conf:0,canc:0,pend:0}
+    porProd[prod].ord++;totOrd++
+    if(m.estado_final==='CANCELADO'){porProd[prod].canc++;totCanc++}
+    else if(m.estado_final==='PENDIENTE CONFIRMACION'){porProd[prod].pend++;totPend++}
+    else if(m.estado_final){porProd[prod].conf++;totConf++}
   }
+
+  // 2. Manual: reportes_diarios existentes
+  const{data:reportes}=await sb.from('reportes_diarios').select('*').eq('fecha',fecha).eq('usuario_id',me?.id)
+  const repByProd={}
+  if(reportes)for(const r of reportes)repByProd[r.producto_nombre||'']=r
+
+  const prods=Object.keys(porProd)
+
+  // Auto section HTML
+  let autoHtml=''
+  if(prods.length===0){
+    autoHtml='<div class="alert alert-blue">Sin datos de Dropi para esta fecha</div>'
+  }else{
+    autoHtml=prods.map(p=>{
+      const d=porProd[p],rep=repByProd[p]
+      const pid=p.replace(/\s+/g,'_')
+      return`<div class="card" style="margin-bottom:10px;border-left:3px solid var(--green)">
+        <div style="font-weight:600;margin-bottom:8px">${p}</div>
+        <div class="form-grid g4">
+          <div class="fld"><label>Órdenes</label><input type="number" value="${d.ord}" disabled style="${_autoStyle}"></div>
+          <div class="fld"><label>✅ Confirm.</label><input type="number" value="${d.conf}" disabled style="${_autoStyle}"></div>
+          <div class="fld"><label>❌ Cancel.</label><input type="number" value="${d.canc}" disabled style="${_autoStyle}"></div>
+          <div class="fld"><label>⏳ Pend.</label><input type="number" value="${d.pend}" disabled style="${_autoStyle}"></div>
+        </div>
+        <div class="form-grid g2" style="margin-top:8px">
+          <div class="fld"><label>Conversaciones (manual)</label>
+            <input type="number" id="rc-${pid}" value="${rep?.conversaciones||0}" min="0" class="rep-conv" data-prod="${p}" ${!esHoy?'disabled style="'+_autoStyle+'"':''}></div>
+        </div>
+      </div>`
+    }).join('')
+    autoHtml+=`<div class="cards-row c4" style="margin-top:14px">
+      <div class="card c-blue"><div class="card-label">Total órdenes</div><div class="card-val">${totOrd}</div></div>
+      <div class="card c-green"><div class="card-label">Confirmados</div><div class="card-val">${totConf}</div></div>
+      <div class="card c-red"><div class="card-label">Cancelados</div><div class="card-val">${totCanc}</div></div>
+      <div class="card c-amber"><div class="card-label">Pendientes</div><div class="card-val">${totPend}</div></div>
+    </div>`
+  }
+
+  // Motivo for historical edit
+  let motivoHtml=''
+  if(!esHoy&&prods.length>0){
+    motivoHtml=`<div class="alert alert-blue" style="margin-bottom:14px">📅 Fecha anterior — solo lectura. Para modificar conversaciones, activa edición.</div>
+    <div style="margin-bottom:14px">
+      <button class="btn-sm btn-amber" onclick="habilitarEdicionHist()">🔓 Habilitar edición</button>
+      <div id="rep-motivo-wrap" style="display:none;margin-top:8px">
+        <div class="fld"><label>Motivo de edición (obligatorio)</label>
+        <input type="text" id="rep-motivo" placeholder="Ej: Corrección de conversaciones reales"></div>
+      </div>
+    </div>`
+  }
+
+  // Ventas de hoy (solo si es hoy)
+  let ventasHtml=''
+  if(esHoy){
+    ventasHtml=`<div class="divider"></div>
+    <div class="section-title">📝 Ventas de hoy (manual)</div>
+    <div class="page-sub" style="margin-bottom:14px">Selecciona producto, pega IDs de anuncio y conversaciones aproximadas</div>
+    <div id="ventas-rows"></div>
+    <button class="btn-sm btn-blue" onclick="addVentaRow()" style="margin-bottom:14px">+ Agregar producto</button>
+    <div class="fld" style="margin-bottom:14px"><label>Nota (opcional)</label>
+      <textarea id="rep-nota" rows="2" style="resize:vertical">${reportes?.[0]?.nota||''}</textarea></div>`
+  }
+
+  el.innerHTML=`
+    <div class="section-title" style="color:var(--green)">📊 Datos ${esHoy?'de ayer':'del '+fecha} (auto desde Dropi)</div>
+    ${motivoHtml}${autoHtml}${ventasHtml}
+    <div style="margin-top:16px">
+      <button class="btn-full btn-primary" onclick="saveReporteV2('${fecha}')">💾 Guardar reporte</button>
+    </div>
+    <div id="rep-msg" style="margin-top:10px"></div>`
+
+  // Cargar ventas existentes o crear primera fila
+  if(esHoy){
+    const ventasExist=reportes?.filter(r=>r.ad_ids)||[]
+    if(ventasExist.length>0)for(const v of ventasExist)addVentaRow(v.producto_nombre||'',v.ad_ids||'',v.conversaciones_aprox||0)
+    else addVentaRow()
+  }
+}
+window.cargarReporteData=cargarReporteData
+
+window.addVentaRow=(prodNom,adIds,convAp)=>{
+  const idx=window._ventaIdx++
+  const container=document.getElementById('ventas-rows')
+  if(!container)return
+  const div=document.createElement('div')
+  div.className='card';div.id=`vrow-${idx}`;div.style.marginBottom='10px'
+  div.innerHTML=`<div class="form-grid g3" style="align-items:start">
+    <div class="fld"><label>Producto</label>
+      <select id="vp-${idx}">
+        <option value="">Seleccionar...</option>
+        ${productos.map(p=>`<option value="${p.nombre}" ${p.nombre===prodNom?'selected':''}>${p.nombre}</option>`).join('')}
+      </select></div>
+    <div class="fld"><label>IDs anuncio (uno por línea)</label>
+      <textarea id="vi-${idx}" rows="3" placeholder="Pega todos los IDs aquí">${adIds||''}</textarea></div>
+    <div class="fld"><label>Conv. aprox.</label>
+      <input type="number" id="vc-${idx}" value="${convAp||0}" min="0">
+      <button class="btn-sm btn-red" onclick="document.getElementById('vrow-${idx}').remove()" style="margin-top:6px;font-size:11px">✕ Quitar</button></div>
+  </div>`
+  container.appendChild(div)
+}
+
+window.habilitarEdicionHist=()=>{
+  document.getElementById('rep-motivo-wrap').style.display='block'
+  document.querySelectorAll('.rep-conv').forEach(el=>{el.disabled=false;el.style.cssText=''})
+}
+
+window.saveReporteV2=async(fecha)=>{
+  const esHoy=fecha===today()
+  const msg=document.getElementById('rep-msg')
+
+  if(!esHoy){
+    const motivo=document.getElementById('rep-motivo')?.value?.trim()
+    if(!motivo){msg.innerHTML='<div class="alert alert-red">Ingresa un motivo para editar el histórico</div>';return}
+    // Save conversaciones per product
+    const convEls=document.querySelectorAll('.rep-conv')
+    let saved=0
+    for(const cel of convEls){
+      const prodName=cel.dataset.prod
+      const conv=parseInt(cel.value)||0
+      const prodObj=productos.find(p=>p.nombre===prodName)
+      const{error}=await sb.from('reportes_diarios').upsert({
+        fecha,producto_id:prodObj?.id||prodName,producto_nombre:prodName,
+        conversaciones:conv,nota:`[EDITADO] ${motivo}`,
+        usuario_id:me.id,updated_at:new Date().toISOString()
+      },{onConflict:'fecha,producto_id,usuario_id'})
+      if(!error)saved++
+    }
+    msg.innerHTML=`<div class="alert alert-green">✅ Actualizado (${saved} productos) — Motivo: "${motivo}"</div>`
+    logAction('reporte_editado_historico',{fecha,motivo,productos:saved}).catch(()=>{})
+    return
+  }
+
+  // Save ventas de hoy
+  const rows=document.getElementById('ventas-rows')?.children||[]
+  let saved=0
+  for(const row of rows){
+    const idx=row.id.replace('vrow-','')
+    const prodNom=document.getElementById(`vp-${idx}`)?.value
+    if(!prodNom)continue
+    const adIds=document.getElementById(`vi-${idx}`)?.value?.trim()||''
+    const convAp=parseInt(document.getElementById(`vc-${idx}`)?.value)||0
+    const prodObj=productos.find(p=>p.nombre===prodNom)
+    // Also get conversaciones from auto section if exists
+    const pid=prodNom.replace(/\s+/g,'_')
+    const convReal=parseInt(document.getElementById(`rc-${pid}`)?.value)||0
+    const{error}=await sb.from('reportes_diarios').upsert({
+      fecha,producto_id:prodObj?.id||prodNom,producto_nombre:prodNom,
+      conversaciones:convReal,conversaciones_aprox:convAp,ad_ids:adIds,
+      nota:document.getElementById('rep-nota')?.value||'',
+      usuario_id:me.id,updated_at:new Date().toISOString()
+    },{onConflict:'fecha,producto_id,usuario_id'})
+    if(error){msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+    saved++
+  }
+  // Also save conv for products in auto section that aren't in ventas rows
+  const convEls=document.querySelectorAll('.rep-conv')
+  for(const cel of convEls){
+    const prodName=cel.dataset.prod
+    const alreadySaved=[...rows].some(r=>{const i=r.id.replace('vrow-','');return document.getElementById(`vp-${i}`)?.value===prodName})
+    if(alreadySaved)continue
+    const conv=parseInt(cel.value)||0
+    const prodObj=productos.find(p=>p.nombre===prodName)
+    await sb.from('reportes_diarios').upsert({
+      fecha,producto_id:prodObj?.id||prodName,producto_nombre:prodName,
+      conversaciones:conv,usuario_id:me.id,updated_at:new Date().toISOString()
+    },{onConflict:'fecha,producto_id,usuario_id'}).catch(()=>{})
+  }
+  msg.innerHTML=`<div class="alert alert-green">✅ ${saved} producto(s) guardado(s)</div>`
+  logAction('reporte_guardado',{fecha,productos:saved}).catch(()=>{})
 }
 
 // ── AUXILIAR: PEDIDOS ──────────────────────────────────────
@@ -1771,7 +1902,7 @@ async function cargarRegistrosDia(fecha){
   el.innerHTML='<div class="loading">Cargando...</div>'
   const{data,error}=await sb.from('mapeos').select('*')
     .eq('fecha_dropi',fecha)
-    .in('estado_final',['PENDIENTE CONFIRMACION','CANCELADO'])
+    .not('estado_final','is',null)
     .order('estado_final')
   if(error){el.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
   if(!data||!data.length){
@@ -1779,31 +1910,35 @@ async function cargarRegistrosDia(fecha){
   }
   const pend=data.filter(m=>m.estado_final==='PENDIENTE CONFIRMACION')
   const canc=data.filter(m=>m.estado_final==='CANCELADO')
+  const conf=data.filter(m=>m.estado_final!=='PENDIENTE CONFIRMACION'&&m.estado_final!=='CANCELADO')
   const esHoy=fecha===today()
+  const _card=(m)=>`<div class="card" style="margin-bottom:8px;padding:12px">
+    <div style="font-size:14px;font-weight:600;font-family:monospace">${m.telefono}</div>
+    <div style="font-size:13px;color:var(--text);margin-top:2px">${m.nombre_cliente||'—'}</div>
+    <div style="font-size:11px;color:var(--muted)">${m.producto||'—'} · ${m.ciudad||'—'}</div>
+  </div>`
   el.innerHTML=`
-    <div class="cards-row c2" style="margin-bottom:14px">
+    <div class="cards-row c3" style="margin-bottom:14px">
+      <div class="card c-green"><div class="card-label">Confirmados</div><div class="card-val">${conf.length}</div></div>
       <div class="card c-amber"><div class="card-label">Pendientes</div><div class="card-val">${pend.length}</div></div>
       <div class="card c-red"><div class="card-label">Cancelados</div><div class="card-val">${canc.length}</div></div>
     </div>
     ${!esHoy?'<div class="alert alert-blue" style="margin-bottom:14px">📅 Fecha anterior — solo lectura. Para confirmar un reservado, ve a la sección "Confirmar reservado" e ingresa el número.</div>':''}
+    <div style="margin-bottom:18px">
+      <div class="section-title">✅ Confirmados (${conf.length})</div>
+      ${conf.length===0?'<div class="alert alert-green">Sin confirmados</div>':
+      `<div class="form-grid g3">${conf.map(_card).join('')}</div>`}
+    </div>
     <div class="form-grid g2">
       <div>
         <div class="section-title">⏳ Pendientes por confirmar (${pend.length})</div>
         ${pend.length===0?'<div class="alert alert-green">Sin pendientes</div>':
-        pend.map(m=>`<div class="card" style="margin-bottom:8px;padding:12px">
-          <div style="font-size:14px;font-weight:600;font-family:monospace">${m.telefono}</div>
-          <div style="font-size:13px;color:var(--text);margin-top:2px">${m.nombre_cliente||'—'}</div>
-          <div style="font-size:11px;color:var(--muted)">${m.producto||'—'} · ${m.ciudad||'—'}</div>
-        </div>`).join('')}
+        pend.map(_card).join('')}
       </div>
       <div>
         <div class="section-title">❌ Cancelados (${canc.length})</div>
         ${canc.length===0?'<div class="alert alert-green">Sin cancelados</div>':
-        canc.map(m=>`<div class="card" style="margin-bottom:8px;padding:12px">
-          <div style="font-size:14px;font-weight:600;font-family:monospace">${m.telefono}</div>
-          <div style="font-size:13px;color:var(--text);margin-top:2px">${m.nombre_cliente||'—'}</div>
-          <div style="font-size:11px;color:var(--muted)">${m.producto||'—'} · ${m.ciudad||'—'}</div>
-        </div>`).join('')}
+        canc.map(_card).join('')}
       </div>
     </div>`
 }
@@ -1940,6 +2075,147 @@ window.actualizarEstadosDropi=async()=>{
   logAction('dropi_estados_actualizados',{actualizadas:ok,errores:fail}).catch(()=>{})
   // Recargar registros del día
   cargarRegistrosDia(document.getElementById('reg-fecha')?.value||today())
+}
+
+// ── AUXILIAR: SEGUIMIENTO DE ENTREGAS ─────────────────────
+async function pageAuxSeguimiento(c){
+  c.innerHTML=`<div class="page-title">🚚 Seguimiento de entregas</div>
+    <div class="page-sub">Sube reporte Dropi para ver estado de lotes despachados (días 8-15)</div>
+    <div class="card" style="max-width:600px">
+      <div class="fld" style="margin-bottom:12px">
+        <label>Reporte Dropi (.xlsx)</label>
+        <input type="file" id="seg-file" accept=".xlsx,.xls"
+          style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--text);width:100%">
+      </div>
+      <button class="btn-full btn-primary" onclick="procesarSeguimiento()">▶ Procesar seguimiento</button>
+      <div id="seg-msg" style="margin-top:10px"></div>
+    </div>
+    <div id="seg-resultado" style="margin-top:18px"></div>`
+}
+
+window.procesarSeguimiento=async()=>{
+  const fileInput=document.getElementById('seg-file')
+  const msg=document.getElementById('seg-msg')
+  const resEl=document.getElementById('seg-resultado')
+  if(!fileInput.files.length){msg.innerHTML='<div class="alert alert-red">Selecciona un archivo</div>';return}
+  msg.innerHTML='<div class="alert alert-blue">Procesando seguimiento...</div>'
+
+  try{
+    const buf=await fileInput.files[0].arrayBuffer()
+    const wbook=XLSX.read(buf,{type:'array'})
+    const rows=XLSX.utils.sheet_to_json(wbook.Sheets[wbook.SheetNames[0]],{defval:''})
+    if(!rows.length){msg.innerHTML='<div class="alert alert-red">Archivo vacío</div>';return}
+
+    // Extraer datos
+    const ordenes=rows.map(r=>({
+      telefono:String(r['TELÉFONO']||r['TELEFONO']||'').replace(/\D/g,''),
+      estatus:String(r['ESTATUS']||'').trim().toUpperCase(),
+      fecha_dropi:String(r['FECHA']||''),
+      producto_dropi:String(r['PRODUCTO']||''),
+      transportadora:String(r['TRANSPORTADORA']||''),
+      novedad:String(r['NOVEDAD']||''),
+      ciudad:String(r['CIUDAD DESTINO']||''),
+    })).filter(o=>o.telefono.length>=7)
+
+    // Cruzar con mapeos
+    const telefonos=[...new Set(ordenes.map(o=>o.telefono))]
+    let mapeos=[]
+    for(let i=0;i<telefonos.length;i+=100){
+      const batch=telefonos.slice(i,i+100)
+      const{data}=await sb.from('mapeos').select('*').in('telefono',batch)
+      if(data)mapeos=mapeos.concat(data)
+    }
+    const mByTel={}
+    for(const m of mapeos){if(!mByTel[m.telefono])mByTel[m.telefono]=[];mByTel[m.telefono].push(m)}
+
+    // Cruzar y clasificar
+    const resultados=ordenes.map(o=>{
+      const mapeo=mByTel[o.telefono]?.[0]||null
+      const producto=mapeo?.producto||o.producto_dropi
+      const si=DROPI_STATUS[o.estatus]||{cat:'otro',emoji:'❓',pill:'pill-blue',label:o.estatus}
+      return{...o,mapeo,producto,si,fecha_lote:mapeo?.fecha_dropi||null}
+    }).filter(r=>r.mapeo)
+
+    if(!resultados.length){
+      msg.innerHTML='<div class="alert alert-amber">No se encontraron órdenes cruzadas con el asignador</div>';return
+    }
+
+    // Agrupar por lote (fecha_dropi del mapeo)
+    const lotes={}
+    const productosSet=new Set()
+    for(const r of resultados){
+      const lote=r.fecha_lote||'Sin lote'
+      if(!lotes[lote])lotes[lote]={entregado:0,devuelto:0,en_transito:0,novedad:0,cancelado:0,otro:0,total:0,items:[]}
+      lotes[lote].total++
+      lotes[lote].items.push(r)
+      productosSet.add(r.producto)
+      const cat=r.si.cat
+      if(cat==='entregado'||cat==='novedad_ok')lotes[lote].entregado++
+      else if(cat==='devuelto')lotes[lote].devuelto++
+      else if(cat==='en_transito'||cat==='en_proceso'||cat==='en_bodega')lotes[lote].en_transito++
+      else if(cat==='novedad')lotes[lote].novedad++
+      else if(cat==='cancelado')lotes[lote].cancelado++
+      else lotes[lote].otro++
+    }
+
+    const prodList=[...productosSet].sort()
+    msg.innerHTML=`<div class="alert alert-green">✅ ${resultados.length} órdenes cruzadas en ${Object.keys(lotes).length} lotes</div>`
+
+    // Filtro por producto
+    const filtroHtml=`<div class="fld" style="max-width:250px;margin-bottom:14px">
+      <label>Filtrar por producto</label>
+      <select id="seg-filtro" onchange="filtrarSeguimiento()">
+        <option value="">Todos</option>
+        ${prodList.map(p=>`<option value="${p}">${p}</option>`).join('')}
+      </select></div>`
+
+    // Render lotes
+    const lotesOrdenados=Object.entries(lotes).sort((a,b)=>b[0].localeCompare(a[0]))
+
+    const lotesHtml=lotesOrdenados.map(([fecha,d])=>{
+      const pctEnt=d.total>0?Math.round(d.entregado/d.total*100):0
+      const pctDev=d.total>0?Math.round(d.devuelto/d.total*100):0
+      const pctTran=d.total>0?Math.round(d.en_transito/d.total*100):0
+      const devColor=pctDev>20?'var(--red)':pctDev>15?'var(--amber)':'var(--green)'
+      return`<div class="card seg-lote" data-productos="${d.items.map(i=>i.producto).join(',')}" style="margin-bottom:12px">
+        <div style="font-weight:600;margin-bottom:10px">📦 Lote ${fecha} <span style="color:var(--muted);font-weight:400">(${d.total} órdenes)</span></div>
+        <div class="cards-row c4" style="margin-bottom:8px">
+          <div class="card c-green" style="padding:10px"><div class="card-label">Entregados</div><div class="card-val">${d.entregado} <span style="font-size:12px">(${pctEnt}%)</span></div></div>
+          <div class="card c-red" style="padding:10px"><div class="card-label">Devueltos</div><div class="card-val">${d.devuelto} <span style="font-size:12px">(${pctDev}%)</span></div></div>
+          <div class="card c-blue" style="padding:10px"><div class="card-label">En tránsito</div><div class="card-val">${d.en_transito} <span style="font-size:12px">(${pctTran}%)</span></div></div>
+          <div class="card c-amber" style="padding:10px"><div class="card-label">Novedad</div><div class="card-val">${d.novedad}</div></div>
+        </div>
+        <div style="font-size:13px">Devol. real: <strong style="color:${devColor}">${pctDev}%</strong></div>
+      </div>`
+    }).join('')
+
+    resEl.innerHTML=filtroHtml+lotesHtml
+
+    // Update mapeos with latest status
+    let updated=0
+    for(const r of resultados){
+      if(r.mapeo){
+        const{error}=await sb.from('mapeos').update({estado_final:r.estatus}).eq('id',r.mapeo.id)
+        if(!error)updated++
+      }
+    }
+    msg.innerHTML+=`<div class="alert alert-blue" style="margin-top:8px">💾 ${updated} estados actualizados automáticamente</div>`
+
+    window._segResultados=resultados
+    window._segLotes=lotes
+    logAction('seguimiento_procesado',{ordenes:resultados.length,lotes:Object.keys(lotes).length}).catch(()=>{})
+  }catch(e){
+    msg.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
+  }
+}
+
+window.filtrarSeguimiento=()=>{
+  const filtro=document.getElementById('seg-filtro')?.value||''
+  document.querySelectorAll('.seg-lote').forEach(el=>{
+    if(!filtro){el.style.display='';return}
+    const prods=el.dataset.productos||''
+    el.style.display=prods.includes(filtro)?'':'none'
+  })
 }
 
 // ── INIT ───────────────────────────────────────────────────

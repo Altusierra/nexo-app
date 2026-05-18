@@ -2180,17 +2180,27 @@ window.procesarNovedadesXlsx=async()=>{
     let mapeos=[]
     for(let i=0;i<telefonos.length;i+=100){
       const batch=telefonos.slice(i,i+100)
-      const{data}=await sb.from('mapeos').select('telefono,producto,ad_id,fecha').in('telefono',batch)
+      const{data}=await sb.from('mapeos').select('id,telefono,producto,ad_id,fecha').in('telefono',batch)
       if(data)mapeos=mapeos.concat(data)
     }
     const mByTel={}
     for(const m of mapeos){if(!mByTel[m.telefono])mByTel[m.telefono]=m}
 
-    // Enriquecer con producto del mapeo
+    // Enriquecer con producto del mapeo + guardar fecha_novedad
+    const novUpdates=[]
     for(const item of items){
       const m=mByTel[item.tel]
       item.producto=m?.producto||'—'
       item.ad_id=m?.ad_id||null
+      if(m?.id&&item.fechaNov){
+        const p=item.fechaNov.split('-')
+        if(p.length===3)novUpdates.push({id:m.id,fiso:`${p[2]}-${p[1]}-${p[0]}`})
+      }
+    }
+    let novUpdated=0
+    for(const u of novUpdates){
+      const{error}=await sb.from('mapeos').update({fecha_novedad:u.fiso}).eq('id',u.id)
+      if(!error)novUpdated++
     }
 
     // Ordenar: prioridad primero, dentro de cada prioridad los más viejos primero
@@ -2200,7 +2210,7 @@ window.procesarNovedadesXlsx=async()=>{
     const medias=items.filter(i=>i.cat.pri==='MEDIA')
     const normales=items.filter(i=>i.cat.pri==='NORMAL')
 
-    msg.innerHTML=`<div class="alert alert-green">✅ ${items.length} novedades procesadas del reporte</div>`
+    msg.innerHTML=`<div class="alert alert-green">✅ ${items.length} novedades procesadas del reporte${novUpdated>0?` · 📅 ${novUpdated} fechas de novedad guardadas`:''}</div>`
 
     const renderCard=(m)=>{
       const diasTxt=m.dias!==null?`${m.dias}d`:'—'
@@ -2740,7 +2750,7 @@ async function cargarSeguimientoHist(){
   const lotes={},fechasCompra=new Set()
   for(const m of data){
     const lote=m.fecha_dropi||'Sin lote'
-    if(!lotes[lote])lotes[lote]={entregado:0,devuelto:0,en_transito:0,novedad:0,cancelado:0,total:0,prods:new Set(),ventaEnt:0,fechas:new Set()}
+    if(!lotes[lote])lotes[lote]={entregado:0,devuelto:0,en_transito:0,novedad:0,cancelado:0,total:0,prods:new Set(),ventaEnt:0,fechas:new Set(),novConFecha:0,novResueltas:0,novDiasTotal:0}
     lotes[lote].total++
     lotes[lote].prods.add(m.producto)
     if(m.fecha){lotes[lote].fechas.add(m.fecha);fechasCompra.add(m.fecha)}
@@ -2756,6 +2766,16 @@ async function cargarSeguimientoHist(){
     else if(st==='en_transito'||st==='en_proceso'||st==='en_bodega')lotes[lote].en_transito++
     else if(st==='novedad')lotes[lote].novedad++
     else if(st==='cancelado')lotes[lote].cancelado++
+    if(m.fecha_novedad){
+      lotes[lote].novConFecha++
+      if(st==='entregado'||st==='novedad_ok'||st==='devuelto'){
+        lotes[lote].novResueltas++
+        const fNov=new Date(m.fecha_novedad+'T12:00:00')
+        const fDrp=new Date(lote+'T12:00:00')
+        const dias=Math.round((fDrp-fNov)/(86400000))
+        if(dias>=0)lotes[lote].novDiasTotal+=dias
+      }
+    }
   }
 
   // Fetch gasto_ads para fechas de compra (admin only, para ROAS por lote)
@@ -2782,6 +2802,14 @@ async function cargarSeguimientoHist(){
       if(estPct!==null){
         const diffColor=pctDev>estPct?'var(--red)':'var(--green)'
         devEstHtml=` · Estimada: ${estPct}% → Real: <strong style="color:${diffColor}">${pctDev}%</strong> ${pctDev>estPct?'⚠️':'✅'}`
+        const diffPct=(pctDev-estPct)/100
+        if(diffPct>0){
+          const extraDevs=Math.round(diffPct*d.total)
+          const fp=prodObj.precio_2u||129900,fc=prodObj.costo_2u||36000
+          const ffo=prodObj.flete_outbound||21000,ffd=prodObj.flete_devolucion||18000
+          const impMargen=Math.round(extraDevs*(fp-fc-ffo+ffd))
+          devEstHtml+=`<br>💸 <strong style="color:var(--red)">${extraDevs} devol. extra</strong> → Impacto: <strong style="color:var(--red)">-$${fmt(impMargen)}</strong>`
+        }
       }
     }
     return`<div class="card" style="margin-bottom:12px">
@@ -2793,6 +2821,12 @@ async function cargarSeguimientoHist(){
         <div class="card c-amber" style="padding:10px"><div class="card-label">Novedad</div><div class="card-val">${d.novedad}</div></div>
       </div>
       <div style="font-size:13px">Devol. real: <strong style="color:${devColor}">${pctDev}%</strong>${devEstHtml}</div>
+      ${d.novConFecha>0?(()=>{
+        const promDias=d.novResueltas>0?Math.round(d.novDiasTotal/d.novResueltas):null
+        const promColor=promDias===null?'var(--muted)':promDias>7?'var(--red)':promDias>4?'var(--amber)':'var(--green)'
+        const pendientes=d.novConFecha-d.novResueltas
+        return`<div style="font-size:13px;margin-top:4px">⏱️ Novedades: <strong>${d.novResueltas}</strong> resueltas de <strong>${d.novConFecha}</strong>${pendientes>0?` · <span style="color:var(--amber)">${pendientes} pendientes</span>`:''}${promDias!==null?` · Promedio: <strong style="color:${promColor}">${promDias} días</strong>`:''}</div>`
+      })():''}
       ${esAdmin?(()=>{
         const gastoLote=[...d.fechas].reduce((s,f)=>s+(gastoByFecha[f]||0),0)
         if(!gastoLote||!d.ventaEnt)return''

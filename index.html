@@ -3587,19 +3587,21 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   }
 
   // ── También buscar ventas del reporte diario (ad_ids manuales del auxiliar) ──
-  const{data:reportes}=await sb.from('reportes_diarios').select('ad_ids,fecha').gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null)
+  const{data:reportes}=await sb.from('reportes_diarios').select('ad_ids,fecha,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false})
   if(reportes?.length){
-    // Agrupar por fecha y quedarse solo con el último guardado por fecha
-    const lastByFecha={}
+    // Deduplicar: quedarse solo con la última fila por fecha+producto (evita duplicados por conflicto de upsert)
+    const seen=new Set()
+    const uniqueReportes=[]
     for(const rep of reportes){
-      if(!rep.ad_ids)continue
-      if(!lastByFecha[rep.fecha])lastByFecha[rep.fecha]=[]
-      lastByFecha[rep.fecha].push(rep.ad_ids)
+      const key=rep.fecha+'|'+rep.producto_nombre
+      if(seen.has(key))continue
+      seen.add(key)
+      uniqueReportes.push(rep)
     }
-    // Contar: cada línea de ad_id = 1 venta (repetidos = múltiples ventas)
-    for(const fecha of Object.keys(lastByFecha)){
-      const allIds=lastByFecha[fecha].join('\n')
-      const ids=allIds.split(/[\n,]+/).map(s=>s.trim()).filter(s=>s.length>5)
+    // Contar: cada línea de ad_id = 1 venta (repetidos dentro de un producto = múltiples ventas)
+    for(const rep of uniqueReportes){
+      if(!rep.ad_ids)continue
+      const ids=rep.ad_ids.split(/[\n,]+/).map(s=>s.trim()).filter(s=>s.length>5)
       for(const adId of ids){
         const campId=adToCamp[adId]
         if(!campId)continue

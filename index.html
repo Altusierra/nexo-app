@@ -1753,8 +1753,61 @@ async function pageAuxDropi(c){
       <button class="btn-full btn-primary" onclick="procesarDropi()">▶ Procesar reporte</button>
       <div id="dropi-msg" style="margin-top:10px"></div>
     </div>
-    <div id="dropi-resultado" style="margin-top:18px"></div>`
+    <div id="dropi-resultado" style="margin-top:18px"></div>
+    <div class="divider"></div>
+    <div class="page-title" style="font-size:16px">📋 Registros del día</div>
+    <div class="page-sub">Pendientes por confirmar y cancelados</div>
+    <div class="fld" style="max-width:200px;margin-bottom:14px">
+      <label>Fecha Dropi</label>
+      <input type="date" id="reg-fecha" value="${today()}" onchange="cargarRegistrosDia(this.value)">
+    </div>
+    <div id="reg-dia-content"><div class="loading">Cargando...</div></div>`
+  cargarRegistrosDia(today())
 }
+
+async function cargarRegistrosDia(fecha){
+  const el=document.getElementById('reg-dia-content')
+  if(!el)return
+  el.innerHTML='<div class="loading">Cargando...</div>'
+  const{data,error}=await sb.from('mapeos').select('*')
+    .eq('fecha_dropi',fecha)
+    .in('estado_final',['PENDIENTE CONFIRMACION','CANCELADO'])
+    .order('estado_final')
+  if(error){el.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+  if(!data||!data.length){
+    el.innerHTML='<div class="alert alert-blue">Sin registros para esta fecha</div>';return
+  }
+  const pend=data.filter(m=>m.estado_final==='PENDIENTE CONFIRMACION')
+  const canc=data.filter(m=>m.estado_final==='CANCELADO')
+  const esHoy=fecha===today()
+  el.innerHTML=`
+    <div class="cards-row c2" style="margin-bottom:14px">
+      <div class="card c-amber"><div class="card-label">Pendientes</div><div class="card-val">${pend.length}</div></div>
+      <div class="card c-red"><div class="card-label">Cancelados</div><div class="card-val">${canc.length}</div></div>
+    </div>
+    ${!esHoy?'<div class="alert alert-blue" style="margin-bottom:14px">📅 Fecha anterior — solo lectura. Para confirmar un reservado, ve a la sección "Confirmar reservado" e ingresa el número.</div>':''}
+    <div class="form-grid g2">
+      <div>
+        <div class="section-title">⏳ Pendientes por confirmar (${pend.length})</div>
+        ${pend.length===0?'<div class="alert alert-green">Sin pendientes</div>':
+        pend.map(m=>`<div class="card" style="margin-bottom:8px;padding:12px">
+          <div style="font-size:14px;font-weight:600;font-family:monospace">${m.telefono}</div>
+          <div style="font-size:13px;color:var(--text);margin-top:2px">${m.nombre_cliente||'—'}</div>
+          <div style="font-size:11px;color:var(--muted)">${m.producto||'—'} · ${m.ciudad||'—'}</div>
+        </div>`).join('')}
+      </div>
+      <div>
+        <div class="section-title">❌ Cancelados (${canc.length})</div>
+        ${canc.length===0?'<div class="alert alert-green">Sin cancelados</div>':
+        canc.map(m=>`<div class="card" style="margin-bottom:8px;padding:12px">
+          <div style="font-size:14px;font-weight:600;font-family:monospace">${m.telefono}</div>
+          <div style="font-size:13px;color:var(--text);margin-top:2px">${m.nombre_cliente||'—'}</div>
+          <div style="font-size:11px;color:var(--muted)">${m.producto||'—'} · ${m.ciudad||'—'}</div>
+        </div>`).join('')}
+      </div>
+    </div>`
+}
+window.cargarRegistrosDia=cargarRegistrosDia
 
 window.procesarDropi=async()=>{
   const fileInput=document.getElementById('dropi-file')
@@ -1872,11 +1925,20 @@ window.actualizarEstadosDropi=async()=>{
   msgEl.innerHTML='<span style="color:var(--blue)">Actualizando...</span>'
   let ok=0,fail=0
   for(const r of cruzados){
-    const{error}=await sb.from('mapeos').update({estado_final:r.estatus}).eq('id',r.mapeo.id)
+    // Convertir DD-MM-YYYY → YYYY-MM-DD para Supabase
+    let fd=null
+    if(r.fecha_dropi){const p=r.fecha_dropi.split('-');if(p.length===3)fd=`${p[2]}-${p[1]}-${p[0]}`}
+    const{error}=await sb.from('mapeos').update({
+      estado_final:r.estatus,
+      fecha_dropi:fd,
+      nombre_cliente:r.nombre||null
+    }).eq('id',r.mapeo.id)
     if(error)fail++;else ok++
   }
   msgEl.innerHTML=`<span style="color:var(--green)">✅ ${ok} actualizadas${fail?` · ${fail} errores`:''}</span>`
   logAction('dropi_estados_actualizados',{actualizadas:ok,errores:fail}).catch(()=>{})
+  // Recargar registros del día
+  cargarRegistrosDia(document.getElementById('reg-fecha')?.value||today())
 }
 
 // ── INIT ───────────────────────────────────────────────────

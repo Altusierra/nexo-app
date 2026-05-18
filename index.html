@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Nexo</title>
 <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -398,6 +399,7 @@ const NAV={
     {id:'aux-reporte',icon:'📝',label:'Reporte del día'},
     {id:'aux-pedidos',icon:'📦',label:'Mis pedidos'},
     {id:'aux-reservado',icon:'🔍',label:'Confirmar reservado'},
+    {id:'aux-dropi',icon:'📊',label:'Cruce Dropi'},
     {id:'aux-cierre',icon:'✅',label:'Cerrar jornada'},
   ]
 }
@@ -471,6 +473,7 @@ function render(page){
     'aux-reporte':pageAuxReporte,
     'aux-pedidos':pageAuxPedidos,
     'aux-reservado':pageAuxReservado,
+    'aux-dropi':pageAuxDropi,
     'aux-cierre':pageAuxCierre,
   }
   const fn=pages[page]
@@ -1259,18 +1262,12 @@ async function pageAuxAsignador(c){
 
   try{
     const{D,M,kw,masterByCode}=await cargarAsignDataSiNecesario()
-    // DEBUG: conteo visible (quitar después)
-    const _dbgCiudades=Object.keys(D).length
-    const _dbgMaestros=Object.keys(masterByCode).length
-    const _dbgCeldas=Object.values(M).reduce((s,o)=>s+Object.keys(o).length,0)
-    const _dbgKw=Object.keys(kw).length
     const kwList=Object.keys(kw).sort()
     const kwHtml=kwList.length
       ? kwList.map(k=>`<span class="pill pill-blue" style="margin-right:4px">${k} → ${kw[k]}</span>`).join('')
       : '<span style="color:var(--muted)">Sin keywords. Por defecto todo va a GEN (genérico).</span>'
 
     document.getElementById('asign-content').innerHTML=`
-      <div class="alert alert-yellow" style="font-family:monospace;font-size:11px">🔍 DEBUG: ciudades=${_dbgCiudades} · maestros=${_dbgMaestros} · celdas=${_dbgCeldas} · keywords=${_dbgKw} — Si celdas=0, la tabla maestro_ciudades no está cargando.</div>
       <div class="card" style="margin-bottom:14px">
         <div style="font-size:12px;color:var(--muted);margin-bottom:6px"><strong>Palabras reconocidas en la columna PRODUCTO:</strong></div>
         <div>${kwHtml}</div>
@@ -1717,6 +1714,169 @@ async function pageAuxCierre(c){
   }
 
   renderCierre()
+}
+
+// ── AUXILIAR: CRUCE DROPI (Fase 2) ────────────────────────
+const DROPI_STATUS={
+  'ENTREGADO':{cat:'entregado',emoji:'✅',pill:'pill-green',label:'Entregado'},
+  'CANCELADO':{cat:'cancelado',emoji:'❌',pill:'pill-red',label:'Cancelado'},
+  'DEVOLUCION':{cat:'devuelto',emoji:'↩️',pill:'pill-red',label:'Devuelto'},
+  'PENDIENTE CONFIRMACION':{cat:'pendiente',emoji:'⏳',pill:'pill-amber',label:'Pendiente'},
+  'PENDIENTE':{cat:'pendiente',emoji:'⏳',pill:'pill-amber',label:'Pendiente'},
+  'DESPACHADA':{cat:'en_proceso',emoji:'📦',pill:'pill-blue',label:'Despachada'},
+  'EN PROCESAMIENTO':{cat:'en_proceso',emoji:'📦',pill:'pill-blue',label:'En proceso'},
+  'GUIA_GENERADA':{cat:'en_proceso',emoji:'📦',pill:'pill-blue',label:'Guía generada'},
+  'EN REPARTO':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'En reparto'},
+  'EN TERMINAL DESTINO':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'En tránsito'},
+  'EN TERMINAL ORIGEN':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'En tránsito'},
+  'EN BODEGA DESTINO':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'En tránsito'},
+  'EN TRANSPORTE':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'En tránsito'},
+  'EN REEXPEDICION':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'En tránsito'},
+  'EN ESPERA DE RUTA DOMESTICA':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'En tránsito'},
+  'RECLAME EN OFICINA':{cat:'en_bodega',emoji:'📍',pill:'pill-amber',label:'Reclame oficina'},
+  'EN BODEGA TRANSPORTADORA':{cat:'en_bodega',emoji:'📍',pill:'pill-amber',label:'En bodega'},
+  'NOVEDAD':{cat:'novedad',emoji:'⚠️',pill:'pill-amber',label:'Novedad'},
+  'INTENTO DE ENTREGA':{cat:'novedad',emoji:'⚠️',pill:'pill-amber',label:'Intento entrega'},
+  'SIN MOVIMIENTOS':{cat:'novedad',emoji:'⚠️',pill:'pill-amber',label:'Sin movimiento'},
+  'NOVEDAD SOLUCIONADA':{cat:'novedad_ok',emoji:'✅',pill:'pill-green',label:'Novedad resuelta'},
+}
+
+async function pageAuxDropi(c){
+  c.innerHTML=`<div class="page-title">📊 Cruce Dropi</div>
+    <div class="page-sub">Sube el reporte de Dropi y cruza automáticamente con las ventas del asignador</div>
+    <div class="card" style="max-width:600px">
+      <div class="fld" style="margin-bottom:12px">
+        <label>Reporte Dropi (.xlsx)</label>
+        <input type="file" id="dropi-file" accept=".xlsx,.xls"
+          style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--text);width:100%">
+      </div>
+      <button class="btn-full btn-primary" onclick="procesarDropi()">▶ Procesar reporte</button>
+      <div id="dropi-msg" style="margin-top:10px"></div>
+    </div>
+    <div id="dropi-resultado" style="margin-top:18px"></div>`
+}
+
+window.procesarDropi=async()=>{
+  const fileInput=document.getElementById('dropi-file')
+  const msg=document.getElementById('dropi-msg')
+  const resEl=document.getElementById('dropi-resultado')
+  if(!fileInput.files.length){msg.innerHTML='<div class="alert alert-red">Selecciona un archivo</div>';return}
+  msg.innerHTML='<div class="alert alert-blue">Procesando archivo...</div>'
+
+  try{
+    // 1. Parsear xlsx
+    const buf=await fileInput.files[0].arrayBuffer()
+    const wbook=XLSX.read(buf,{type:'array'})
+    const rows=XLSX.utils.sheet_to_json(wbook.Sheets[wbook.SheetNames[0]],{defval:''})
+    if(!rows.length){msg.innerHTML='<div class="alert alert-red">El archivo está vacío</div>';return}
+
+    // 2. Extraer datos relevantes
+    const ordenes=rows.map(r=>({
+      telefono:String(r['TELÉFONO']||r['TELEFONO']||'').replace(/\D/g,''),
+      estatus:String(r['ESTATUS']||'').trim().toUpperCase(),
+      fecha_dropi:String(r['FECHA']||''),
+      producto:String(r['PRODUCTO']||''),
+      cantidad:parseInt(r['CANTIDAD'])||1,
+      transportadora:String(r['TRANSPORTADORA']||''),
+      total:parseFloat(r['TOTAL DE LA ORDEN'])||0,
+      novedad:String(r['NOVEDAD']||''),
+      ciudad:String(r['CIUDAD DESTINO']||''),
+      nombre:String(r['NOMBRE CLIENTE']||''),
+      id_dropi:String(r['ID']||''),
+    })).filter(o=>o.telefono.length>=7)
+
+    // 3. Buscar en mapeos por teléfono (paginado)
+    const telefonos=[...new Set(ordenes.map(o=>o.telefono))]
+    let mapeos=[]
+    for(let i=0;i<telefonos.length;i+=100){
+      const batch=telefonos.slice(i,i+100)
+      const{data}=await sb.from('mapeos').select('*').in('telefono',batch)
+      if(data)mapeos=mapeos.concat(data)
+    }
+
+    // Index mapeos por teléfono
+    const mByTel={}
+    for(const m of mapeos){if(!mByTel[m.telefono])mByTel[m.telefono]=[];mByTel[m.telefono].push(m)}
+
+    // 4. Cruzar
+    const resultados=ordenes.map(o=>{
+      const mapeo=mByTel[o.telefono]?.[0]||null
+      const si=DROPI_STATUS[o.estatus]||{cat:'otro',emoji:'❓',pill:'pill-blue',label:o.estatus}
+      return{...o,mapeo,cruzado:!!mapeo,ad_id:mapeo?.ad_id||null,fecha_venta:mapeo?.fecha||null,si}
+    })
+
+    // 5. Conteos
+    const total=resultados.length
+    const cruzados=resultados.filter(r=>r.cruzado).length
+    const sinCruce=total-cruzados
+    const porCat={}
+    for(const r of resultados)porCat[r.si.cat]=(porCat[r.si.cat]||0)+1
+    const conAd=resultados.filter(r=>r.cruzado&&r.ad_id).length
+    const organicos=cruzados-conAd
+
+    // 6. Render
+    msg.innerHTML=`<div class="alert alert-green">
+      ✅ ${total} órdenes procesadas del reporte Dropi<br>
+      🔗 ${cruzados} cruzadas con asignador · ${sinCruce} sin cruce
+    </div>`
+
+    const catItems=[['entregado','pill-green','✅ Entregados'],['cancelado','pill-red','❌ Cancelados'],
+      ['devuelto','pill-red','↩️ Devueltos'],['pendiente','pill-amber','⏳ Pendientes'],
+      ['en_proceso','pill-blue','📦 En proceso'],['en_transito','pill-blue','🚚 En tránsito'],
+      ['en_bodega','pill-amber','📍 En bodega'],['novedad','pill-amber','⚠️ Novedad']]
+    const catHtml=catItems.filter(([k])=>porCat[k]).map(([k,cls,l])=>`<span class="pill ${cls}" style="margin-right:6px">${l}: ${porCat[k]}</span>`).join('')
+
+    resEl.innerHTML=`
+      <div class="cards-row c4">
+        <div class="card c-blue"><div class="card-label">Total órdenes</div><div class="card-val">${total}</div></div>
+        <div class="card c-green"><div class="card-label">Cruzadas</div><div class="card-val">${cruzados}</div>
+          <div class="card-sub">Ad: ${conAd} · Org: ${organicos}</div></div>
+        <div class="card c-amber"><div class="card-label">Sin cruce</div><div class="card-val">${sinCruce}</div></div>
+        <div class="card c-green"><div class="card-label">Entregados</div><div class="card-val">${porCat.entregado||0}</div>
+          <div class="card-sub">${total>0?Math.round((porCat.entregado||0)/total*100):0}%</div></div>
+      </div>
+      <div style="margin-bottom:14px">${catHtml}</div>
+      ${cruzados>0?`<div style="margin-bottom:14px">
+        <button class="btn-sm btn-green" onclick="actualizarEstadosDropi()">💾 Actualizar estados en sistema (${cruzados} órdenes)</button>
+        <span id="dropi-upd-msg" style="margin-left:10px"></span>
+      </div>`:''}
+      <div class="table-wrap"><table>
+        <tr><th>Teléfono</th><th>Nombre</th><th>Ciudad</th><th>Producto</th><th>Cant.</th><th>Estado Dropi</th><th>Transportadora</th><th>Total</th><th>Cruce</th><th>Fecha venta</th></tr>
+        ${resultados.map(r=>`<tr>
+          <td data-label="Teléfono" style="font-family:monospace">${r.telefono}</td>
+          <td data-label="Nombre">${r.nombre}</td>
+          <td data-label="Ciudad">${r.ciudad}</td>
+          <td data-label="Producto">${r.producto}</td>
+          <td data-label="Cant.">${r.cantidad}u</td>
+          <td data-label="Estado"><span class="pill ${r.si.pill}">${r.si.emoji} ${r.si.label}</span></td>
+          <td data-label="Carrier">${r.transportadora}</td>
+          <td data-label="Total">$${fmt(r.total)}</td>
+          <td data-label="Cruce">${r.cruzado?`<span class="pill pill-green">${r.ad_id?'Ad':'ORG'}</span>`:'<span class="pill pill-red">—</span>'}</td>
+          <td data-label="F. venta" style="font-family:monospace;font-size:11px">${r.fecha_venta||'—'}</td>
+        </tr>`).join('')}
+      </table></div>`
+
+    window._dropiResultados=resultados
+    logAction('dropi_procesado',{total,cruzados,sinCruce,entregados:porCat.entregado||0,cancelados:porCat.cancelado||0}).catch(()=>{})
+  }catch(e){
+    msg.innerHTML=`<div class="alert alert-red">Error procesando: ${e.message}</div>`
+  }
+}
+
+window.actualizarEstadosDropi=async()=>{
+  const res=window._dropiResultados
+  if(!res)return
+  const cruzados=res.filter(r=>r.cruzado&&r.mapeo)
+  const msgEl=document.getElementById('dropi-upd-msg')
+  if(!cruzados.length){msgEl.innerHTML='<span style="color:var(--amber)">Sin órdenes para actualizar</span>';return}
+  msgEl.innerHTML='<span style="color:var(--blue)">Actualizando...</span>'
+  let ok=0,fail=0
+  for(const r of cruzados){
+    const{error}=await sb.from('mapeos').update({estado_final:r.estatus}).eq('id',r.mapeo.id)
+    if(error)fail++;else ok++
+  }
+  msgEl.innerHTML=`<span style="color:var(--green)">✅ ${ok} actualizadas${fail?` · ${fail} errores`:''}</span>`
+  logAction('dropi_estados_actualizados',{actualizadas:ok,errores:fail}).catch(()=>{})
 }
 
 // ── INIT ───────────────────────────────────────────────────

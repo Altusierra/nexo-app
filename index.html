@@ -3273,10 +3273,110 @@ async function pageAdminMeta(c){
 }
 
 async function pageTraffPortafolio(c){
+  const lastSync=await getConfig('meta_sync_last')
+  const agoStr=_timeAgo(lastSync)
   c.innerHTML=`<div class="page-title">📊 Portafolio de campañas</div>
-    <div class="page-sub">Métricas y semáforo por campaña</div>
+    <div class="page-sub" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <span>Métricas y semáforo por campaña</span>
+      <span style="font-size:12px;color:var(--muted)">Actualizado ${agoStr}</span>
+      <button class="btn-sm btn-outline" onclick="refreshPortafolio()" title="Actualizar">🔄</button>
+      <button class="btn-sm btn-primary" onclick="runMetaSyncAllAccounts(7)">🔄 Sync 7d todas</button>
+    </div>
     <div id="meta-portafolio"><div class="loading">Cargando portafolio...</div></div>`
   renderMetaPortafolio(document.getElementById('meta-portafolio'),false)
+}
+
+function _timeAgo(dateStr){
+  if(!dateStr)return'Nunca'
+  const diff=Date.now()-new Date(dateStr).getTime()
+  const mins=Math.floor(diff/60000)
+  if(mins<1)return'hace un momento'
+  if(mins<60)return`hace ${mins} min`
+  const hrs=Math.floor(mins/60)
+  if(hrs<24)return`hace ${hrs}h`
+  return`hace ${Math.floor(hrs/24)}d`
+}
+
+window.refreshPortafolio=()=>{
+  const rol=currentRol()
+  if(rol==='admin')navigate('admin-meta')
+  else navigate('traff-portafolio')
+}
+
+window.runMetaSyncAllAccounts=async(days)=>{
+  const btn=event?.target
+  if(btn){btn.disabled=true;btn.textContent='⏳ Sincronizando...'}
+  try{
+    let token=await getConfig('meta_access_token')
+    if(!token){alert('Token no configurado');return}
+    const{data:cuentas}=await sb.from('meta_cuentas').select('account_id,nombre').order('nombre')
+    if(!cuentas?.length){alert('Sin cuentas');return}
+    for(const cuenta of cuentas){
+      const statusEl=document.getElementById('meta-sync-status-'+cuenta.account_id)
+      if(statusEl)statusEl.textContent='🔄'
+      try{
+        await _syncOneAccount(cuenta.account_id,token,days)
+        if(statusEl)statusEl.textContent='✅'
+      }catch(e){
+        if(statusEl)statusEl.textContent='⚠️'
+        console.error(`Sync ${cuenta.nombre}:`,e)
+      }
+    }
+    await sb.from('config').upsert({clave:'meta_sync_last',valor:new Date().toISOString(),updated_at:new Date().toISOString()},{onConflict:'clave'})
+    logAction('meta_sync_all_accounts',{days,cuentas:cuentas.length}).catch(()=>{})
+  }catch(e){alert('Error: '+e.message)}
+  finally{if(btn){btn.disabled=false;btn.textContent='🔄 Sync 7d todas'}}
+}
+
+window.runMetaSyncAccount=async(accountId,accountName,days)=>{
+  const statusEl=document.getElementById('meta-sync-status-'+accountId)
+  if(statusEl)statusEl.textContent='🔄'
+  try{
+    let token=await getConfig('meta_access_token')
+    if(!token){if(statusEl)statusEl.textContent='⚠️';alert('Token no configurado');return}
+    await _syncOneAccount(accountId,token,days)
+    await sb.from('meta_cuentas').update({synced_at:new Date().toISOString()}).eq('account_id',accountId)
+    if(statusEl)statusEl.textContent='✅'
+    logAction('meta_sync_account',{account_id:accountId,days}).catch(()=>{})
+    // Refresh expanded content
+    const accEl=document.getElementById('meta-acc-'+accountId)
+    if(accEl&&accEl.style.display!=='none')toggleMetaCuenta(accountId,true)
+  }catch(e){
+    if(statusEl)statusEl.textContent='⚠️'
+    alert(`Error sync ${accountName}: ${e.message}`)
+  }
+}
+
+async function _syncOneAccount(accountId,token,days){
+  const actId='act_'+accountId
+  const until=new Date().toISOString().slice(0,10)
+  const sd=new Date()
+  if(days==='all')sd.setFullYear(sd.getFullYear()-3);else sd.setDate(sd.getDate()-days)
+  const since=sd.toISOString().slice(0,10)
+
+  const camps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,objective,daily_budget,lifetime_budget',limit:'500'})
+  for(const c of camps){
+    await sb.from('meta_campanas').upsert({meta_id:c.id,account_id:accountId,nivel:'campaign',nombre:c.name||'',estado:c.status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget/100:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget/100:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+  }
+  const adsets=await metaGet(`/${actId}/adsets`,token,{fields:'id,name,status,campaign_id,daily_budget',limit:'500'})
+  for(const s of adsets){
+    await sb.from('meta_campanas').upsert({meta_id:s.id,account_id:accountId,nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.status||'',daily_budget:s.daily_budget?s.daily_budget/100:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+  }
+  const ads=await metaGet(`/${actId}/ads`,token,{fields:'id,name,status,adset_id',limit:'500'})
+  for(const ad of ads){
+    await sb.from('meta_campanas').upsert({meta_id:ad.id,account_id:accountId,nivel:'ad',parent_id:ad.adset_id||'',nombre:ad.name||'',estado:ad.status||'',synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+  }
+  const chunks=metaDateChunks(since,until,90)
+  for(const ch of chunks){
+    const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:JSON.stringify(ch),level:'campaign',time_increment:'1',limit:'500'})
+    for(const i of cIns){
+      await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+    }
+    const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:JSON.stringify(ch),level:'ad',time_increment:'1',limit:'500'})
+    for(const i of aIns){
+      await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+    }
+  }
 }
 
 async function renderMetaPortafolio(el,isAdmin){
@@ -3291,16 +3391,12 @@ async function renderMetaPortafolio(el,isAdmin){
     return
   }
 
-  // Insights últimos 7 días agrupados por campaña
-  const h7=new Date();h7.setDate(h7.getDate()-7)
-  const{data:ins7}=await sb.from('meta_insights').select('meta_id,spend,impressions,clicks,reach,conversions,ctr,cpm,frequency').eq('nivel','campaign').gte('fecha',h7.toISOString().slice(0,10))
-
-  const agg={}
-  for(const i of (ins7||[])){
-    if(!agg[i.meta_id])agg[i.meta_id]={spend:0,imp:0,clicks:0,reach:0,conv:0,ctrs:[],cpms:[],freqs:[]}
-    const a=agg[i.meta_id]
-    a.spend+=i.spend||0;a.imp+=i.impressions||0;a.clicks+=i.clicks||0;a.conv+=i.conversions||0
-    if(i.ctr)a.ctrs.push(parseFloat(i.ctr));if(i.cpm)a.cpms.push(parseFloat(i.cpm));if(i.frequency)a.freqs.push(parseFloat(i.frequency))
+  // Count campaigns per account
+  const campsByAcc={}
+  for(const c of (campanas||[])){
+    if(!campsByAcc[c.account_id])campsByAcc[c.account_id]={total:0,activas:0}
+    campsByAcc[c.account_id].total++
+    if(c.estado==='ACTIVE')campsByAcc[c.account_id].activas++
   }
 
   // Break-even
@@ -3311,61 +3407,172 @@ async function renderMetaPortafolio(el,isAdmin){
   const margenBE=p2*(1-dp)-c2-fo-(fd*dp)
   const roasBE=margenBE>0?p2/margenBE:999
 
+  // Default dates: last 30 days
+  const defHasta=new Date().toISOString().slice(0,10)
+  const defDesde=new Date(Date.now()-30*86400000).toISOString().slice(0,10)
+
+  // Store portfolio context for expand/filter
+  window._metaPort={campanas,p2,c2,fo,fd,dp,margenBE,roasBE,isAdmin}
+
   let html=`<div style="font-size:12px;color:var(--muted);margin-bottom:14px">Última sync: ${lastStr} · Break-even ROAS: <strong>${roasBE.toFixed(2)}x</strong></div>`
 
+  // Controls: search + filters + date range
+  html+=`<div style="margin-bottom:16px;display:flex;flex-direction:column;gap:10px">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <input type="text" id="meta-search" placeholder="🔍 Buscar cuenta..." style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;flex:1;min-width:180px;outline:none" oninput="filterMetaCuentas()">
+      <button class="btn-sm btn-primary" id="mf-all" onclick="setMetaFilter('all')">Todas</button>
+      <button class="btn-sm btn-outline" id="mf-ACTIVE" onclick="setMetaFilter('ACTIVE')">Activas</button>
+      <button class="btn-sm btn-outline" id="mf-INACTIVE" onclick="setMetaFilter('INACTIVE')">Inactivas</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+      <div class="fld" style="margin:0"><label style="font-size:10px">Desde</label><input type="date" id="meta-desde" value="${defDesde}" style="font-size:12px;padding:6px 8px" onchange="applyMetaDateRange()"></div>
+      <div class="fld" style="margin:0"><label style="font-size:10px">Hasta</label><input type="date" id="meta-hasta" value="${defHasta}" style="font-size:12px;padding:6px 8px" onchange="applyMetaDateRange()"></div>
+    </div>
+  </div>`
+
+  // Render accounts as accordions
   for(const cuenta of cuentas){
-    const camps=(campanas||[]).filter(c=>c.account_id===cuenta.account_id)
-    const activas=camps.filter(c=>c.estado==='ACTIVE')
-    const pausadas=camps.filter(c=>c.estado!=='ACTIVE')
+    const cc=campsByAcc[cuenta.account_id]||{total:0,activas:0}
+    const syncOk=cuenta.synced_at?true:false
+    const statusIcon=syncOk?'✅':'⚠️'
 
-    html+=`<div class="card" style="margin-bottom:16px">
-      <div style="font-weight:600;font-size:15px;margin-bottom:12px">${cuenta.nombre||cuenta.account_id} <span class="pill pill-${cuenta.estado==='ACTIVE'?'green':'red'}" style="font-size:10px">${cuenta.estado}</span></div>`
-
-    if(!camps.length){html+=`<div class="alert alert-blue">Sin campañas</div></div>`;continue}
-
-    const renderCamp=(camp)=>{
-      const m=agg[camp.meta_id]||{spend:0,imp:0,clicks:0,conv:0,ctrs:[],cpms:[],freqs:[]}
-      const cpa=m.conv>0?m.spend/m.conv:0
-      const roasM=m.spend>0&&m.conv>0?(m.conv*p2)/m.spend:0
-      const avgCtr=m.ctrs.length?(m.ctrs.reduce((a,b)=>a+b,0)/m.ctrs.length):0
-      const avgCpm=m.cpms.length?(m.cpms.reduce((a,b)=>a+b,0)/m.cpms.length):0
-      const avgFreq=m.freqs.length?(m.freqs.reduce((a,b)=>a+b,0)/m.freqs.length):0
-
-      let semCls='',semTxt='Sin datos',semBorder='var(--border)'
-      if(m.spend>0){
-        if(roasM<roasBE){semCls='pill-red';semTxt='🔴 STOP';semBorder='var(--red)'}
-        else if(roasM<roasBE*1.4){semCls='pill-amber';semTxt='🟡 Precaución';semBorder='var(--amber)'}
-        else if(roasM<roasBE*2.2){semCls='pill-green';semTxt='🟢 Escalar';semBorder='var(--green)'}
-        else{semCls='pill-blue';semTxt='🟣 Fuego';semBorder='var(--purple)'}
-      }
-
-      return`<div class="card" style="margin-bottom:8px;padding:12px;cursor:pointer;border-left:3px solid ${semBorder}" onclick="viewCampDetail('${camp.meta_id}')">
+    html+=`<div class="meta-cuenta-wrap" data-estado="${cuenta.estado}" data-nombre="${(cuenta.nombre||cuenta.account_id).toLowerCase()}" data-accid="${cuenta.account_id}" style="margin-bottom:8px">
+      <div class="card" style="padding:12px;cursor:pointer;user-select:none" onclick="toggleMetaCuenta('${cuenta.account_id}')">
         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-          <div><div style="font-weight:600;font-size:13px">${camp.nombre||camp.meta_id}</div>
-            <div style="font-size:11px;color:var(--muted)">${camp.objetivo||''} · ${camp.estado}</div></div>
-          <span class="pill ${semCls}">${semTxt}</span>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span id="meta-sync-status-${cuenta.account_id}" style="font-size:16px">${statusIcon}</span>
+            <div>
+              <span style="font-weight:600;font-size:14px">${cuenta.nombre||cuenta.account_id}</span>
+              <span class="pill pill-${cuenta.estado==='ACTIVE'?'green':'red'}" style="font-size:10px;margin-left:6px">${cuenta.estado}</span>
+              <div style="font-size:11px;color:var(--muted)">${cc.total} campañas · ${cc.activas} activas</div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <button class="btn-sm btn-outline" onclick="event.stopPropagation();runMetaSyncAccount('${cuenta.account_id}','${(cuenta.nombre||'').replace(/'/g,"\\'")}',7)" title="Sync 7 días">🔄 7d</button>
+            ${isAdmin?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();runMetaSyncAccount('${cuenta.account_id}','${(cuenta.nombre||'').replace(/'/g,"\\'")}','all')" title="Sync completo">📥</button>`:''}
+            <span style="font-size:18px;color:var(--muted);transition:transform .2s" id="meta-chevron-${cuenta.account_id}">▸</span>
+          </div>
         </div>
-        ${m.spend>0?`<div class="cards-row c4" style="margin-top:10px;gap:6px">
-          <div style="font-size:11px"><span style="color:var(--muted)">Gasto 7d</span><br><strong>$${fmt(m.spend)}</strong></div>
-          <div style="font-size:11px"><span style="color:var(--muted)">ROAS</span><br><strong style="color:${roasM>=roasBE?'var(--green)':'var(--red)'}">${roasM.toFixed(2)}x</strong></div>
-          <div style="font-size:11px"><span style="color:var(--muted)">CPA</span><br><strong${isAdmin?` style="color:${cpa<=margenBE?'var(--green)':'var(--red)'}"`:''}>${cpa>0?'$'+fmt(cpa):'—'}</strong>${isAdmin?`<br><span style="font-size:10px;color:var(--muted)">Lím: $${fmt(margenBE)}</span>`:''}</div>
-          <div style="font-size:11px"><span style="color:var(--muted)">Conv.</span><br><strong>${m.conv}</strong></div>
-        </div>
-        <div style="display:flex;gap:14px;margin-top:6px;font-size:11px;color:var(--muted)">
-          <span>CTR: ${avgCtr.toFixed(2)}%</span><span>CPM: $${fmt(avgCpm)}</span><span>Freq: ${avgFreq.toFixed(1)}</span>
-        </div>`:''}</div>`
+      </div>
+      <div id="meta-acc-${cuenta.account_id}" style="display:none;padding:4px 0 4px 12px"></div>
+    </div>`
+  }
+
+  el.innerHTML=html
+  window._metaFilterState='all'
+}
+
+window.toggleMetaCuenta=async(accountId,forceReload)=>{
+  const accEl=document.getElementById('meta-acc-'+accountId)
+  const chevron=document.getElementById('meta-chevron-'+accountId)
+  if(!accEl)return
+  const isOpen=accEl.style.display!=='none'
+  if(isOpen&&!forceReload){
+    accEl.style.display='none'
+    if(chevron)chevron.textContent='▸'
+    return
+  }
+  accEl.style.display='block'
+  if(chevron)chevron.textContent='▾'
+  accEl.innerHTML='<div class="loading">Cargando campañas...</div>'
+
+  const ctx=window._metaPort
+  if(!ctx)return
+
+  // Get date range
+  const desde=document.getElementById('meta-desde')?.value||new Date(Date.now()-30*86400000).toISOString().slice(0,10)
+  const hasta=document.getElementById('meta-hasta')?.value||new Date().toISOString().slice(0,10)
+
+  // Query insights for this account in date range
+  const{data:ins}=await sb.from('meta_insights').select('meta_id,spend,impressions,clicks,reach,conversions,ctr,cpm,frequency').eq('nivel','campaign').eq('account_id',accountId).gte('fecha',desde).lte('fecha',hasta)
+
+  const agg={}
+  for(const i of (ins||[])){
+    if(!agg[i.meta_id])agg[i.meta_id]={spend:0,imp:0,clicks:0,reach:0,conv:0,ctrs:[],cpms:[],freqs:[]}
+    const a=agg[i.meta_id]
+    a.spend+=i.spend||0;a.imp+=i.impressions||0;a.clicks+=i.clicks||0;a.conv+=i.conversions||0
+    if(i.ctr)a.ctrs.push(parseFloat(i.ctr));if(i.cpm)a.cpms.push(parseFloat(i.cpm));if(i.frequency)a.freqs.push(parseFloat(i.frequency))
+  }
+
+  const camps=(ctx.campanas||[]).filter(c=>c.account_id===accountId)
+  const activas=camps.filter(c=>c.estado==='ACTIVE')
+  const pausadas=camps.filter(c=>c.estado!=='ACTIVE')
+
+  if(!camps.length){accEl.innerHTML='<div class="alert alert-blue">Sin campañas</div>';return}
+
+  const renderCamp=(camp)=>{
+    const m=agg[camp.meta_id]||{spend:0,imp:0,clicks:0,conv:0,ctrs:[],cpms:[],freqs:[]}
+    const cpa=m.conv>0?m.spend/m.conv:0
+    const roasM=m.spend>0&&m.conv>0?(m.conv*ctx.p2)/m.spend:0
+    const avgCtr=m.ctrs.length?(m.ctrs.reduce((a,b)=>a+b,0)/m.ctrs.length):0
+    const avgCpm=m.cpms.length?(m.cpms.reduce((a,b)=>a+b,0)/m.cpms.length):0
+    const avgFreq=m.freqs.length?(m.freqs.reduce((a,b)=>a+b,0)/m.freqs.length):0
+
+    let semCls='',semTxt='Sin datos',semBorder='var(--border)'
+    if(m.spend>0){
+      if(roasM<ctx.roasBE){semCls='pill-red';semTxt='🔴 STOP';semBorder='var(--red)'}
+      else if(roasM<ctx.roasBE*1.4){semCls='pill-amber';semTxt='🟡 Precaución';semBorder='var(--amber)'}
+      else if(roasM<ctx.roasBE*2.2){semCls='pill-green';semTxt='🟢 Escalar';semBorder='var(--green)'}
+      else{semCls='pill-blue';semTxt='🟣 Fuego';semBorder='var(--purple)'}
     }
 
-    if(activas.length){
-      html+=`<div class="section-title" style="color:var(--green)">Activas (${activas.length})</div>`
-      html+=activas.map(renderCamp).join('')
-    }
-    if(pausadas.length){
-      html+=`<details style="margin-top:8px"><summary style="font-size:12px;color:var(--muted);cursor:pointer">Pausadas / Otras (${pausadas.length})</summary><div style="margin-top:8px">${pausadas.map(renderCamp).join('')}</div></details>`
-    }
-    html+=`</div>`
+    return`<div class="card" style="margin-bottom:8px;padding:12px;cursor:pointer;border-left:3px solid ${semBorder}" onclick="viewCampDetail('${camp.meta_id}')">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+        <div><div style="font-weight:600;font-size:13px">${camp.nombre||camp.meta_id}</div>
+          <div style="font-size:11px;color:var(--muted)">${camp.objetivo||''} · ${camp.estado}</div></div>
+        <span class="pill ${semCls}">${semTxt}</span>
+      </div>
+      ${m.spend>0?`<div class="cards-row c4" style="margin-top:10px;gap:6px">
+        <div style="font-size:11px"><span style="color:var(--muted)">Gasto</span><br><strong>$${fmt(m.spend)}</strong></div>
+        <div style="font-size:11px"><span style="color:var(--muted)">ROAS</span><br><strong style="color:${roasM>=ctx.roasBE?'var(--green)':'var(--red)'}">${roasM.toFixed(2)}x</strong></div>
+        <div style="font-size:11px"><span style="color:var(--muted)">CPA</span><br><strong${ctx.isAdmin?` style="color:${cpa<=ctx.margenBE?'var(--green)':'var(--red)'}"`:''}>${cpa>0?'$'+fmt(cpa):'—'}</strong>${ctx.isAdmin?`<br><span style="font-size:10px;color:var(--muted)">Lím: $${fmt(ctx.margenBE)}</span>`:''}</div>
+        <div style="font-size:11px"><span style="color:var(--muted)">Conv.</span><br><strong>${m.conv}</strong></div>
+      </div>
+      <div style="display:flex;gap:14px;margin-top:6px;font-size:11px;color:var(--muted)">
+        <span>CTR: ${avgCtr.toFixed(2)}%</span><span>CPM: $${fmt(avgCpm)}</span><span>Freq: ${avgFreq.toFixed(1)}</span>
+      </div>`:''}</div>`
   }
-  el.innerHTML=html
+
+  let campHtml=''
+  if(activas.length){
+    campHtml+=`<div class="section-title" style="color:var(--green)">Activas (${activas.length})</div>`
+    campHtml+=activas.map(renderCamp).join('')
+  }
+  if(pausadas.length){
+    campHtml+=`<details style="margin-top:8px"><summary style="font-size:12px;color:var(--muted);cursor:pointer">Pausadas / Otras (${pausadas.length})</summary><div style="margin-top:8px">${pausadas.map(renderCamp).join('')}</div></details>`
+  }
+  accEl.innerHTML=campHtml
+}
+
+window.filterMetaCuentas=()=>{
+  const q=(document.getElementById('meta-search')?.value||'').toLowerCase()
+  const filter=window._metaFilterState||'all'
+  document.querySelectorAll('.meta-cuenta-wrap').forEach(el=>{
+    const nombre=el.dataset.nombre||''
+    const estado=el.dataset.estado||''
+    const matchSearch=!q||nombre.includes(q)
+    const matchFilter=filter==='all'||estado===filter
+    el.style.display=(matchSearch&&matchFilter)?'':'none'
+  })
+}
+
+window.setMetaFilter=(filter)=>{
+  window._metaFilterState=filter
+  document.querySelectorAll('#mf-all,#mf-ACTIVE,#mf-INACTIVE').forEach(b=>{
+    b.className=b.id==='mf-'+filter?'btn-sm btn-primary':'btn-sm btn-outline'
+  })
+  filterMetaCuentas()
+}
+
+window.applyMetaDateRange=()=>{
+  // Close all open accordions so they reload with new date range
+  document.querySelectorAll('.meta-cuenta-wrap').forEach(el=>{
+    const accId=el.dataset.accid
+    const accEl=document.getElementById('meta-acc-'+accId)
+    const chevron=document.getElementById('meta-chevron-'+accId)
+    if(accEl){accEl.style.display='none';accEl.innerHTML=''}
+    if(chevron)chevron.textContent='▸'
+  })
 }
 
 // ── META: DETALLE CAMPAÑA ────────────────────────────────

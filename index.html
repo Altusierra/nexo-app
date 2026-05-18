@@ -1595,6 +1595,7 @@ window.procesarAsignador=async()=>{
         ad_id:p.adId||null,
         producto:p.producto,
         ciudad:ciudadDropi!=='—'?ciudadDropi:p.ciudad,
+        cantidad:p.qty||1,
         estado_inicial:estado
       })
     }
@@ -1707,38 +1708,50 @@ async function pageAuxHome(c){
 async function pageAuxReporte(c){
   c.innerHTML=`<div class="page-title">📝 Reporte del día</div>
     <div class="page-sub">Datos automáticos de Dropi + ventas manuales</div>
-    <div class="fld" style="max-width:200px;margin-bottom:14px">
-      <label>Fecha</label>
-      <input type="date" id="rep-fecha" value="${today()}" onchange="cargarReporteData(this.value)">
+    <div class="form-grid g2" style="max-width:400px;margin-bottom:14px">
+      <div class="fld"><label>Fecha de compra</label>
+        <input type="date" id="rep-fecha" value="${today()}" onchange="cargarReporteData()"></div>
+      <div class="fld"><label>Fecha Dropi (subida)</label>
+        <input type="date" id="rep-fecha-dropi" value="" onchange="cargarReporteData()"></div>
     </div>
     <div id="rep-content"><div class="loading">Cargando...</div></div>`
   window._ventaIdx=0
-  cargarReporteData(today())
+  cargarReporteData()
 }
 
 const _autoStyle='background:rgba(0,180,80,0.08);border:1px solid rgba(0,180,80,0.2);color:var(--text);cursor:not-allowed'
 
-async function cargarReporteData(fecha){
+async function cargarReporteData(){
   const el=document.getElementById('rep-content')
   if(!el)return
   el.innerHTML='<div class="loading">Cargando...</div>'
-  const esHoy=fecha===today()
+  const fechaCompra=document.getElementById('rep-fecha')?.value||''
+  const fechaDropi=document.getElementById('rep-fecha-dropi')?.value||''
+  const fecha=fechaCompra||fechaDropi
+  if(!fecha){el.innerHTML='<div class="alert alert-blue">Selecciona al menos una fecha</div>';return}
+  const esHoy=fechaCompra===today()&&!fechaDropi
+  const usandoDropi=!!fechaDropi
 
   // 1. Auto: mapeos agrupados por producto
-  const{data:mapeos}=await sb.from('mapeos').select('*').eq('fecha',fecha)
+  let query=sb.from('mapeos').select('*')
+  if(fechaCompra)query=query.eq('fecha',fechaCompra)
+  if(fechaDropi)query=query.eq('fecha_dropi',fechaDropi)
+  const{data:mapeos}=await query
   const porProd={}
   let totConf=0,totCanc=0,totPend=0,totOrd=0
   if(mapeos)for(const m of mapeos){
     const prod=m.producto||'Sin producto'
-    if(!porProd[prod])porProd[prod]={ord:0,conf:0,canc:0,pend:0}
+    if(!porProd[prod])porProd[prod]={ord:0,conf:0,canc:0,pend:0,byQty:{}}
     porProd[prod].ord++;totOrd++
+    const q=m.cantidad||1
+    porProd[prod].byQty[q]=(porProd[prod].byQty[q]||0)+1
     if(m.estado_final==='CANCELADO'){porProd[prod].canc++;totCanc++}
     else if(m.estado_final==='PENDIENTE CONFIRMACION'){porProd[prod].pend++;totPend++}
     else if(m.estado_final){porProd[prod].conf++;totConf++}
   }
 
   // 2. Manual: reportes_diarios existentes
-  const{data:reportes}=await sb.from('reportes_diarios').select('*').eq('fecha',fecha).eq('usuario_id',me?.id)
+  const{data:reportes}=await sb.from('reportes_diarios').select('*').eq('fecha',fechaCompra||fechaDropi).eq('usuario_id',me?.id)
   const repByProd={}
   if(reportes)for(const r of reportes)repByProd[r.producto_nombre||'']=r
 
@@ -1747,23 +1760,26 @@ async function cargarReporteData(fecha){
   // Auto section HTML
   let autoHtml=''
   if(prods.length===0){
-    autoHtml='<div class="alert alert-blue">Sin datos de Dropi para esta fecha</div>'
+    autoHtml='<div class="alert alert-blue">Sin datos para esta(s) fecha(s)</div>'
   }else{
     autoHtml=prods.map(p=>{
       const d=porProd[p],rep=repByProd[p]
       const pid=p.replace(/\s+/g,'_')
+      // Desglose por unidades
+      const qtyKeys=Object.keys(d.byQty).map(Number).sort()
+      const qtyHtml=qtyKeys.map(q=>`<div class="fld"><label>Órd ${q}u</label><input type="number" value="${d.byQty[q]}" disabled style="${_autoStyle}"></div>`).join('')
       return`<div class="card" style="margin-bottom:10px;border-left:3px solid var(--green)">
         <div style="font-weight:600;margin-bottom:8px">${p}</div>
-        <div class="form-grid g4">
-          <div class="fld"><label>Órdenes</label><input type="number" value="${d.ord}" disabled style="${_autoStyle}"></div>
+        <div class="form-grid g${Math.min(qtyKeys.length+3,6)}">
+          ${qtyHtml}
           <div class="fld"><label>✅ Confirm.</label><input type="number" value="${d.conf}" disabled style="${_autoStyle}"></div>
           <div class="fld"><label>❌ Cancel.</label><input type="number" value="${d.canc}" disabled style="${_autoStyle}"></div>
           <div class="fld"><label>⏳ Pend.</label><input type="number" value="${d.pend}" disabled style="${_autoStyle}"></div>
         </div>
-        <div class="form-grid g2" style="margin-top:8px">
+        ${!usandoDropi?`<div class="form-grid g2" style="margin-top:8px">
           <div class="fld"><label>Conversaciones (manual)</label>
             <input type="number" id="rc-${pid}" value="${rep?.conversaciones||0}" min="0" class="rep-conv" data-prod="${p}" ${!esHoy?'disabled style="'+_autoStyle+'"':''}></div>
-        </div>
+        </div>`:''}
       </div>`
     }).join('')
     autoHtml+=`<div class="cards-row c4" style="margin-top:14px">
@@ -1776,7 +1792,7 @@ async function cargarReporteData(fecha){
 
   // Motivo for historical edit
   let motivoHtml=''
-  if(!esHoy&&prods.length>0){
+  if(!esHoy&&prods.length>0&&!usandoDropi){
     motivoHtml=`<div class="alert alert-blue" style="margin-bottom:14px">📅 Fecha anterior — solo lectura. Para modificar conversaciones, activa edición.</div>
     <div style="margin-bottom:14px">
       <button class="btn-sm btn-amber" onclick="habilitarEdicionHist()">🔓 Habilitar edición</button>
@@ -1799,11 +1815,12 @@ async function cargarReporteData(fecha){
       <textarea id="rep-nota" rows="2" style="resize:vertical">${reportes?.[0]?.nota||''}</textarea></div>`
   }
 
+  const labelFecha=usandoDropi?'Dropi '+fechaDropi:esHoy?'de ayer':fecha
   el.innerHTML=`
-    <div class="section-title" style="color:var(--green)">📊 Datos ${esHoy?'de ayer':'del '+fecha} (auto desde Dropi)</div>
+    <div class="section-title" style="color:var(--green)">📊 Datos ${labelFecha} (auto desde Dropi)</div>
     ${motivoHtml}${autoHtml}${ventasHtml}
     <div style="margin-top:16px">
-      <button class="btn-full btn-primary" onclick="saveReporteV2('${fecha}')">💾 Guardar reporte</button>
+      <button class="btn-full btn-primary" onclick="saveReporteV2('${fechaCompra||fechaDropi}')">💾 Guardar reporte</button>
     </div>
     <div id="rep-msg" style="margin-top:10px"></div>`
 
@@ -2125,36 +2142,36 @@ async function pageAuxDropi(c){
     <div id="dropi-resultado" style="margin-top:18px"></div>
     <div class="divider"></div>
     <div class="page-title" style="font-size:16px">📋 Registros del día</div>
-    <div class="page-sub">Pendientes por confirmar y cancelados</div>
-    <div class="fld" style="max-width:200px;margin-bottom:14px">
-      <label>Fecha de compra</label>
-      <input type="date" id="reg-fecha" value="${today()}" onchange="cargarRegistrosDia(this.value)">
+    <div class="page-sub">Confirmados, pendientes y cancelados</div>
+    <div class="form-grid g2" style="max-width:400px;margin-bottom:14px">
+      <div class="fld"><label>Fecha de compra</label>
+        <input type="date" id="reg-fecha" value="${today()}" onchange="cargarRegistrosDia()"></div>
+      <div class="fld"><label>Fecha Dropi (subida)</label>
+        <input type="date" id="reg-fecha-dropi" value="" onchange="cargarRegistrosDia()"></div>
     </div>
     <div id="reg-dia-content"><div class="loading">Cargando...</div></div>`
-  cargarRegistrosDia(today())
+  cargarRegistrosDia()
 }
 
-async function cargarRegistrosDia(fecha){
+async function cargarRegistrosDia(){
   const el=document.getElementById('reg-dia-content')
   if(!el)return
   el.innerHTML='<div class="loading">Cargando...</div>'
-  const{data,error}=await sb.from('mapeos').select('*')
-    .eq('fecha',fecha)
-    .not('estado_final','is',null)
-    .order('estado_final')
-  // DEBUG
-  console.log('🔍 registrosDia query:',{fecha,results:data?.length,error,firstItem:data?.[0]})
+  const fechaCompra=document.getElementById('reg-fecha')?.value||''
+  const fechaDropi=document.getElementById('reg-fecha-dropi')?.value||''
+  if(!fechaCompra&&!fechaDropi){el.innerHTML='<div class="alert alert-blue">Selecciona al menos una fecha</div>';return}
+  let query=sb.from('mapeos').select('*').not('estado_final','is',null)
+  if(fechaCompra)query=query.eq('fecha',fechaCompra)
+  if(fechaDropi)query=query.eq('fecha_dropi',fechaDropi)
+  const{data,error}=await query.order('estado_final')
   if(error){el.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
   if(!data||!data.length){
-    // DEBUG: intentar sin filtro de estado_final
-    const{data:all}=await sb.from('mapeos').select('fecha,estado_final,estado_inicial').eq('fecha',fecha)
-    el.innerHTML=`<div class="alert alert-blue">Sin registros para ${fecha}</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:4px">Debug: ${all?.length||0} mapeos con fecha=${fecha} (sin filtro estado). ${all?.map(m=>'ef:'+m.estado_final+' ei:'+m.estado_inicial).join(', ')||'ninguno'}</div>`;return
+    el.innerHTML='<div class="alert alert-blue">Sin registros para esta(s) fecha(s)</div>';return
   }
   const pend=data.filter(m=>m.estado_final==='PENDIENTE CONFIRMACION')
   const canc=data.filter(m=>m.estado_final==='CANCELADO')
   const conf=data.filter(m=>m.estado_final!=='PENDIENTE CONFIRMACION'&&m.estado_final!=='CANCELADO')
-  const esHoy=fecha===today()
+  const esHoy=fechaCompra===today()&&!fechaDropi
   const _card=(m)=>`<div class="card" style="margin-bottom:8px;padding:12px">
     <div style="font-size:14px;font-weight:600;font-family:monospace">${m.telefono}</div>
     <div style="font-size:13px;color:var(--text);margin-top:2px">${m.nombre_cliente||'—'}</div>
@@ -2317,7 +2334,7 @@ window.actualizarEstadosDropi=async()=>{
   msgEl.innerHTML=`<span style="color:var(--green)">✅ ${ok} actualizadas${fail?` · ${fail} errores`:''}</span>`
   logAction('dropi_estados_actualizados',{actualizadas:ok,errores:fail}).catch(()=>{})
   // Recargar registros del día
-  cargarRegistrosDia(document.getElementById('reg-fecha')?.value||today())
+  cargarRegistrosDia()
 }
 
 // ── ADMIN: GASTOS FIJOS ────────────────────────────────────

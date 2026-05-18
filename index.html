@@ -3071,15 +3071,39 @@ async function getConfig(key){
   return data?.valor||''
 }
 
+const _metaWait=ms=>new Promise(r=>setTimeout(r,ms))
+let _metaLastCall=0
+
 async function metaGet(path,token,params={}){
   let all=[],url=`${META_BASE}${path}?access_token=${token}`
   for(const[k,v]of Object.entries(params))url+=`&${k}=${encodeURIComponent(v)}`
   while(url){
-    const r=await fetch(url)
-    if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.error?.message||`Error ${r.status}`)}
-    const j=await r.json()
-    if(j.data)all=all.concat(j.data)
-    url=j.paging?.next||null
+    // Pausa mínima entre llamadas (400ms)
+    const elapsed=Date.now()-_metaLastCall
+    if(elapsed<400)await _metaWait(400-elapsed)
+    _metaLastCall=Date.now()
+
+    let retries=0
+    while(retries<3){
+      const r=await fetch(url)
+      if(r.ok){
+        const j=await r.json()
+        if(j.data)all=all.concat(j.data)
+        url=j.paging?.next||null
+        break
+      }
+      const e=await r.json().catch(()=>({}))
+      const isRateLimit=r.status===429||(e.error?.code===4)||(e.error?.code===17)||(e.error?.message||'').toLowerCase().includes('limit')
+      if(isRateLimit&&retries<2){
+        retries++
+        const waitSec=30*retries
+        const prog=document.getElementById('sync-progress')
+        if(prog)prog.innerHTML+=`<div style="font-size:12px;color:var(--amber)">⏳ Rate limit — esperando ${waitSec}s (intento ${retries}/3)...</div>`
+        await _metaWait(waitSec*1000)
+        continue
+      }
+      throw new Error(e.error?.message||`Error ${r.status}`)
+    }
   }
   return all
 }

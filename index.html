@@ -388,8 +388,10 @@ const NAV={
   admin:[
     {id:'admin-home',icon:'📊',label:'Dashboard'},
     {id:'admin-reportes',icon:'📋',label:'Reportes'},
+    {id:'admin-resumen',icon:'📈',label:'Resumen Semanal'},
     {id:'admin-gasto',icon:'💰',label:'Gasto Ads'},
     {id:'admin-productos',icon:'📦',label:'Productos'},
+    {id:'admin-gastos-fijos',icon:'📌',label:'Gastos Fijos'},
     {id:'admin-usuarios',icon:'👥',label:'Equipo'},
     {id:'admin-actividad',icon:'🕒',label:'Actividad'},
   ],
@@ -463,8 +465,10 @@ function render(page){
   const pages={
     'admin-home':pageAdminHome,
     'admin-reportes':pageAdminReportes,
+    'admin-resumen':pageAdminResumen,
     'admin-gasto':pageAdminGasto,
     'admin-productos':pageAdminProductos,
+    'admin-gastos-fijos':pageAdminGastosFijos,
     'admin-usuarios':pageAdminUsuarios,
     'admin-actividad':pageAdminActividad,
     'aux-asignador':pageAuxAsignador,
@@ -648,6 +652,116 @@ async function pageAdminReportes(c){
   loadReportesAdmin()
 }
 
+// ── ADMIN: RESUMEN SEMANAL ─────────────────────────────────
+async function pageAdminResumen(c){
+  c.innerHTML=`<div class="page-title">📈 Resumen Semanal</div>
+    <div class="page-sub">Datos reales agregados por semana desde Dropi</div>
+    <div class="fld" style="max-width:200px;margin-bottom:14px">
+      <label>Filtrar producto</label>
+      <select id="rs-prod" onchange="cargarResumenSemanal()">
+        <option value="">Todos</option>
+        ${productos.map(p=>`<option value="${p.nombre}">${p.nombre}</option>`).join('')}
+      </select>
+    </div>
+    <div id="rs-content"><div class="loading">Cargando...</div></div>`
+  cargarResumenSemanal()
+}
+
+async function cargarResumenSemanal(){
+  const el=document.getElementById('rs-content')
+  if(!el)return
+  el.innerHTML='<div class="loading">Cargando...</div>'
+  const filtroProd=document.getElementById('rs-prod')?.value||''
+
+  // Traer mapeos con estado_final (ya procesados por Dropi)
+  let query=sb.from('mapeos').select('*').not('estado_final','is',null)
+  const{data:mapeos}=await query.limit(10000)
+  if(!mapeos?.length){el.innerHTML='<div class="alert alert-blue">Sin datos de entregas aún</div>';return}
+
+  // Traer gasto ads
+  const{data:gastos}=await sb.from('gasto_ads').select('*').limit(5000)
+  const gastoByWeek={}
+  if(gastos)for(const g of gastos){
+    const w=_getWeek(g.fecha)
+    gastoByWeek[w]=(gastoByWeek[w]||0)+(g.monto||0)
+  }
+
+  // Agrupar por semana
+  const semanas={}
+  for(const m of mapeos){
+    if(filtroProd&&m.producto!==filtroProd)continue
+    const w=_getWeek(m.fecha_dropi||m.fecha)
+    if(!semanas[w])semanas[w]={env:0,ent:0,dev:0,canc:0,pend:0,trans:0,total:0}
+    semanas[w].total++
+    const st=DROPI_STATUS[m.estado_final]?.cat||'otro'
+    if(st==='entregado'||st==='novedad_ok')semanas[w].ent++
+    else if(st==='devuelto')semanas[w].dev++
+    else if(st==='cancelado')semanas[w].canc++
+    else if(st==='pendiente')semanas[w].pend++
+    else semanas[w].trans++
+    semanas[w].env++
+  }
+
+  const weeks=Object.entries(semanas).sort((a,b)=>b[0].localeCompare(a[0]))
+  if(!weeks.length){el.innerHTML='<div class="alert alert-blue">Sin datos para este producto</div>';return}
+
+  // Guardar para export
+  window._resumenData=weeks.map(([w,d])=>({
+    semana:w,enviadas:d.env,entregadas:d.ent,devueltas:d.dev,canceladas:d.canc,
+    en_transito:d.trans,pct_entrega:d.ent>0?Math.round(d.ent/d.total*100):0,
+    pct_devolucion:d.dev>0?Math.round(d.dev/d.total*100):0,
+    gasto_ads:gastoByWeek[w]||0
+  }))
+
+  el.innerHTML=`
+    <div style="margin-bottom:14px">
+      <button class="btn-sm btn-blue" onclick="exportarResumen()">📥 Exportar a Excel</button>
+    </div>
+    <div class="table-wrap"><table>
+      <tr><th>Semana</th><th>Enviadas</th><th>Entregadas</th><th>Devueltas</th><th>% Ent.</th><th>% Dev.</th><th>Canceladas</th><th>En tránsito</th><th>Gasto Ads</th></tr>
+      ${weeks.map(([w,d])=>{
+        const pctEnt=d.total>0?Math.round(d.ent/d.total*100):0
+        const pctDev=d.total>0?Math.round(d.dev/d.total*100):0
+        const devColor=pctDev>20?'color:var(--red)':pctDev>15?'color:var(--amber)':'color:var(--green)'
+        const gasto=gastoByWeek[w]||0
+        return`<tr>
+          <td data-label="Semana" style="font-family:monospace;font-size:12px">${w}</td>
+          <td data-label="Enviadas"><strong>${d.env}</strong></td>
+          <td data-label="Entregadas">${d.ent}</td>
+          <td data-label="Devueltas">${d.dev}</td>
+          <td data-label="% Ent." style="color:var(--green)">${pctEnt}%</td>
+          <td data-label="% Dev." style="${devColor}"><strong>${pctDev}%</strong></td>
+          <td data-label="Canceladas">${d.canc}</td>
+          <td data-label="En tránsito">${d.trans}</td>
+          <td data-label="Gasto">${gasto?'$'+fmt(gasto):'—'}</td>
+        </tr>`
+      }).join('')}
+    </table></div>`
+}
+
+function _getWeek(fecha){
+  if(!fecha)return'sin-fecha'
+  const d=new Date(fecha)
+  const day=d.getDay()||7
+  d.setDate(d.getDate()-day+1)
+  const mon=d.toISOString().slice(5,10).replace('-','/')
+  const end=new Date(d)
+  end.setDate(end.getDate()+6)
+  const monEnd=end.toISOString().slice(5,10).replace('-','/')
+  return`${mon} - ${monEnd}`
+}
+
+window.cargarResumenSemanal=cargarResumenSemanal
+
+window.exportarResumen=()=>{
+  const data=window._resumenData
+  if(!data?.length)return
+  const ws=XLSX.utils.json_to_sheet(data)
+  const wb=XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb,ws,'Resumen Semanal')
+  XLSX.writeFile(wb,`resumen_semanal_${today()}.xlsx`)
+}
+
 // ── ADMIN: GASTO ADS ───────────────────────────────────────
 async function pageAdminGasto(c){
   c.innerHTML=`<div class="page-title">Gasto en Ads</div>
@@ -691,9 +805,15 @@ async function pageAdminGasto(c){
 
 // ── ADMIN: PRODUCTOS ───────────────────────────────────────
 async function pageAdminProductos(c){
-  const p=productos[0]||{}
+  // Cargar maestros para dropdown
+  const{data:maestros}=await sb.from('maestros').select('id,codigo,nombre').limit(100)
+  const maestrosList=maestros||[]
+
   c.innerHTML=`<div class="page-title">Productos</div>
-    <div class="page-sub">Configuración de precios y costos</div>
+    <div class="page-sub">Configuración de precios, costos y keywords</div>
+    <div style="margin-bottom:16px">
+      <button class="btn-sm btn-primary" onclick="modalAddProducto()">➕ Agregar producto</button>
+    </div>
     ${productos.map(prod=>`
     <div class="card" style="margin-bottom:16px">
       <div style="font-weight:600;margin-bottom:14px;font-size:15px">${prod.nombre}</div>
@@ -710,23 +830,134 @@ async function pageAdminProductos(c){
         <div class="fld"><label>Flete devolución</label><input type="number" id="fd-${prod.id}" value="${prod.flete_devolucion||18000}"></div>
         <div class="fld"><label>% Devolución</label><input type="number" step="0.01" id="dp-${prod.id}" value="${(prod.dev_pct*100)||19}"></div>
       </div>
-      <div style="margin-top:14px;display:flex;gap:8px">
+      <div class="divider"></div>
+      <div class="form-grid g2">
+        <div class="fld"><label>Keywords (separadas por coma)</label>
+          <input type="text" id="kw-${prod.id}" value="${prod.keywords||''}" placeholder="neocell, colageno"></div>
+        <div class="fld"><label>Maestro carrier</label>
+          <select id="mc-${prod.id}">
+            ${maestrosList.map(m=>`<option value="${m.codigo}" ${m.codigo===(prod.maestro_codigo||'GEN')?'selected':''}>${m.codigo} (${m.nombre||''})</option>`).join('')}
+          </select></div>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn-sm btn-primary" onclick="saveProd('${prod.id}')">Guardar cambios</button>
+        <button class="btn-sm btn-blue" onclick="showSimulador('${prod.id}')">📊 Simular break-even</button>
       </div>
       <div id="pmsg-${prod.id}" style="margin-top:8px"></div>
-    </div>`).join('')}`
+      <div id="sim-${prod.id}" style="margin-top:10px"></div>
+    </div>`).join('')}
+    <div id="prod-modal-area"></div>`
 
   window.saveProd=async(id)=>{
     const g=s=>parseInt(document.getElementById(s+'-'+id).value)||0
     const gf=s=>parseFloat(document.getElementById(s+'-'+id).value)||0
+    const kw=document.getElementById('kw-'+id)?.value||''
+    const mc=document.getElementById('mc-'+id)?.value||'GEN'
     const{error}=await sb.from('productos').update({
       precio_1u:g('pp1'),precio_2u:g('pp2'),precio_3u:g('pp3'),precio_4u:g('pp4'),
       costo_1u:g('cp1'),costo_2u:g('cp2'),costo_3u:g('cp3'),costo_4u:g('cp4'),
-      flete_outbound:g('fo'),flete_devolucion:g('fd'),dev_pct:gf('dp')/100
+      flete_outbound:g('fo'),flete_devolucion:g('fd'),dev_pct:gf('dp')/100,
+      keywords:kw,maestro_codigo:mc
     }).eq('id',id)
     const msg=document.getElementById('pmsg-'+id)
     if(error)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`
     else{msg.innerHTML='<div class="alert alert-green">✅ Guardado</div>';await loadProductos();logAction('producto_editado',{producto_id:id}).catch(()=>{})}
+  }
+
+  window.showSimulador=(id)=>{
+    const prod=productos.find(p=>p.id===id)
+    if(!prod)return
+    const el=document.getElementById('sim-'+id)
+    if(el.innerHTML){el.innerHTML='';return}
+    // Default: oferta 2u
+    const p2=prod.precio_2u||129900,c2=prod.costo_2u||36000
+    const fo=prod.flete_outbound||21000,fd=prod.flete_devolucion||18000
+    const devPct=(prod.dev_pct||0.19)
+    el.innerHTML=`<div class="card" style="border:1px solid var(--blue);background:rgba(59,130,246,0.05)">
+      <div style="font-weight:600;margin-bottom:10px">📊 Simulador Break-even — ${prod.nombre}</div>
+      <div class="form-grid g3">
+        <div class="fld"><label>Precio venta (2u)</label><input type="number" id="sim-precio-${id}" value="${p2}" oninput="calcSimBE('${id}')"></div>
+        <div class="fld"><label>% Devolución</label><input type="number" step="0.1" id="sim-dev-${id}" value="${(devPct*100).toFixed(1)}" oninput="calcSimBE('${id}')"></div>
+        <div class="fld"><label>Tasa de cierre %</label><input type="number" step="0.1" id="sim-tc-${id}" value="50" oninput="calcSimBE('${id}')"></div>
+      </div>
+      <div id="sim-res-${id}" style="margin-top:12px"></div>
+    </div>`
+    calcSimBE(id)
+  }
+
+  window.calcSimBE=(id)=>{
+    const prod=productos.find(p=>p.id===id)
+    if(!prod)return
+    const precio=parseFloat(document.getElementById('sim-precio-'+id).value)||0
+    const devPct=(parseFloat(document.getElementById('sim-dev-'+id).value)||0)/100
+    const tc=(parseFloat(document.getElementById('sim-tc-'+id).value)||0)/100
+    const costo=prod.costo_2u||36000,fo=prod.flete_outbound||21000,fd=prod.flete_devolucion||18000
+    const entrega=1-devPct
+    const ingresoEfectivo=precio*entrega
+    const costoDevPond=fd*devPct
+    const costoTotal=costo+fo+costoDevPond
+    const margen=ingresoEfectivo-costoTotal
+    const cpaBE=margen
+    const roasBE=cpaBE>0?precio/cpaBE:0
+    const color=margen>0?'var(--green)':'var(--red)'
+    document.getElementById('sim-res-'+id).innerHTML=`
+      <div class="form-grid g3">
+        <div class="card" style="padding:10px"><div class="card-label">CPA Break-even</div><div class="card-val" style="color:${color}">$${fmt(Math.round(cpaBE))}</div></div>
+        <div class="card" style="padding:10px"><div class="card-label">ROAS Break-even</div><div class="card-val" style="color:${color}">${roasBE.toFixed(2)}x</div></div>
+        <div class="card" style="padding:10px"><div class="card-label">Margen por orden</div><div class="card-val" style="color:${color}">$${fmt(Math.round(margen))}</div></div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px">Ingreso efectivo: $${fmt(Math.round(ingresoEfectivo))} · Costo total: $${fmt(Math.round(costoTotal))} · Entrega: ${(entrega*100).toFixed(0)}%</div>`
+  }
+
+  window.modalAddProducto=()=>{
+    const area=document.getElementById('prod-modal-area')
+    area.innerHTML=`<div class="card" style="border:2px solid var(--primary);margin-bottom:16px">
+      <div style="font-weight:600;margin-bottom:14px;font-size:15px">➕ Nuevo producto</div>
+      <div class="form-grid g2">
+        <div class="fld"><label>Nombre</label><input type="text" id="np-nombre" placeholder="Colágeno Neocell 4"></div>
+        <div class="fld"><label>Keywords</label><input type="text" id="np-kw" placeholder="neocell, colageno"></div>
+      </div>
+      <div class="form-grid g4">
+        <div class="fld"><label>Precio 1u</label><input type="number" id="np-p1" value="0"></div>
+        <div class="fld"><label>Precio 2u</label><input type="number" id="np-p2" value="0"></div>
+        <div class="fld"><label>Precio 3u</label><input type="number" id="np-p3" value="0"></div>
+        <div class="fld"><label>Precio 4u</label><input type="number" id="np-p4" value="0"></div>
+        <div class="fld"><label>Costo 1u</label><input type="number" id="np-c1" value="0"></div>
+        <div class="fld"><label>Costo 2u</label><input type="number" id="np-c2" value="0"></div>
+        <div class="fld"><label>Costo 3u</label><input type="number" id="np-c3" value="0"></div>
+        <div class="fld"><label>Costo 4u</label><input type="number" id="np-c4" value="0"></div>
+        <div class="fld"><label>Flete outbound</label><input type="number" id="np-fo" value="21000"></div>
+        <div class="fld"><label>Flete devolución</label><input type="number" id="np-fd" value="18000"></div>
+        <div class="fld"><label>% Devolución</label><input type="number" step="0.01" id="np-dp" value="19"></div>
+        <div class="fld"><label>Maestro carrier</label>
+          <select id="np-mc">${maestrosList.map(m=>`<option value="${m.codigo}">${m.codigo} (${m.nombre||''})</option>`).join('')}</select></div>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:8px">
+        <button class="btn-sm btn-primary" onclick="saveNewProd()">Crear producto</button>
+        <button class="btn-sm btn-outline" onclick="document.getElementById('prod-modal-area').innerHTML=''">Cancelar</button>
+      </div>
+      <div id="np-msg" style="margin-top:8px"></div>
+    </div>`
+    area.scrollIntoView({behavior:'smooth'})
+  }
+
+  window.saveNewProd=async()=>{
+    const nombre=document.getElementById('np-nombre').value.trim()
+    if(!nombre){document.getElementById('np-msg').innerHTML='<div class="alert alert-red">El nombre es obligatorio</div>';return}
+    const g=s=>parseInt(document.getElementById(s).value)||0
+    const{error}=await sb.from('productos').insert({
+      nombre,activo:true,
+      precio_1u:g('np-p1'),precio_2u:g('np-p2'),precio_3u:g('np-p3'),precio_4u:g('np-p4'),
+      costo_1u:g('np-c1'),costo_2u:g('np-c2'),costo_3u:g('np-c3'),costo_4u:g('np-c4'),
+      flete_outbound:g('np-fo'),flete_devolucion:g('np-fd'),
+      dev_pct:(parseFloat(document.getElementById('np-dp').value)||19)/100,
+      keywords:document.getElementById('np-kw').value||'',
+      maestro_codigo:document.getElementById('np-mc').value||'GEN'
+    })
+    if(error){document.getElementById('np-msg').innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+    await loadProductos()
+    logAction('producto_creado',{nombre}).catch(()=>{})
+    pageAdminProductos(document.getElementById('content'))
   }
 }
 
@@ -1257,16 +1488,21 @@ async function pageAuxAsignador(c){
 
   try{
     const{D,M,kw,masterByCode}=await cargarAsignDataSiNecesario()
-    const kwList=Object.keys(kw).sort()
-    const kwHtml=kwList.length
-      ? kwList.map(k=>`<span class="pill pill-blue" style="margin-right:4px">${k} → ${kw[k]}</span>`).join('')
+    // Keywords: combinar desde productos (nuevas) + maestro_keywords (legacy)
+    const allKw=new Set(Object.keys(kw))
+    for(const p of productos){
+      if(p.keywords)(p.keywords).split(',').map(k=>k.trim().toLowerCase()).filter(Boolean).forEach(k=>allKw.add(k))
+    }
+    const kwFlat=[...allKw].sort().join(', ')
+    const kwHtml=kwFlat
+      ? `<span style="color:var(--blue);font-family:monospace;font-size:13px">${kwFlat}</span>`
       : '<span style="color:var(--muted)">Sin keywords. Por defecto todo va a GEN (genérico).</span>'
 
     document.getElementById('asign-content').innerHTML=`
       <div class="card" style="margin-bottom:14px">
         <div style="font-size:12px;color:var(--muted);margin-bottom:6px"><strong>Palabras reconocidas en la columna PRODUCTO:</strong></div>
         <div>${kwHtml}</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:8px">Cualquier otra palabra → procesa como genérico (3 niveles).</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:8px">Cualquier otra palabra → Asignador Genérico (GEN)</div>
       </div>
 
       <div class="card">
@@ -2077,6 +2313,101 @@ window.actualizarEstadosDropi=async()=>{
   cargarRegistrosDia(document.getElementById('reg-fecha')?.value||today())
 }
 
+// ── ADMIN: GASTOS FIJOS ────────────────────────────────────
+async function pageAdminGastosFijos(c){
+  c.innerHTML=`<div class="page-title">📌 Gastos Fijos</div>
+    <div class="page-sub">Gastos mensuales recurrentes</div>
+    <div style="margin-bottom:16px">
+      <button class="btn-sm btn-primary" onclick="modalAddGasto()">➕ Agregar gasto</button>
+    </div>
+    <div id="gf-total" style="margin-bottom:14px"></div>
+    <div id="gf-list"><div class="loading">Cargando...</div></div>
+    <div id="gf-modal-area"></div>`
+  loadGastosFijos()
+}
+
+async function loadGastosFijos(){
+  const{data,error}=await sb.from('gastos_fijos').select('*').order('concepto')
+  const el=document.getElementById('gf-list')
+  const totEl=document.getElementById('gf-total')
+  if(!el)return
+  if(error){el.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+  if(!data?.length){el.innerHTML='<div class="alert alert-blue">Sin gastos fijos registrados</div>';totEl.innerHTML='';return}
+  const total=data.reduce((s,g)=>s+(g.monto||0),0)
+  totEl.innerHTML=`<div class="card c-blue"><div class="card-label">Total mensual</div><div class="card-val">$${fmt(total)}</div></div>`
+  el.innerHTML=`<div class="table-wrap"><table>
+    <tr><th>Concepto</th><th>Monto mensual</th><th>Acciones</th></tr>
+    ${data.map(g=>`<tr>
+      <td data-label="Concepto">${g.concepto}</td>
+      <td data-label="Monto">$${fmt(g.monto||0)}</td>
+      <td data-label="Acciones">
+        <button class="btn-sm btn-outline" onclick="editGasto('${g.id}','${(g.concepto||'').replace(/'/g,"\\'")}',${g.monto||0})">✏️</button>
+        <button class="btn-sm btn-red" onclick="deleteGasto('${g.id}','${(g.concepto||'').replace(/'/g,"\\'")}')">🗑️</button>
+      </td>
+    </tr>`).join('')}
+  </table></div>`
+}
+
+window.modalAddGasto=()=>{
+  const area=document.getElementById('gf-modal-area')
+  area.innerHTML=`<div class="card" style="border:2px solid var(--primary);margin-top:16px;max-width:500px">
+    <div style="font-weight:600;margin-bottom:10px">➕ Nuevo gasto fijo</div>
+    <div class="form-grid g2">
+      <div class="fld"><label>Concepto</label><input type="text" id="gf-concepto" placeholder="Ej: Canva"></div>
+      <div class="fld"><label>Monto mensual</label><input type="number" id="gf-monto" value="0"></div>
+    </div>
+    <div style="margin-top:10px;display:flex;gap:8px">
+      <button class="btn-sm btn-primary" onclick="saveNewGasto()">Guardar</button>
+      <button class="btn-sm btn-outline" onclick="document.getElementById('gf-modal-area').innerHTML=''">Cancelar</button>
+    </div>
+    <div id="gf-msg" style="margin-top:8px"></div>
+  </div>`
+}
+
+window.saveNewGasto=async()=>{
+  const concepto=document.getElementById('gf-concepto').value.trim()
+  const monto=parseInt(document.getElementById('gf-monto').value)||0
+  if(!concepto){document.getElementById('gf-msg').innerHTML='<div class="alert alert-red">Concepto obligatorio</div>';return}
+  const{error}=await sb.from('gastos_fijos').insert({concepto,monto})
+  if(error){document.getElementById('gf-msg').innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+  document.getElementById('gf-modal-area').innerHTML=''
+  loadGastosFijos()
+  logAction('gasto_fijo_creado',{concepto,monto}).catch(()=>{})
+}
+
+window.editGasto=(id,concepto,monto)=>{
+  const area=document.getElementById('gf-modal-area')
+  area.innerHTML=`<div class="card" style="border:2px solid var(--amber);margin-top:16px;max-width:500px">
+    <div style="font-weight:600;margin-bottom:10px">✏️ Editar gasto</div>
+    <div class="form-grid g2">
+      <div class="fld"><label>Concepto</label><input type="text" id="ge-concepto" value="${concepto}"></div>
+      <div class="fld"><label>Monto mensual</label><input type="number" id="ge-monto" value="${monto}"></div>
+    </div>
+    <div style="margin-top:10px;display:flex;gap:8px">
+      <button class="btn-sm btn-primary" onclick="updateGasto('${id}')">Actualizar</button>
+      <button class="btn-sm btn-outline" onclick="document.getElementById('gf-modal-area').innerHTML=''">Cancelar</button>
+    </div>
+    <div id="ge-msg" style="margin-top:8px"></div>
+  </div>`
+}
+
+window.updateGasto=async(id)=>{
+  const concepto=document.getElementById('ge-concepto').value.trim()
+  const monto=parseInt(document.getElementById('ge-monto').value)||0
+  const{error}=await sb.from('gastos_fijos').update({concepto,monto}).eq('id',id)
+  if(error){document.getElementById('ge-msg').innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+  document.getElementById('gf-modal-area').innerHTML=''
+  loadGastosFijos()
+  logAction('gasto_fijo_editado',{id,concepto,monto}).catch(()=>{})
+}
+
+window.deleteGasto=async(id,concepto)=>{
+  if(!confirm(`¿Eliminar "${concepto}"?`))return
+  await sb.from('gastos_fijos').delete().eq('id',id)
+  loadGastosFijos()
+  logAction('gasto_fijo_eliminado',{id,concepto}).catch(()=>{})
+}
+
 // ── AUXILIAR: SEGUIMIENTO DE ENTREGAS ─────────────────────
 async function pageAuxSeguimiento(c){
   c.innerHTML=`<div class="page-title">🚚 Seguimiento de entregas</div>
@@ -2171,12 +2502,24 @@ window.procesarSeguimiento=async()=>{
 
     // Render lotes
     const lotesOrdenados=Object.entries(lotes).sort((a,b)=>b[0].localeCompare(a[0]))
+    const esAdmin=currentRol()==='admin'
 
     const lotesHtml=lotesOrdenados.map(([fecha,d])=>{
       const pctEnt=d.total>0?Math.round(d.entregado/d.total*100):0
       const pctDev=d.total>0?Math.round(d.devuelto/d.total*100):0
       const pctTran=d.total>0?Math.round(d.en_transito/d.total*100):0
       const devColor=pctDev>20?'var(--red)':pctDev>15?'var(--amber)':'var(--green)'
+      // Para admin: buscar estimado del producto principal del lote
+      let devEstHtml=''
+      if(esAdmin){
+        const prodPrincipal=d.items[0]?.producto
+        const prodObj=productos.find(p=>p.nombre===prodPrincipal)
+        const estPct=prodObj?Math.round((prodObj.dev_pct||0)*100):null
+        if(estPct!==null){
+          const diffColor=pctDev>estPct?'var(--red)':'var(--green)'
+          devEstHtml=` · Estimada: ${estPct}% → Real: <strong style="color:${diffColor}">${pctDev}%</strong> ${pctDev>estPct?'⚠️':'✅'}`
+        }
+      }
       return`<div class="card seg-lote" data-productos="${d.items.map(i=>i.producto).join(',')}" style="margin-bottom:12px">
         <div style="font-weight:600;margin-bottom:10px">📦 Lote ${fecha} <span style="color:var(--muted);font-weight:400">(${d.total} órdenes)</span></div>
         <div class="cards-row c4" style="margin-bottom:8px">
@@ -2185,7 +2528,7 @@ window.procesarSeguimiento=async()=>{
           <div class="card c-blue" style="padding:10px"><div class="card-label">En tránsito</div><div class="card-val">${d.en_transito} <span style="font-size:12px">(${pctTran}%)</span></div></div>
           <div class="card c-amber" style="padding:10px"><div class="card-label">Novedad</div><div class="card-val">${d.novedad}</div></div>
         </div>
-        <div style="font-size:13px">Devol. real: <strong style="color:${devColor}">${pctDev}%</strong></div>
+        <div style="font-size:13px">Devol. real: <strong style="color:${devColor}">${pctDev}%</strong>${devEstHtml}</div>
       </div>`
     }).join('')
 
@@ -2200,6 +2543,39 @@ window.procesarSeguimiento=async()=>{
       }
     }
     msg.innerHTML+=`<div class="alert alert-blue" style="margin-top:8px">💾 ${updated} estados actualizados automáticamente</div>`
+
+    // Rolling 90 días: auto-actualizar dev_pct si es admin y hay 50+ órdenes
+    if(esAdmin){
+      const hoy=new Date()
+      const hace90=new Date(hoy);hace90.setDate(hace90.getDate()-90)
+      const fecha90=hace90.toISOString().slice(0,10)
+      for(const prod of productos){
+        // Contar órdenes con resultado final (entregado o devuelto) en los últimos 90 días
+        let entregados=0,devueltos=0
+        // Primero intentar 90 días, si no hay 50, usar todo
+        const{data:recientes}=await sb.from('mapeos').select('estado_final')
+          .eq('producto',prod.nombre).gte('fecha_dropi',fecha90)
+          .in('estado_final',['ENTREGADO','DEVOLUCION']).limit(5000)
+        let pool=recientes||[]
+        if(pool.length<50){
+          const{data:todas}=await sb.from('mapeos').select('estado_final')
+            .eq('producto',prod.nombre)
+            .in('estado_final',['ENTREGADO','DEVOLUCION']).limit(5000)
+          pool=todas||[]
+        }
+        if(pool.length>=50){
+          entregados=pool.filter(m=>m.estado_final==='ENTREGADO').length
+          devueltos=pool.filter(m=>m.estado_final==='DEVOLUCION').length
+          const newPct=devueltos/(entregados+devueltos)
+          const oldPct=prod.dev_pct||0
+          if(Math.abs(newPct-oldPct)>0.005){
+            await sb.from('productos').update({dev_pct:Math.round(newPct*1000)/1000}).eq('id',prod.id)
+            msg.innerHTML+=`<div class="alert alert-green" style="margin-top:4px">📊 ${prod.nombre}: dev% actualizado ${Math.round(oldPct*100)}% → ${Math.round(newPct*100)}% (${pool.length} órdenes)</div>`
+          }
+        }
+      }
+      await loadProductos()
+    }
 
     window._segResultados=resultados
     window._segLotes=lotes

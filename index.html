@@ -354,7 +354,7 @@ function showApp(){
   syncMobRole()
   renderNav()
   const rol=currentRol()
-  const defaultPage=rol==='admin'?'admin-home':(rol==='auxiliar'?'aux-asignador':'admin-home')
+  const defaultPage=rol==='admin'?'admin-home':(rol==='auxiliar'?'aux-asignador':(rol==='trafficker'?'traff-portafolio':'admin-home'))
   navigate(defaultPage)
   renderImpersonateBar()
 }
@@ -394,10 +394,14 @@ const NAV={
     {id:'admin-reportes',icon:'📋',label:'Reportes'},
     {id:'admin-resumen',icon:'📈',label:'Resumen Semanal'},
     {id:'admin-gasto',icon:'💰',label:'Gasto Ads'},
+    {id:'admin-meta',icon:'📡',label:'Meta Ads'},
     {id:'admin-productos',icon:'📦',label:'Productos'},
     {id:'admin-gastos-fijos',icon:'📌',label:'Gastos Fijos'},
     {id:'admin-usuarios',icon:'👥',label:'Equipo'},
     {id:'admin-actividad',icon:'🕒',label:'Actividad'},
+  ],
+  trafficker:[
+    {id:'traff-portafolio',icon:'📊',label:'Portafolio'},
   ],
   auxiliar:[
     {id:'aux-asignador',icon:'📍',label:'Asignador'},
@@ -438,7 +442,7 @@ window.startImpersonate=(u)=>{
   renderNav()
   renderImpersonateBar()
   const rol=impersonating.rol
-  navigate(rol==='admin'?'admin-home':(rol==='auxiliar'?'aux-asignador':'admin-home'))
+  navigate(rol==='admin'?'admin-home':(rol==='auxiliar'?'aux-asignador':(rol==='trafficker'?'traff-portafolio':'admin-home')))
 }
 
 window.stopImpersonate=()=>{
@@ -483,6 +487,8 @@ function render(page){
     'aux-novedades':pageAuxNovedades,
     'aux-seguimiento':pageAuxSeguimiento,
     'aux-cierre':pageAuxCierre,
+    'admin-meta':pageAdminMeta,
+    'traff-portafolio':pageTraffPortafolio,
   }
   const fn=pages[page]
   if(fn)fn(c)
@@ -3055,6 +3061,434 @@ window.filtrarSeguimiento=()=>{
     const prods=el.dataset.productos||''
     el.style.display=prods.includes(filtro)?'':'none'
   })
+}
+
+// ── META GRAPH API ENGINE ─────────────────────────────────
+const META_BASE='https://graph.facebook.com/v21.0'
+
+async function getConfig(key){
+  const{data}=await sb.from('config').select('valor').eq('clave',key).maybeSingle()
+  return data?.valor||''
+}
+
+async function metaGet(path,token,params={}){
+  let all=[],url=`${META_BASE}${path}?access_token=${token}`
+  for(const[k,v]of Object.entries(params))url+=`&${k}=${encodeURIComponent(v)}`
+  while(url){
+    const r=await fetch(url)
+    if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.error?.message||`Error ${r.status}`)}
+    const j=await r.json()
+    if(j.data)all=all.concat(j.data)
+    url=j.paging?.next||null
+  }
+  return all
+}
+
+function metaConv(actions){
+  if(!actions?.length)return 0
+  const pri=['purchase','lead','onsite_conversion.messaging_conversation_started_7d','offsite_conversion.fb_pixel_lead','complete_registration']
+  for(const p of pri){const f=actions.find(a=>a.action_type===p);if(f)return parseInt(f.value)||0}
+  return 0
+}
+
+function metaCPR(costActions){
+  if(!costActions?.length)return 0
+  const pri=['purchase','lead','onsite_conversion.messaging_conversation_started_7d','offsite_conversion.fb_pixel_lead','complete_registration']
+  for(const p of pri){const f=costActions.find(a=>a.action_type===p);if(f)return parseFloat(f.value)||0}
+  return 0
+}
+
+window.saveMetaConfig=async()=>{
+  const token=document.getElementById('cfg-token').value.trim()
+  const appId=document.getElementById('cfg-appid').value.trim()
+  const msg=document.getElementById('cfg-msg')
+  if(!token){msg.innerHTML='<div class="alert alert-red">El token es obligatorio</div>';return}
+  await sb.from('config').upsert({clave:'meta_access_token',valor:token,updated_at:new Date().toISOString()},{onConflict:'clave'})
+  await sb.from('config').upsert({clave:'meta_app_id',valor:appId,updated_at:new Date().toISOString()},{onConflict:'clave'})
+  msg.innerHTML='<div class="alert alert-green">✅ Guardado</div>'
+  logAction('meta_config_guardada',{}).catch(()=>{})
+}
+
+window.testMetaToken=async()=>{
+  const msg=document.getElementById('cfg-msg')
+  msg.innerHTML='<div class="alert alert-blue">Probando conexión...</div>'
+  try{
+    const token=document.getElementById('cfg-token').value.trim()||await getConfig('meta_access_token')
+    if(!token){msg.innerHTML='<div class="alert alert-red">Sin token</div>';return}
+    const accs=await metaGet('/me/adaccounts',token,{fields:'account_id,name',limit:'5'})
+    msg.innerHTML=`<div class="alert alert-green">✅ Conexión exitosa — ${accs.length} cuenta(s) encontrada(s): ${accs.map(a=>a.name||a.account_id).join(', ')}</div>`
+  }catch(e){msg.innerHTML=`<div class="alert alert-red">❌ ${e.message}</div>`}
+}
+
+window.runMetaSync=async(days)=>{
+  const prog=document.getElementById('sync-progress')
+  if(!prog)return
+  const log=m=>{prog.innerHTML+=`<div style="font-size:12px;color:var(--muted);padding:2px 0">${m}</div>`;prog.scrollTop=prog.scrollHeight}
+  prog.innerHTML=''
+  try{
+    const token=await getConfig('meta_access_token')
+    if(!token){prog.innerHTML='<div class="alert alert-red">Token no configurado</div>';return}
+
+    log('🔄 Obteniendo cuentas publicitarias...')
+    const accounts=await metaGet('/me/adaccounts',token,{fields:'account_id,name,currency,timezone_name,account_status'})
+    log(`✅ ${accounts.length} cuentas`)
+
+    for(const a of accounts){
+      const accId=a.account_id||a.id.replace('act_','')
+      await sb.from('meta_cuentas').upsert({account_id:accId,nombre:a.name||'',moneda:a.currency||'COP',timezone:a.timezone_name||'',estado:a.account_status===1?'ACTIVE':'INACTIVE',synced_at:new Date().toISOString()},{onConflict:'account_id'})
+    }
+
+    const until=new Date().toISOString().slice(0,10)
+    const sd=new Date()
+    if(days==='all')sd.setFullYear(sd.getFullYear()-3);else sd.setDate(sd.getDate()-days)
+    const since=sd.toISOString().slice(0,10)
+    let tCamp=0,tIns=0
+
+    for(const a of accounts){
+      const accId=a.account_id||a.id.replace('act_',''),actId=a.id
+
+      log(`📊 ${a.name}: campañas...`)
+      const camps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,objective,daily_budget,lifetime_budget',limit:'500'})
+      for(const c of camps){
+        await sb.from('meta_campanas').upsert({meta_id:c.id,account_id:accId,nivel:'campaign',nombre:c.name||'',estado:c.status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget/100:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget/100:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+        tCamp++
+      }
+
+      log(`📊 ${a.name}: conjuntos...`)
+      const adsets=await metaGet(`/${actId}/adsets`,token,{fields:'id,name,status,campaign_id,daily_budget',limit:'500'})
+      for(const s of adsets){
+        await sb.from('meta_campanas').upsert({meta_id:s.id,account_id:accId,nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.status||'',daily_budget:s.daily_budget?s.daily_budget/100:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+      }
+
+      log(`📊 ${a.name}: anuncios...`)
+      const ads=await metaGet(`/${actId}/ads`,token,{fields:'id,name,status,adset_id',limit:'500'})
+      for(const ad of ads){
+        await sb.from('meta_campanas').upsert({meta_id:ad.id,account_id:accId,nivel:'ad',parent_id:ad.adset_id||'',nombre:ad.name||'',estado:ad.status||'',synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+      }
+
+      log(`📈 ${a.name}: métricas campañas (${since} → ${until})...`)
+      const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:JSON.stringify({since,until}),level:'campaign',time_increment:'1',limit:'500'})
+      for(const i of cIns){
+        await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:accId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        tIns++
+      }
+
+      log(`📈 ${a.name}: métricas anuncios (${since} → ${until})...`)
+      const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:JSON.stringify({since,until}),level:'ad',time_increment:'1',limit:'500'})
+      for(const i of aIns){
+        await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:accId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        tIns++
+      }
+
+      log(`✅ ${a.name}: listo`)
+    }
+
+    await sb.from('config').upsert({clave:'meta_sync_last',valor:new Date().toISOString(),updated_at:new Date().toISOString()},{onConflict:'clave'})
+    log(`<br><strong style="color:var(--green)">✅ Sync completo: ${accounts.length} cuentas · ${tCamp} campañas · ${tIns} métricas</strong>`)
+    logAction('meta_sync',{days,cuentas:accounts.length,campanas:tCamp,insights:tIns}).catch(()=>{})
+  }catch(e){
+    log(`<strong style="color:var(--red)">❌ Error: ${e.message}</strong>`)
+  }
+}
+
+// ── META: ADMIN CONFIG + PORTAFOLIO ──────────────────────
+async function pageAdminMeta(c){
+  const token=await getConfig('meta_access_token')
+  const appId=await getConfig('meta_app_id')
+  const lastSync=await getConfig('meta_sync_last')
+  const lastStr=lastSync?new Date(lastSync).toLocaleString('es-CO'):'Nunca'
+
+  c.innerHTML=`<div class="page-title">📡 Meta Ads</div>
+    <div class="page-sub">Conexión con Meta Graph API y portafolio de campañas</div>
+    <div class="card" style="max-width:600px;margin-bottom:20px">
+      <div class="section-title">Credenciales</div>
+      <div class="form-grid" style="gap:14px">
+        <div class="fld"><label>App ID</label><input type="text" id="cfg-appid" value="${appId}"></div>
+        <div class="fld"><label>Access Token (System User)</label><input type="password" id="cfg-token" value="${token}">
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">Token de System User — no caduca</div></div>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn-sm btn-primary" onclick="saveMetaConfig()">💾 Guardar</button>
+        <button class="btn-sm btn-outline" onclick="testMetaToken()">🔍 Probar conexión</button>
+      </div>
+      <div id="cfg-msg" style="margin-top:10px"></div>
+    </div>
+    <div class="card" style="max-width:600px;margin-bottom:20px">
+      <div class="section-title">Sincronización</div>
+      <div style="font-size:13px;color:var(--muted);margin-bottom:14px">Última sync: <strong>${lastStr}</strong></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn-sm btn-primary" onclick="runMetaSync(7)">🔄 Sync 7 días</button>
+        <button class="btn-sm btn-green" onclick="runMetaSync('all')">📥 Sync completo</button>
+      </div>
+      <div id="sync-progress" style="margin-top:12px;max-height:300px;overflow-y:auto"></div>
+    </div>
+    <div id="meta-portafolio"><div class="loading">Cargando portafolio...</div></div>`
+  renderMetaPortafolio(document.getElementById('meta-portafolio'),true)
+}
+
+async function pageTraffPortafolio(c){
+  c.innerHTML=`<div class="page-title">📊 Portafolio de campañas</div>
+    <div class="page-sub">Métricas y semáforo por campaña</div>
+    <div id="meta-portafolio"><div class="loading">Cargando portafolio...</div></div>`
+  renderMetaPortafolio(document.getElementById('meta-portafolio'),false)
+}
+
+async function renderMetaPortafolio(el,isAdmin){
+  if(!el)return
+  const{data:cuentas}=await sb.from('meta_cuentas').select('*').order('nombre')
+  const{data:campanas}=await sb.from('meta_campanas').select('*').eq('nivel','campaign').order('nombre')
+  const lastSync=await getConfig('meta_sync_last')
+  const lastStr=lastSync?new Date(lastSync).toLocaleString('es-CO'):'Nunca'
+
+  if(!cuentas?.length){
+    el.innerHTML=`<div class="alert alert-blue">Sin datos de Meta. ${isAdmin?'Configura el token y sincroniza arriba.':'Pide al admin que sincronice.'}</div>`
+    return
+  }
+
+  // Insights últimos 7 días agrupados por campaña
+  const h7=new Date();h7.setDate(h7.getDate()-7)
+  const{data:ins7}=await sb.from('meta_insights').select('meta_id,spend,impressions,clicks,reach,conversions,ctr,cpm,frequency').eq('nivel','campaign').gte('fecha',h7.toISOString().slice(0,10))
+
+  const agg={}
+  for(const i of (ins7||[])){
+    if(!agg[i.meta_id])agg[i.meta_id]={spend:0,imp:0,clicks:0,reach:0,conv:0,ctrs:[],cpms:[],freqs:[]}
+    const a=agg[i.meta_id]
+    a.spend+=i.spend||0;a.imp+=i.impressions||0;a.clicks+=i.clicks||0;a.conv+=i.conversions||0
+    if(i.ctr)a.ctrs.push(parseFloat(i.ctr));if(i.cpm)a.cpms.push(parseFloat(i.cpm));if(i.frequency)a.freqs.push(parseFloat(i.frequency))
+  }
+
+  // Break-even
+  const prod=productos[0]||{}
+  const p2=prod.precio_2u||129900,c2=prod.costo_2u||36000
+  const fo=prod.flete_outbound||21000,fd=prod.flete_devolucion||18000
+  const dp=prod.dev_pct||0.19
+  const margenBE=p2*(1-dp)-c2-fo-(fd*dp)
+  const roasBE=margenBE>0?p2/margenBE:999
+
+  let html=`<div style="font-size:12px;color:var(--muted);margin-bottom:14px">Última sync: ${lastStr} · Break-even ROAS: <strong>${roasBE.toFixed(2)}x</strong></div>`
+
+  for(const cuenta of cuentas){
+    const camps=(campanas||[]).filter(c=>c.account_id===cuenta.account_id)
+    const activas=camps.filter(c=>c.estado==='ACTIVE')
+    const pausadas=camps.filter(c=>c.estado!=='ACTIVE')
+
+    html+=`<div class="card" style="margin-bottom:16px">
+      <div style="font-weight:600;font-size:15px;margin-bottom:12px">${cuenta.nombre||cuenta.account_id} <span class="pill pill-${cuenta.estado==='ACTIVE'?'green':'red'}" style="font-size:10px">${cuenta.estado}</span></div>`
+
+    if(!camps.length){html+=`<div class="alert alert-blue">Sin campañas</div></div>`;continue}
+
+    const renderCamp=(camp)=>{
+      const m=agg[camp.meta_id]||{spend:0,imp:0,clicks:0,conv:0,ctrs:[],cpms:[],freqs:[]}
+      const cpa=m.conv>0?m.spend/m.conv:0
+      const roasM=m.spend>0&&m.conv>0?(m.conv*p2)/m.spend:0
+      const avgCtr=m.ctrs.length?(m.ctrs.reduce((a,b)=>a+b,0)/m.ctrs.length):0
+      const avgCpm=m.cpms.length?(m.cpms.reduce((a,b)=>a+b,0)/m.cpms.length):0
+      const avgFreq=m.freqs.length?(m.freqs.reduce((a,b)=>a+b,0)/m.freqs.length):0
+
+      let semCls='',semTxt='Sin datos',semBorder='var(--border)'
+      if(m.spend>0){
+        if(roasM<roasBE){semCls='pill-red';semTxt='🔴 STOP';semBorder='var(--red)'}
+        else if(roasM<roasBE*1.4){semCls='pill-amber';semTxt='🟡 Precaución';semBorder='var(--amber)'}
+        else if(roasM<roasBE*2.2){semCls='pill-green';semTxt='🟢 Escalar';semBorder='var(--green)'}
+        else{semCls='pill-blue';semTxt='🟣 Fuego';semBorder='var(--purple)'}
+      }
+
+      return`<div class="card" style="margin-bottom:8px;padding:12px;cursor:pointer;border-left:3px solid ${semBorder}" onclick="viewCampDetail('${camp.meta_id}')">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <div><div style="font-weight:600;font-size:13px">${camp.nombre||camp.meta_id}</div>
+            <div style="font-size:11px;color:var(--muted)">${camp.objetivo||''} · ${camp.estado}</div></div>
+          <span class="pill ${semCls}">${semTxt}</span>
+        </div>
+        ${m.spend>0?`<div class="cards-row c4" style="margin-top:10px;gap:6px">
+          <div style="font-size:11px"><span style="color:var(--muted)">Gasto 7d</span><br><strong>$${fmt(m.spend)}</strong></div>
+          <div style="font-size:11px"><span style="color:var(--muted)">ROAS</span><br><strong style="color:${roasM>=roasBE?'var(--green)':'var(--red)'}">${roasM.toFixed(2)}x</strong></div>
+          <div style="font-size:11px"><span style="color:var(--muted)">CPA</span><br><strong${isAdmin?` style="color:${cpa<=margenBE?'var(--green)':'var(--red)'}"`:''}>${cpa>0?'$'+fmt(cpa):'—'}</strong>${isAdmin?`<br><span style="font-size:10px;color:var(--muted)">Lím: $${fmt(margenBE)}</span>`:''}</div>
+          <div style="font-size:11px"><span style="color:var(--muted)">Conv.</span><br><strong>${m.conv}</strong></div>
+        </div>
+        <div style="display:flex;gap:14px;margin-top:6px;font-size:11px;color:var(--muted)">
+          <span>CTR: ${avgCtr.toFixed(2)}%</span><span>CPM: $${fmt(avgCpm)}</span><span>Freq: ${avgFreq.toFixed(1)}</span>
+        </div>`:''}</div>`
+    }
+
+    if(activas.length){
+      html+=`<div class="section-title" style="color:var(--green)">Activas (${activas.length})</div>`
+      html+=activas.map(renderCamp).join('')
+    }
+    if(pausadas.length){
+      html+=`<details style="margin-top:8px"><summary style="font-size:12px;color:var(--muted);cursor:pointer">Pausadas / Otras (${pausadas.length})</summary><div style="margin-top:8px">${pausadas.map(renderCamp).join('')}</div></details>`
+    }
+    html+=`</div>`
+  }
+  el.innerHTML=html
+}
+
+// ── META: DETALLE CAMPAÑA ────────────────────────────────
+window.viewCampDetail=async(campId)=>{
+  const isAdmin=currentRol()==='admin'
+  closeModal()
+
+  // Datos de la campaña
+  const{data:camp}=await sb.from('meta_campanas').select('*').eq('meta_id',campId).eq('nivel','campaign').maybeSingle()
+  if(!camp){alert('Campaña no encontrada');return}
+
+  // Insights últimos 30 días
+  const h30=new Date();h30.setDate(h30.getDate()-30)
+  const{data:ins}=await sb.from('meta_insights').select('*').eq('meta_id',campId).eq('nivel','campaign').gte('fecha',h30.toISOString().slice(0,10)).order('fecha',{ascending:false})
+
+  let spend30=0,imp30=0,clicks30=0,conv30=0,reach30=0
+  const ctrs=[],cpms=[],freqs=[]
+  for(const i of (ins||[])){
+    spend30+=i.spend||0;imp30+=i.impressions||0;clicks30+=i.clicks||0;conv30+=i.conversions||0;reach30+=i.reach||0
+    if(i.ctr)ctrs.push(parseFloat(i.ctr));if(i.cpm)cpms.push(parseFloat(i.cpm));if(i.frequency)freqs.push(parseFloat(i.frequency))
+  }
+  const avgCtr=ctrs.length?(ctrs.reduce((a,b)=>a+b,0)/ctrs.length):0
+  const avgCpm=cpms.length?(cpms.reduce((a,b)=>a+b,0)/cpms.length):0
+  const avgFreq=freqs.length?(freqs.reduce((a,b)=>a+b,0)/freqs.length):0
+  const cpa30=conv30>0?spend30/conv30:0
+
+  // Break-even
+  const prod=productos[0]||{}
+  const p2=prod.precio_2u||129900,c2=prod.costo_2u||36000
+  const fo=prod.flete_outbound||21000,fd=prod.flete_devolucion||18000
+  const dp=prod.dev_pct||0.19
+  const margenBE=p2*(1-dp)-c2-fo-(fd*dp)
+  const roasBE=margenBE>0?p2/margenBE:999
+  const roasM=spend30>0&&conv30>0?(conv30*p2)/spend30:0
+
+  // Semáforo
+  let semHtml=''
+  if(spend30===0){
+    semHtml=`<div class="semaforo" style="background:var(--card2);border-color:var(--border)"><div class="sem-dot" style="background:var(--subtle)"></div><div><div class="sem-title" style="color:var(--muted)">Sin gasto en los últimos 30 días</div></div></div>`
+  }else{
+    let cls,title,msg
+    if(roasM<roasBE){cls='sem-rojo';title='🔴 STOP — Debajo del break-even';msg=`ROAS ${roasM.toFixed(2)}x vs mínimo ${roasBE.toFixed(2)}x`}
+    else if(roasM<roasBE*1.4){cls='sem-amarillo';title='🟡 Precaución — Poco colchón';msg=`ROAS ${roasM.toFixed(2)}x. Rentable pero ajustado.`}
+    else if(roasM<roasBE*2.2){cls='sem-verde';title='🟢 Escalar — Aumentar presupuesto';msg=`ROAS ${roasM.toFixed(2)}x. Aumentar 20-30%.`}
+    else{cls='sem-fuego';title='🟣 Fuego — Escalar agresivo';msg=`ROAS ${roasM.toFixed(2)}x. Muy por encima del BE.`}
+    semHtml=`<div class="semaforo ${cls}"><div class="sem-dot"></div><div><div class="sem-title">${title}</div><div class="sem-msg">${msg}</div></div></div>`
+  }
+
+  // ROAS real cruzado con Dropi
+  let dropiHtml=''
+  const{data:adsets}=await sb.from('meta_campanas').select('meta_id').eq('parent_id',campId).eq('nivel','adset')
+  if(adsets?.length){
+    const adsetIds=adsets.map(a=>a.meta_id)
+    let allAdIds=[]
+    for(let i=0;i<adsetIds.length;i+=50){
+      const batch=adsetIds.slice(i,i+50)
+      const{data:ads}=await sb.from('meta_campanas').select('meta_id').in('parent_id',batch).eq('nivel','ad')
+      if(ads)allAdIds=allAdIds.concat(ads.map(a=>a.meta_id))
+    }
+    if(allAdIds.length){
+      let mapeos=[]
+      for(let i=0;i<allAdIds.length;i+=50){
+        const batch=allAdIds.slice(i,i+50)
+        const{data}=await sb.from('mapeos').select('estado_final,cantidad,producto').in('ad_id',batch).not('estado_final','is',null)
+        if(data)mapeos=mapeos.concat(data)
+      }
+      if(mapeos.length){
+        let ent=0,dev=0,canc=0,otro=0,ventaEnt=0
+        for(const m of mapeos){
+          const st=DROPI_STATUS[m.estado_final]?.cat||'otro'
+          if(st==='entregado'||st==='novedad_ok'){
+            ent++
+            const qty=m.cantidad||1
+            const prodObj=productos.find(p=>p.nombre===m.producto)
+            ventaEnt+=(prodObj?([0,prodObj.precio_1u,prodObj.precio_2u,prodObj.precio_3u,prodObj.precio_4u][qty]||prodObj.precio_2u||0):p2)
+          }
+          else if(st==='devuelto')dev++
+          else if(st==='cancelado')canc++
+          else otro++
+        }
+        const total=ent+dev+canc+otro
+        const pctDev=total>0?Math.round(dev/(ent+dev)*100):0
+        const roasReal=spend30>0?ventaEnt/spend30:0
+        const devColor=pctDev>20?'var(--red)':pctDev>15?'var(--amber)':'var(--green)'
+
+        dropiHtml=`<div class="section-title" style="margin-top:16px">📦 Datos reales (Dropi)</div>
+          <div class="cards-row c4">
+            <div class="card c-green" style="padding:10px"><div class="card-label">Entregados</div><div class="card-val">${ent}</div></div>
+            <div class="card c-red" style="padding:10px"><div class="card-label">Devueltos</div><div class="card-val">${dev} <span style="font-size:12px;color:${devColor}">(${pctDev}%)</span></div></div>
+            <div class="card c-amber" style="padding:10px"><div class="card-label">Cancelados</div><div class="card-val">${canc}</div></div>
+            <div class="card" style="padding:10px"><div class="card-label">Total Dropi</div><div class="card-val">${total}</div></div>
+          </div>
+          ${isAdmin?`<div class="cards-row c3" style="margin-top:8px">
+            <div class="card ${roasReal>=roasBE?'c-green':'c-red'}" style="padding:10px"><div class="card-label">ROAS Real</div><div class="card-val">${roasReal.toFixed(2)}x</div><div class="card-sub">Venta entregada / Gasto</div></div>
+            <div class="card" style="padding:10px"><div class="card-label">Venta entregada</div><div class="card-val">$${fmt(ventaEnt)}</div></div>
+            <div class="card" style="padding:10px"><div class="card-label">CPA real</div><div class="card-val">$${fmt(ent>0?spend30/ent:0)}</div><div class="card-sub">Gasto / Entregados</div></div>
+          </div>`:''}`
+      }
+    }
+  }
+  if(!dropiHtml)dropiHtml=`<div class="alert alert-blue" style="margin-top:12px">Sin datos de Dropi cruzados para esta campaña</div>`
+
+  // Notas
+  const{data:notas}=await sb.from('meta_notas').select('*,usuarios(nombre)').eq('campaign_id',campId).order('created_at',{ascending:false}).limit(20)
+  const notasHtml=`<div class="section-title" style="margin-top:16px">📝 Notas</div>
+    <div class="form-grid" style="margin-bottom:10px">
+      <div class="fld"><textarea id="camp-nota" rows="2" placeholder="Agregar nota sobre esta campaña..."></textarea></div>
+    </div>
+    <button class="btn-sm btn-primary" onclick="saveCampNota('${campId}')" style="margin-bottom:10px">Guardar nota</button>
+    <div id="camp-nota-msg"></div>
+    ${(notas||[]).length?notas.map(n=>`<div style="padding:8px;border-bottom:1px solid var(--border);font-size:12px">
+      <div style="color:var(--muted)">${n.usuarios?.nombre||'—'} · ${new Date(n.created_at).toLocaleString('es-CO')}</div>
+      <div style="margin-top:4px">${n.nota}</div>
+    </div>`).join(''):'<div style="font-size:12px;color:var(--muted)">Sin notas</div>'}`
+
+  // Historial diario (tabla)
+  const histHtml=(ins||[]).length?`<div class="section-title" style="margin-top:16px">📅 Historial diario (últimos 30 días)</div>
+    <div class="table-wrap"><table>
+      <tr><th>Fecha</th><th>Gasto</th><th>Impr.</th><th>Clicks</th><th>CTR</th><th>CPM</th><th>Conv.</th><th>CPA</th></tr>
+      ${ins.map(i=>`<tr>
+        <td data-label="Fecha" style="font-family:monospace;font-size:11px">${i.fecha}</td>
+        <td data-label="Gasto">$${fmt(i.spend)}</td>
+        <td data-label="Impr.">${fmt(i.impressions)}</td>
+        <td data-label="Clicks">${fmt(i.clicks)}</td>
+        <td data-label="CTR">${parseFloat(i.ctr).toFixed(2)}%</td>
+        <td data-label="CPM">$${fmt(i.cpm)}</td>
+        <td data-label="Conv.">${i.conversions||0}</td>
+        <td data-label="CPA">${i.conversions>0?'$'+fmt(i.spend/i.conversions):'—'}</td>
+      </tr>`).join('')}
+    </table></div>`:''
+
+  // Modal
+  const div=document.createElement('div')
+  div.id='user-modal';div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:750px">
+    <div style="display:flex;justify-content:space-between;align-items:start">
+      <div><div class="modal-title">${camp.nombre||campId}</div>
+        <div class="modal-sub">${camp.objetivo||''} · ${camp.estado} · ${camp.account_id}</div></div>
+      <button class="btn-sm btn-outline" onclick="closeModal()">✕</button>
+    </div>
+    ${semHtml}
+    <div class="cards-row c4">
+      <div class="card" style="padding:10px"><div class="card-label">Gasto 30d</div><div class="card-val">$${fmt(spend30)}</div></div>
+      <div class="card ${roasM>=roasBE?'c-green':'c-red'}" style="padding:10px"><div class="card-label">ROAS Meta</div><div class="card-val">${roasM.toFixed(2)}x</div><div class="card-sub">BE: ${roasBE.toFixed(2)}x</div></div>
+      <div class="card" style="padding:10px"><div class="card-label">CPA</div><div class="card-val">${cpa30>0?'$'+fmt(cpa30):'—'}</div>${isAdmin?`<div class="card-sub">Lím: $${fmt(margenBE)}</div>`:''}</div>
+      <div class="card" style="padding:10px"><div class="card-label">Conv. 30d</div><div class="card-val">${conv30}</div></div>
+    </div>
+    <div class="cards-row c4" style="margin-top:8px">
+      <div class="card" style="padding:10px"><div class="card-label">CTR</div><div class="card-val">${avgCtr.toFixed(2)}%</div></div>
+      <div class="card" style="padding:10px"><div class="card-label">CPM</div><div class="card-val">$${fmt(avgCpm)}</div></div>
+      <div class="card" style="padding:10px"><div class="card-label">Frecuencia</div><div class="card-val">${avgFreq.toFixed(1)}</div></div>
+      <div class="card" style="padding:10px"><div class="card-label">Alcance</div><div class="card-val">${fmt(reach30)}</div></div>
+    </div>
+    ${dropiHtml}
+    ${notasHtml}
+    ${histHtml}
+  </div>`
+  div.onclick=closeModal
+  document.body.appendChild(div)
+}
+
+window.saveCampNota=async(campId)=>{
+  const nota=document.getElementById('camp-nota')?.value?.trim()
+  const msg=document.getElementById('camp-nota-msg')
+  if(!nota){if(msg)msg.innerHTML='<div class="alert alert-red">Escribe algo</div>';return}
+  const{error}=await sb.from('meta_notas').insert({campaign_id:campId,usuario_id:me.id,nota})
+  if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+  logAction('meta_nota_guardada',{campaign_id:campId}).catch(()=>{})
+  viewCampDetail(campId)
 }
 
 // ── INIT ───────────────────────────────────────────────────

@@ -3514,20 +3514,18 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
 
   const desde=document.getElementById('meta-desde')?.value||new Date(Date.now()-30*86400000).toISOString().slice(0,10)
   const hasta=document.getElementById('meta-hasta')?.value||new Date().toISOString().slice(0,10)
+  const hoy=new Date().toISOString().slice(0,10)
   const actId='act_'+accountId
   let camps=[],agg={},source='meta'
 
   try{
-    // 1) Token
     let token=document.getElementById('cfg-token')?.value?.trim()||''
     if(!token)token=await getConfig('meta_access_token')
     if(!token)throw new Error('Sin token')
 
-    // 2) Campañas en vivo de Meta
     const rawCamps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,effective_status,objective,daily_budget,lifetime_budget',limit:'500'})
     camps=rawCamps.map(c=>({meta_id:c.id,nombre:c.name||'',estado:c.effective_status||c.status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget/100:null}))
 
-    // 3) Insights en vivo del rango de fechas
     const timeRange=JSON.stringify({since:desde,until:hasta})
     const rawIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
     for(const i of rawIns){
@@ -3538,7 +3536,6 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       if(i.ctr)a.ctrs.push(parseFloat(i.ctr));if(i.cpm)a.cpms.push(parseFloat(i.cpm));if(i.frequency)a.freqs.push(parseFloat(i.frequency))
     }
   }catch(e){
-    // Fallback a Supabase
     console.warn('Meta API error, fallback Supabase:',e.message)
     source='supabase'
     const{data:freshCamps}=await sb.from('meta_campanas').select('*').eq('account_id',accountId).eq('nivel','campaign').order('nombre')
@@ -3553,10 +3550,51 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     }
   }
 
-  const activas=camps.filter(c=>c.estado==='ACTIVE')
-  const pausadas=camps.filter(c=>c.estado!=='ACTIVE')
-
   if(!camps.length){accEl.innerHTML='<div class="alert alert-blue">Sin campañas</div>';return}
+
+  // ── Ventas reales: ad hierarchy + mapeos ──
+  const{data:allAdsets}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('account_id',accountId).eq('nivel','adset')
+  const{data:allAds}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('account_id',accountId).eq('nivel','ad')
+  const adsetToCamp={}
+  for(const as of (allAdsets||[]))adsetToCamp[as.meta_id]=as.parent_id
+  const adToCamp={}
+  for(const ad of (allAds||[]))adToCamp[ad.meta_id]=adsetToCamp[ad.parent_id]||''
+  const allAdIds=Object.keys(adToCamp)
+
+  const ventasByCamp={}
+  if(allAdIds.length){
+    let mapeos=[]
+    for(let i=0;i<allAdIds.length;i+=100){
+      const batch=allAdIds.slice(i,i+100)
+      const{data}=await sb.from('mapeos').select('ad_id,estado_final,fecha_dropi').in('ad_id',batch).gte('fecha_dropi',desde).lte('fecha_dropi',hasta)
+      if(data)mapeos=mapeos.concat(data)
+    }
+    for(const m of mapeos){
+      const campId=adToCamp[m.ad_id]
+      if(!campId)continue
+      if(!ventasByCamp[campId])ventasByCamp[campId]={ventas:0,canceladas:0,pendientes:0}
+      const v=ventasByCamp[campId]
+      if(m.fecha_dropi===hoy||!m.estado_final){
+        v.ventas++
+      }else{
+        const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
+        if(cat==='cancelado')v.canceladas++
+        else if(cat==='pendiente')v.pendientes++
+        else v.ventas++
+      }
+    }
+  }
+
+  // ── Clasificar: con/sin actividad ──
+  const conActividad=[],sinActividad=[]
+  for(const camp of camps){
+    const m=agg[camp.meta_id]
+    const hasData=m&&(m.spend>0||m.imp>0)
+    camp._hasData=hasData
+    if(hasData)conActividad.push(camp)
+    else sinActividad.push(camp)
+  }
+  conActividad.sort((a,b)=>(agg[b.meta_id]?.spend||0)-(agg[a.meta_id]?.spend||0))
 
   const sourceHtml=source==='meta'
     ?`<div style="font-size:11px;color:var(--green);margin-bottom:8px">🟢 Datos en vivo de Meta · ${desde} → ${hasta}</div>`
@@ -3564,32 +3602,39 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
 
   const renderCamp=(camp)=>{
     const m=agg[camp.meta_id]||{spend:0,imp:0,clicks:0,conv:0,ctrs:[],cpms:[],freqs:[]}
+    const v=ventasByCamp[camp.meta_id]||{ventas:0,canceladas:0,pendientes:0}
     const cpa=m.conv>0?m.spend/m.conv:0
+    const cpaReal=v.ventas>0?m.spend/v.ventas:0
     const roasM=m.spend>0&&m.conv>0?(m.conv*ctx.p2)/m.spend:0
     const avgCtr=m.ctrs.length?(m.ctrs.reduce((a,b)=>a+b,0)/m.ctrs.length):0
     const avgCpm=m.cpms.length?(m.cpms.reduce((a,b)=>a+b,0)/m.cpms.length):0
     const avgFreq=m.freqs.length?(m.freqs.reduce((a,b)=>a+b,0)/m.freqs.length):0
 
-    let semCls='',semTxt='Sin datos',semBorder='var(--border)'
-    if(m.spend>0){
+    let semCls='',semTxt='Sin actividad',semBorder='var(--border)'
+    if(camp._hasData&&m.spend>0){
       if(roasM<ctx.roasBE){semCls='pill-red';semTxt='🔴 STOP';semBorder='var(--red)'}
       else if(roasM<ctx.roasBE*1.4){semCls='pill-amber';semTxt='🟡 Precaución';semBorder='var(--amber)'}
       else if(roasM<ctx.roasBE*2.2){semCls='pill-green';semTxt='🟢 Escalar';semBorder='var(--green)'}
       else{semCls='pill-blue';semTxt='🟣 Fuego';semBorder='var(--purple)'}
     }
 
-    return`<div class="meta-camp-item" data-campestado="${camp.estado}" style="margin-bottom:8px">
+    const inactive=!camp._hasData
+    const opacity=inactive?'opacity:.5':''
+
+    return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" style="margin-bottom:8px;${opacity}">
       <div class="card" style="padding:12px;cursor:pointer;border-left:3px solid ${semBorder}" onclick="viewCampDetail('${camp.meta_id}')">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
         <div><div style="font-weight:600;font-size:13px">${camp.nombre||camp.meta_id}</div>
           <div style="font-size:11px;color:var(--muted)">${camp.objetivo||''} · ${camp.estado}</div></div>
         <span class="pill ${semCls}">${semTxt}</span>
       </div>
-      ${m.spend>0?`<div class="cards-row c4" style="margin-top:10px;gap:6px">
+      ${camp._hasData?`<div class="cards-row" style="margin-top:10px;gap:6px;display:grid;grid-template-columns:repeat(6,1fr)">
         <div style="font-size:11px"><span style="color:var(--muted)">Gasto</span><br><strong>$${fmt(m.spend)}</strong></div>
         <div style="font-size:11px"><span style="color:var(--muted)">ROAS</span><br><strong style="color:${roasM>=ctx.roasBE?'var(--green)':'var(--red)'}">${roasM.toFixed(2)}x</strong></div>
-        <div style="font-size:11px"><span style="color:var(--muted)">CPA</span><br><strong${ctx.isAdmin?` style="color:${cpa<=ctx.margenBE?'var(--green)':'var(--red)'}"`:''}>${cpa>0?'$'+fmt(cpa):'—'}</strong>${ctx.isAdmin?`<br><span style="font-size:10px;color:var(--muted)">Lím: $${fmt(ctx.margenBE)}</span>`:''}</div>
+        <div style="font-size:11px"><span style="color:var(--muted)">CPA Meta</span><br><strong>${cpa>0?'$'+fmt(cpa):'—'}</strong></div>
         <div style="font-size:11px"><span style="color:var(--muted)">Conv.</span><br><strong>${m.conv}</strong></div>
+        <div style="font-size:11px"><span style="color:var(--muted)">Ventas</span><br><strong style="color:var(--green)">${v.ventas}</strong>${v.canceladas?`<span style="font-size:10px;color:var(--red)"> · ${v.canceladas}✗</span>`:''}${v.pendientes?`<span style="font-size:10px;color:var(--amber)"> · ${v.pendientes}⏳</span>`:''}</div>
+        <div style="font-size:11px"><span style="color:var(--muted)">CPA Real</span><br><strong${ctx.isAdmin&&cpaReal>0?` style="color:${cpaReal<=ctx.margenBE?'var(--green)':'var(--red)'}"`:''}>${cpaReal>0?'$'+fmt(cpaReal):'—'}</strong></div>
       </div>
       <div style="display:flex;gap:14px;margin-top:6px;font-size:11px;color:var(--muted)">
         <span>CTR: ${avgCtr.toFixed(2)}%</span><span>CPM: $${fmt(avgCpm)}</span><span>Freq: ${avgFreq.toFixed(1)}</span>
@@ -3597,21 +3642,20 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     </div>`
   }
 
-  // Per-account campaign filter + source indicator
   let campHtml=sourceHtml
   campHtml+=`<div style="margin:8px 0;display:flex;gap:4px;flex-wrap:wrap">
     <button class="btn-sm btn-primary cf-btn" onclick="filterCampsInAccount('${accountId}','all',this)">Todas (${camps.length})</button>
-    <button class="btn-sm btn-outline cf-btn" onclick="filterCampsInAccount('${accountId}','ACTIVE',this)">Activas (${activas.length})</button>
-    <button class="btn-sm btn-outline cf-btn" onclick="filterCampsInAccount('${accountId}','PAUSED',this)">Inactivas (${pausadas.length})</button>
+    <button class="btn-sm btn-outline cf-btn" onclick="filterCampsInAccount('${accountId}','active',this)">Con actividad (${conActividad.length})</button>
+    <button class="btn-sm btn-outline cf-btn" onclick="filterCampsInAccount('${accountId}','inactive',this)">Sin actividad (${sinActividad.length})</button>
   </div>`
 
-  if(activas.length){
-    campHtml+=`<div class="section-title" style="color:var(--green)">Activas (${activas.length})</div>`
-    campHtml+=activas.map(renderCamp).join('')
+  if(conActividad.length){
+    campHtml+=`<div class="section-title" style="color:var(--green)">Con actividad (${conActividad.length})</div>`
+    campHtml+=conActividad.map(renderCamp).join('')
   }
-  if(pausadas.length){
-    campHtml+=`<div class="section-title" style="color:var(--muted);margin-top:8px">Pausadas / Otras (${pausadas.length})</div>`
-    campHtml+=pausadas.map(renderCamp).join('')
+  if(sinActividad.length){
+    campHtml+=`<div class="section-title" style="color:var(--muted);margin-top:8px">Sin actividad (${sinActividad.length})</div>`
+    campHtml+=sinActividad.map(renderCamp).join('')
   }
   accEl.innerHTML=campHtml
 }
@@ -3619,18 +3663,13 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
 window.filterCampsInAccount=(accountId,filter,btn)=>{
   const accEl=document.getElementById('meta-acc-'+accountId)
   if(!accEl)return
-  // Update button styles
   accEl.querySelectorAll('.cf-btn').forEach(b=>{b.className='btn-sm btn-outline cf-btn'})
   if(btn)btn.className='btn-sm btn-primary cf-btn'
-  // Filter campaigns
   accEl.querySelectorAll('.meta-camp-item').forEach(el=>{
     if(filter==='all'){el.style.display='';return}
-    const est=el.dataset.campestado||''
-    if(filter==='ACTIVE'){
-      el.style.display=est==='ACTIVE'?'':'none'
-    }else{
-      el.style.display=est!=='ACTIVE'?'':'none'
-    }
+    const hasData=el.dataset.hasdata==='1'
+    if(filter==='active')el.style.display=hasData?'':'none'
+    else el.style.display=!hasData?'':'none'
   })
 }
 

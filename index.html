@@ -2229,9 +2229,10 @@ window.saveReporteV2=async(fecha)=>{
     for(const cel of convEls){
       const prodName=cel.dataset.prod
       const conv=parseInt(cel.value)||0
-      const prodObj=productos.find(p=>p.nombre===prodName)
+      const prodObj=productos.find(p=>_normProd(p.nombre)===_normProd(prodName))
+      if(!prodObj){errMsg+=`Producto "${prodName}" no existe en config. `;continue}
       const{error}=await sb.from('reportes_diarios').upsert({
-        fecha,producto_id:prodObj?.id||prodName,producto_nombre:prodName,
+        fecha,producto_id:prodObj.id,producto_nombre:prodObj.nombre,
         conversaciones:conv,nota:`[EDITADO] ${motivo}`,
         usuario_id:me.id,updated_at:new Date().toISOString()
       },{onConflict:'fecha,producto_id,usuario_id'})
@@ -2253,12 +2254,13 @@ window.saveReporteV2=async(fecha)=>{
     if(!prodNom)continue
     const adIds=document.getElementById(`vi-${idx}`)?.value?.trim()||''
     const convAp=parseInt(document.getElementById(`vc-${idx}`)?.value)||0
-    const prodObj=productos.find(p=>p.nombre===prodNom)
+    const prodObj=productos.find(p=>_normProd(p.nombre)===_normProd(prodNom))
+    if(!prodObj){msg.innerHTML=`<div class="alert alert-red">Producto "${prodNom}" no existe en config</div>`;return}
     // Also get conversaciones from auto section if exists
-    const pid=prodNom.replace(/\s+/g,'_')
+    const pid=_normProd(prodNom).replace(/\s+/g,'_')
     const convReal=parseInt(document.getElementById(`rc-${pid}`)?.value)||0
     const{error}=await sb.from('reportes_diarios').upsert({
-      fecha,producto_id:prodObj?.id||prodNom,producto_nombre:prodNom,
+      fecha,producto_id:prodObj.id,producto_nombre:prodObj.nombre,
       conversaciones:convReal,conversaciones_aprox:convAp,ad_ids:adIds,
       nota:document.getElementById('rep-nota')?.value||'',
       usuario_id:me.id,updated_at:new Date().toISOString()
@@ -2270,12 +2272,13 @@ window.saveReporteV2=async(fecha)=>{
   const convEls=document.querySelectorAll('.rep-conv')
   for(const cel of convEls){
     const prodName=cel.dataset.prod
-    const alreadySaved=[...rows].some(r=>{const i=r.id.replace('vrow-','');return document.getElementById(`vp-${i}`)?.value===prodName})
+    const alreadySaved=[...rows].some(r=>{const i=r.id.replace('vrow-','');return _normProd(document.getElementById(`vp-${i}`)?.value||'')===_normProd(prodName)})
     if(alreadySaved)continue
     const conv=parseInt(cel.value)||0
-    const prodObj=productos.find(p=>p.nombre===prodName)
+    const prodObj=productos.find(p=>_normProd(p.nombre)===_normProd(prodName))
+    if(!prodObj)continue
     await sb.from('reportes_diarios').upsert({
-      fecha,producto_id:prodObj?.id||prodName,producto_nombre:prodName,
+      fecha,producto_id:prodObj.id,producto_nombre:prodObj.nombre,
       conversaciones:conv,usuario_id:me.id,updated_at:new Date().toISOString()
     },{onConflict:'fecha,producto_id,usuario_id'}).catch(()=>{})
   }
@@ -4645,12 +4648,17 @@ async function cargarSeccionMaestros(){
     if(!maestros?.length){el.innerHTML='<div class="alert alert-blue">No hay maestros configurados</div>';return}
     const usoPorMaestro={}
     for(const p of productos){const code=p.maestro_codigo||'GEN';if(!usoPorMaestro[code])usoPorMaestro[code]=[];usoPorMaestro[code].push(p.nombre)}
-    const{data:versiones}=await sb.from('maestros_versiones').select('maestro_codigo,version,desactivado_en').order('version',{ascending:false})
+    // Versiones (todas, sin límite)
+    let versiones=[]
+    try{versiones=await fetchAllRows('maestros_versiones','maestro_codigo,version,desactivado_en')}catch(_){}
     const versByCode={}
-    for(const v of (versiones||[])){if(!versByCode[v.maestro_codigo])versByCode[v.maestro_codigo]=[];versByCode[v.maestro_codigo].push(v)}
-    const{data:ciuCounts}=await sb.from('maestro_ciudades').select('maestro_id')
+    for(const v of versiones){if(!versByCode[v.maestro_codigo])versByCode[v.maestro_codigo]=[];versByCode[v.maestro_codigo].push(v)}
+    // Conteo ciudades por maestro (con count real, no limite 1000)
     const ciudadesPorMaestro={}
-    for(const c of (ciuCounts||[])){ciudadesPorMaestro[c.maestro_id]=(ciudadesPorMaestro[c.maestro_id]||0)+1}
+    for(const m of maestros){
+      const{count}=await sb.from('maestro_ciudades').select('id',{count:'exact',head:true}).eq('maestro_id',m.id)
+      ciudadesPorMaestro[m.id]=count||0
+    }
 
     let html=`<div style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn-sm btn-primary" onclick="modalAgregarMaestro()">➕ Agregar maestro nuevo</button>

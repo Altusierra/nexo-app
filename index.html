@@ -393,7 +393,7 @@ const NAV={
     {id:'admin-home',icon:'📊',label:'Dashboard'},
     {id:'admin-reportes',icon:'📋',label:'Reportes'},
     {id:'admin-resumen',icon:'📈',label:'Resumen Semanal'},
-    {id:'admin-gasto',icon:'💰',label:'Gasto Ads'},
+    {id:'admin-gasto',icon:'💰',label:'Tracker'},
     {id:'admin-meta',icon:'📡',label:'Meta Ads'},
     {id:'admin-productos',icon:'📦',label:'Productos'},
     {id:'admin-gastos-fijos',icon:'📌',label:'Gastos Fijos'},
@@ -498,6 +498,21 @@ function render(page){
 // ── UTILS ──────────────────────────────────────────────────
 const fmt=n=>new Intl.NumberFormat('es-CO').format(Math.round(n||0))
 const today=()=>new Date().toISOString().split('T')[0]
+const _isoDate=(d)=>d.toISOString().split('T')[0]
+const _daysAgo=(n)=>{const d=new Date();d.setDate(d.getDate()-n);return _isoDate(d)}
+function _quickDateBtns(desdeId,hastaId,onchangeFn){
+  const sets=[
+    ['Hoy',0,0],['Ayer',1,1],['Hoy+Ayer',1,0],['7d',6,0],['14d',13,0],['30d',29,0],
+    ['Este mes','cm',0],['Mes pasado','lm','lm']
+  ]
+  return sets.map(([label,desde,hasta])=>{
+    let d,h
+    if(desde==='cm'){const n=new Date();d=_isoDate(new Date(n.getFullYear(),n.getMonth(),1));h=today()}
+    else if(desde==='lm'){const n=new Date();d=_isoDate(new Date(n.getFullYear(),n.getMonth()-1,1));h=_isoDate(new Date(n.getFullYear(),n.getMonth(),0))}
+    else{d=_daysAgo(desde);h=_daysAgo(hasta)}
+    return`<button class="btn-sm btn-outline" onclick="document.getElementById('${desdeId}').value='${d}';document.getElementById('${hastaId}').value='${h}';${onchangeFn}">${label}</button>`
+  }).join('')
+}
 function dentroDeHorario(rol,hora_inicio,hora_fin){
   if(rol==='admin')return true
   if(!hora_inicio||!hora_fin)return true
@@ -546,145 +561,213 @@ async function getReporteAdmin(fecha){
 
 // ── ADMIN: HOME ────────────────────────────────────────────
 async function pageAdminHome(c){
+  const defDesde=_daysAgo(7),defHasta=today()
   c.innerHTML=`<div class="page-title">Dashboard</div>
-    <div class="page-sub" id="dash-date"></div>
+    <div class="page-sub">Métricas reales consolidadas</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px">
+      <div class="fld" style="margin:0"><label style="font-size:10px">Desde</label><input type="date" id="dash-desde" value="${defDesde}" style="font-size:12px;padding:6px 8px" onchange="loadDash()"></div>
+      <div class="fld" style="margin:0"><label style="font-size:10px">Hasta</label><input type="date" id="dash-hasta" value="${defHasta}" style="font-size:12px;padding:6px 8px" onchange="loadDash()"></div>
+    </div>
+    <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px">${_quickDateBtns('dash-desde','dash-hasta','loadDash()')}</div>
     <div id="dash-content"><div class="loading">Cargando métricas...</div></div>`
+  window.loadDash=loadDash
+  loadDash()
+}
 
-  const fecha=today()
-  document.getElementById('dash-date').textContent=
-    new Date(fecha+'T12:00:00').toLocaleDateString('es-CO',{weekday:'long',year:'numeric',month:'long',day:'numeric'})
+async function loadDash(){
+  const el=document.getElementById('dash-content')
+  if(!el)return
+  el.innerHTML='<div class="loading">Cargando métricas...</div>'
+  const desde=document.getElementById('dash-desde')?.value||_daysAgo(7)
+  const hasta=document.getElementById('dash-hasta')?.value||today()
+  const hoy=today()
 
-  const reportes=await getReporteAdmin(fecha)
-  const gasto=await sb.from('gasto_ads').select('*').eq('fecha',fecha)
-  const gastosFijos=await sb.from('gastos_fijos').select('monto')
-  const prod=productos[0]||{}
+  // 1. Gasto real desde Meta Insights
+  const{data:insData}=await sb.from('meta_insights').select('fecha,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
+  const gastoByFecha={}
+  let gastoTotal=0
+  for(const i of (insData||[])){gastoByFecha[i.fecha]=(gastoByFecha[i.fecha]||0)+(i.spend||0);gastoTotal+=i.spend||0}
 
-  // Agregar reportes del día
-  let tot1=0,tot2=0,tot3=0,tot4=0,conv=0,conf=0,canc=0,pend=0,gastoTotal=0
-  reportes.forEach(r=>{
-    tot1+=r.ord_1u||0;tot2+=r.ord_2u||0;tot3+=r.ord_3u||0;tot4+=r.ord_4u||0
-    conv+=r.conversaciones||0;conf+=r.confirmados||0
-    canc+=r.cancelados||0;pend+=r.pendientes||0
-  })
-  ;(gasto.data||[]).forEach(g=>gastoTotal+=g.monto||0)
-
+  // 2. Órdenes desde mapeos (asignador + Dropi)
+  const{data:mapeos}=await sb.from('mapeos').select('cantidad,producto,estado_final,fecha,ad_id').gte('fecha',desde).lte('fecha',hasta).limit(10000)
+  let tot1=0,tot2=0,tot3=0,tot4=0,conf=0,canc=0,pend=0,conAd=0
+  const prodStats={}
+  for(const m of (mapeos||[])){
+    const q=m.cantidad||2
+    if(q===1)tot1++;else if(q===2)tot2++;else if(q===3)tot3++;else tot4++
+    if(m.ad_id)conAd++
+    if(m.estado_final==='CANCELADO')canc++
+    else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)pend++
+    else conf++
+    const pn=m.producto||'Sin producto'
+    if(!prodStats[pn])prodStats[pn]={o1:0,o2:0,o3:0,o4:0}
+    if(q===1)prodStats[pn].o1++;else if(q===2)prodStats[pn].o2++;else if(q===3)prodStats[pn].o3++;else prodStats[pn].o4++
+  }
   const totalOrds=tot1+tot2+tot3+tot4
-  const venta=(tot1*( prod.precio_1u||0))+(tot2*(prod.precio_2u||0))+
-               (tot3*(prod.precio_3u||0))+(tot4*(prod.precio_4u||0))
-  const roas_bruto=gastoTotal>0?venta/gastoTotal:0
 
-  // Costos reales
-  const costoProducto=(tot1*(prod.costo_1u||0))+(tot2*(prod.costo_2u||0))+
-                       (tot3*(prod.costo_3u||0))+(tot4*(prod.costo_4u||0))
-  const costoFlete=totalOrds*(prod.flete_outbound||21000)
-  const devPct=prod.dev_pct||0.19
-  const costoDevolucion=totalOrds*devPct*(prod.flete_devolucion||18000)
-  const ventaEfectiva=venta*(1-devPct)
-  const gastoFijoMensual=(gastosFijos.data||[]).reduce((s,g)=>s+(g.monto||0),0)
-  const gastoFijoDiario=Math.round(gastoFijoMensual/30)
-  const gananciaNetaVal=ventaEfectiva-costoProducto-costoFlete-costoDevolucion-gastoTotal-gastoFijoDiario
-  const roas_neto=gastoTotal>0?(gananciaNetaVal+gastoTotal)/gastoTotal:0
-
-  // Break-even
-  const p2=prod.precio_2u||129900,c2=prod.costo_2u||36000
-  const fo=prod.flete_outbound||21000,fd=prod.flete_devolucion||18000
-  const dp=prod.dev_pct||0.19
-  const ingrEf=p2*(1-dp),costoTot=c2+fo+(fd*dp)
-  const margen=ingrEf-costoTot
-  const be_roas=margen>0?p2/margen:0
-
-  // Semáforo
-  let semHtml=''
-  if(gastoTotal===0){
-    semHtml=`<div class="semaforo" style="background:var(--card2);border-color:var(--border)">
-      <div class="sem-dot" style="background:var(--subtle)"></div>
-      <div><div class="sem-title" style="color:var(--muted)">Sin gasto en ads registrado hoy</div>
-      <div class="sem-msg" style="color:var(--subtle)">Ingresa el gasto para ver el semáforo</div></div></div>`
-  } else {
-    const rb=roas_bruto
-    let cls,title,msg
-    if(rb<be_roas){cls='sem-rojo';title='STOP — Debajo del break-even';msg=`ROAS ${rb.toFixed(2)}x vs mínimo ${be_roas.toFixed(2)}x. Revisar campañas.`}
-    else if(rb<be_roas*1.4){cls='sem-amarillo';title='Precaución — Poco colchón';msg=`ROAS ${rb.toFixed(2)}x. Rentable pero ajustado. No escalar aún.`}
-    else if(rb<be_roas*2.2){cls='sem-verde';title='Verde — Escalar con confianza';msg=`ROAS ${rb.toFixed(2)}x. Aumenta presupuesto 20-30%.`}
-    else{cls='sem-fuego';title='🟣 Fuego — Escalar agresivo';msg=`ROAS ${rb.toFixed(2)}x. Muy por encima del break-even. Escalar sin miedo.`}
-    semHtml=`<div class="semaforo ${cls}">
-      <div class="sem-dot"></div>
-      <div><div class="sem-title">${title}</div><div class="sem-msg">${msg}</div></div></div>`
+  // 3. Venta por oferta cruzada con precios de producto
+  let ventaTotal=0,costoProvTotal=0
+  for(const[pn,st]of Object.entries(prodStats)){
+    const prod=productos.find(p=>p.nombre===pn)||productos[0]||{}
+    ventaTotal+=(st.o1*(prod.precio_1u||0))+(st.o2*(prod.precio_2u||0))+(st.o3*(prod.precio_3u||0))+(st.o4*(prod.precio_4u||0))
+    costoProvTotal+=(st.o1*(prod.costo_1u||0))+(st.o2*(prod.costo_2u||0))+(st.o3*(prod.costo_3u||0))+(st.o4*(prod.costo_4u||0))
   }
 
-  document.getElementById('dash-content').innerHTML=`
+  // 4. Conversaciones desde reportes_diarios
+  const{data:reps}=await sb.from('reportes_diarios').select('conversaciones,fecha').gte('fecha',desde).lte('fecha',hasta)
+  let conv=0
+  for(const r of (reps||[]))conv+=r.conversaciones||0
+
+  // 5. Gastos fijos
+  const{data:gfData}=await sb.from('gastos_fijos').select('monto')
+  const gastoFijoMensual=(gfData||[]).reduce((s,g)=>s+(g.monto||0),0)
+  const dias=Math.max(1,Math.round((new Date(hasta)-new Date(desde))/86400000)+1)
+  const gastoFijoPeriodo=Math.round(gastoFijoMensual/30*dias)
+
+  // 6. Cálculos estilo tracker
+  const prod0=productos[0]||{}
+  const devPct=prod0.dev_pct||0.19
+  const costoFlete=totalOrds*(prod0.flete_outbound||21000)
+  const costoDevolucion=Math.round(totalOrds*devPct*(prod0.flete_devolucion||18000))
+  const costoConv=conv*(prod0.costo_conversacion||100)
+  const ventaEfectiva=Math.round(ventaTotal*(1-devPct))
+  const ganNeta=ventaEfectiva-costoProvTotal-costoFlete-costoDevolucion-gastoTotal-costoConv-gastoFijoPeriodo
+  const roas_bruto=gastoTotal>0?ventaTotal/gastoTotal:0
+  const roas_neto=gastoTotal>0?(ganNeta+gastoTotal)/gastoTotal:0
+  const cpa=totalOrds>0?gastoTotal/totalOrds:0
+  const cpr=totalOrds>0?gastoTotal/totalOrds:0
+  const tasaCierre=conv>0?totalOrds/conv:0
+
+  // Break-even
+  const p2=prod0.precio_2u||129900,c2=prod0.costo_2u||36000
+  const fo=prod0.flete_outbound||21000,fd=prod0.flete_devolucion||18000
+  const dp=prod0.dev_pct||0.19
+  const margenBE=p2*(1-dp)-c2-fo-(fd*dp)
+  const be_roas=margenBE>0?p2/margenBE:0
+
+  // Semáforo — basado en CPA si solo hay hoy, ROAS si hay data completa
+  const tieneOferta=totalOrds>0&&ventaTotal>0
+  let semHtml=''
+  if(gastoTotal===0){
+    semHtml=`<div class="semaforo" style="background:var(--card2);border-color:var(--border)"><div class="sem-dot" style="background:var(--subtle)"></div><div><div class="sem-title" style="color:var(--muted)">Sin gasto en ads en este rango</div><div class="sem-msg" style="color:var(--subtle)">Sincroniza Meta Ads para ver el semáforo</div></div></div>`
+  } else if(tieneOferta){
+    let cls,title,msg
+    if(roas_bruto<be_roas){cls='sem-rojo';title='STOP — Debajo del break-even';msg=`ROAS ${roas_bruto.toFixed(2)}x vs mínimo ${be_roas.toFixed(2)}x`}
+    else if(roas_bruto<be_roas*1.4){cls='sem-amarillo';title='Precaución — Poco colchón';msg=`ROAS ${roas_bruto.toFixed(2)}x. Rentable pero ajustado.`}
+    else if(roas_bruto<be_roas*2.2){cls='sem-verde';title='Verde — Escalar con confianza';msg=`ROAS ${roas_bruto.toFixed(2)}x. Aumentar 20-30%.`}
+    else{cls='sem-fuego';title='🟣 Fuego — Escalar agresivo';msg=`ROAS ${roas_bruto.toFixed(2)}x. Muy por encima del BE.`}
+    semHtml=`<div class="semaforo ${cls}"><div class="sem-dot"></div><div><div class="sem-title">${title}</div><div class="sem-msg">${msg}</div></div></div>`
+  } else if(totalOrds>0){
+    const cpaSem=cpa<=margenBE?'sem-verde':cpa<=margenBE*1.3?'sem-amarillo':'sem-rojo'
+    const cpaTit=cpa<=margenBE?'CPA dentro del límite':'CPA por encima del break-even'
+    semHtml=`<div class="semaforo ${cpaSem}"><div class="sem-dot"></div><div><div class="sem-title">${cpaTit}</div><div class="sem-msg">CPA: $${fmt(cpa)} vs límite: $${fmt(margenBE)} · ROAS pendiente (sin oferta aún)</div></div></div>`
+  }
+
+  el.innerHTML=`
     ${semHtml}
     <div class="cards-row c4">
-      <div class="card c-blue"><div class="card-label">Órdenes hoy</div><div class="card-val">${totalOrds}</div>
+      <div class="card c-blue"><div class="card-label">Órdenes</div><div class="card-val">${totalOrds}</div>
         <div class="card-sub">1u:${tot1} · 2u:${tot2} · 3u:${tot3} · 4u:${tot4}</div></div>
       <div class="card c-green"><div class="card-label">Confirmados</div><div class="card-val">${conf}</div>
         <div class="card-sub">${totalOrds>0?Math.round(conf/totalOrds*100):0}% del total</div></div>
       <div class="card c-red"><div class="card-label">Cancelados</div><div class="card-val">${canc}</div></div>
       <div class="card c-amber"><div class="card-label">Pendientes</div><div class="card-val">${pend}</div></div>
     </div>
-    <div class="cards-row c3">
+    <div class="cards-row c4">
       <div class="card c-purple"><div class="card-label">Conversaciones</div><div class="card-val">${conv}</div>
-        <div class="card-sub">Tasa cierre: ${conv>0?(totalOrds/conv*100).toFixed(1):0}%</div></div>
-      <div class="card"><div class="card-label">Gasto Ads</div><div class="card-val">$${fmt(gastoTotal)}</div></div>
-      <div class="card ${roas_bruto>=be_roas?'c-green':'c-red'}">
-        <div class="card-label">ROAS Bruto</div>
-        <div class="card-val">${roas_bruto.toFixed(2)}x</div>
-        <div class="card-sub">Break-even: ${be_roas.toFixed(2)}x</div></div>
+        <div class="card-sub">Tasa cierre: ${(tasaCierre*100).toFixed(1)}%</div></div>
+      <div class="card"><div class="card-label">Gasto Ads (Meta)</div><div class="card-val">$${fmt(gastoTotal)}</div></div>
+      <div class="card"><div class="card-label">CPA</div><div class="card-val ${cpa>0&&cpa<=margenBE?'c-green':'c-red'}">$${fmt(cpa)}</div>
+        <div class="card-sub">Límite: $${fmt(margenBE)}</div></div>
+      <div class="card ${roas_bruto>=be_roas?'c-green':'c-red'}"><div class="card-label">ROAS Bruto</div>
+        <div class="card-val">${tieneOferta?roas_bruto.toFixed(2)+'x':'—'}</div>
+        <div class="card-sub">BE: ${be_roas.toFixed(2)}x${!tieneOferta?' · Pendiente oferta':''}</div></div>
     </div>
-    <div class="cards-row c3">
-      <div class="card ${roas_neto>=1?'c-green':'c-red'}">
-        <div class="card-label">ROAS Neto</div>
-        <div class="card-val">${roas_neto.toFixed(2)}x</div>
-        <div class="card-sub">Break-even neto: 1.00x</div></div>
-      <div class="card ${gananciaNetaVal>=0?'c-green':'c-red'}">
-        <div class="card-label">Ganancia Neta</div>
-        <div class="card-val">$${fmt(gananciaNetaVal)}</div>
-        <div class="card-sub">Venta ef: $${fmt(ventaEfectiva)} − Costos: $${fmt(costoProducto+costoFlete+costoDevolucion)}</div></div>
-      <div class="card"><div class="card-label">Gastos Fijos / día</div>
-        <div class="card-val">$${fmt(gastoFijoDiario)}</div>
-        <div class="card-sub">Mensual: $${fmt(gastoFijoMensual)}</div></div>
+    <div class="cards-row c4">
+      <div class="card"><div class="card-label">Venta</div><div class="card-val">${tieneOferta?'$'+fmt(ventaTotal):'—'}</div></div>
+      <div class="card ${roas_neto>=1?'c-green':'c-red'}"><div class="card-label">ROAS Neto</div>
+        <div class="card-val">${tieneOferta?roas_neto.toFixed(2)+'x':'—'}</div>
+        <div class="card-sub">BE neto: 1.00x</div></div>
+      <div class="card ${ganNeta>=0?'c-green':'c-red'}"><div class="card-label">Ganancia Neta</div>
+        <div class="card-val">${tieneOferta?'$'+fmt(ganNeta):'—'}</div>
+        <div class="card-sub">${tieneOferta?`Margen: ${(ganNeta/ventaTotal*100).toFixed(1)}%`:''}</div></div>
+      <div class="card"><div class="card-label">Gastos Fijos</div>
+        <div class="card-val">$${fmt(gastoFijoPeriodo)}</div>
+        <div class="card-sub">${dias}d · Mensual: $${fmt(gastoFijoMensual)}</div></div>
     </div>
-    <div class="section-title">Reportes del día</div>
-    ${reportes.length===0?'<div class="alert alert-blue">Sin reportes registrados hoy</div>':
-    `<div class="table-wrap"><table>
-      <tr><th>Auxiliar</th><th>Producto</th><th>Órdenes</th><th>Conv.</th><th>Conf.</th><th>Canc.</th><th>Pend.</th><th>Jornada</th></tr>
-      ${reportes.map(r=>`<tr>
-        <td data-label="Auxiliar">${r.usuarios?.nombre||'—'}</td>
-        <td data-label="Producto">${r.producto_nombre||'—'}</td>
-        <td data-label="Órdenes">${(r.ord_1u||0)+(r.ord_2u||0)+(r.ord_3u||0)+(r.ord_4u||0)}</td>
-        <td data-label="Conv.">${r.conversaciones||0}</td>
-        <td data-label="Conf.">${r.confirmados||0}</td>
-        <td data-label="Canc.">${r.cancelados||0}</td>
-        <td data-label="Pend.">${r.pendientes||0}</td>
-        <td data-label="Jornada">${r.jornada_cerrada?'<span class="pill pill-green">✅ Cerrada</span>':'<span class="pill pill-amber">⏳ Abierta</span>'}</td>
-      </tr>`).join('')}
-    </table></div>`}
-  `
+    ${tieneOferta?`<div class="cards-row c3">
+      <div class="card"><div class="card-label">Costo Producto</div><div class="card-val">$${fmt(costoProvTotal)}</div></div>
+      <div class="card"><div class="card-label">Flete + Dev</div><div class="card-val">$${fmt(costoFlete+costoDevolucion)}</div></div>
+      <div class="card"><div class="card-label">Costo Conv.</div><div class="card-val">$${fmt(costoConv)}</div>
+        <div class="card-sub">${conv} conv × $${fmt(prod0.costo_conversacion||100)}</div></div>
+    </div>`:''}`
 }
 
 // ── ADMIN: REPORTES ────────────────────────────────────────
 async function pageAdminReportes(c){
   c.innerHTML=`<div class="page-title">Reportes</div>
-    <div class="page-sub">Historial de reportes diarios</div>
-    <div class="form-grid g2" style="max-width:400px;margin-bottom:20px">
-      <div class="fld"><label>Fecha</label><input type="date" id="rep-fecha" value="${today()}" onchange="loadReportesAdmin()"></div>
+    <div class="page-sub">Datos reales por fecha (mapeos + Dropi)</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px">
+      <div class="fld" style="margin:0"><label style="font-size:10px">Desde</label><input type="date" id="rep-desde" value="${_daysAgo(7)}" style="font-size:12px;padding:6px 8px" onchange="loadReportesAdmin()"></div>
+      <div class="fld" style="margin:0"><label style="font-size:10px">Hasta</label><input type="date" id="rep-hasta" value="${today()}" style="font-size:12px;padding:6px 8px" onchange="loadReportesAdmin()"></div>
     </div>
+    <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px">${_quickDateBtns('rep-desde','rep-hasta','loadReportesAdmin()')}</div>
     <div id="rep-list"><div class="loading">Cargando...</div></div>`
   window.loadReportesAdmin=async()=>{
-    const fecha=document.getElementById('rep-fecha').value
-    const reportes=await getReporteAdmin(fecha)
+    const desde=document.getElementById('rep-desde').value
+    const hasta=document.getElementById('rep-hasta').value
     const el=document.getElementById('rep-list')
-    if(!reportes.length){el.innerHTML='<div class="alert alert-blue">Sin reportes para esta fecha</div>';return}
+    el.innerHTML='<div class="loading">Cargando...</div>'
+
+    // Mapeos por fecha
+    const{data:mapeos}=await sb.from('mapeos').select('fecha,cantidad,producto,estado_final,ad_id').gte('fecha',desde).lte('fecha',hasta).limit(10000)
+    // Gasto Meta por fecha
+    const{data:insData}=await sb.from('meta_insights').select('fecha,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
+    // Conversaciones desde reportes
+    const{data:reps}=await sb.from('reportes_diarios').select('fecha,conversaciones,producto_nombre,usuarios(nombre),jornada_cerrada').gte('fecha',desde).lte('fecha',hasta)
+
+    const byFecha={}
+    for(const m of (mapeos||[])){
+      const f=m.fecha||'sin-fecha'
+      if(!byFecha[f])byFecha[f]={o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,conv:0,gasto:0,conAd:0}
+      const q=m.cantidad||2
+      if(q===1)byFecha[f].o1++;else if(q===2)byFecha[f].o2++;else if(q===3)byFecha[f].o3++;else byFecha[f].o4++
+      if(m.estado_final==='CANCELADO')byFecha[f].canc++
+      else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)byFecha[f].pend++
+      else byFecha[f].conf++
+      if(m.ad_id)byFecha[f].conAd++
+    }
+    for(const i of (insData||[])){if(!byFecha[i.fecha])byFecha[i.fecha]={o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,conv:0,gasto:0,conAd:0};byFecha[i.fecha].gasto+=(i.spend||0)}
+    for(const r of (reps||[])){if(byFecha[r.fecha])byFecha[r.fecha].conv+=(r.conversaciones||0)}
+
+    const fechas=Object.keys(byFecha).sort().reverse()
+    if(!fechas.length){el.innerHTML='<div class="alert alert-blue">Sin datos para este rango</div>';return}
+
+    const prod0=productos[0]||{}
+    const margenBE=(prod0.precio_2u||129900)*(1-(prod0.dev_pct||0.19))-(prod0.costo_2u||36000)-(prod0.flete_outbound||21000)-((prod0.flete_devolucion||18000)*(prod0.dev_pct||0.19))
+
     el.innerHTML=`<div class="table-wrap"><table>
-      <tr><th>Fecha</th><th>Auxiliar</th><th>Producto</th><th>1u</th><th>2u</th><th>3u</th><th>4u</th><th>Total</th><th>Conv.</th><th>Conf.</th><th>Canc.</th><th>Pend.</th><th>Nota</th><th>Jornada</th></tr>
-      ${reportes.map(r=>`<tr>
-        <td data-label="Fecha">${r.fecha}</td><td data-label="Auxiliar">${r.usuarios?.nombre||'—'}</td><td data-label="Producto">${r.producto_nombre||'—'}</td>
-        <td data-label="1u">${r.ord_1u||0}</td><td data-label="2u">${r.ord_2u||0}</td><td data-label="3u">${r.ord_3u||0}</td><td data-label="4u">${r.ord_4u||0}</td>
-        <td data-label="Total"><strong>${(r.ord_1u||0)+(r.ord_2u||0)+(r.ord_3u||0)+(r.ord_4u||0)}</strong></td>
-        <td data-label="Conv.">${r.conversaciones||0}</td><td data-label="Conf.">${r.confirmados||0}</td><td data-label="Canc.">${r.cancelados||0}</td><td data-label="Pend.">${r.pendientes||0}</td>
-        <td data-label="Nota">${r.nota||'—'}</td>
-        <td data-label="Jornada">${r.jornada_cerrada?'<span class="pill pill-green">✅</span>':'<span class="pill pill-amber">⏳</span>'}</td>
-      </tr>`).join('')}
+      <tr><th>Fecha</th><th>1u</th><th>2u</th><th>3u</th><th>4u</th><th>Total</th><th>Conf.</th><th>Canc.</th><th>Pend.</th><th>Conv.</th><th>Gasto</th><th>CPA</th><th>ROAS</th></tr>
+      ${fechas.map(f=>{
+        const d=byFecha[f],tot=d.o1+d.o2+d.o3+d.o4
+        const venta=(d.o1*(prod0.precio_1u||0))+(d.o2*(prod0.precio_2u||0))+(d.o3*(prod0.precio_3u||0))+(d.o4*(prod0.precio_4u||0))
+        const cpa=tot>0?d.gasto/tot:0
+        const roas=d.gasto>0?venta/d.gasto:0
+        const tieneOferta=venta>0
+        const cpaCls=cpa>0&&cpa<=margenBE?'color:var(--green)':cpa>0?'color:var(--red)':''
+        return`<tr>
+          <td data-label="Fecha" style="font-family:monospace;font-size:12px">${f}</td>
+          <td data-label="1u">${d.o1}</td><td data-label="2u">${d.o2}</td><td data-label="3u">${d.o3}</td><td data-label="4u">${d.o4}</td>
+          <td data-label="Total"><strong>${tot}</strong></td>
+          <td data-label="Conf." style="color:var(--green)">${d.conf}</td>
+          <td data-label="Canc."${d.canc?` style="color:var(--red)"`:``}>${d.canc}</td>
+          <td data-label="Pend."${d.pend?` style="color:var(--amber)"`:``}>${d.pend}</td>
+          <td data-label="Conv.">${d.conv||'—'}</td>
+          <td data-label="Gasto">${d.gasto?'$'+fmt(d.gasto):'—'}</td>
+          <td data-label="CPA" style="${cpaCls}">${cpa>0?'$'+fmt(cpa):'—'}</td>
+          <td data-label="ROAS" style="${tieneOferta&&roas>0?(roas>=(prod0.precio_2u||129900)/margenBE?'color:var(--green)':'color:var(--red)'):''}">${tieneOferta&&roas>0?roas.toFixed(2)+'x':'—'}</td>
+        </tr>`
+      }).join('')}
     </table></div>`
   }
   loadReportesAdmin()
@@ -693,16 +776,29 @@ async function pageAdminReportes(c){
 // ── ADMIN: RESUMEN SEMANAL ─────────────────────────────────
 async function pageAdminResumen(c){
   c.innerHTML=`<div class="page-title">📈 Resumen Semanal</div>
-    <div class="page-sub">Datos reales agregados por semana desde Dropi</div>
-    <div class="fld" style="max-width:200px;margin-bottom:14px">
-      <label>Filtrar producto</label>
-      <select id="rs-prod" onchange="cargarResumenSemanal()">
-        <option value="">Todos</option>
-        ${productos.map(p=>`<option value="${p.nombre}">${p.nombre}</option>`).join('')}
-      </select>
+    <div class="page-sub">Datos reales agregados por semana (Lun-Dom)</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px">
+      <div class="fld" style="margin:0"><label style="font-size:10px">Filtrar producto</label>
+        <select id="rs-prod" onchange="cargarResumenSemanal()" style="font-size:12px;padding:6px 8px">
+          <option value="">Todos</option>
+          ${productos.map(p=>`<option value="${p.nombre}">${p.nombre}</option>`).join('')}
+        </select></div>
+      <div class="fld" style="margin:0"><label style="font-size:10px">Desde</label><input type="date" id="rs-desde" value="2024-01-01" style="font-size:12px;padding:6px 8px" onchange="cargarResumenSemanal()"></div>
+      <div class="fld" style="margin:0"><label style="font-size:10px">Hasta</label><input type="date" id="rs-hasta" value="${today()}" style="font-size:12px;padding:6px 8px" onchange="cargarResumenSemanal()"></div>
     </div>
     <div id="rs-content"><div class="loading">Cargando...</div></div>`
   cargarResumenSemanal()
+}
+
+function _getMonday(d){const dt=new Date(d);const day=dt.getDay()||7;dt.setDate(dt.getDate()-day+1);dt.setHours(0,0,0,0);return dt}
+function _weekKey(mon){const sun=new Date(mon);sun.setDate(sun.getDate()+6);return`${String(mon.getDate()).padStart(2,'0')}/${String(mon.getMonth()+1).padStart(2,'0')}/${mon.getFullYear()} – ${String(sun.getDate()).padStart(2,'0')}/${String(sun.getMonth()+1).padStart(2,'0')}/${sun.getFullYear()}`}
+function _weekMonday(dateStr){return _getMonday(new Date(dateStr+'T12:00:00'))}
+function _generateAllWeeks(desde,hasta){
+  const weeks=[]
+  let mon=_getMonday(new Date(desde+'T12:00:00'))
+  const end=new Date(hasta+'T12:00:00')
+  while(mon<=end){weeks.push({key:_weekKey(mon),mon:new Date(mon)});mon.setDate(mon.getDate()+7)}
+  return weeks
 }
 
 async function cargarResumenSemanal(){
@@ -710,85 +806,68 @@ async function cargarResumenSemanal(){
   if(!el)return
   el.innerHTML='<div class="loading">Cargando...</div>'
   const filtroProd=document.getElementById('rs-prod')?.value||''
+  const desde=document.getElementById('rs-desde')?.value||'2024-01-01'
+  const hasta=document.getElementById('rs-hasta')?.value||today()
 
-  // Traer mapeos con estado_final (ya procesados por Dropi)
-  let query=sb.from('mapeos').select('*').not('estado_final','is',null)
+  // Traer mapeos con estado_final
+  let query=sb.from('mapeos').select('*').not('estado_final','is',null).gte('fecha',desde).lte('fecha',hasta)
+  if(filtroProd)query=query.eq('producto',filtroProd)
   const{data:mapeos}=await query.limit(10000)
-  if(!mapeos?.length){el.innerHTML='<div class="alert alert-blue">Sin datos de entregas aún</div>';return}
 
-  // Traer gasto ads
-  const{data:gastos}=await sb.from('gasto_ads').select('*').limit(5000)
+  // Gasto desde meta_insights
+  const{data:insData}=await sb.from('meta_insights').select('fecha,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
   const gastoByWeek={}
-  if(gastos)for(const g of gastos){
-    const w=_getWeek(g.fecha)
-    gastoByWeek[w]=(gastoByWeek[w]||0)+(g.monto||0)
-  }
+  for(const i of (insData||[])){const wk=_weekKey(_weekMonday(i.fecha));gastoByWeek[wk]=(gastoByWeek[wk]||0)+(i.spend||0)}
 
-  // Agrupar por semana
+  // Agrupar mapeos por semana
   const semanas={}
-  for(const m of mapeos){
-    if(filtroProd&&m.producto!==filtroProd)continue
-    const w=_getWeek(m.fecha||m.fecha_dropi)
+  for(const m of (mapeos||[])){
+    const w=_weekKey(_weekMonday(m.fecha||m.fecha_dropi))
     if(!semanas[w])semanas[w]={env:0,ent:0,dev:0,canc:0,pend:0,trans:0,total:0}
-    semanas[w].total++
+    semanas[w].total++;semanas[w].env++
     const st=DROPI_STATUS[m.estado_final]?.cat||'otro'
     if(st==='entregado'||st==='novedad_ok')semanas[w].ent++
     else if(st==='devuelto')semanas[w].dev++
     else if(st==='cancelado')semanas[w].canc++
     else if(st==='pendiente')semanas[w].pend++
     else semanas[w].trans++
-    semanas[w].env++
   }
 
-  const weeks=Object.entries(semanas).sort((a,b)=>b[0].localeCompare(a[0]))
-  if(!weeks.length){el.innerHTML='<div class="alert alert-blue">Sin datos para este producto</div>';return}
+  // Generar todas las semanas en el rango
+  const allWeeks=_generateAllWeeks(desde,hasta).reverse()
+  if(!allWeeks.length){el.innerHTML='<div class="alert alert-blue">Sin semanas en este rango</div>';return}
 
-  // Guardar para export
-  window._resumenData=weeks.map(([w,d])=>({
-    semana:w,enviadas:d.env,entregadas:d.ent,devueltas:d.dev,canceladas:d.canc,
-    en_transito:d.trans,pct_entrega:d.ent>0?Math.round(d.ent/d.total*100):0,
-    pct_devolucion:d.dev>0?Math.round(d.dev/d.total*100):0,
-    gasto_ads:gastoByWeek[w]||0
-  }))
+  // Export data
+  window._resumenData=allWeeks.map(w=>{const d=semanas[w.key]||{};return{semana:w.key,enviadas:d.env||0,entregadas:d.ent||0,devueltas:d.dev||0,canceladas:d.canc||0,en_transito:d.trans||0,pct_entrega:d.total>0?Math.round((d.ent||0)/d.total*100):0,pct_devolucion:d.total>0?Math.round((d.dev||0)/d.total*100):0,gasto_ads:gastoByWeek[w.key]||0}})
 
   el.innerHTML=`
     <div style="margin-bottom:14px">
       <button class="btn-sm btn-blue" onclick="exportarResumen()">📥 Exportar a Excel</button>
     </div>
     <div class="table-wrap"><table>
-      <tr><th>Semana</th><th>Enviadas</th><th>Entregadas</th><th>Devueltas</th><th>% Ent.</th><th>% Dev.</th><th>Canceladas</th><th>En tránsito</th><th>Gasto Ads</th></tr>
-      ${weeks.map(([w,d])=>{
+      <tr><th>Semana (Lun-Dom)</th><th>Enviadas</th><th>Entregadas</th><th>Devueltas</th><th>% Ent.</th><th>% Dev.</th><th>Canceladas</th><th>En tránsito</th><th>Gasto Ads</th></tr>
+      ${allWeeks.map(w=>{
+        const d=semanas[w.key]||{env:0,ent:0,dev:0,canc:0,trans:0,total:0}
+        const gasto=gastoByWeek[w.key]||0
         const pctEnt=d.total>0?Math.round(d.ent/d.total*100):0
         const pctDev=d.total>0?Math.round(d.dev/d.total*100):0
-        const devColor=pctDev>20?'color:var(--red)':pctDev>15?'color:var(--amber)':'color:var(--green)'
-        const gasto=gastoByWeek[w]||0
-        return`<tr>
-          <td data-label="Semana" style="font-family:monospace;font-size:12px">${w}</td>
-          <td data-label="Enviadas"><strong>${d.env}</strong></td>
-          <td data-label="Entregadas">${d.ent}</td>
-          <td data-label="Devueltas">${d.dev}</td>
-          <td data-label="% Ent." style="color:var(--green)">${pctEnt}%</td>
-          <td data-label="% Dev." style="${devColor}"><strong>${pctDev}%</strong></td>
-          <td data-label="Canceladas">${d.canc}</td>
-          <td data-label="En tránsito">${d.trans}</td>
+        const devColor=pctDev>20?'color:var(--red)':pctDev>15?'color:var(--amber)':d.total>0?'color:var(--green)':'color:var(--muted)'
+        const isEmpty=d.total===0
+        const rowStyle=isEmpty?'opacity:0.4':''
+        return`<tr style="${rowStyle}">
+          <td data-label="Semana" style="font-family:monospace;font-size:12px;white-space:nowrap">${w.key}</td>
+          <td data-label="Enviadas"><strong>${d.env||0}</strong></td>
+          <td data-label="Entregadas">${d.ent||0}</td>
+          <td data-label="Devueltas">${d.dev||0}</td>
+          <td data-label="% Ent." style="color:var(--green)">${d.total>0?pctEnt+'%':'—'}</td>
+          <td data-label="% Dev." style="${devColor}"><strong>${d.total>0?pctDev+'%':'—'}</strong></td>
+          <td data-label="Canceladas">${d.canc||0}</td>
+          <td data-label="En tránsito">${d.trans||0}</td>
           <td data-label="Gasto">${gasto?'$'+fmt(gasto):'—'}</td>
         </tr>`
       }).join('')}
     </table></div>`
 }
-
-function _getWeek(fecha){
-  if(!fecha)return'sin-fecha'
-  const d=new Date(fecha)
-  const day=d.getDay()||7
-  d.setDate(d.getDate()-day+1)
-  const mon=d.toISOString().slice(5,10).replace('-','/')
-  const end=new Date(d)
-  end.setDate(end.getDate()+6)
-  const monEnd=end.toISOString().slice(5,10).replace('-','/')
-  return`${mon} - ${monEnd}`
-}
-
 window.cargarResumenSemanal=cargarResumenSemanal
 
 window.exportarResumen=()=>{
@@ -801,44 +880,151 @@ window.exportarResumen=()=>{
 }
 
 // ── ADMIN: GASTO ADS ───────────────────────────────────────
+// ── ADMIN: GASTO ADS → TRACKER DIARIO ──────────────────────
 async function pageAdminGasto(c){
-  c.innerHTML=`<div class="page-title">Gasto en Ads</div>
-    <div class="page-sub">Registrar inversión diaria en Meta Ads</div>
-    <div class="card" style="max-width:500px;margin-bottom:20px">
-      <div class="form-grid" style="gap:14px">
-        <div class="fld"><label>Fecha</label><input type="date" id="g-fecha" value="${today()}"></div>
-        <div class="fld"><label>Producto</label><select id="g-prod">
-          ${productos.map(p=>`<option value="${p.id}">${p.nombre}</option>`).join('')}
-        </select></div>
-        <div class="fld"><label>Gasto ($COP)</label><input type="number" id="g-monto" placeholder="ej: 500000"></div>
-        <button class="btn-full btn-primary" onclick="saveGasto()">Registrar gasto</button>
-      </div>
-      <div id="g-msg" style="margin-top:10px"></div>
+  c.innerHTML=`<div class="page-title">💰 Tracker Diario</div>
+    <div class="page-sub">Gasto real (Meta) + Ventas (Dropi) + Ganancia — todo automático</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px">
+      <div class="fld" style="margin:0"><label style="font-size:10px">Desde</label><input type="date" id="trk-desde" value="${_daysAgo(14)}" style="font-size:12px;padding:6px 8px" onchange="loadTracker()"></div>
+      <div class="fld" style="margin:0"><label style="font-size:10px">Hasta</label><input type="date" id="trk-hasta" value="${today()}" style="font-size:12px;padding:6px 8px" onchange="loadTracker()"></div>
     </div>
-    <div id="g-hist"><div class="loading">Cargando historial...</div></div>`
+    <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px">${_quickDateBtns('trk-desde','trk-hasta','loadTracker()')}</div>
+    <div id="trk-content"><div class="loading">Cargando tracker...</div></div>
+    <div class="divider"></div>
+    <div class="section-title">📊 Simulador "¿Qué pasa si...?"</div>
+    <div class="card" style="max-width:700px">
+      <div class="form-grid g4">
+        <div class="fld"><label>Gasto diario ($)</label><input type="number" id="sim-gasto" value="500000" oninput="runSim()"></div>
+        <div class="fld"><label>% Devolución</label><input type="number" step="0.1" id="sim-dev" value="${((productos[0]?.dev_pct||0.19)*100).toFixed(0)}" oninput="runSim()"></div>
+        <div class="fld"><label>% Cancelados</label><input type="number" step="0.1" id="sim-canc" value="10" oninput="runSim()"></div>
+        <div class="fld"><label>Oferta</label><select id="sim-oferta" onchange="runSim()"><option value="2">2u</option><option value="1">1u</option><option value="3">3u</option><option value="4">4u</option></select></div>
+      </div>
+      <div id="sim-result" style="margin-top:14px"></div>
+    </div>`
+  window.loadTracker=loadTracker
+  window.runSim=runSim
+  loadTracker()
+  runSim()
+}
 
-  window.saveGasto=async()=>{
-    const fecha=document.getElementById('g-fecha').value
-    const prod_id=document.getElementById('g-prod').value
-    const monto=parseInt(document.getElementById('g-monto').value)
-    if(!monto||monto<=0){document.getElementById('g-msg').innerHTML='<div class="alert alert-red">Monto inválido</div>';return}
-    const{error}=await sb.from('gasto_ads').upsert(
-      {fecha,producto_id:prod_id,monto,usuario_id:me.id},{onConflict:'fecha,producto_id'})
-    const msg=document.getElementById('g-msg')
-    if(error){msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`}
-    else{msg.innerHTML='<div class="alert alert-green">✅ Gasto guardado</div>';loadGastoHist();logAction('gasto_registrado',{fecha,producto_id:prod_id,monto}).catch(()=>{})}
+async function loadTracker(){
+  const el=document.getElementById('trk-content')
+  if(!el)return
+  el.innerHTML='<div class="loading">Cargando...</div>'
+  const desde=document.getElementById('trk-desde')?.value||_daysAgo(14)
+  const hasta=document.getElementById('trk-hasta')?.value||today()
+  const hoy=today()
+  const prod0=productos[0]||{}
+  const dp=prod0.dev_pct||0.19
+  const cc=prod0.costo_conversacion||100
+
+  // Data
+  const[{data:insData},{data:mapeos},{data:reps}]=await Promise.all([
+    sb.from('meta_insights').select('fecha,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta),
+    sb.from('mapeos').select('fecha,cantidad,producto,estado_final,ad_id').gte('fecha',desde).lte('fecha',hasta).limit(10000),
+    sb.from('reportes_diarios').select('fecha,conversaciones').gte('fecha',desde).lte('fecha',hasta)
+  ])
+
+  const byFecha={}
+  for(const i of (insData||[])){if(!byFecha[i.fecha])byFecha[i.fecha]={gasto:0,o1:0,o2:0,o3:0,o4:0,conv:0,conf:0,canc:0};byFecha[i.fecha].gasto+=(i.spend||0)}
+  for(const m of (mapeos||[])){
+    const f=m.fecha||'?';if(!byFecha[f])byFecha[f]={gasto:0,o1:0,o2:0,o3:0,o4:0,conv:0,conf:0,canc:0}
+    const q=m.cantidad||2;if(q===1)byFecha[f].o1++;else if(q===2)byFecha[f].o2++;else if(q===3)byFecha[f].o3++;else byFecha[f].o4++
+    if(m.estado_final==='CANCELADO')byFecha[f].canc++;else byFecha[f].conf++
   }
+  for(const r of (reps||[])){if(byFecha[r.fecha])byFecha[r.fecha].conv+=(r.conversaciones||0)}
 
-  async function loadGastoHist(){
-    const{data}=await sb.from('gasto_ads').select('*,productos(nombre)').order('fecha',{ascending:false}).limit(30)
-    const el=document.getElementById('g-hist')
-    if(!data?.length){el.innerHTML='<div class="alert alert-blue">Sin registros aún</div>';return}
-    el.innerHTML=`<div class="table-wrap"><table>
-      <tr><th>Fecha</th><th>Producto</th><th>Gasto</th></tr>
-      ${data.map(g=>`<tr><td data-label="Fecha">${g.fecha}</td><td data-label="Producto">${g.productos?.nombre||'—'}</td><td data-label="Gasto">$${fmt(g.monto)}</td></tr>`).join('')}
+  const fechas=Object.keys(byFecha).filter(f=>f!=='?').sort().reverse()
+  if(!fechas.length){el.innerHTML='<div class="alert alert-blue">Sin datos en este rango</div>';return}
+
+  // Break-even
+  const p2=prod0.precio_2u||129900,c2=prod0.costo_2u||36000
+  const fo=prod0.flete_outbound||21000,fd=prod0.flete_devolucion||18000
+  const margenBE=p2*(1-dp)-c2-fo-(fd*dp)
+  const be_roas=margenBE>0?p2/margenBE:0
+
+  // Acumulados
+  let aTot=0,aGasto=0,aVenta=0,aGanNeta=0,aConv=0
+
+  const rows=fechas.map(f=>{
+    const d=byFecha[f]
+    const tot=d.o1+d.o2+d.o3+d.o4;aTot+=tot;aGasto+=d.gasto;aConv+=d.conv
+    const venta=(d.o1*(prod0.precio_1u||0))+(d.o2*(prod0.precio_2u||0))+(d.o3*(prod0.precio_3u||0))+(d.o4*(prod0.precio_4u||0))
+    const costoP=(d.o1*(prod0.costo_1u||0))+(d.o2*(prod0.costo_2u||0))+(d.o3*(prod0.costo_3u||0))+(d.o4*(prod0.costo_4u||0))
+    const costoF=tot*fo,costoD=Math.round(tot*dp*fd),costoC=d.conv*cc
+    const ventaEf=Math.round(venta*(1-dp))
+    const ganNeta=ventaEf-costoP-costoF-costoD-d.gasto-costoC
+    aVenta+=venta;aGanNeta+=ganNeta
+    const tieneOferta=venta>0
+    const cpa=tot>0?d.gasto/tot:0
+    const roas=d.gasto>0&&tieneOferta?venta/d.gasto:0
+    const rN=d.gasto>0&&tieneOferta?(ganNeta+d.gasto)/d.gasto:0
+    const tc=d.conv>0?tot/d.conv:0
+    const cpaCls=cpa>0&&cpa<=margenBE?'color:var(--green)':cpa>0?'color:var(--red)':''
+    const roasCls=roas>=be_roas?'color:var(--green)':roas>0?'color:var(--red)':''
+    const ganCls=ganNeta>=0?'color:var(--green)':'color:var(--red)'
+    const esHoy=f===hoy
+    return`<tr${esHoy?' style="background:rgba(99,102,241,0.06)"':''}>
+      <td data-label="Fecha" style="font-family:monospace;font-size:11px;white-space:nowrap">${f}${esHoy?' 📍':''}</td>
+      <td data-label="1u">${d.o1}</td><td data-label="2u">${d.o2}</td><td data-label="3u">${d.o3}</td><td data-label="4u">${d.o4}</td>
+      <td data-label="Tot Ord"><strong>${tot}</strong></td>
+      <td data-label="Gasto">${d.gasto?'$'+fmt(d.gasto):'—'}</td>
+      <td data-label="Conv.">${d.conv||'—'}</td>
+      <td data-label="TC">${tc>0?(tc*100).toFixed(1)+'%':'—'}</td>
+      <td data-label="Venta">${tieneOferta?'$'+fmt(venta):'—'}</td>
+      <td data-label="CPA" style="${cpaCls}">${cpa>0?'$'+fmt(cpa):'—'}</td>
+      <td data-label="ROAS" style="${roasCls}">${tieneOferta&&roas>0?roas.toFixed(2)+'x':'—'}</td>
+      <td data-label="Gan Neta" style="${tieneOferta?ganCls:''}">${tieneOferta?'$'+fmt(ganNeta):'—'}</td>
+      <td data-label="ROAS N" style="${rN>=1?'color:var(--green)':rN>0?'color:var(--red)':''}">${tieneOferta&&rN>0?rN.toFixed(2)+'x':'—'}</td>
+    </tr>`
+  }).join('')
+
+  // Acumulado totals
+  const aRoas=aGasto>0&&aVenta>0?aVenta/aGasto:0
+  const aRN=aGasto>0&&aVenta>0?(aGanNeta+aGasto)/aGasto:0
+  const aCPA=aTot>0?aGasto/aTot:0
+  const aTC=aConv>0?aTot/aConv:0
+
+  el.innerHTML=`
+    <div class="cards-row c4" style="margin-bottom:14px">
+      <div class="card"><div class="card-label">Tot. Órdenes</div><div class="card-val">${aTot}</div></div>
+      <div class="card"><div class="card-label">Gasto Total</div><div class="card-val">$${fmt(aGasto)}</div></div>
+      <div class="card ${aGanNeta>=0?'c-green':'c-red'}"><div class="card-label">Ganancia Neta</div><div class="card-val">$${fmt(aGanNeta)}</div></div>
+      <div class="card ${aRoas>=be_roas?'c-green':'c-red'}"><div class="card-label">ROAS Bruto</div><div class="card-val">${aRoas>0?aRoas.toFixed(2)+'x':'—'}</div>
+        <div class="card-sub">BE: ${be_roas.toFixed(2)}x · CPA: $${fmt(aCPA)}</div></div>
+    </div>
+    <div class="table-wrap"><table>
+      <tr><th>Fecha</th><th>1u</th><th>2u</th><th>3u</th><th>4u</th><th>Tot</th><th>Gasto</th><th>Conv</th><th>TC</th><th>Venta</th><th>CPA</th><th>ROAS</th><th>Gan Neta</th><th>ROAS N</th></tr>
+      ${rows}
     </table></div>`
-  }
-  loadGastoHist()
+}
+
+function runSim(){
+  const el=document.getElementById('sim-result')
+  if(!el)return
+  const prod0=productos[0]||{}
+  const gasto=parseFloat(document.getElementById('sim-gasto')?.value)||0
+  const devPct=(parseFloat(document.getElementById('sim-dev')?.value)||19)/100
+  const cancPct=(parseFloat(document.getElementById('sim-canc')?.value)||10)/100
+  const oferta=parseInt(document.getElementById('sim-oferta')?.value)||2
+  const precio=[0,prod0.precio_1u||0,prod0.precio_2u||0,prod0.precio_3u||0,prod0.precio_4u||0][oferta]
+  const costo=[0,prod0.costo_1u||0,prod0.costo_2u||0,prod0.costo_3u||0,prod0.costo_4u||0][oferta]
+  const fo=prod0.flete_outbound||21000,fd=prod0.flete_devolucion||18000
+  const entrega=1-devPct
+  const ingEf=precio*entrega
+  const costoOrd=costo+fo+(fd*devPct)
+  const margenOrd=ingEf-costoOrd
+  const minOrds=margenOrd>0?Math.ceil(gasto/margenOrd):999
+  const roas=margenOrd>0?precio/margenOrd:0
+  const ganSi20=margenOrd>0?(20*margenOrd)-gasto:0
+  const color=margenOrd>0?'var(--green)':'var(--red)'
+  el.innerHTML=`<div class="cards-row c4">
+    <div class="card" style="padding:10px"><div class="card-label">Mín. órdenes BE</div><div class="card-val" style="color:${color}">${minOrds}</div></div>
+    <div class="card" style="padding:10px"><div class="card-label">CPA máximo</div><div class="card-val" style="color:${color}">$${fmt(Math.round(margenOrd))}</div></div>
+    <div class="card" style="padding:10px"><div class="card-label">ROAS BE</div><div class="card-val" style="color:${color}">${roas.toFixed(2)}x</div></div>
+    <div class="card" style="padding:10px"><div class="card-label">Si vendes 20</div><div class="card-val" style="color:${ganSi20>=0?'var(--green)':'var(--red)'}">$${fmt(ganSi20)}</div></div>
+  </div>
+  <div style="font-size:11px;color:var(--muted);margin-top:6px">Ingreso ef/ord: $${fmt(Math.round(ingEf))} · Costo/ord: $${fmt(Math.round(costoOrd))} · Margen/ord: $${fmt(Math.round(margenOrd))}</div>`
 }
 
 // ── ADMIN: PRODUCTOS ───────────────────────────────────────
@@ -867,6 +1053,7 @@ async function pageAdminProductos(c){
         <div class="fld"><label>Flete outbound</label><input type="number" id="fo-${prod.id}" value="${prod.flete_outbound||21000}"></div>
         <div class="fld"><label>Flete devolución</label><input type="number" id="fd-${prod.id}" value="${prod.flete_devolucion||18000}"></div>
         <div class="fld"><label>% Devolución</label><input type="number" step="0.01" id="dp-${prod.id}" value="${(prod.dev_pct*100)||19}"></div>
+        <div class="fld"><label>Costo/conversación</label><input type="number" id="cc-${prod.id}" value="${prod.costo_conversacion||100}"></div>
       </div>
       <div class="divider"></div>
       <div class="form-grid g2">
@@ -895,7 +1082,7 @@ async function pageAdminProductos(c){
       precio_1u:g('pp1'),precio_2u:g('pp2'),precio_3u:g('pp3'),precio_4u:g('pp4'),
       costo_1u:g('cp1'),costo_2u:g('cp2'),costo_3u:g('cp3'),costo_4u:g('cp4'),
       flete_outbound:g('fo'),flete_devolucion:g('fd'),dev_pct:gf('dp')/100,
-      keywords:kw,maestro_codigo:mc
+      costo_conversacion:g('cc'),keywords:kw,maestro_codigo:mc
     }).eq('id',id)
     const msg=document.getElementById('pmsg-'+id)
     if(error)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`
@@ -967,6 +1154,7 @@ async function pageAdminProductos(c){
         <div class="fld"><label>Flete outbound</label><input type="number" id="np-fo" value="21000"></div>
         <div class="fld"><label>Flete devolución</label><input type="number" id="np-fd" value="18000"></div>
         <div class="fld"><label>% Devolución</label><input type="number" step="0.01" id="np-dp" value="19"></div>
+        <div class="fld"><label>Costo/conversación</label><input type="number" id="np-cc" value="100"></div>
         <div class="fld"><label>Maestro carrier</label>
           <select id="np-mc">${maestrosList.map(m=>`<option value="${m.codigo}">${m.codigo} (${m.nombre||''})</option>`).join('')}</select></div>
       </div>
@@ -989,6 +1177,7 @@ async function pageAdminProductos(c){
       costo_1u:g('np-c1'),costo_2u:g('np-c2'),costo_3u:g('np-c3'),costo_4u:g('np-c4'),
       flete_outbound:g('np-fo'),flete_devolucion:g('np-fd'),
       dev_pct:(parseFloat(document.getElementById('np-dp').value)||19)/100,
+      costo_conversacion:parseInt(document.getElementById('np-cc').value)||100,
       keywords:document.getElementById('np-kw').value||'',
       maestro_codigo:document.getElementById('np-mc').value||'GEN'
     })
@@ -1018,7 +1207,7 @@ async function loadUsuarios(){
   if(!data?.length){el.innerHTML='<div class="alert alert-blue">Sin usuarios</div>';return}
   el.innerHTML=`<div class="table-wrap"><table>
     <tr>
-      <th>Nombre</th><th>Usuario</th><th>Rol</th><th>Estado</th>
+      <th>Nombre</th><th>Usuario</th><th>Correo</th><th>Rol</th><th>Estado</th>
       <th>Horario</th><th>Contraseña (nota)</th><th>Acciones</th>
     </tr>
     ${data.map(u=>{
@@ -1029,6 +1218,7 @@ async function loadUsuarios(){
       return `<tr>
         <td data-label="Nombre">${u.nombre||'—'}</td>
         <td data-label="Usuario" style="font-family:monospace;font-size:12px">${u.username||'<span style="color:var(--subtle)">—</span>'}</td>
+        <td data-label="Correo" style="font-size:12px;color:var(--muted)">${u.email||'—'}</td>
         <td data-label="Rol"><span class="tag-rol">${u.rol||'—'}</span></td>
         <td data-label="Estado">${estado}</td>
         <td data-label="Horario" style="font-family:monospace;font-size:12px">${horario}</td>
@@ -3246,6 +3436,8 @@ async function pageAdminMeta(c){
 
   c.innerHTML=`<div class="page-title">📡 Meta Ads</div>
     <div class="page-sub">Conexión con Meta Graph API y portafolio de campañas</div>
+    <div id="meta-portafolio"><div class="loading">Cargando portafolio...</div></div>
+    <div class="divider"></div>
     <div class="card" style="max-width:600px;margin-bottom:20px">
       <div class="section-title">Credenciales</div>
       <div class="form-grid" style="gap:14px">
@@ -3260,15 +3452,14 @@ async function pageAdminMeta(c){
       <div id="cfg-msg" style="margin-top:10px"></div>
     </div>
     <div class="card" style="max-width:600px;margin-bottom:20px">
-      <div class="section-title">Sincronización</div>
+      <div class="section-title">Sincronización global</div>
       <div style="font-size:13px;color:var(--muted);margin-bottom:14px">Última sync: <strong>${lastStr}</strong></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn-sm btn-primary" onclick="runMetaSync(7)">🔄 Sync 7 días</button>
         <button class="btn-sm btn-green" onclick="runMetaSync('all')">📥 Sync completo</button>
       </div>
       <div id="sync-progress" style="margin-top:12px;max-height:300px;overflow-y:auto"></div>
-    </div>
-    <div id="meta-portafolio"><div class="loading">Cargando portafolio...</div></div>`
+    </div>`
   renderMetaPortafolio(document.getElementById('meta-portafolio'),true)
 }
 
@@ -3323,11 +3514,14 @@ window.runMetaSyncAllAccounts=async(days,btn)=>{
     const{data:cuentas}=await sb.from('meta_cuentas').select('account_id,nombre').order('nombre')
     if(!cuentas?.length){alert('Sin cuentas');return}
     let ok=0,fail=0
-    for(const cuenta of cuentas){
+    for(let ci=0;ci<cuentas.length;ci++){
+      const cuenta=cuentas[ci]
       const statusEl=document.getElementById('meta-sync-status-'+cuenta.account_id)
-      if(statusEl)statusEl.textContent='🔄'
+      const _showPct=(pct,msg)=>{if(statusEl)statusEl.innerHTML=pct>=100?'✅':`<span style="font-size:11px">${pct}%</span>`}
+      if(statusEl)statusEl.innerHTML='<span style="font-size:11px">0%</span>'
+      if(btn)btn.textContent=`⏳ ${ci+1}/${cuentas.length}...`
       try{
-        await _syncOneAccount(cuenta.account_id,token,days)
+        await _syncOneAccount(cuenta.account_id,token,days,_showPct)
         await sb.from('meta_cuentas').update({synced_at:new Date().toISOString()}).eq('account_id',cuenta.account_id)
         if(statusEl)statusEl.textContent='✅'
         ok++
@@ -3349,15 +3543,15 @@ window.runMetaSyncAllAccounts=async(days,btn)=>{
 
 window.runMetaSyncAccount=async(accountId,accountName,days)=>{
   const statusEl=document.getElementById('meta-sync-status-'+accountId)
-  if(statusEl)statusEl.textContent='🔄'
+  const _showPct=(pct,msg)=>{if(statusEl)statusEl.innerHTML=pct>=100?'✅':`<span style="font-size:11px">${pct}%</span>`}
+  if(statusEl)statusEl.innerHTML='<span style="font-size:11px">0%</span>'
   try{
     let token=await getConfig('meta_access_token')
     if(!token){if(statusEl)statusEl.textContent='⚠️';alert('Token no configurado');return}
-    await _syncOneAccount(accountId,token,days)
+    await _syncOneAccount(accountId,token,days,_showPct)
     await sb.from('meta_cuentas').update({synced_at:new Date().toISOString()}).eq('account_id',accountId)
     if(statusEl)statusEl.textContent='✅'
     logAction('meta_sync_account',{account_id:accountId,days}).catch(()=>{})
-    // Refresh expanded content
     const accEl=document.getElementById('meta-acc-'+accountId)
     if(accEl&&accEl.style.display!=='none')toggleMetaCuenta(accountId,true)
   }catch(e){
@@ -3366,27 +3560,35 @@ window.runMetaSyncAccount=async(accountId,accountName,days)=>{
   }
 }
 
-async function _syncOneAccount(accountId,token,days){
+async function _syncOneAccount(accountId,token,days,onProgress){
+  const _p=onProgress||(()=>{})
   const actId='act_'+accountId
   const until=new Date().toISOString().slice(0,10)
   const sd=new Date()
   if(days==='all')sd.setFullYear(sd.getFullYear()-3);else sd.setDate(sd.getDate()-days)
   const since=sd.toISOString().slice(0,10)
 
+  _p(10,'Campañas...')
   const camps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,effective_status,objective,daily_budget,lifetime_budget',limit:'500'})
   for(const c of camps){
     await sb.from('meta_campanas').upsert({meta_id:c.id,account_id:accountId,nivel:'campaign',nombre:c.name||'',estado:c.effective_status||c.status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget/100:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget/100:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
   }
+  _p(25,'Ad sets...')
   const adsets=await metaGet(`/${actId}/adsets`,token,{fields:'id,name,status,effective_status,campaign_id,daily_budget',limit:'500'})
   for(const s of adsets){
     await sb.from('meta_campanas').upsert({meta_id:s.id,account_id:accountId,nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.effective_status||s.status||'',daily_budget:s.daily_budget?s.daily_budget/100:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
   }
+  _p(40,'Anuncios...')
   const ads=await metaGet(`/${actId}/ads`,token,{fields:'id,name,status,effective_status,adset_id',limit:'500'})
   for(const ad of ads){
     await sb.from('meta_campanas').upsert({meta_id:ad.id,account_id:accountId,nivel:'ad',parent_id:ad.adset_id||'',nombre:ad.name||'',estado:ad.effective_status||ad.status||'',synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
   }
   const chunks=metaDateChunks(since,until,90)
-  for(const ch of chunks){
+  const totalChunks=chunks.length
+  for(let ci=0;ci<totalChunks;ci++){
+    const ch=chunks[ci]
+    const pct=50+Math.round((ci/totalChunks)*50)
+    _p(pct,`Métricas ${ci+1}/${totalChunks}...`)
     const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:JSON.stringify(ch),level:'campaign',time_increment:'1',limit:'500'})
     for(const i of cIns){
       await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
@@ -3396,6 +3598,7 @@ async function _syncOneAccount(accountId,token,days){
       await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
     }
   }
+  _p(100,'✅')
 }
 
 async function renderMetaPortafolio(el,isAdmin){
@@ -3452,6 +3655,7 @@ async function renderMetaPortafolio(el,isAdmin){
       <div class="fld" style="margin:0"><label style="font-size:10px">Desde</label><input type="date" id="meta-desde" value="${defDesde}" style="font-size:12px;padding:6px 8px" onchange="applyMetaDateRange()"></div>
       <div class="fld" style="margin:0"><label style="font-size:10px">Hasta</label><input type="date" id="meta-hasta" value="${defHasta}" style="font-size:12px;padding:6px 8px" onchange="applyMetaDateRange()"></div>
     </div>
+    <div style="display:flex;gap:4px;flex-wrap:wrap">${_quickDateBtns('meta-desde','meta-hasta','applyMetaDateRange()')}</div>
   </div>`
 
   // Admin: add sync all buttons

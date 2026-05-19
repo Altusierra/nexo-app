@@ -3731,28 +3731,31 @@ window.applyMetaDateRange=()=>{
 }
 
 // ── META: DETALLE CAMPAÑA ────────────────────────────────
-window.viewCampDetail=async(campId)=>{
+window.viewCampDetail=async(campId,customDesde,customHasta)=>{
   const isAdmin=currentRol()==='admin'
   closeModal()
 
-  // Datos de la campaña
   const{data:camp}=await sb.from('meta_campanas').select('*').eq('meta_id',campId).eq('nivel','campaign').maybeSingle()
   if(!camp){alert('Campaña no encontrada');return}
 
-  // Insights últimos 30 días
-  const h30=new Date();h30.setDate(h30.getDate()-30)
-  const{data:ins}=await sb.from('meta_insights').select('*').eq('meta_id',campId).eq('nivel','campaign').gte('fecha',h30.toISOString().slice(0,10)).order('fecha',{ascending:false})
+  // Fecha: custom > inputs globales > default 30d
+  const desde=customDesde||document.getElementById('meta-desde')?.value||new Date(Date.now()-30*86400000).toISOString().slice(0,10)
+  const hasta=customHasta||document.getElementById('meta-hasta')?.value||new Date().toISOString().slice(0,10)
+  const hoy=new Date().toISOString().slice(0,10)
 
-  let spend30=0,imp30=0,clicks30=0,conv30=0,reach30=0
+  // Insights del rango
+  const{data:ins}=await sb.from('meta_insights').select('*').eq('meta_id',campId).eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('fecha',{ascending:false})
+
+  let spendR=0,impR=0,clicksR=0,convR=0,reachR=0
   const ctrs=[],cpms=[],freqs=[]
   for(const i of (ins||[])){
-    spend30+=i.spend||0;imp30+=i.impressions||0;clicks30+=i.clicks||0;conv30+=i.conversions||0;reach30+=i.reach||0
+    spendR+=i.spend||0;impR+=i.impressions||0;clicksR+=i.clicks||0;convR+=i.conversions||0;reachR+=i.reach||0
     if(i.ctr)ctrs.push(parseFloat(i.ctr));if(i.cpm)cpms.push(parseFloat(i.cpm));if(i.frequency)freqs.push(parseFloat(i.frequency))
   }
   const avgCtr=ctrs.length?(ctrs.reduce((a,b)=>a+b,0)/ctrs.length):0
   const avgCpm=cpms.length?(cpms.reduce((a,b)=>a+b,0)/cpms.length):0
   const avgFreq=freqs.length?(freqs.reduce((a,b)=>a+b,0)/freqs.length):0
-  const cpa30=conv30>0?spend30/conv30:0
+  const cpaMeta=convR>0?spendR/convR:0
 
   // Break-even
   const prod=productos[0]||{}
@@ -3761,12 +3764,12 @@ window.viewCampDetail=async(campId)=>{
   const dp=prod.dev_pct||0.19
   const margenBE=p2*(1-dp)-c2-fo-(fd*dp)
   const roasBE=margenBE>0?p2/margenBE:999
-  const roasM=spend30>0&&conv30>0?(conv30*p2)/spend30:0
+  const roasM=spendR>0&&convR>0?(convR*p2)/spendR:0
 
   // Semáforo
   let semHtml=''
-  if(spend30===0){
-    semHtml=`<div class="semaforo" style="background:var(--card2);border-color:var(--border)"><div class="sem-dot" style="background:var(--subtle)"></div><div><div class="sem-title" style="color:var(--muted)">Sin gasto en los últimos 30 días</div></div></div>`
+  if(spendR===0){
+    semHtml=`<div class="semaforo" style="background:var(--card2);border-color:var(--border)"><div class="sem-dot" style="background:var(--subtle)"></div><div><div class="sem-title" style="color:var(--muted)">Sin gasto en el rango seleccionado</div></div></div>`
   }else{
     let cls,title,msg
     if(roasM<roasBE){cls='sem-rojo';title='🔴 STOP — Debajo del break-even';msg=`ROAS ${roasM.toFixed(2)}x vs mínimo ${roasBE.toFixed(2)}x`}
@@ -3776,59 +3779,109 @@ window.viewCampDetail=async(campId)=>{
     semHtml=`<div class="semaforo ${cls}"><div class="sem-dot"></div><div><div class="sem-title">${title}</div><div class="sem-msg">${msg}</div></div></div>`
   }
 
-  // ROAS real cruzado con Dropi
-  let dropiHtml=''
+  // ── Ad hierarchy + ventas reales ──
   const{data:adsets}=await sb.from('meta_campanas').select('meta_id').eq('parent_id',campId).eq('nivel','adset')
-  if(adsets?.length){
-    const adsetIds=adsets.map(a=>a.meta_id)
-    let allAdIds=[]
-    for(let i=0;i<adsetIds.length;i+=50){
-      const batch=adsetIds.slice(i,i+50)
-      const{data:ads}=await sb.from('meta_campanas').select('meta_id').in('parent_id',batch).eq('nivel','ad')
-      if(ads)allAdIds=allAdIds.concat(ads.map(a=>a.meta_id))
-    }
-    if(allAdIds.length){
-      let mapeos=[]
-      for(let i=0;i<allAdIds.length;i+=50){
-        const batch=allAdIds.slice(i,i+50)
-        const{data}=await sb.from('mapeos').select('estado_final,cantidad,producto').in('ad_id',batch).not('estado_final','is',null)
-        if(data)mapeos=mapeos.concat(data)
-      }
-      if(mapeos.length){
-        let ent=0,dev=0,canc=0,otro=0,ventaEnt=0
-        for(const m of mapeos){
-          const st=DROPI_STATUS[m.estado_final]?.cat||'otro'
-          if(st==='entregado'||st==='novedad_ok'){
-            ent++
-            const qty=m.cantidad||1
-            const prodObj=productos.find(p=>p.nombre===m.producto)
-            ventaEnt+=(prodObj?([0,prodObj.precio_1u,prodObj.precio_2u,prodObj.precio_3u,prodObj.precio_4u][qty]||prodObj.precio_2u||0):p2)
-          }
-          else if(st==='devuelto')dev++
-          else if(st==='cancelado')canc++
-          else otro++
-        }
-        const total=ent+dev+canc+otro
-        const pctDev=total>0?Math.round(dev/(ent+dev)*100):0
-        const roasReal=spend30>0?ventaEnt/spend30:0
-        const devColor=pctDev>20?'var(--red)':pctDev>15?'var(--amber)':'var(--green)'
+  const adsetIds=(adsets||[]).map(a=>a.meta_id)
+  let allAds=[]
+  for(let i=0;i<adsetIds.length;i+=50){
+    const batch=adsetIds.slice(i,i+50)
+    const{data:ads}=await sb.from('meta_campanas').select('meta_id,nombre,estado').in('parent_id',batch).eq('nivel','ad')
+    if(ads)allAds=allAds.concat(ads)
+  }
+  const allAdIds=allAds.map(a=>a.meta_id)
+  const adNameMap={};for(const a of allAds)adNameMap[a.meta_id]=a.nombre||a.meta_id
 
-        dropiHtml=`<div class="section-title" style="margin-top:16px">📦 Datos reales (Dropi)</div>
-          <div class="cards-row c4">
-            <div class="card c-green" style="padding:10px"><div class="card-label">Entregados</div><div class="card-val">${ent}</div></div>
-            <div class="card c-red" style="padding:10px"><div class="card-label">Devueltos</div><div class="card-val">${dev} <span style="font-size:12px;color:${devColor}">(${pctDev}%)</span></div></div>
-            <div class="card c-amber" style="padding:10px"><div class="card-label">Cancelados</div><div class="card-val">${canc}</div></div>
-            <div class="card" style="padding:10px"><div class="card-label">Total Dropi</div><div class="card-val">${total}</div></div>
-          </div>
-          ${isAdmin?`<div class="cards-row c3" style="margin-top:8px">
-            <div class="card ${roasReal>=roasBE?'c-green':'c-red'}" style="padding:10px"><div class="card-label">ROAS Real</div><div class="card-val">${roasReal.toFixed(2)}x</div><div class="card-sub">Venta entregada / Gasto</div></div>
-            <div class="card" style="padding:10px"><div class="card-label">Venta entregada</div><div class="card-val">$${fmt(ventaEnt)}</div></div>
-            <div class="card" style="padding:10px"><div class="card-label">CPA real</div><div class="card-val">$${fmt(ent>0?spend30/ent:0)}</div><div class="card-sub">Gasto / Entregados</div></div>
-          </div>`:''}`
+  // Insights per ad
+  const adAgg={}
+  if(allAdIds.length){
+    for(let i=0;i<allAdIds.length;i+=50){
+      const batch=allAdIds.slice(i,i+50)
+      const{data:adIns}=await sb.from('meta_insights').select('meta_id,spend,impressions,conversions').eq('nivel','ad').gte('fecha',desde).lte('fecha',hasta).in('meta_id',batch)
+      for(const ai of (adIns||[])){
+        if(!adAgg[ai.meta_id])adAgg[ai.meta_id]={spend:0,imp:0,conv:0}
+        adAgg[ai.meta_id].spend+=ai.spend||0
+        adAgg[ai.meta_id].imp+=ai.impressions||0
+        adAgg[ai.meta_id].conv+=ai.conversions||0
       }
     }
   }
-  if(!dropiHtml)dropiHtml=`<div class="alert alert-blue" style="margin-top:12px">Sin datos de Dropi cruzados para esta campaña</div>`
+
+  // Mapeos per ad
+  const adVentas={}
+  if(allAdIds.length){
+    let mapeos=[]
+    for(let i=0;i<allAdIds.length;i+=50){
+      const batch=allAdIds.slice(i,i+50)
+      const{data}=await sb.from('mapeos').select('ad_id,estado_final,fecha_dropi').in('ad_id',batch).gte('fecha_dropi',desde).lte('fecha_dropi',hasta)
+      if(data)mapeos=mapeos.concat(data)
+    }
+    for(const m of mapeos){
+      if(!adVentas[m.ad_id])adVentas[m.ad_id]={ventas:0,canceladas:0,pendientes:0,_src:'mapeos'}
+      const v=adVentas[m.ad_id]
+      v._src='mapeos'
+      if(m.fecha_dropi===hoy||!m.estado_final)v.ventas++
+      else{
+        const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
+        if(cat==='cancelado')v.canceladas++
+        else if(cat==='pendiente')v.pendientes++
+        else v.ventas++
+      }
+    }
+  }
+
+  // Reportes diarios (auxiliar)
+  const{data:reportes}=await sb.from('reportes_diarios').select('ad_ids,fecha,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false})
+  if(reportes?.length){
+    const seen=new Set()
+    for(const rep of reportes){
+      const key=rep.fecha+'|'+rep.producto_nombre
+      if(seen.has(key))continue
+      seen.add(key)
+      if(!rep.ad_ids)continue
+      const ids=rep.ad_ids.split(/[\n,]+/).map(s=>s.trim()).filter(s=>s.length>5)
+      for(const adId of ids){
+        if(!allAdIds.includes(adId))continue
+        if(!adVentas[adId])adVentas[adId]={ventas:0,canceladas:0,pendientes:0}
+        if(adVentas[adId]._src!=='mapeos')adVentas[adId].ventas++
+      }
+    }
+  }
+
+  // Totals
+  let totVentas=0,totCanc=0,totPend=0
+  for(const v of Object.values(adVentas)){totVentas+=v.ventas;totCanc+=v.canceladas;totPend+=v.pendientes}
+  const cpaReal=totVentas>0?spendR/totVentas:0
+
+  // Ventas HTML
+  const ventasHtml=`<div class="section-title" style="margin-top:16px">🛒 Ventas Reales</div>
+    <div class="cards-row c4">
+      <div class="card c-green" style="padding:10px"><div class="card-label">Confirmadas</div><div class="card-val">${totVentas}</div></div>
+      <div class="card c-red" style="padding:10px"><div class="card-label">Canceladas</div><div class="card-val">${totCanc}</div></div>
+      <div class="card c-amber" style="padding:10px"><div class="card-label">Pendientes</div><div class="card-val">${totPend}</div></div>
+      <div class="card ${cpaReal>0&&cpaReal<=margenBE?'c-green':'c-red'}" style="padding:10px"><div class="card-label">CPA Real</div><div class="card-val">${cpaReal>0?'$'+fmt(cpaReal):'—'}</div><div class="card-sub">Gasto / Confirmadas</div></div>
+    </div>`
+
+  // Breakdown por anuncio
+  const adRows=allAds.map(ad=>{
+    const m=adAgg[ad.meta_id]||{spend:0,imp:0,conv:0}
+    const v=adVentas[ad.meta_id]||{ventas:0,canceladas:0,pendientes:0}
+    const cpaAd=v.ventas>0?m.spend/v.ventas:0
+    return{id:ad.meta_id,nombre:ad.nombre||ad.meta_id,estado:ad.estado,spend:m.spend,imp:m.imp,conv:m.conv,ventas:v.ventas,canceladas:v.canceladas,pendientes:v.pendientes,cpaAd}
+  }).filter(r=>r.spend>0||r.ventas>0).sort((a,b)=>b.spend-a.spend)
+
+  const breakdownHtml=adRows.length?`<div class="section-title" style="margin-top:16px">📊 Breakdown por anuncio</div>
+    <div class="table-wrap"><table>
+      <tr><th>Anuncio</th><th>Gasto</th><th>Conv.</th><th>Ventas</th><th>Canc.</th><th>Pend.</th><th>CPA Real</th></tr>
+      ${adRows.map(r=>`<tr>
+        <td data-label="Anuncio" style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.nombre}">${r.nombre}</td>
+        <td data-label="Gasto">$${fmt(r.spend)}</td>
+        <td data-label="Conv.">${r.conv}</td>
+        <td data-label="Ventas" style="color:var(--green);font-weight:600">${r.ventas}</td>
+        <td data-label="Canc."${r.canceladas?` style="color:var(--red)"`:``}>${r.canceladas||0}</td>
+        <td data-label="Pend."${r.pendientes?` style="color:var(--amber)"`:``}>${r.pendientes||0}</td>
+        <td data-label="CPA Real"${r.cpaAd>0&&r.cpaAd>margenBE?` style="color:var(--red)"`:r.cpaAd>0?` style="color:var(--green)"`:``}>${r.cpaAd>0?'$'+fmt(r.cpaAd):'—'}</td>
+      </tr>`).join('')}
+    </table></div>`:`<div class="alert alert-blue" style="margin-top:12px">Sin datos de anuncios para este rango</div>`
 
   // Notas
   const{data:notas}=await sb.from('meta_notas').select('*,usuarios(nombre)').eq('campaign_id',campId).order('created_at',{ascending:false}).limit(20)
@@ -3843,10 +3896,10 @@ window.viewCampDetail=async(campId)=>{
       <div style="margin-top:4px">${n.nota}</div>
     </div>`).join(''):'<div style="font-size:12px;color:var(--muted)">Sin notas</div>'}`
 
-  // Historial diario (tabla)
-  const histHtml=(ins||[]).length?`<div class="section-title" style="margin-top:16px">📅 Historial diario (últimos 30 días)</div>
+  // Historial diario con ventas
+  const histHtml=(ins||[]).length?`<div class="section-title" style="margin-top:16px">📅 Historial diario</div>
     <div class="table-wrap"><table>
-      <tr><th>Fecha</th><th>Gasto</th><th>Impr.</th><th>Clicks</th><th>CTR</th><th>CPM</th><th>Conv.</th><th>CPA</th></tr>
+      <tr><th>Fecha</th><th>Gasto</th><th>Impr.</th><th>Clicks</th><th>CTR</th><th>CPM</th><th>Conv.</th><th>CPA Meta</th></tr>
       ${ins.map(i=>`<tr>
         <td data-label="Fecha" style="font-family:monospace;font-size:11px">${i.fecha}</td>
         <td data-label="Gasto">$${fmt(i.spend)}</td>
@@ -3855,33 +3908,38 @@ window.viewCampDetail=async(campId)=>{
         <td data-label="CTR">${parseFloat(i.ctr).toFixed(2)}%</td>
         <td data-label="CPM">$${fmt(i.cpm)}</td>
         <td data-label="Conv.">${i.conversions||0}</td>
-        <td data-label="CPA">${i.conversions>0?'$'+fmt(i.spend/i.conversions):'—'}</td>
+        <td data-label="CPA Meta">${i.conversions>0?'$'+fmt(i.spend/i.conversions):'—'}</td>
       </tr>`).join('')}
     </table></div>`:''
 
   // Modal
   const div=document.createElement('div')
   div.id='user-modal';div.className='modal-bg'
-  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:750px">
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:800px">
     <div style="display:flex;justify-content:space-between;align-items:start">
       <div><div class="modal-title">${camp.nombre||campId}</div>
         <div class="modal-sub">${camp.objetivo||''} · ${camp.estado} · ${camp.account_id}</div></div>
       <button class="btn-sm btn-outline" onclick="closeModal()">✕</button>
     </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px">
+      <div class="fld" style="margin:0"><label style="font-size:10px">Desde</label><input type="date" id="cd-desde" value="${desde}" style="font-size:12px;padding:6px 8px" onchange="viewCampDetail('${campId}',this.value,document.getElementById('cd-hasta').value)"></div>
+      <div class="fld" style="margin:0"><label style="font-size:10px">Hasta</label><input type="date" id="cd-hasta" value="${hasta}" style="font-size:12px;padding:6px 8px" onchange="viewCampDetail('${campId}',document.getElementById('cd-desde').value,this.value)"></div>
+    </div>
     ${semHtml}
     <div class="cards-row c4">
-      <div class="card" style="padding:10px"><div class="card-label">Gasto 30d</div><div class="card-val">$${fmt(spend30)}</div></div>
+      <div class="card" style="padding:10px"><div class="card-label">Gasto</div><div class="card-val">$${fmt(spendR)}</div></div>
       <div class="card ${roasM>=roasBE?'c-green':'c-red'}" style="padding:10px"><div class="card-label">ROAS Meta</div><div class="card-val">${roasM.toFixed(2)}x</div><div class="card-sub">BE: ${roasBE.toFixed(2)}x</div></div>
-      <div class="card" style="padding:10px"><div class="card-label">CPA</div><div class="card-val">${cpa30>0?'$'+fmt(cpa30):'—'}</div>${isAdmin?`<div class="card-sub">Lím: $${fmt(margenBE)}</div>`:''}</div>
-      <div class="card" style="padding:10px"><div class="card-label">Conv. 30d</div><div class="card-val">${conv30}</div></div>
+      <div class="card" style="padding:10px"><div class="card-label">CPA Meta</div><div class="card-val">${cpaMeta>0?'$'+fmt(cpaMeta):'—'}</div>${isAdmin?`<div class="card-sub">Lím: $${fmt(margenBE)}</div>`:''}</div>
+      <div class="card" style="padding:10px"><div class="card-label">Conv.</div><div class="card-val">${convR}</div></div>
     </div>
     <div class="cards-row c4" style="margin-top:8px">
       <div class="card" style="padding:10px"><div class="card-label">CTR</div><div class="card-val">${avgCtr.toFixed(2)}%</div></div>
       <div class="card" style="padding:10px"><div class="card-label">CPM</div><div class="card-val">$${fmt(avgCpm)}</div></div>
       <div class="card" style="padding:10px"><div class="card-label">Frecuencia</div><div class="card-val">${avgFreq.toFixed(1)}</div></div>
-      <div class="card" style="padding:10px"><div class="card-label">Alcance</div><div class="card-val">${fmt(reach30)}</div></div>
+      <div class="card" style="padding:10px"><div class="card-label">Alcance</div><div class="card-val">${fmt(reachR)}</div></div>
     </div>
-    ${dropiHtml}
+    ${ventasHtml}
+    ${breakdownHtml}
     ${notasHtml}
     ${histHtml}
   </div>`

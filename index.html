@@ -498,6 +498,7 @@ function render(page){
 // ── UTILS ──────────────────────────────────────────────────
 const fmt=n=>new Intl.NumberFormat('es-CO').format(Math.round(n||0))
 const today=()=>new Date().toISOString().split('T')[0]
+const _normProd=s=>(s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()
 const _isoDate=(d)=>d.toISOString().split('T')[0]
 const _daysAgo=(n)=>{const d=new Date();d.setDate(d.getDate()-n);return _isoDate(d)}
 function _quickDateBtns(desdeId,hastaId,onchangeFn){
@@ -814,16 +815,31 @@ async function cargarResumenSemanal(){
   if(filtroProd)query=query.eq('producto',filtroProd)
   const{data:mapeos}=await query.limit(10000)
 
-  // Gasto desde meta_insights
+  // Gasto desde meta_insights (por semana)
   const{data:insData}=await sb.from('meta_insights').select('fecha,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
   const gastoByWeek={}
   for(const i of (insData||[])){const wk=_weekKey(_weekMonday(i.fecha));gastoByWeek[wk]=(gastoByWeek[wk]||0)+(i.spend||0)}
 
-  // Agrupar mapeos por semana
+  // Conversaciones desde reportes_diarios (por semana)
+  const{data:reportesConv}=await sb.from('reportes_diarios').select('fecha,conversaciones').gte('fecha',desde).lte('fecha',hasta)
+  const convByWeek={}
+  for(const r of (reportesConv||[])){const wk=_weekKey(_weekMonday(r.fecha));convByWeek[wk]=(convByWeek[wk]||0)+(r.conversaciones||0)}
+
+  // Gastos fijos (mensual total → prorrateo /30 × 7 por semana)
+  const{data:gfData}=await sb.from('gastos_fijos').select('monto')
+  const gastoFijoMensual=(gfData||[]).reduce((s,g)=>s+(g.monto||0),0)
+  const fijosSemana=Math.round(gastoFijoMensual/30*7)
+
+  // Lookup de producto por nombre normalizado
+  const prodByKey={}
+  for(const p of productos){prodByKey[_normProd(p.nombre)]=p}
+  const ccDefault=(productos[0]?.costo_conversacion)||100
+
+  // Agrupar mapeos por semana + acumular ventas/costos por estado
   const semanas={}
   for(const m of (mapeos||[])){
     const w=_weekKey(_weekMonday(m.fecha||m.fecha_dropi))
-    if(!semanas[w])semanas[w]={env:0,ent:0,dev:0,canc:0,pend:0,trans:0,total:0}
+    if(!semanas[w])semanas[w]={env:0,ent:0,dev:0,canc:0,pend:0,trans:0,total:0,ventaTot:0,costoTot:0,ventaEnt:0,costoEnt:0,fleteOutTot:0,fleteDevTeorico:0,fleteDevReal:0,ventaEfTeorica:0,costoEfTeorico:0}
     semanas[w].total++;semanas[w].env++
     const st=DROPI_STATUS[m.estado_final]?.cat||'otro'
     if(st==='entregado'||st==='novedad_ok')semanas[w].ent++
@@ -831,29 +847,94 @@ async function cargarResumenSemanal(){
     else if(st==='cancelado')semanas[w].canc++
     else if(st==='pendiente')semanas[w].pend++
     else semanas[w].trans++
+
+    // Cálculos económicos por mapeo
+    const pk=_normProd(m.producto)
+    const prod=prodByKey[pk]||productos[0]||{}
+    const q=m.cantidad||2
+    const precio=[0,prod.precio_1u||0,prod.precio_2u||0,prod.precio_3u||0,prod.precio_4u||0][q]||(prod.precio_2u||0)
+    const costo=[0,prod.costo_1u||0,prod.costo_2u||0,prod.costo_3u||0,prod.costo_4u||0][q]||(prod.costo_2u||0)
+    const fo=prod.flete_outbound||21000
+    const fd=prod.flete_devolucion||18000
+    const dp=prod.dev_pct||0.19
+
+    // Estimada (teórica): aplica % devolución del producto
+    semanas[w].ventaTot+=precio
+    semanas[w].costoTot+=costo
+    semanas[w].ventaEfTeorica+=precio*(1-dp)
+    semanas[w].costoEfTeorico+=costo*(1-dp)
+    semanas[w].fleteDevTeorico+=fd*dp
+    // Flete outbound: solo si físicamente se envió (no canceladas)
+    if(st!=='cancelado'){
+      semanas[w].fleteOutTot+=fo
+    }
+    // Real: solo cuenta venta/costo de las entregadas
+    if(st==='entregado'||st==='novedad_ok'){
+      semanas[w].ventaEnt+=precio
+      semanas[w].costoEnt+=costo
+    }
+    // Flete devolución real: solo de las devueltas
+    if(st==='devuelto'){
+      semanas[w].fleteDevReal+=fd
+    }
   }
 
   // Generar todas las semanas en el rango
   const allWeeks=_generateAllWeeks(desde,hasta).reverse()
   if(!allWeeks.length){el.innerHTML='<div class="alert alert-blue">Sin semanas en este rango</div>';return}
 
+  // Calcular ganancias por semana
+  const ganByWeek={}
+  for(const w of allWeeks){
+    const d=semanas[w.key]||{}
+    const gasto=gastoByWeek[w.key]||0
+    const conv=convByWeek[w.key]||0
+    const costoConv=conv*ccDefault
+    // Estimada
+    const ganEst=Math.round((d.ventaEfTeorica||0)-(d.costoEfTeorico||0)-(d.fleteOutTot||0)-(d.fleteDevTeorico||0)-gasto-costoConv-fijosSemana)
+    // Real
+    const ganReal=Math.round((d.ventaEnt||0)-(d.costoEnt||0)-(d.fleteOutTot||0)-(d.fleteDevReal||0)-gasto-costoConv-fijosSemana)
+    ganByWeek[w.key]={ganEst,ganReal}
+  }
+
   // Export data
-  window._resumenData=allWeeks.map(w=>{const d=semanas[w.key]||{};return{semana:w.key,enviadas:d.env||0,entregadas:d.ent||0,devueltas:d.dev||0,canceladas:d.canc||0,en_transito:d.trans||0,pct_entrega:d.total>0?Math.round((d.ent||0)/d.total*100):0,pct_devolucion:d.total>0?Math.round((d.dev||0)/d.total*100):0,gasto_ads:gastoByWeek[w.key]||0}})
+  window._resumenData=allWeeks.map(w=>{
+    const d=semanas[w.key]||{}
+    const g=ganByWeek[w.key]||{ganEst:0,ganReal:0}
+    return{
+      semana:w.key,
+      enviadas:d.env||0,
+      entregadas:d.ent||0,
+      devueltas:d.dev||0,
+      canceladas:d.canc||0,
+      en_transito:d.trans||0,
+      pct_entrega:d.total>0?Math.round((d.ent||0)/d.total*100):0,
+      pct_devolucion:d.total>0?Math.round((d.dev||0)/d.total*100):0,
+      gasto_ads:gastoByWeek[w.key]||0,
+      conversaciones:convByWeek[w.key]||0,
+      ganancia_estimada:g.ganEst,
+      ganancia_real:g.ganReal
+    }
+  })
 
   el.innerHTML=`
-    <div style="margin-bottom:14px">
+    <div style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <button class="btn-sm btn-blue" onclick="exportarResumen()">📥 Exportar a Excel</button>
+      <span style="font-size:11px;color:var(--muted)">Gastos fijos prorrateados: $${fmt(fijosSemana)}/semana ($${fmt(gastoFijoMensual)}/mes ÷ 30 × 7)</span>
     </div>
     <div class="table-wrap"><table>
-      <tr><th>Semana (Lun-Dom)</th><th>Enviadas</th><th>Entregadas</th><th>Devueltas</th><th>% Ent.</th><th>% Dev.</th><th>Canceladas</th><th>En tránsito</th><th>Gasto Ads</th></tr>
+      <tr><th>Semana (Lun-Dom)</th><th>Enviadas</th><th>Entregadas</th><th>Devueltas</th><th>% Ent.</th><th>% Dev.</th><th>Canceladas</th><th>En tránsito</th><th>Gasto Ads</th><th>Gan. Estimada</th><th>Gan. Real</th></tr>
       ${allWeeks.map(w=>{
         const d=semanas[w.key]||{env:0,ent:0,dev:0,canc:0,trans:0,total:0}
         const gasto=gastoByWeek[w.key]||0
+        const g=ganByWeek[w.key]||{ganEst:0,ganReal:0}
         const pctEnt=d.total>0?Math.round(d.ent/d.total*100):0
         const pctDev=d.total>0?Math.round(d.dev/d.total*100):0
         const devColor=pctDev>20?'color:var(--red)':pctDev>15?'color:var(--amber)':d.total>0?'color:var(--green)':'color:var(--muted)'
         const isEmpty=d.total===0
         const rowStyle=isEmpty?'opacity:0.4':''
+        const ganEstColor=g.ganEst>0?'color:var(--green)':g.ganEst<0?'color:var(--red)':'color:var(--muted)'
+        const ganRealColor=g.ganReal>0?'color:var(--green)':g.ganReal<0?'color:var(--red)':'color:var(--muted)'
         return`<tr style="${rowStyle}">
           <td data-label="Semana" style="font-family:monospace;font-size:12px;white-space:nowrap">${w.key}</td>
           <td data-label="Enviadas"><strong>${d.env||0}</strong></td>
@@ -864,6 +945,8 @@ async function cargarResumenSemanal(){
           <td data-label="Canceladas">${d.canc||0}</td>
           <td data-label="En tránsito">${d.trans||0}</td>
           <td data-label="Gasto">${gasto?'$'+fmt(gasto):'—'}</td>
+          <td data-label="Gan. Estimada" style="${ganEstColor};font-weight:600">${isEmpty?'—':'$'+fmt(g.ganEst)}</td>
+          <td data-label="Gan. Real" style="${ganRealColor};font-weight:600">${isEmpty?'—':'$'+fmt(g.ganReal)}</td>
         </tr>`
       }).join('')}
     </table></div>`
@@ -1964,25 +2047,31 @@ async function cargarReporteData(){
   const usandoDropi=tipo==='dropi'
   const campo=usandoDropi?'fecha_dropi':'fecha'
 
-  // 1. Auto: mapeos agrupados por producto
+  // 1. Auto: mapeos agrupados por producto (normalizado: case + tildes)
   const{data:mapeos}=await sb.from('mapeos').select('*').eq(campo,fecha)
   const porProd={}
   let totConf=0,totCanc=0,totPend=0,totOrd=0
   if(mapeos)for(const m of mapeos){
-    const prod=m.producto||'Sin producto'
-    if(!porProd[prod])porProd[prod]={ord:0,conf:0,canc:0,pend:0,byQty:{}}
-    porProd[prod].ord++;totOrd++
+    const display=m.producto||'Sin producto'
+    const key=_normProd(display)||'sin_producto'
+    if(!porProd[key])porProd[key]={display,ord:0,conf:0,canc:0,pend:0,byQtyConf:{},byQtyCanc:{},byQtyPend:{},byFechaDropi:{}}
+    porProd[key].ord++;totOrd++
     const q=m.cantidad||1
-    porProd[prod].byQty[q]=(porProd[prod].byQty[q]||0)+1
-    if(m.estado_final==='CANCELADO'){porProd[prod].canc++;totCanc++}
-    else if(m.estado_final==='PENDIENTE CONFIRMACION'){porProd[prod].pend++;totPend++}
-    else if(m.estado_final){porProd[prod].conf++;totConf++}
+    if(m.estado_final==='CANCELADO'){porProd[key].canc++;totCanc++;porProd[key].byQtyCanc[q]=(porProd[key].byQtyCanc[q]||0)+1}
+    else if(m.estado_final==='PENDIENTE CONFIRMACION'){porProd[key].pend++;totPend++;porProd[key].byQtyPend[q]=(porProd[key].byQtyPend[q]||0)+1}
+    else if(m.estado_final){porProd[key].conf++;totConf++;porProd[key].byQtyConf[q]=(porProd[key].byQtyConf[q]||0)+1}
+    else {porProd[key].pend++;totPend++;porProd[key].byQtyPend[q]=(porProd[key].byQtyPend[q]||0)+1}
+    // Desglose por fecha_dropi (solo cuando filtramos por fecha de compra)
+    if(!usandoDropi){
+      const fd=m.fecha_dropi||'Sin subir'
+      porProd[key].byFechaDropi[fd]=(porProd[key].byFechaDropi[fd]||0)+1
+    }
   }
 
-  // 2. Manual: reportes_diarios existentes
+  // 2. Manual: reportes_diarios existentes (indexados por nombre normalizado)
   const{data:reportes}=await sb.from('reportes_diarios').select('*').eq('fecha',fecha).eq('usuario_id',me?.id)
   const repByProd={}
-  if(reportes)for(const r of reportes)repByProd[r.producto_nombre||'']=r
+  if(reportes)for(const r of reportes)repByProd[_normProd(r.producto_nombre)||'']=r
 
   const prods=Object.keys(porProd)
 
@@ -1991,16 +2080,42 @@ async function cargarReporteData(){
   if(prods.length===0){
     autoHtml='<div class="alert alert-blue">Sin datos para esta(s) fecha(s)</div>'
   }else{
-    autoHtml=prods.map(p=>{
-      const d=porProd[p],rep=repByProd[p]
-      const pid=p.replace(/\s+/g,'_')
-      // Desglose por unidades
-      const qtyKeys=Object.keys(d.byQty).map(Number).sort()
-      const qtyHtml=qtyKeys.map(q=>`<div class="fld"><label>Órd ${q}u</label><input type="number" value="${d.byQty[q]}" disabled style="${_autoStyle}"></div>`).join('')
+    autoHtml=prods.map(key=>{
+      const d=porProd[key],rep=repByProd[key]
+      const p=d.display
+      const pid=key.replace(/\s+/g,'_')
+      // Desglose por unidades, separado por estado
+      const allQtys=new Set([...Object.keys(d.byQtyConf),...Object.keys(d.byQtyCanc),...Object.keys(d.byQtyPend)].map(Number))
+      const qtyKeys=[...allQtys].sort((a,b)=>a-b)
+      const renderQtyRow=(label,emoji,color,byQ)=>{
+        if(!qtyKeys.length)return ''
+        const cells=qtyKeys.map(q=>`<div style="flex:1;min-width:60px;background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:6px 8px;text-align:center"><div style="font-size:10px;color:var(--muted)">${q}u</div><div style="font-size:14px;font-weight:600;color:${color}">${byQ[q]||0}</div></div>`).join('')
+        return`<div style="margin-bottom:6px"><div style="font-size:11px;color:var(--muted);margin-bottom:4px">${emoji} ${label}</div><div style="display:flex;gap:6px;flex-wrap:wrap">${cells}</div></div>`
+      }
+      const qtyHtml=`${renderQtyRow('Confirmadas','✅','var(--green)',d.byQtyConf)}${renderQtyRow('Canceladas','❌','var(--red)',d.byQtyCanc)}${renderQtyRow('Pendientes','⏳','var(--amber)',d.byQtyPend)}`
+      // Desglose por fecha_dropi (solo si tipo='compra')
+      let fechaDropiHtml=''
+      if(!usandoDropi){
+        const fds=Object.keys(d.byFechaDropi).sort((a,b)=>{
+          if(a==='Sin subir')return 1
+          if(b==='Sin subir')return -1
+          return a.localeCompare(b)
+        })
+        if(fds.length){
+          const items=fds.map(fd=>{
+            const n=d.byFechaDropi[fd]
+            const isToday=fd===today()
+            const lbl=fd==='Sin subir'?'⚠️ Sin subir':(isToday?`📍 ${fd}`:fd)
+            const color=fd==='Sin subir'?'var(--amber)':(isToday?'var(--blue)':'var(--text)')
+            return`<span style="display:inline-block;background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:11px;color:${color}"><strong>${n}</strong> · ${lbl}</span>`
+          }).join(' ')
+          fechaDropiHtml=`<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)"><div style="font-size:11px;color:var(--muted);margin-bottom:6px">📅 Subidas a Dropi por fecha</div><div style="display:flex;gap:6px;flex-wrap:wrap">${items}</div></div>`
+        }
+      }
       return`<div class="card" style="margin-bottom:10px;border-left:3px solid var(--green)">
-        <div style="font-weight:600;margin-bottom:8px">${p}</div>
-        <div class="form-grid g${Math.min(qtyKeys.length+3,6)}">
-          ${qtyHtml}
+        <div style="font-weight:600;margin-bottom:8px">${p} <span style="font-size:12px;color:var(--muted);font-weight:400">· Total: ${d.ord}</span></div>
+        ${qtyHtml}
+        <div class="form-grid g3" style="margin-top:8px">
           <div class="fld"><label>✅ Confirm.</label><input type="number" value="${d.conf}" disabled style="${_autoStyle}"></div>
           <div class="fld"><label>❌ Cancel.</label><input type="number" value="${d.canc}" disabled style="${_autoStyle}"></div>
           <div class="fld"><label>⏳ Pend.</label><input type="number" value="${d.pend}" disabled style="${_autoStyle}"></div>
@@ -2009,6 +2124,7 @@ async function cargarReporteData(){
           <div class="fld"><label>Conversaciones (manual)</label>
             <input type="number" id="rc-${pid}" value="${rep?.conversaciones||0}" min="0" class="rep-conv" data-prod="${p}" ${!esHoy?'disabled style="'+_autoStyle+'"':''}></div>
         </div>`:''}
+        ${fechaDropiHtml}
       </div>`
     }).join('')
     autoHtml+=`<div class="cards-row c4" style="margin-top:14px">
@@ -3626,6 +3742,11 @@ async function renderMetaPortafolio(el,isAdmin){
   const insCountByAcc={}
   for(const i of (insAccs||[])){insCountByAcc[i.account_id]=(insCountByAcc[i.account_id]||0)+1}
 
+  // Gasto de HOY por cuenta (para filtro "Activas")
+  const{data:insHoy}=await sb.from('meta_insights').select('account_id,spend').eq('nivel','campaign').eq('fecha',today())
+  const tieneGastoHoy={}
+  for(const i of (insHoy||[])){if((i.spend||0)>0)tieneGastoHoy[i.account_id]=true}
+
   // Break-even
   const prod=productos[0]||{}
   const p2=prod.precio_2u||129900,c2=prod.costo_2u||36000
@@ -3673,7 +3794,7 @@ async function renderMetaPortafolio(el,isAdmin){
     const hasData=nIns>0
     const statusIcon=hasData?'✅':'⚠️'
 
-    html+=`<div class="meta-cuenta-wrap" data-estado="${cuenta.estado}" data-nombre="${(cuenta.nombre||cuenta.account_id).toLowerCase()}" data-accid="${cuenta.account_id}" style="margin-bottom:8px">
+    html+=`<div class="meta-cuenta-wrap" data-estado="${cuenta.estado}" data-tienegastohoy="${tieneGastoHoy[cuenta.account_id]?1:0}" data-nombre="${(cuenta.nombre||cuenta.account_id).toLowerCase()}" data-accid="${cuenta.account_id}" style="margin-bottom:8px">
       <div class="card" style="padding:12px;cursor:pointer;user-select:none" onclick="toggleMetaCuenta('${cuenta.account_id}')">
         <div style="display:flex;align-items:center;gap:10px">
           <span id="meta-sync-status-${cuenta.account_id}" style="font-size:18px;flex-shrink:0">${statusIcon}</span>
@@ -3908,9 +4029,11 @@ window.filterMetaCuentas=()=>{
   const filter=window._metaFilterState||'all'
   document.querySelectorAll('.meta-cuenta-wrap').forEach(el=>{
     const nombre=el.dataset.nombre||''
-    const estado=el.dataset.estado||''
+    const tieneGastoHoy=el.dataset.tienegastohoy==='1'
     const matchSearch=!q||nombre.includes(q)
-    const matchFilter=filter==='all'||estado===filter
+    let matchFilter=true
+    if(filter==='ACTIVE')matchFilter=tieneGastoHoy
+    else if(filter==='INACTIVE')matchFilter=!tieneGastoHoy
     el.style.display=(matchSearch&&matchFilter)?'':'none'
   })
 }

@@ -1157,7 +1157,15 @@ async function pageAdminProductos(c){
       <div id="pmsg-${prod.id}" style="margin-top:8px"></div>
       <div id="sim-${prod.id}" style="margin-top:10px"></div>
     </div>`).join('')}
-    <div id="prod-modal-area"></div>`
+    <div id="prod-modal-area"></div>
+    <div class="divider" style="margin-top:30px"></div>
+    <div class="page-title" style="margin-top:20px">🗺️ Maestros de carriers</div>
+    <div class="page-sub">Reglas de despacho por ciudad. Cada maestro tiene historial completo de versiones.</div>
+    <div id="maestros-section"><div class="loading">Cargando maestros...</div></div>
+    <div id="maestros-modal-area"></div>`
+
+  // Cargar sección de maestros al final (solo admin)
+  if(me?.rol==='admin')cargarSeccionMaestros()
 
   window.saveProd=async(id)=>{
     const g=s=>parseInt(document.getElementById(s+'-'+id).value)||0
@@ -4619,6 +4627,634 @@ window.verAnalisisGuardado=async(id)=>{
   showIAResult(data.nivel,data.target_nombre,{analisis:data.analisis,tokens_in:data.tokens_in,tokens_out:data.tokens_out,costo_usd:parseFloat(data.costo_usd||0)},null,data.desde||'—',data.hasta||'—')
 }
 
+
+// ── MAESTROS DE CARRIERS ──────────────────────────────────
+// Bloqueo: este módulo es SOLO admin. Verificado en cada acción.
+function _guardAdmin(){
+  if(me?.rol!=='admin'){alert('Acción restringida a administradores');return false}
+  return true
+}
+
+async function cargarSeccionMaestros(){
+  const el=document.getElementById('maestros-section')
+  if(!el)return
+  if(me?.rol!=='admin'){el.innerHTML='<div class="alert alert-red">Solo admin</div>';return}
+  el.innerHTML='<div class="loading">Cargando...</div>'
+  try{
+    const{data:maestros}=await sb.from('maestros').select('id,codigo,nombre,niveles,es_default,created_at').order('codigo')
+    if(!maestros?.length){el.innerHTML='<div class="alert alert-blue">No hay maestros configurados</div>';return}
+    const usoPorMaestro={}
+    for(const p of productos){const code=p.maestro_codigo||'GEN';if(!usoPorMaestro[code])usoPorMaestro[code]=[];usoPorMaestro[code].push(p.nombre)}
+    const{data:versiones}=await sb.from('maestros_versiones').select('maestro_codigo,version,desactivado_en').order('version',{ascending:false})
+    const versByCode={}
+    for(const v of (versiones||[])){if(!versByCode[v.maestro_codigo])versByCode[v.maestro_codigo]=[];versByCode[v.maestro_codigo].push(v)}
+    const{data:ciuCounts}=await sb.from('maestro_ciudades').select('maestro_id')
+    const ciudadesPorMaestro={}
+    for(const c of (ciuCounts||[])){ciudadesPorMaestro[c.maestro_id]=(ciudadesPorMaestro[c.maestro_id]||0)+1}
+
+    let html=`<div style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn-sm btn-primary" onclick="modalAgregarMaestro()">➕ Agregar maestro nuevo</button>
+      <button class="btn-sm btn-outline" onclick="descargarPlantillaMaestro()">📄 Descargar plantilla vacía</button>
+      <button class="btn-sm btn-outline" onclick="modalProbadorMaestro()">🧪 Probador en vivo</button>
+    </div>`
+
+    for(const m of maestros){
+      const enUso=usoPorMaestro[m.codigo]||[]
+      const vers=versByCode[m.codigo]||[]
+      const nCiu=ciudadesPorMaestro[m.id]||0
+      const vActiva=vers.find(v=>!v.desactivado_en)
+      const vNum=vActiva?.version||0
+      html+=`<div class="card" style="margin-bottom:14px;border-left:3px solid var(--blue)">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+          <div style="flex:1;min-width:240px">
+            <div style="font-weight:600;font-size:15px;margin-bottom:4px">${m.codigo} — ${m.nombre||''}</div>
+            <div style="font-size:12px;color:var(--muted);line-height:1.6">
+              📦 ${fmt(nCiu)} ciudades · ${m.niveles} niveles · Versión activa: <strong>${vNum?'v'+vNum:'(sin versionar)'}</strong><br>
+              ${enUso.length?'🔗 En uso por: <strong>'+enUso.join(', ')+'</strong>':'⚠️ Sin productos asignados'}
+            </div>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button class="btn-sm btn-outline" onclick="statsMaestro('${m.codigo}','${m.id}')" title="Estadísticas">📊 Stats</button>
+            <button class="btn-sm btn-outline" onclick="exportarMaestro('${m.codigo}','${m.id}')" title="Exportar a Excel">📥 Exportar</button>
+            <button class="btn-sm btn-blue" onclick="modalReemplazarMaestro('${m.codigo}','${m.id}')" title="Reemplazar con xlsx">🔄 Reemplazar</button>
+            <button class="btn-sm btn-outline" onclick="modalHistorialMaestro('${m.codigo}')" title="Ver historial">🕐 Historial (${vers.length})</button>
+          </div>
+        </div>
+      </div>`
+    }
+    el.innerHTML=html
+  }catch(e){el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`}
+}
+
+// ── Helpers de validación y parseo de xlsx ────────────────
+async function _parseXlsxMaestro(file){
+  const ab=await file.arrayBuffer()
+  const wb=XLSX.read(ab,{type:'array'})
+  const ws=wb.Sheets[wb.SheetNames[0]]
+  return XLSX.utils.sheet_to_json(ws,{defval:''})
+}
+
+function _detectarNiveles(rows){
+  let max=1
+  for(const r of rows){
+    if(String(r.d4||'').trim())max=Math.max(max,4)
+    else if(String(r.d3||'').trim())max=Math.max(max,3)
+    else if(String(r.d2||'').trim())max=Math.max(max,2)
+  }
+  return max
+}
+
+async function _validarRowsMaestro(rows){
+  const errores=[],warnings=[]
+  if(!rows.length)return{ok:false,errores:['El archivo está vacío']}
+  const cols=Object.keys(rows[0]||{}).map(c=>c.toLowerCase())
+  if(!cols.includes('ciudad'))errores.push('Falta columna obligatoria: ciudad')
+  if(errores.length)return{ok:false,errores}
+
+  const ciudadesDB=await fetchAllRows('ciudades_dropi','id,nombre_dropi,departamento,key_norm')
+  const ciudadesNorm={}
+  for(const c of ciudadesDB){
+    const key=c.key_norm||_normProd(c.nombre_dropi)
+    if(!ciudadesNorm[key])ciudadesNorm[key]=[]
+    ciudadesNorm[key].push(c)
+  }
+
+  const filasLimpias=[]
+  const ciudadesVistas=new Set()
+  let cobertura=0,canceladas=0,sinCob=0,interOnly=0,i=0
+  for(const r of rows){
+    i++
+    const ciudad=(r.ciudad||r.CIUDAD||'').toString().trim()
+    if(!ciudad){warnings.push(`Fila ${i}: ciudad vacía, saltada`);continue}
+    const dept=(r.dept_codigo||r.DEPT_CODIGO||r.dept||'').toString().trim()
+    const d1=(r.d1||r.D1||'').toString().trim().toUpperCase()
+    const d2=(r.d2||r.D2||'').toString().trim().toUpperCase()
+    const d3=(r.d3||r.D3||'').toString().trim().toUpperCase()
+    const d4=(r.d4||r.D4||'').toString().trim().toUpperCase()
+    const fEnv=parseInt(r.flete_envia||r.FLETE_ENVIA||0)||0
+    const fCoord=parseInt(r.flete_coord||r.FLETE_COORD||0)||0
+    const fInter=parseInt(r.flete_inter||r.FLETE_INTER||0)||0
+    for(const[label,v] of [['d1',d1],['d2',d2],['d3',d3],['d4',d4]]){
+      if(v&&!['E','C',''].includes(v))errores.push(`Fila ${i} (${ciudad}): ${label}='${v}' inválido. Solo E, C o vacío.`)
+    }
+    if(fEnv<0||fCoord<0||fInter<0)errores.push(`Fila ${i} (${ciudad}): fletes no pueden ser negativos`)
+    const norm=_normProd(ciudad)
+    const matches=ciudadesNorm[norm]||[]
+    let ciuMatch=null
+    if(matches.length===1)ciuMatch=matches[0]
+    else if(matches.length>1){
+      if(dept)ciuMatch=matches.find(c=>(c.departamento||'').toUpperCase()===dept.toUpperCase())
+      if(!ciuMatch){warnings.push(`Fila ${i}: "${ciudad}" tiene ${matches.length} coincidencias. Indica dept_codigo. Saltada.`);continue}
+    }else{warnings.push(`Fila ${i}: "${ciudad}" no existe en tabla ciudades_dropi. Saltada.`);continue}
+    if(ciudadesVistas.has(ciuMatch.id)){warnings.push(`Fila ${i} (${ciudad}): duplicada, conservando primera.`);continue}
+    ciudadesVistas.add(ciuMatch.id)
+    const todos=[d1,d2,d3,d4].filter(v=>v)
+    if(!todos.length)sinCob++
+    else if(todos.every(v=>v==='C'))canceladas++
+    else cobertura++
+    if(fEnv===0&&fCoord===0&&fInter>0)interOnly++
+    filasLimpias.push({ciudad_id:ciuMatch.id,d1:d1||null,d2:d2||null,d3:d3||null,d4:d4||null,flete_envia:fEnv,flete_coord:fCoord,flete_inter:fInter,dept_codigo:dept||ciuMatch.departamento||''})
+  }
+  return{ok:errores.length===0,errores,warnings,filasLimpias,statsResumen:{total:filasLimpias.length,cobertura,canceladas,sinCob,interOnly},nivelesDetectados:_detectarNiveles(filasLimpias)}
+}
+
+// ── Reemplazar maestro ────────────────────────────────────
+window.modalReemplazarMaestro=async(codigo,maestroId)=>{
+  if(!_guardAdmin())return
+  const enUso=productos.filter(p=>(p.maestro_codigo||'GEN')===codigo).map(p=>p.nombre)
+  closeModal()
+  const div=document.createElement('div')
+  div.id='user-modal';div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:600px">
+    <div class="modal-title">🔄 Reemplazar maestro ${codigo}</div>
+    ${enUso.length?`<div class="alert alert-amber" style="margin-top:10px"><strong>⚠️ Este maestro lo usan ${enUso.length} producto(s):</strong><br>${enUso.join(', ')}<br>Las órdenes futuras usarán las nuevas reglas.</div>`:''}
+    <div class="form-grid" style="margin-top:14px">
+      <div class="fld"><label>Archivo xlsx con las nuevas reglas</label>
+        <input type="file" id="mr-file" accept=".xlsx,.xls"></div>
+      <div class="fld"><label>Nota del cambio (opcional)</label>
+        <input type="text" id="mr-nota" placeholder="Ej: Servientrega subió tarifas costa norte"></div>
+    </div>
+    <div id="mr-msg" style="margin-top:10px"></div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
+      <button class="btn-sm btn-primary" onclick="reemplazarMaestroValidar('${codigo}','${maestroId}')">Validar y previsualizar</button>
+    </div>
+  </div>`
+  div.onclick=closeModal
+  document.body.appendChild(div)
+}
+
+window.reemplazarMaestroValidar=async(codigo,maestroId)=>{
+  if(!_guardAdmin())return
+  const file=document.getElementById('mr-file')?.files?.[0]
+  const nota=document.getElementById('mr-nota')?.value?.trim()||''
+  const msg=document.getElementById('mr-msg')
+  if(!file){msg.innerHTML='<div class="alert alert-red">Selecciona un archivo</div>';return}
+  msg.innerHTML='<div class="loading">Validando archivo...</div>'
+  try{
+    const rows=await _parseXlsxMaestro(file)
+    const v=await _validarRowsMaestro(rows)
+    if(v.errores.length){msg.innerHTML=`<div class="alert alert-red"><strong>${v.errores.length} errores:</strong><br>${v.errores.slice(0,10).join('<br>')}${v.errores.length>10?'<br>...':''}</div>`;return}
+    window._mrData={codigo,maestroId,nota,filas:v.filasLimpias,niveles:v.nivelesDetectados}
+    const s=v.statsResumen
+    msg.innerHTML=`<div class="alert alert-green"><strong>✅ Archivo válido</strong></div>
+      <div class="card" style="margin-top:10px;padding:12px">
+        <div style="font-weight:600;margin-bottom:8px">Vista previa del cambio</div>
+        <div style="font-size:12px;line-height:1.8">
+          📊 Total filas: <strong>${fmt(s.total)}</strong><br>
+          ✅ Con cobertura: <strong>${fmt(s.cobertura)}</strong><br>
+          ❌ Canceladas: <strong>${fmt(s.canceladas)}</strong><br>
+          ⚠️ Sin cobertura: <strong>${fmt(s.sinCob)}</strong><br>
+          🚚 Solo Interrapidísimo: <strong>${fmt(s.interOnly)}</strong><br>
+          🎚️ Niveles detectados: <strong>${v.nivelesDetectados}</strong>
+        </div>
+        ${v.warnings.length?`<div class="alert alert-amber" style="margin-top:10px;font-size:11px"><strong>${v.warnings.length} avisos:</strong><br>${v.warnings.slice(0,5).join('<br>')}${v.warnings.length>5?'<br>...y '+(v.warnings.length-5)+' más':''}</div>`:''}
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn-sm btn-green" onclick="reemplazarMaestroAplicar()">✅ Confirmar reemplazo</button>
+        <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
+      </div>`
+  }catch(e){msg.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`}
+}
+
+window.reemplazarMaestroAplicar=async()=>{
+  if(!_guardAdmin())return
+  const d=window._mrData
+  if(!d){alert('Sesión perdida, reabre el modal');return}
+  const msg=document.getElementById('mr-msg')
+  msg.innerHTML='<div class="loading">Procesando... no cierres esta ventana</div>'
+  try{
+    const{data:ciuActuales}=await sb.from('maestro_ciudades').select('ciudad_id,d1,d2,d3,d4,flete_envia,flete_coord,flete_inter,dept_codigo').eq('maestro_id',d.maestroId)
+    const{data:mInfo}=await sb.from('maestros').select('niveles,nombre').eq('id',d.maestroId).maybeSingle()
+    const{data:vActual}=await sb.from('maestros_versiones').select('id,version,activado_en').eq('maestro_codigo',d.codigo).is('desactivado_en',null).maybeSingle()
+    let ordsActuales=0
+    if(vActual?.activado_en){
+      const prodNombres=productos.filter(p=>(p.maestro_codigo||'GEN')===d.codigo).map(p=>p.nombre)
+      if(prodNombres.length){
+        const{count}=await sb.from('mapeos').select('id',{count:'exact',head:true}).in('producto',prodNombres).gte('created_at',vActual.activado_en)
+        ordsActuales=count||0
+      }
+    }
+    let nextVersion=1
+    if(vActual){
+      await sb.from('maestros_versiones').update({desactivado_en:new Date().toISOString(),ordenes_procesadas:ordsActuales}).eq('id',vActual.id)
+      nextVersion=(vActual.version||0)+1
+    }else{
+      if(ciuActuales?.length){
+        await sb.from('maestros_versiones').insert({
+          maestro_codigo:d.codigo,version:1,
+          activado_en:new Date(Date.now()-86400000).toISOString(),
+          desactivado_en:new Date().toISOString(),
+          activado_por:me?.id,
+          nota:'Versión inicial (migración automática)',
+          ciudades_data:ciuActuales,
+          niveles:mInfo?.niveles||3,
+          nombre:mInfo?.nombre||d.codigo,
+          ordenes_procesadas:ordsActuales
+        })
+        nextVersion=2
+      }
+    }
+    await sb.from('maestro_ciudades').delete().eq('maestro_id',d.maestroId)
+    const inserts=d.filas.map(f=>({...f,maestro_id:d.maestroId}))
+    for(let i=0;i<inserts.length;i+=500){
+      const chunk=inserts.slice(i,i+500)
+      const{error}=await sb.from('maestro_ciudades').insert(chunk)
+      if(error)throw new Error('Error insertando ciudades: '+error.message)
+    }
+    if(d.niveles!==mInfo?.niveles){
+      await sb.from('maestros').update({niveles:d.niveles}).eq('id',d.maestroId)
+    }
+    await sb.from('maestros_versiones').insert({
+      maestro_codigo:d.codigo,version:nextVersion,
+      activado_en:new Date().toISOString(),
+      desactivado_en:null,activado_por:me?.id,
+      nota:d.nota||null,ciudades_data:d.filas,
+      niveles:d.niveles,nombre:mInfo?.nombre||d.codigo,
+      ordenes_procesadas:0
+    })
+    logAction('maestro_reemplazado',{codigo:d.codigo,version:nextVersion,filas:d.filas.length,nota:d.nota}).catch(()=>{})
+    msg.innerHTML='<div class="alert alert-green">✅ Maestro reemplazado correctamente</div>'
+    setTimeout(()=>{closeModal();cargarSeccionMaestros()},1200)
+  }catch(e){msg.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`}
+}
+
+// ── Agregar maestro nuevo ─────────────────────────────────
+window.modalAgregarMaestro=()=>{
+  if(!_guardAdmin())return
+  closeModal()
+  const div=document.createElement('div')
+  div.id='user-modal';div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:600px">
+    <div class="modal-title">➕ Agregar maestro nuevo</div>
+    <div class="form-grid g2" style="margin-top:14px">
+      <div class="fld"><label>Código (corto)</label>
+        <input type="text" id="ma-codigo" placeholder="TRIFLEX" maxlength="20" style="text-transform:uppercase"></div>
+      <div class="fld"><label>Nombre (descripción)</label>
+        <input type="text" id="ma-nombre" placeholder="Triflex (3 niveles)"></div>
+    </div>
+    <div class="fld" style="margin-top:10px"><label>Archivo xlsx con las reglas</label>
+      <input type="file" id="ma-file" accept=".xlsx,.xls">
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">Niveles se detectan automáticamente del archivo (d1, d2, d3, d4)</div></div>
+    <div class="fld" style="margin-top:10px"><label>Nota inicial (opcional)</label>
+      <input type="text" id="ma-nota" placeholder="Versión inicial"></div>
+    <div id="ma-msg" style="margin-top:10px"></div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
+      <button class="btn-sm btn-primary" onclick="agregarMaestroValidar()">Validar y previsualizar</button>
+    </div>
+  </div>`
+  div.onclick=closeModal
+  document.body.appendChild(div)
+}
+
+window.agregarMaestroValidar=async()=>{
+  if(!_guardAdmin())return
+  const codigo=document.getElementById('ma-codigo')?.value?.trim().toUpperCase()
+  const nombre=document.getElementById('ma-nombre')?.value?.trim()
+  const nota=document.getElementById('ma-nota')?.value?.trim()||''
+  const file=document.getElementById('ma-file')?.files?.[0]
+  const msg=document.getElementById('ma-msg')
+  if(!codigo||!nombre){msg.innerHTML='<div class="alert alert-red">Código y nombre son obligatorios</div>';return}
+  if(!/^[A-Z0-9_]+$/.test(codigo)){msg.innerHTML='<div class="alert alert-red">Código solo letras mayúsculas, números y guión bajo</div>';return}
+  if(!file){msg.innerHTML='<div class="alert alert-red">Selecciona un archivo</div>';return}
+  const{data:exist}=await sb.from('maestros').select('id').eq('codigo',codigo).maybeSingle()
+  if(exist){msg.innerHTML=`<div class="alert alert-red">Ya existe un maestro con código <strong>${codigo}</strong></div>`;return}
+  msg.innerHTML='<div class="loading">Validando archivo...</div>'
+  try{
+    const rows=await _parseXlsxMaestro(file)
+    const v=await _validarRowsMaestro(rows)
+    if(v.errores.length){msg.innerHTML=`<div class="alert alert-red"><strong>${v.errores.length} errores:</strong><br>${v.errores.slice(0,10).join('<br>')}</div>`;return}
+    window._maData={codigo,nombre,nota,filas:v.filasLimpias,niveles:v.nivelesDetectados}
+    const s=v.statsResumen
+    msg.innerHTML=`<div class="alert alert-green"><strong>✅ Archivo válido</strong></div>
+      <div class="card" style="margin-top:10px;padding:12px">
+        <div style="font-weight:600;margin-bottom:8px">Vista previa de ${codigo}</div>
+        <div style="font-size:12px;line-height:1.8">
+          📊 Total: <strong>${fmt(s.total)}</strong> · ✅ Cobertura: <strong>${fmt(s.cobertura)}</strong> · ❌ Canc: <strong>${fmt(s.canceladas)}</strong> · ⚠️ Sin cob: <strong>${fmt(s.sinCob)}</strong><br>
+          🎚️ Niveles detectados: <strong>${v.nivelesDetectados}</strong>
+        </div>
+        ${v.warnings.length?`<div class="alert alert-amber" style="margin-top:10px;font-size:11px"><strong>${v.warnings.length} avisos:</strong><br>${v.warnings.slice(0,5).join('<br>')}</div>`:''}
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn-sm btn-green" onclick="agregarMaestroAplicar()">✅ Crear maestro</button>
+        <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
+      </div>`
+  }catch(e){msg.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`}
+}
+
+window.agregarMaestroAplicar=async()=>{
+  if(!_guardAdmin())return
+  const d=window._maData
+  if(!d){alert('Sesión perdida');return}
+  const msg=document.getElementById('ma-msg')
+  msg.innerHTML='<div class="loading">Creando maestro...</div>'
+  try{
+    const{data:nuevoMaestro,error:mErr}=await sb.from('maestros').insert({codigo:d.codigo,nombre:d.nombre,niveles:d.niveles,es_default:false}).select().single()
+    if(mErr)throw new Error('Error creando maestro: '+mErr.message)
+    const inserts=d.filas.map(f=>({...f,maestro_id:nuevoMaestro.id}))
+    for(let i=0;i<inserts.length;i+=500){
+      const chunk=inserts.slice(i,i+500)
+      const{error}=await sb.from('maestro_ciudades').insert(chunk)
+      if(error)throw new Error('Error insertando ciudades: '+error.message)
+    }
+    await sb.from('maestros_versiones').insert({
+      maestro_codigo:d.codigo,version:1,
+      activado_en:new Date().toISOString(),
+      desactivado_en:null,activado_por:me?.id,
+      nota:d.nota||'Versión inicial',
+      ciudades_data:d.filas,niveles:d.niveles,
+      nombre:d.nombre,ordenes_procesadas:0
+    })
+    logAction('maestro_creado',{codigo:d.codigo,nombre:d.nombre,filas:d.filas.length}).catch(()=>{})
+    msg.innerHTML='<div class="alert alert-green">✅ Maestro creado correctamente</div>'
+    setTimeout(()=>{closeModal();cargarSeccionMaestros()},1200)
+  }catch(e){msg.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`}
+}
+
+// ── Exportar maestro a xlsx ───────────────────────────────
+window.exportarMaestro=async(codigo,maestroId)=>{
+  if(!_guardAdmin())return
+  try{
+    const{data:ciu}=await sb.from('maestro_ciudades').select('ciudad_id,d1,d2,d3,d4,flete_envia,flete_coord,flete_inter,dept_codigo').eq('maestro_id',maestroId)
+    const ciudades=await fetchAllRows('ciudades_dropi','id,nombre_dropi,departamento,key_norm')
+    const ciuById={};for(const c of ciudades)ciuById[c.id]=c
+    const rows=(ciu||[]).map(r=>{
+      const c=ciuById[r.ciudad_id]||{}
+      return{ciudad:c.nombre_dropi||'',dept_codigo:r.dept_codigo||c.departamento||'',d1:r.d1||'',d2:r.d2||'',d3:r.d3||'',d4:r.d4||'',flete_envia:r.flete_envia||0,flete_coord:r.flete_coord||0,flete_inter:r.flete_inter||0}
+    }).sort((a,b)=>a.ciudad.localeCompare(b.ciudad))
+    const ws=XLSX.utils.json_to_sheet(rows)
+    const wb=XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb,ws,codigo)
+    XLSX.writeFile(wb,`maestro_${codigo}_${today()}.xlsx`)
+    logAction('maestro_exportado',{codigo}).catch(()=>{})
+  }catch(e){alert('Error exportando: '+e.message)}
+}
+
+// ── Plantilla vacía ───────────────────────────────────────
+window.descargarPlantillaMaestro=()=>{
+  if(!_guardAdmin())return
+  const rows=[
+    {ciudad:'BOGOTA',dept_codigo:'CUN',d1:'E',d2:'E',d3:'E',d4:'',flete_envia:8000,flete_coord:0,flete_inter:9500},
+    {ciudad:'MEDELLIN',dept_codigo:'ANT',d1:'E',d2:'E',d3:'',d4:'',flete_envia:9000,flete_coord:0,flete_inter:10000},
+    {ciudad:'CALI',dept_codigo:'VAL',d1:'C',d2:'C',d3:'C',d4:'',flete_envia:0,flete_coord:0,flete_inter:0}
+  ]
+  const ws=XLSX.utils.json_to_sheet(rows)
+  const wb=XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb,ws,'plantilla')
+  XLSX.writeFile(wb,`plantilla_maestro_${today()}.xlsx`)
+}
+
+// ── Estadísticas de un maestro ────────────────────────────
+window.statsMaestro=async(codigo,maestroId)=>{
+  if(!_guardAdmin())return
+  closeModal()
+  const div=document.createElement('div')
+  div.id='user-modal';div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:600px">
+    <div class="modal-title">📊 Estadísticas — ${codigo}</div>
+    <div id="stats-content"><div class="loading">Calculando...</div></div>
+    <div class="modal-actions"><button class="btn-sm btn-primary" onclick="closeModal()">Cerrar</button></div>
+  </div>`
+  div.onclick=closeModal
+  document.body.appendChild(div)
+  try{
+    const{data:ciu}=await sb.from('maestro_ciudades').select('d1,d2,d3,d4,flete_envia,flete_coord,flete_inter').eq('maestro_id',maestroId)
+    let cob=0,canc=0,sinCob=0,interOnly=0,coord=0,fSum=0,fCount=0
+    for(const r of (ciu||[])){
+      const todos=[r.d1,r.d2,r.d3,r.d4].filter(v=>v)
+      if(!todos.length)sinCob++
+      else if(todos.every(v=>v==='C'))canc++
+      else cob++
+      if((r.flete_envia||0)===0&&(r.flete_coord||0)===0&&(r.flete_inter||0)>0)interOnly++
+      if((r.flete_coord||0)>0)coord++
+      const fE=r.flete_envia||0
+      if(fE>0){fSum+=fE;fCount++}
+    }
+    const fProm=fCount>0?Math.round(fSum/fCount):0
+    document.getElementById('stats-content').innerHTML=`<div class="cards-row c2" style="margin-top:10px">
+      <div class="card c-green"><div class="card-label">Con cobertura</div><div class="card-val">${fmt(cob)}</div></div>
+      <div class="card c-red"><div class="card-label">Canceladas</div><div class="card-val">${fmt(canc)}</div></div>
+      <div class="card c-amber"><div class="card-label">Sin cobertura</div><div class="card-val">${fmt(sinCob)}</div></div>
+      <div class="card c-blue"><div class="card-label">Solo Interrapidísimo</div><div class="card-val">${fmt(interOnly)}</div></div>
+      <div class="card"><div class="card-label">Necesitan coord.</div><div class="card-val">${fmt(coord)}</div></div>
+      <div class="card"><div class="card-label">Flete promedio</div><div class="card-val">$${fmt(fProm)}</div></div>
+    </div>
+    <div style="margin-top:14px;font-size:12px;color:var(--muted)">Total ciudades: <strong>${fmt((ciu||[]).length)}</strong></div>`
+  }catch(e){document.getElementById('stats-content').innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`}
+}
+
+// ── Historial de versiones ────────────────────────────────
+window.modalHistorialMaestro=async(codigo)=>{
+  if(!_guardAdmin())return
+  closeModal()
+  const div=document.createElement('div')
+  div.id='user-modal';div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:780px;max-height:85vh;overflow-y:auto">
+    <div class="modal-title">🕐 Historial — ${codigo}</div>
+    <div id="hist-content"><div class="loading">Cargando versiones...</div></div>
+    <div class="modal-actions"><button class="btn-sm btn-primary" onclick="closeModal()">Cerrar</button></div>
+  </div>`
+  div.onclick=closeModal
+  document.body.appendChild(div)
+  try{
+    const{data:vers}=await sb.from('maestros_versiones').select('*,usuarios(nombre)').eq('maestro_codigo',codigo).order('version',{ascending:false})
+    if(!vers?.length){document.getElementById('hist-content').innerHTML='<div class="alert alert-blue">Sin historial. La primera versión se creará al hacer un reemplazo.</div>';return}
+    const fechaFmt=d=>d?new Date(d).toLocaleDateString('es-CO'):'—'
+    const diasEntre=(a,b)=>{if(!a||!b)return '—';return Math.round((new Date(b)-new Date(a))/86400000)+' días'}
+    let html=''
+    for(const v of vers){
+      const activa=!v.desactivado_en
+      const dur=activa?'(hasta hoy)':`(${diasEntre(v.activado_en,v.desactivado_en)})`
+      const filas=Array.isArray(v.ciudades_data)?v.ciudades_data.length:0
+      html+=`<div class="card" style="margin-bottom:10px;border-left:3px solid ${activa?'var(--green)':'var(--muted)'}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">
+          <div style="flex:1;min-width:240px">
+            <div style="font-weight:600;margin-bottom:4px">${activa?'🟢 ACTIVA — ':''}v${v.version} ${activa?'':'(histórica)'}</div>
+            <div style="font-size:12px;color:var(--muted);line-height:1.7">
+              📅 ${fechaFmt(v.activado_en)} → ${activa?'hoy':fechaFmt(v.desactivado_en)} ${dur}<br>
+              📦 ${fmt(filas)} ciudades · ${v.niveles||3} niveles<br>
+              📋 Órdenes procesadas: <strong>${fmt(v.ordenes_procesadas||0)}</strong><br>
+              👤 Por: ${v.usuarios?.nombre||'—'}<br>
+              ${v.nota?`📝 "${v.nota}"`:''}
+            </div>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-self:flex-start">
+            <button class="btn-sm btn-outline" onclick="exportarVersion('${v.id}','${codigo}',${v.version})" style="padding:4px 8px;font-size:11px">📥 Exp</button>
+            ${!activa?`<button class="btn-sm btn-outline" onclick="compararVersion('${v.id}','${codigo}',${v.version})" style="padding:4px 8px;font-size:11px">🔍 Comp</button>`:''}
+            ${!activa?`<button class="btn-sm btn-blue" onclick="restablecerVersion('${v.id}','${codigo}',${v.version})" style="padding:4px 8px;font-size:11px">⏪ Restablecer</button>`:''}
+          </div>
+        </div>
+      </div>`
+    }
+    document.getElementById('hist-content').innerHTML=html
+  }catch(e){document.getElementById('hist-content').innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`}
+}
+
+window.exportarVersion=async(verId,codigo,version)=>{
+  if(!_guardAdmin())return
+  try{
+    const{data:v}=await sb.from('maestros_versiones').select('ciudades_data').eq('id',verId).maybeSingle()
+    if(!v?.ciudades_data){alert('Sin datos');return}
+    const ciudades=await fetchAllRows('ciudades_dropi','id,nombre_dropi,departamento,key_norm')
+    const ciuById={};for(const c of ciudades)ciuById[c.id]=c
+    const rows=v.ciudades_data.map(r=>{
+      const c=ciuById[r.ciudad_id]||{}
+      return{ciudad:c.nombre_dropi||'',dept_codigo:r.dept_codigo||c.departamento||'',d1:r.d1||'',d2:r.d2||'',d3:r.d3||'',d4:r.d4||'',flete_envia:r.flete_envia||0,flete_coord:r.flete_coord||0,flete_inter:r.flete_inter||0}
+    }).sort((a,b)=>a.ciudad.localeCompare(b.ciudad))
+    const ws=XLSX.utils.json_to_sheet(rows)
+    const wb=XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb,ws,`${codigo}_v${version}`)
+    XLSX.writeFile(wb,`maestro_${codigo}_v${version}.xlsx`)
+  }catch(e){alert('Error: '+e.message)}
+}
+
+window.compararVersion=async(verId,codigo,version)=>{
+  if(!_guardAdmin())return
+  try{
+    const{data:vHist}=await sb.from('maestros_versiones').select('ciudades_data').eq('id',verId).maybeSingle()
+    const{data:vAct}=await sb.from('maestros_versiones').select('ciudades_data,version').eq('maestro_codigo',codigo).is('desactivado_en',null).maybeSingle()
+    if(!vAct){alert('No hay versión activa');return}
+    const histMap={},actMap={}
+    for(const r of (vHist?.ciudades_data||[]))histMap[r.ciudad_id]=r
+    for(const r of (vAct?.ciudades_data||[]))actMap[r.ciudad_id]=r
+    let agregadas=0,removidas=0,cambiadas=0,iguales=0
+    const todasIds=new Set([...Object.keys(histMap),...Object.keys(actMap)])
+    for(const id of todasIds){
+      const h=histMap[id],a=actMap[id]
+      if(!h)agregadas++
+      else if(!a)removidas++
+      else if(JSON.stringify(h)!==JSON.stringify(a))cambiadas++
+      else iguales++
+    }
+    alert(`Comparación v${version} vs v${vAct.version} (activa):\n\n`+
+      `✅ Iguales: ${iguales}\n`+
+      `🆕 Agregadas en activa: ${agregadas}\n`+
+      `❌ Removidas en activa: ${removidas}\n`+
+      `🔄 Modificadas: ${cambiadas}`)
+  }catch(e){alert('Error: '+e.message)}
+}
+
+window.restablecerVersion=async(verId,codigo,version)=>{
+  if(!_guardAdmin())return
+  const nota=prompt(`⚠️ ¿Restablecer ${codigo} a la versión v${version}?\n\nEsto:\n- Reemplaza la versión activa actual con las reglas de v${version}\n- La versión activa actual pasa a histórico\n- Se crea una nueva versión activa con las reglas de v${version}\n\nDeja una nota opcional (o cancela):`)
+  if(nota===null)return
+  try{
+    const{data:vHist}=await sb.from('maestros_versiones').select('ciudades_data,niveles,nombre').eq('id',verId).maybeSingle()
+    if(!vHist){alert('Versión no encontrada');return}
+    const{data:maestro}=await sb.from('maestros').select('id,niveles').eq('codigo',codigo).maybeSingle()
+    if(!maestro){alert('Maestro no encontrado');return}
+    const{data:vActual}=await sb.from('maestros_versiones').select('id,version,activado_en').eq('maestro_codigo',codigo).is('desactivado_en',null).maybeSingle()
+    let nextVersion=1
+    if(vActual){
+      const prodNombres=productos.filter(p=>(p.maestro_codigo||'GEN')===codigo).map(p=>p.nombre)
+      let ordsActuales=0
+      if(prodNombres.length){
+        const{count}=await sb.from('mapeos').select('id',{count:'exact',head:true}).in('producto',prodNombres).gte('created_at',vActual.activado_en)
+        ordsActuales=count||0
+      }
+      await sb.from('maestros_versiones').update({desactivado_en:new Date().toISOString(),ordenes_procesadas:ordsActuales}).eq('id',vActual.id)
+      nextVersion=(vActual.version||0)+1
+    }
+    await sb.from('maestro_ciudades').delete().eq('maestro_id',maestro.id)
+    const filas=Array.isArray(vHist.ciudades_data)?vHist.ciudades_data:[]
+    const inserts=filas.map(f=>({...f,maestro_id:maestro.id}))
+    for(let i=0;i<inserts.length;i+=500){
+      const chunk=inserts.slice(i,i+500)
+      const{error}=await sb.from('maestro_ciudades').insert(chunk)
+      if(error)throw new Error('Error insertando: '+error.message)
+    }
+    if(vHist.niveles&&vHist.niveles!==maestro.niveles){
+      await sb.from('maestros').update({niveles:vHist.niveles}).eq('id',maestro.id)
+    }
+    await sb.from('maestros_versiones').insert({
+      maestro_codigo:codigo,version:nextVersion,
+      activado_en:new Date().toISOString(),desactivado_en:null,
+      activado_por:me?.id,nota:(nota?nota:'Restablecida desde v'+version),
+      ciudades_data:filas,niveles:vHist.niveles||maestro.niveles,
+      nombre:vHist.nombre,ordenes_procesadas:0
+    })
+    logAction('maestro_restablecido',{codigo,desde_version:version,nueva_version:nextVersion,nota}).catch(()=>{})
+    alert(`✅ ${codigo} restablecido a las reglas de v${version}. Nueva versión activa: v${nextVersion}`)
+    closeModal()
+    cargarSeccionMaestros()
+  }catch(e){alert('Error: '+e.message)}
+}
+
+// ── Probador en vivo ──────────────────────────────────────
+window.modalProbadorMaestro=async()=>{
+  if(!_guardAdmin())return
+  closeModal()
+  const{data:maestros}=await sb.from('maestros').select('codigo,nombre').order('codigo')
+  const div=document.createElement('div')
+  div.id='user-modal';div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:600px">
+    <div class="modal-title">🧪 Probador en vivo</div>
+    <div class="modal-sub">Simula el resultado del asignador para una ciudad + oferta</div>
+    <div class="form-grid g2" style="margin-top:14px">
+      <div class="fld"><label>Maestro</label>
+        <select id="pr-maestro">${(maestros||[]).map(m=>`<option value="${m.codigo}">${m.codigo} — ${m.nombre||''}</option>`).join('')}</select></div>
+      <div class="fld"><label>Oferta</label>
+        <select id="pr-qty"><option value="1">1u</option><option value="2" selected>2u</option><option value="3">3u</option><option value="4">4u</option></select></div>
+    </div>
+    <div class="form-grid g2" style="margin-top:10px">
+      <div class="fld"><label>Ciudad</label>
+        <input type="text" id="pr-ciudad" placeholder="Ej: CALI" style="text-transform:uppercase"></div>
+      <div class="fld"><label>Dept (opcional)</label>
+        <input type="text" id="pr-dept" placeholder="Ej: VAL" style="text-transform:uppercase"></div>
+    </div>
+    <div style="margin-top:10px"><button class="btn-sm btn-primary" onclick="probarMaestro()">▶️ Probar</button></div>
+    <div id="pr-result" style="margin-top:14px"></div>
+    <div class="modal-actions"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>
+  </div>`
+  div.onclick=closeModal
+  document.body.appendChild(div)
+}
+
+window.probarMaestro=async()=>{
+  const codigo=document.getElementById('pr-maestro')?.value
+  const qty=parseInt(document.getElementById('pr-qty')?.value||2)
+  const ciudad=(document.getElementById('pr-ciudad')?.value||'').trim().toUpperCase()
+  const dept=(document.getElementById('pr-dept')?.value||'').trim().toUpperCase()
+  const res=document.getElementById('pr-result')
+  if(!ciudad){res.innerHTML='<div class="alert alert-red">Escribe una ciudad</div>';return}
+  res.innerHTML='<div class="loading">Buscando...</div>'
+  try{
+    const ciudades=await fetchAllRows('ciudades_dropi','id,nombre_dropi,departamento,key_norm')
+    const norm=_normProd(ciudad)
+    let matches=ciudades.filter(c=>(c.key_norm||_normProd(c.nombre_dropi))===norm)
+    if(dept)matches=matches.filter(c=>(c.departamento||'').toUpperCase()===dept)
+    if(!matches.length){res.innerHTML='<div class="alert alert-amber">Ciudad no encontrada. Verifica el nombre.</div>';return}
+    if(matches.length>1){res.innerHTML='<div class="alert alert-amber">Hay '+matches.length+' coincidencias. Indica dept.</div>';return}
+    const ciu=matches[0]
+    const{data:maestro}=await sb.from('maestros').select('id,niveles').eq('codigo',codigo).maybeSingle()
+    if(!maestro){res.innerHTML='<div class="alert alert-red">Maestro no encontrado</div>';return}
+    const{data:celda}=await sb.from('maestro_ciudades').select('*').eq('maestro_id',maestro.id).eq('ciudad_id',ciu.id).maybeSingle()
+    if(!celda){res.innerHTML=`<div class="alert alert-amber">Ciudad ${ciu.nombre_dropi} no tiene reglas en el maestro ${codigo}</div>`;return}
+    const dKey='d'+qty
+    const d=celda[dKey]
+    let estado,carrier,extra=''
+    if(!d){estado='SIN_COBERTURA';carrier='—'}
+    else if(d==='C'){estado='CANCELAR';carrier='—'}
+    else if(d==='E'){
+      if((celda.flete_envia||0)===0&&(celda.flete_inter||0)>0){carrier='Interrapidísimo'}
+      else if((celda.flete_coord||0)>0){carrier='Servientrega';extra='Requiere coordinación'}
+      else{carrier='Servientrega'}
+      estado='DESPACHAR'
+    }
+    const color=estado==='DESPACHAR'?'var(--green)':estado==='CANCELAR'?'var(--red)':'var(--amber)'
+    res.innerHTML=`<div class="card" style="border-left:3px solid ${color}">
+      <div style="font-weight:600;margin-bottom:8px">${ciu.nombre_dropi} (${ciu.departamento||'—'}) · ${qty}u</div>
+      <div style="font-size:12px;line-height:1.8">
+        Estado: <strong style="color:${color}">${estado}</strong><br>
+        Carrier: <strong>${carrier}</strong><br>
+        ${extra?'Nota: '+extra+'<br>':''}
+        Flete envía: $${fmt(celda.flete_envia||0)} · Flete coord: $${fmt(celda.flete_coord||0)} · Flete inter: $${fmt(celda.flete_inter||0)}<br>
+        <span style="color:var(--muted)">Reglas: d1=${celda.d1||'—'} · d2=${celda.d2||'—'} · d3=${celda.d3||'—'} · d4=${celda.d4||'—'}</span>
+      </div>
+    </div>`
+  }catch(e){res.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`}
+}
 
 function showLogin(){
   document.getElementById('login-wrap').style.display='flex'

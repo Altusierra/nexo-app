@@ -412,7 +412,7 @@ const NAV={
     {id:'aux-novedades',icon:'⚠️',label:'Novedades'},
     {id:'aux-seguimiento',icon:'🚚',label:'Seguimiento'},
     {id:'aux-reporte',icon:'📝',label:'Reporte del día'},
-    {id:'aux-reservado',icon:'🔍',label:'Confirmar reservado'},
+    {id:'aux-reservado',icon:'🔍',label:'Reservados y Cancelados'},
     {id:'aux-cierre',icon:'✅',label:'Cerrar jornada'},
   ]
 }
@@ -1374,21 +1374,67 @@ async function pageAdminProductos(c){
     const gf=s=>parseFloat(document.getElementById(s+'-'+id).value)||0
     const cids=(document.getElementById('cids-'+id)?.value||'').split(/[\s,;\n]+/).map(s=>s.trim()).filter(Boolean)
     const mc=document.getElementById('mc-'+id)?.value||'GEN'
-    const{error}=await sb.from('productos').update({
-      precio_1u:g('pp1'),precio_2u:g('pp2'),precio_3u:g('pp3'),precio_4u:g('pp4'),
-      costo_1u:g('cp1'),costo_2u:g('cp2'),costo_3u:g('cp3'),costo_4u:g('cp4'),
+    const nombre=document.getElementById('pname-'+id)?.value?.trim()
+    const aliasesRaw=document.getElementById('paliases-'+id)?.value||''
+    const aliases=aliasesRaw.split(/[,;\n]+/).map(s=>s.trim()).filter(Boolean)
+
+    const updateData={
       flete_outbound:g('fo'),flete_devolucion:g('fd'),dev_pct:gf('dp')/100,
       costo_conversacion:g('cc'),campaign_ids:cids,maestro_codigo:mc
-    }).eq('id',id)
-    const msg=document.getElementById('pmsg-'+id)
-    if(error)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`
-    else{
-      msg.innerHTML='<div class="alert alert-green">✅ Guardado</div>'
-      await loadProductos()
-      logAction('producto_editado',{producto_id:id}).catch(()=>{})
-      await refreshProdResumen(id)
-      await renderCampanasEnlazadas(id)
     }
+    if(nombre)updateData.nombre=nombre
+
+    // Intentar guardar aliases (campo nuevo)
+    try{
+      const{error:aliasErr}=await sb.from('productos').update({...updateData,aliases}).eq('id',id)
+      if(aliasErr){
+        // Si falla por columna aliases inexistente, guardar sin ella
+        if(aliasErr.message.includes('aliases')||aliasErr.code==='42703'){
+          const{error}=await sb.from('productos').update(updateData).eq('id',id)
+          if(error){document.getElementById('pmsg-'+id).innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+          document.getElementById('pmsg-'+id).innerHTML='<div class="alert alert-amber">⚠️ Guardado (sin aliases — ejecuta SQL para agregar columna)</div>'
+        }else{
+          document.getElementById('pmsg-'+id).innerHTML=`<div class="alert alert-red">${aliasErr.message}</div>`
+          return
+        }
+      }
+    }catch(e){document.getElementById('pmsg-'+id).innerHTML=`<div class="alert alert-red">${e.message}</div>`;return}
+
+    // Guardar ofertas: leer todas las cards y actualizar precios/costos
+    const precioInputs=document.querySelectorAll('.of-precio-'+id)
+    const costoInputs=document.querySelectorAll('.of-costo-'+id)
+    const ofertasMap={}
+    precioInputs.forEach(inp=>{
+      const cant=parseInt(inp.dataset.cantidad)
+      const ofId=inp.dataset.id
+      ofertasMap[cant]={ofId,precio:parseInt(inp.value)||0,costo:0}
+    })
+    costoInputs.forEach(inp=>{
+      const cant=parseInt(inp.dataset.cantidad)
+      if(ofertasMap[cant])ofertasMap[cant].costo=parseInt(inp.value)||0
+    })
+    for(const cant of Object.keys(ofertasMap)){
+      const o=ofertasMap[cant]
+      if(o.ofId.startsWith('legacy_')){
+        // legacy → actualizar columnas viejas
+        if(cant>=1&&cant<=4){
+          const upd={}
+          upd['precio_'+cant+'u']=o.precio
+          upd['costo_'+cant+'u']=o.costo
+          await sb.from('productos').update(upd).eq('id',id).catch(()=>{})
+        }
+      }else{
+        // Tabla nueva
+        await sb.from('producto_ofertas').update({precio:o.precio,costo:o.costo}).eq('id',o.ofId).catch(()=>{})
+      }
+    }
+
+    const msg=document.getElementById('pmsg-'+id)
+    msg.innerHTML='<div class="alert alert-green">✅ Guardado</div>'
+    await loadProductos()
+    logAction('producto_editado',{producto_id:id}).catch(()=>{})
+    await refreshProdResumen(id)
+    await renderCampanasEnlazadas(id)
   }
 
   window.modalAddProducto=()=>{
@@ -1396,9 +1442,15 @@ async function pageAdminProductos(c){
     area.innerHTML=`<div class="card" style="border:2px solid var(--primary);margin-bottom:16px">
       <div style="font-weight:600;margin-bottom:14px;font-size:15px">➕ Nuevo producto</div>
       <div class="form-grid g2">
-        <div class="fld"><label>Nombre</label><input type="text" id="np-nombre" placeholder="Colágeno Neocell 4"></div>
-        <div class="fld"><label>IDs de campañas Meta (separadas por coma)</label><input type="text" id="np-cids" placeholder="120244302541010122, 120243626234290122"></div>
+        <div class="fld"><label>📝 Nombre actual</label>
+          <input type="text" id="np-nombre" placeholder="Colágeno Neocell 4">
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">Se usa en todo: reportes, mensajes a clientes, dashboard.</div></div>
+        <div class="fld"><label>🏷️ Aliases (separados por coma)</label>
+          <input type="text" id="np-aliases" placeholder="neocell, colageno, NeoCell">
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">Para que el asignador reconozca nombres variantes desde Dropi/SellerChat.</div></div>
       </div>
+      <div class="divider"></div>
+      <div class="section-title">🏷️ Ofertas iniciales (deja en 0 las que no aplican)</div>
       <div class="form-grid g4">
         <div class="fld"><label>Precio 1u</label><input type="number" id="np-p1" value="0"></div>
         <div class="fld"><label>Precio 2u</label><input type="number" id="np-p2" value="0"></div>
@@ -1408,10 +1460,17 @@ async function pageAdminProductos(c){
         <div class="fld"><label>Costo 2u</label><input type="number" id="np-c2" value="0"></div>
         <div class="fld"><label>Costo 3u</label><input type="number" id="np-c3" value="0"></div>
         <div class="fld"><label>Costo 4u</label><input type="number" id="np-c4" value="0"></div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px">💡 Después de crear el producto, puedes agregar más ofertas (5u, 6u...) desde el botón "➕ Agregar oferta"</div>
+      <div class="divider"></div>
+      <div class="form-grid g4">
         <div class="fld"><label>Flete outbound</label><input type="number" id="np-fo" value="21000"></div>
         <div class="fld"><label>Flete devolución</label><input type="number" id="np-fd" value="18000"></div>
         <div class="fld"><label>% Devolución</label><input type="number" step="0.01" id="np-dp" value="19"></div>
         <div class="fld"><label>Costo/conversación</label><input type="number" id="np-cc" value="100"></div>
+      </div>
+      <div class="form-grid g2" style="margin-top:10px">
+        <div class="fld"><label>IDs de campañas Meta (separadas por coma)</label><input type="text" id="np-cids" placeholder="120244302541010122, 120243626234290122"></div>
         <div class="fld"><label>Maestro carrier</label>
           <select id="np-mc">${maestrosList.map(m=>`<option value="${m.codigo}">${m.codigo} (${m.nombre||''})</option>`).join('')}</select></div>
       </div>
@@ -1429,7 +1488,8 @@ async function pageAdminProductos(c){
     if(!nombre){document.getElementById('np-msg').innerHTML='<div class="alert alert-red">El nombre es obligatorio</div>';return}
     const g=s=>parseInt(document.getElementById(s).value)||0
     const cids=(document.getElementById('np-cids').value||'').split(/[\s,;\n]+/).map(s=>s.trim()).filter(Boolean)
-    const{error}=await sb.from('productos').insert({
+    const aliases=(document.getElementById('np-aliases').value||'').split(/[,;\n]+/).map(s=>s.trim()).filter(Boolean)
+    const payload={
       nombre,activo:true,
       precio_1u:g('np-p1'),precio_2u:g('np-p2'),precio_3u:g('np-p3'),precio_4u:g('np-p4'),
       costo_1u:g('np-c1'),costo_2u:g('np-c2'),costo_3u:g('np-c3'),costo_4u:g('np-c4'),
@@ -1438,8 +1498,14 @@ async function pageAdminProductos(c){
       costo_conversacion:parseInt(document.getElementById('np-cc').value)||100,
       campaign_ids:cids,
       maestro_codigo:document.getElementById('np-mc').value||'GEN'
-    })
-    if(error){document.getElementById('np-msg').innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+    }
+    // Intentar incluir aliases — si la columna no existe, hacer fallback
+    let result=await sb.from('productos').insert({...payload,aliases}).select().single()
+    if(result.error&&(result.error.message.includes('aliases')||result.error.code==='42703')){
+      result=await sb.from('productos').insert(payload).select().single()
+      if(result.error){document.getElementById('np-msg').innerHTML=`<div class="alert alert-amber">Creado sin aliases (columna no existe). ${result.error.message}</div>`;return}
+    }
+    if(result.error){document.getElementById('np-msg').innerHTML=`<div class="alert alert-red">${result.error.message}</div>`;return}
     await loadProductos()
     logAction('producto_creado',{nombre}).catch(()=>{})
     pageAdminProductos(document.getElementById('content'))
@@ -1491,16 +1557,45 @@ async function renderProdBody(id,maestrosList){
   const prod=productos.find(p=>p.id===id);if(!prod)return
   const body=document.getElementById('prod-body-'+id)
   const cids=Array.isArray(prod.campaign_ids)?prod.campaign_ids.join(', '):(prod.campaign_ids||'')
+  const aliases=Array.isArray(prod.aliases)?prod.aliases:[]
+
+  // Cargar ofertas dinámicas (si existe la tabla)
+  let ofertasDB=[]
+  try{
+    const{data,error}=await sb.from('producto_ofertas').select('*').eq('producto_id',id).order('cantidad')
+    if(!error&&data)ofertasDB=data
+  }catch(_){}
+  // Si no hay ofertas dinámicas → migrar desde columnas viejas
+  if(!ofertasDB.length){
+    for(const n of [1,2,3,4]){
+      const precio=prod['precio_'+n+'u']||0
+      const costo=prod['costo_'+n+'u']||0
+      if(precio>0||costo>0)ofertasDB.push({producto_id:id,cantidad:n,precio,costo,_legacy:true})
+    }
+  }
+
   body.innerHTML=`<div style="padding-top:14px">
+    <div class="form-grid g2">
+      <div class="fld"><label>📝 Nombre actual <span style="color:var(--muted);font-size:10px">(se usa en TODO: reportes, dashboard, mensajes, IA)</span></label>
+        <input type="text" id="pname-${id}" value="${prod.nombre||''}"></div>
+      <div class="fld"><label>🆔 ID interno</label>
+        <input type="text" value="${id}" disabled style="font-family:monospace;font-size:11px;opacity:0.6"></div>
+    </div>
+    <div class="fld" style="margin-top:10px">
+      <label>🏷️ Aliases <span style="color:var(--muted);font-size:10px">(cómo lo escriben en SellerChat/Dropi — separados por coma)</span></label>
+      <textarea id="paliases-${id}" rows="2" style="font-family:monospace;font-size:11px" placeholder="neocell, colageno, NeoCell Multi Collagen">${aliases.join(', ')}</textarea>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">El asignador reconoce el producto por cualquier alias. No se muestra en ningún lado al cliente.</div>
+    </div>
+    <div class="divider"></div>
+    <div class="section-title">🏷️ Ofertas (cantidades de unidades)</div>
+    <div id="ofertas-list-${id}" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:10px">
+      ${ofertasDB.map(o=>renderOfertaCard(id,o)).join('')}
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      <button class="btn-sm btn-primary" onclick="modalAgregarOferta('${id}')">➕ Agregar oferta</button>
+    </div>
+    <div class="divider"></div>
     <div class="form-grid g4">
-      <div class="fld"><label>Precio 1u</label><input type="number" id="pp1-${id}" value="${prod.precio_1u||0}"></div>
-      <div class="fld"><label>Precio 2u</label><input type="number" id="pp2-${id}" value="${prod.precio_2u||0}"></div>
-      <div class="fld"><label>Precio 3u</label><input type="number" id="pp3-${id}" value="${prod.precio_3u||0}"></div>
-      <div class="fld"><label>Precio 4u</label><input type="number" id="pp4-${id}" value="${prod.precio_4u||0}"></div>
-      <div class="fld"><label>Costo 1u</label><input type="number" id="cp1-${id}" value="${prod.costo_1u||0}"></div>
-      <div class="fld"><label>Costo 2u</label><input type="number" id="cp2-${id}" value="${prod.costo_2u||0}"></div>
-      <div class="fld"><label>Costo 3u</label><input type="number" id="cp3-${id}" value="${prod.costo_3u||0}"></div>
-      <div class="fld"><label>Costo 4u</label><input type="number" id="cp4-${id}" value="${prod.costo_4u||0}"></div>
       <div class="fld"><label>Flete outbound</label><input type="number" id="fo-${id}" value="${prod.flete_outbound||21000}"></div>
       <div class="fld"><label>Flete devolución</label><input type="number" id="fd-${id}" value="${prod.flete_devolucion||18000}"></div>
       <div class="fld"><label>% Devolución</label><input type="number" step="0.01" id="dp-${id}" value="${(prod.dev_pct*100)||19}"></div>
@@ -1510,7 +1605,7 @@ async function renderProdBody(id,maestrosList){
     <div class="form-grid g2">
       <div class="fld"><label>IDs de campañas Meta (separadas por coma)</label>
         <textarea id="cids-${id}" rows="2" style="font-family:monospace;font-size:11px">${cids}</textarea>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">Atribución directa por ID de campaña. Más preciso que keywords.</div></div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">Atribución directa por ID de campaña.</div></div>
       <div class="fld"><label>Maestro carrier</label>
         <select id="mc-${id}">
           ${maestrosList.map(m=>`<option value="${m.codigo}" ${m.codigo===(prod.maestro_codigo||'GEN')?'selected':''}>${m.codigo} (${m.nombre||''})</option>`).join('')}
@@ -1526,6 +1621,112 @@ async function renderProdBody(id,maestrosList){
     <div id="camps-enlazadas-${id}"><div class="loading">Cargando...</div></div>
   </div>`
   renderCampanasEnlazadas(id)
+}
+
+// Render de una card de oferta individual
+function renderOfertaCard(prodId,oferta){
+  const n=oferta.cantidad
+  const ofId=oferta.id||'legacy_'+n
+  const isLegacy=oferta._legacy===true
+  return`<div class="card" data-oferta-id="${ofId}" data-cantidad="${n}" style="padding:10px;border:1px solid var(--border)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <div style="font-weight:600;font-size:13px">${n}u</div>
+      <button class="btn-sm btn-red" onclick="quitarOferta('${prodId}','${ofId}',${n})" style="padding:2px 6px;font-size:10px" title="Quitar oferta">🗑️</button>
+    </div>
+    <div class="fld" style="margin-bottom:6px"><label style="font-size:10px">Precio</label>
+      <input type="number" class="of-precio-${prodId}" data-cantidad="${n}" data-id="${ofId}" value="${oferta.precio||0}" style="font-size:12px;padding:6px 8px"></div>
+    <div class="fld"><label style="font-size:10px">Costo</label>
+      <input type="number" class="of-costo-${prodId}" data-cantidad="${n}" data-id="${ofId}" value="${oferta.costo||0}" style="font-size:12px;padding:6px 8px"></div>
+    ${isLegacy?'<div style="font-size:9px;color:var(--amber);margin-top:4px">⚠️ Pendiente migrar a tabla nueva</div>':''}
+  </div>`
+}
+
+window.modalAgregarOferta=(prodId)=>{
+  closeModal()
+  const div=document.createElement('div')
+  div.id='user-modal';div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:420px">
+    <div class="modal-title">➕ Nueva oferta</div>
+    <div class="modal-sub">Define una nueva cantidad de unidades con su precio y costo</div>
+    <div class="form-grid g3" style="margin-top:14px">
+      <div class="fld"><label>Cantidad</label><input type="number" id="of-new-cantidad" min="1" value="5"></div>
+      <div class="fld"><label>Precio</label><input type="number" id="of-new-precio" value="0"></div>
+      <div class="fld"><label>Costo</label><input type="number" id="of-new-costo" value="0"></div>
+    </div>
+    <div id="of-msg" style="margin-top:10px"></div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
+      <button class="btn-sm btn-primary" onclick="guardarOferta('${prodId}')">Agregar oferta</button>
+    </div>
+  </div>`
+  div.onclick=closeModal
+  document.body.appendChild(div)
+}
+
+window.guardarOferta=async(prodId)=>{
+  const cantidad=parseInt(document.getElementById('of-new-cantidad')?.value)||0
+  const precio=parseInt(document.getElementById('of-new-precio')?.value)||0
+  const costo=parseInt(document.getElementById('of-new-costo')?.value)||0
+  const msg=document.getElementById('of-msg')
+  if(cantidad<1){msg.innerHTML='<div class="alert alert-red">La cantidad debe ser mayor a 0</div>';return}
+  msg.innerHTML='<div class="loading">Guardando...</div>'
+  try{
+    // Intentar insertar en tabla producto_ofertas
+    const{error}=await sb.from('producto_ofertas').insert({producto_id:prodId,cantidad,precio,costo,activo:true})
+    if(error){
+      // Si la tabla no existe → fallback en columnas viejas (solo 1-4)
+      if(error.message.includes('producto_ofertas')||error.code==='42P01'){
+        if(cantidad>=1&&cantidad<=4){
+          const update={}
+          update['precio_'+cantidad+'u']=precio
+          update['costo_'+cantidad+'u']=costo
+          const{error:err2}=await sb.from('productos').update(update).eq('id',prodId)
+          if(err2){msg.innerHTML=`<div class="alert alert-red">${err2.message}</div>`;return}
+          await loadProductos()
+          msg.innerHTML='<div class="alert alert-amber">⚠️ Tabla producto_ofertas no existe. Guardado en columnas legacy (1-4u). Ejecuta SQL de migración para soportar más cantidades.</div>'
+          setTimeout(()=>{closeModal();refreshProdBody(prodId)},2000)
+          return
+        }
+        msg.innerHTML='<div class="alert alert-red">Necesita tabla producto_ofertas. Cantidades 5+ requieren ejecutar migración SQL.</div>'
+        return
+      }
+      msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`
+      return
+    }
+    logAction('oferta_creada',{producto_id:prodId,cantidad,precio,costo}).catch(()=>{})
+    msg.innerHTML='<div class="alert alert-green">✅ Oferta agregada</div>'
+    setTimeout(()=>{closeModal();refreshProdBody(prodId)},800)
+  }catch(e){msg.innerHTML=`<div class="alert alert-red">${e.message}</div>`}
+}
+
+window.quitarOferta=async(prodId,ofId,cantidad)=>{
+  if(!confirm(`¿Quitar la oferta de ${cantidad}u?`))return
+  try{
+    if(ofId.startsWith('legacy_')){
+      // Es legacy → poner a 0 las columnas viejas
+      const update={}
+      update['precio_'+cantidad+'u']=0
+      update['costo_'+cantidad+'u']=0
+      const{error}=await sb.from('productos').update(update).eq('id',prodId)
+      if(error){alert(error.message);return}
+    }else{
+      const{error}=await sb.from('producto_ofertas').delete().eq('id',ofId)
+      if(error){alert(error.message);return}
+    }
+    await loadProductos()
+    logAction('oferta_eliminada',{producto_id:prodId,cantidad}).catch(()=>{})
+    refreshProdBody(prodId)
+  }catch(e){alert(e.message)}
+}
+
+async function refreshProdBody(prodId){
+  const body=document.getElementById('prod-body-'+prodId)
+  if(!body)return
+  body.dataset.loaded=''
+  body.innerHTML=''
+  const{data:maestros}=await sb.from('maestros').select('id,codigo,nombre').limit(100)
+  await renderProdBody(prodId,maestros||[])
+  body.dataset.loaded='1'
 }
 
 // Render de campañas enlazadas
@@ -2316,10 +2517,15 @@ async function pageAuxAsignador(c){
 
   try{
     const{D,M,kw,masterByCode}=await cargarAsignDataSiNecesario()
-    // Keywords: combinar desde productos (nuevas) + maestro_keywords (legacy)
+    // Palabras reconocidas: aliases (nuevo), keywords legacy y nombres de productos
     const allKw=new Set(Object.keys(kw))
     for(const p of productos){
+      // Aliases (nuevo sistema)
+      if(Array.isArray(p.aliases))p.aliases.forEach(a=>{if(a)allKw.add(a.toLowerCase().trim())})
+      // Keywords legacy
       if(p.keywords)(p.keywords).split(',').map(k=>k.trim().toLowerCase()).filter(Boolean).forEach(k=>allKw.add(k))
+      // El propio nombre del producto (normalizado) también debe reconocerse
+      if(p.nombre)allKw.add(p.nombre.toLowerCase().trim())
     }
     const kwArray=[...allKw].sort()
     const kwHtml=kwArray.length
@@ -2884,51 +3090,176 @@ async function pageAuxPedidos(c){
 
 // ── AUXILIAR: CONFIRMAR RESERVADO ──────────────────────────
 async function pageAuxReservado(c){
-  c.innerHTML=`<div class="page-title">Confirmar reservado</div>
-    <div class="page-sub">Busca por número de teléfono y confirma</div>
-    <div class="card" style="max-width:500px">
+  c.innerHTML=`<div class="page-title">🔍 Reservados y Cancelados</div>
+    <div class="page-sub">Busca una orden por teléfono y cambia su estado</div>
+    <div class="card" style="max-width:600px">
       <div class="fld" style="margin-bottom:12px">
         <label>Número de teléfono</label>
-        <input type="tel" id="res-tel" placeholder="3018022314" maxlength="10"
-          onkeydown="if(event.key==='Enter')buscarReservado()">
+        <input type="tel" id="res-tel" placeholder="3018022314"
+          onkeydown="if(event.key==='Enter')buscarOrden()">
       </div>
-      <button class="btn-full btn-primary" onclick="buscarReservado()">Buscar</button>
+      <button class="btn-full btn-primary" onclick="buscarOrden()">Buscar</button>
       <div id="res-result" style="margin-top:16px"></div>
     </div>`
 
-  window.buscarReservado=async()=>{
-    const tel=document.getElementById('res-tel').value.trim()
-    if(!tel){return}
-    const{data}=await sb.from('mapeos').select('*')
-      .eq('telefono',tel).eq('estado_inicial','PENDIENTE CONFIRMACION').maybeSingle()
-    const el=document.getElementById('res-result')
-    if(!data){
-      el.innerHTML='<div class="alert alert-red">No se encontró reservado con ese número</div>';return
+  // Estados reconocidos para clasificar la orden
+  function _clasificarEstado(m){
+    if(!m)return'desconocido'
+    if(m.estado_final==='CANCELADO')return'cancelado'
+    if(m.estado_final==='CONFIRMADO')return'confirmado'
+    if(m.estado_final==='PENDIENTE CONFIRMACION'||m.estado_final==='PENDIENTE'||!m.estado_final){
+      if(m.estado_inicial==='PENDIENTE CONFIRMACION')return'pendiente'
+      return'pendiente'
     }
+    // Otros estados de Dropi (entregado, en tránsito, etc.) → tratamos como confirmado en flujo
+    return'confirmado'
+  }
+
+  function _normalizarTel(t){
+    return(t||'').replace(/\D/g,'')
+  }
+
+  window.buscarOrden=async()=>{
+    const telRaw=document.getElementById('res-tel').value.trim()
+    const tel=_normalizarTel(telRaw)
+    const el=document.getElementById('res-result')
+    if(!tel||tel.length<7){el.innerHTML='<div class="alert alert-red">Ingresa un número válido</div>';return}
+    el.innerHTML='<div class="loading">Buscando...</div>'
+
+    // Buscar por teléfono normalizado — sin filtrar por estado para encontrar cualquier orden
+    const{data,error}=await sb.from('mapeos').select('*').eq('telefono',tel).order('created_at',{ascending:false}).limit(5)
+    if(error){el.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+    if(!data||!data.length){
+      el.innerHTML='<div class="alert alert-red">No se encontró ninguna orden con ese número</div>';return
+    }
+
+    // Si hay varias, usar la más reciente
+    const m=data[0]
+    const estado=_clasificarEstado(m)
+    window._resOrden=m
+
+    // Cargar última acción si existe (de log)
+    let ultimaAccion=''
+    try{
+      const{data:logs}=await sb.from('audit_log').select('accion,detalles,created_at,usuarios(nombre)').contains('detalles',{mapeo_id:m.id}).order('created_at',{ascending:false}).limit(1)
+      if(logs?.length){
+        const l=logs[0]
+        const fecha=new Date(l.created_at).toLocaleString('es-CO')
+        const motivo=l.detalles?.motivo||''
+        ultimaAccion=`<div style="font-size:11px;color:var(--muted);margin-top:6px">Última acción: <strong>${l.accion}</strong> por ${l.usuarios?.nombre||'—'} · ${fecha}${motivo?`<br>📝 Motivo: <em>"${motivo}"</em>`:''}</div>`
+      }
+    }catch(_){}
+
+    const estadoConfig={
+      pendiente:{label:'⏳ Pendiente',color:'var(--amber)',bg:'var(--amber-bg)'},
+      confirmado:{label:'✅ Confirmado',color:'var(--green)',bg:'var(--green-bg)'},
+      cancelado:{label:'❌ Cancelado',color:'var(--red)',bg:'var(--red-bg)'},
+      desconocido:{label:'❓ Desconocido',color:'var(--muted)',bg:'var(--card2)'}
+    }
+    const cfg=estadoConfig[estado]||estadoConfig.desconocido
+
+    // Botones según el estado actual
+    let botones=''
+    if(estado==='pendiente'){
+      botones=`
+        <button class="btn-sm btn-green" onclick="cambiarEstadoOrden('confirmar',false)" style="flex:1;padding:10px">✅ Confirmar</button>
+        <button class="btn-sm btn-red" onclick="cambiarEstadoOrden('cancelar',true)" style="flex:1;padding:10px">❌ Cancelar</button>`
+    }else if(estado==='confirmado'){
+      botones=`<button class="btn-sm btn-red" onclick="cambiarEstadoOrden('cancelar',true)" style="flex:1;padding:10px">❌ Cancelar</button>`
+    }else if(estado==='cancelado'){
+      botones=`<button class="btn-sm btn-green" onclick="cambiarEstadoOrden('reactivar',true)" style="flex:1;padding:10px">✅ Reactivar (confirmar)</button>`
+    }else{
+      botones=`<div class="alert alert-blue">Estado no editable desde aquí</div>`
+    }
+
     el.innerHTML=`
-      <div class="card" style="border:1px solid var(--amber);background:var(--amber-bg)">
-        <div style="margin-bottom:12px">
-          <div style="font-size:13px;color:var(--muted);margin-bottom:2px">Reservado encontrado</div>
-          <div style="font-size:15px;font-weight:600;color:var(--amber)">${tel}</div>
+      <div class="card" style="border:1px solid ${cfg.color};background:${cfg.bg}">
+        <div style="display:flex;justify-content:space-between;align-items:start;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <div>
+            <div style="font-size:11px;color:var(--muted);margin-bottom:2px">Orden encontrada</div>
+            <div style="font-size:16px;font-weight:600;font-family:monospace">${m.telefono}</div>
+          </div>
+          <span class="pill" style="background:${cfg.bg};color:${cfg.color};border:1px solid ${cfg.color}">${cfg.label}</span>
         </div>
-        <div style="font-size:13px;color:var(--text);margin-bottom:12px">
-          <strong>${data.producto||'—'}</strong>
+        <div style="font-size:13px;line-height:1.7;margin-bottom:10px">
+          <div><strong>Cliente:</strong> ${m.nombre_cliente||'—'}</div>
+          <div><strong>Producto:</strong> ${m.producto||'—'} · ${m.cantidad||1}u</div>
+          <div><strong>Ciudad:</strong> ${m.ciudad||'—'}</div>
+          <div><strong>Fecha compra:</strong> ${m.fecha||'—'}</div>
         </div>
-        <button class="btn-full btn-green" onclick="confirmarReservado('${data.id}')">
-          ✅ Confirmar este reservado
-        </button>
+        ${ultimaAccion}
+        <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">${botones}</div>
       </div>`
   }
 
-  window.confirmarReservado=async(id)=>{
-    const{error}=await sb.from('mapeos').update({estado_final:'CONFIRMADO'}).eq('id',id)
-    const el=document.getElementById('res-result')
-    if(error)el.innerHTML=`<div class="alert alert-red">${error.message}</div>`
-    else{
-      el.innerHTML='<div class="alert alert-green">✅ Reservado confirmado</div>'
-      document.getElementById('res-tel').value=''
-      logAction('reservado_confirmado',{mapeo_id:id}).catch(()=>{})
+  // Pide motivo si pideMotivo=true, luego ejecuta el cambio
+  window.cambiarEstadoOrden=(accion,pideMotivo)=>{
+    const m=window._resOrden
+    if(!m)return
+    if(pideMotivo){
+      const titulo={confirmar:'✅ Confirmar orden',cancelar:'❌ Cancelar orden',reactivar:'✅ Reactivar orden'}[accion]
+      const sugerencias={
+        cancelar:['Cliente se arrepintió','Cliente no responde','Precio muy alto','Ya tiene otro proveedor','Error en pedido'],
+        reactivar:['Se canceló por error','Cliente volvió a confirmar','Error del operador'],
+        confirmar:['Cliente confirmó por teléfono','Recuperación de pendiente']
+      }[accion]||[]
+      closeModal()
+      const div=document.createElement('div')
+      div.id='user-modal';div.className='modal-bg'
+      div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:480px">
+        <div class="modal-title">${titulo}</div>
+        <div class="modal-sub">${m.nombre_cliente||m.telefono} · ${m.producto||'—'}</div>
+        <div class="fld" style="margin-top:14px">
+          <label>Motivo (obligatorio)</label>
+          <textarea id="res-motivo" rows="3" placeholder="Escribe el motivo del cambio..." style="resize:vertical"></textarea>
+          ${sugerencias.length?`<div style="font-size:11px;color:var(--muted);margin-top:6px">Sugerencias:</div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">
+            ${sugerencias.map(s=>`<button class="btn-sm btn-outline" onclick="document.getElementById('res-motivo').value='${s.replace(/'/g,"\\'")}'" style="padding:3px 8px;font-size:11px">${s}</button>`).join('')}
+          </div>`:''}
+        </div>
+        <div id="res-modal-msg" style="margin-top:10px"></div>
+        <div class="modal-actions">
+          <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
+          <button class="btn-sm btn-primary" onclick="aplicarCambioOrden('${accion}')">Confirmar cambio</button>
+        </div>
+      </div>`
+      div.onclick=closeModal
+      document.body.appendChild(div)
+    }else{
+      // Confirmar sin motivo (Pendiente → Confirmado flujo normal)
+      aplicarCambioOrden(accion)
     }
+  }
+
+  window.aplicarCambioOrden=async(accion)=>{
+    const m=window._resOrden
+    if(!m)return
+    const motivo=document.getElementById('res-motivo')?.value?.trim()||''
+    const pideMotivo=accion!=='confirmar'||document.getElementById('res-motivo')
+    if(pideMotivo&&document.getElementById('res-motivo')&&!motivo){
+      document.getElementById('res-modal-msg').innerHTML='<div class="alert alert-red">El motivo es obligatorio</div>'
+      return
+    }
+    const nuevoEstado={confirmar:'CONFIRMADO',cancelar:'CANCELADO',reactivar:'CONFIRMADO'}[accion]
+    const estadoAnterior=m.estado_final||m.estado_inicial||'PENDIENTE CONFIRMACION'
+    const msgEl=document.getElementById('res-modal-msg')||document.getElementById('res-result')
+    if(msgEl)msgEl.innerHTML='<div class="loading">Aplicando cambio...</div>'
+
+    const{error}=await sb.from('mapeos').update({estado_final:nuevoEstado}).eq('id',m.id)
+    if(error){
+      if(msgEl)msgEl.innerHTML=`<div class="alert alert-red">${error.message}</div>`
+      return
+    }
+    // Guardar en audit_log con motivo y estado anterior/nuevo
+    const accionLog={confirmar:'orden_confirmada',cancelar:'orden_cancelada',reactivar:'orden_reactivada'}[accion]
+    logAction(accionLog,{mapeo_id:m.id,telefono:m.telefono,producto:m.producto,estado_anterior:estadoAnterior,estado_nuevo:nuevoEstado,motivo:motivo||null}).catch(()=>{})
+
+    closeModal()
+    // Refrescar la búsqueda para mostrar el nuevo estado
+    setTimeout(()=>{
+      const tel=document.getElementById('res-tel')
+      if(tel){buscarOrden()}
+    },200)
   }
 }
 
@@ -3616,7 +3947,7 @@ async function cargarSeguimientoHist(){
   const lotes={},fechasCompra=new Set()
   for(const m of data){
     const lote=m.fecha_dropi||'Sin lote'
-    if(!lotes[lote])lotes[lote]={entregado:0,devuelto:0,en_transito:0,novedad:0,cancelado:0,pendiente:0,total:0,prods:new Set(),ventaEnt:0,fechas:new Set(),novConFecha:0,novResueltas:0,novDiasTotal:0}
+    if(!lotes[lote])lotes[lote]={entregado:0,devuelto:0,en_transito:0,novedad:0,cancelado:0,total:0,prods:new Set(),ventaEnt:0,fechas:new Set(),novConFecha:0,novResueltas:0,novDiasTotal:0}
     lotes[lote].total++
     lotes[lote].prods.add(m.producto)
     if(m.fecha){lotes[lote].fechas.add(m.fecha);fechasCompra.add(m.fecha)}
@@ -3632,7 +3963,6 @@ async function cargarSeguimientoHist(){
     else if(st==='en_transito'||st==='en_proceso'||st==='en_bodega')lotes[lote].en_transito++
     else if(st==='novedad')lotes[lote].novedad++
     else if(st==='cancelado')lotes[lote].cancelado++
-    else if(st==='pendiente')lotes[lote].pendiente++
     if(m.fecha_novedad){
       lotes[lote].novConFecha++
       if(st==='entregado'||st==='novedad_ok'||st==='devuelto'){
@@ -3679,25 +4009,14 @@ async function cargarSeguimientoHist(){
         }
       }
     }
-    // Calcular % de cada categoría + validación de suma
-    const pctTran=d.total>0?Math.round(d.en_transito/d.total*100):0
-    const pctNov=d.total>0?Math.round(d.novedad/d.total*100):0
-    const pctCanc=d.total>0?Math.round(d.cancelado/d.total*100):0
-    const pctPend=d.total>0?Math.round((d.pendiente||0)/d.total*100):0
-    const sumaPct=pctEnt+pctDev+pctTran+pctNov+pctCanc+pctPend
-    const sumaCant=d.entregado+d.devuelto+d.en_transito+d.novedad+d.cancelado+(d.pendiente||0)
-    const sinClasif=d.total-sumaCant
     return`<div class="card" style="margin-bottom:12px">
       <div style="font-weight:600;margin-bottom:10px">📦 Lote ${fecha} <span style="color:var(--muted);font-weight:400">(${d.total} órdenes · ${[...d.prods].join(', ')})</span></div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:8px">
-        <div class="card c-green" style="padding:10px"><div class="card-label">Entregados</div><div class="card-val">${pctEnt}%</div></div>
-        <div class="card c-red" style="padding:10px"><div class="card-label">Devueltos</div><div class="card-val" style="font-size:18px">${d.devuelto} <span style="font-size:11px">(${pctDev}%)</span></div></div>
-        <div class="card c-blue" style="padding:10px"><div class="card-label">En tránsito</div><div class="card-val" style="font-size:18px">${d.en_transito} <span style="font-size:11px">(${pctTran}%)</span></div></div>
-        <div class="card c-amber" style="padding:10px"><div class="card-label">Novedad</div><div class="card-val" style="font-size:18px">${d.novedad} <span style="font-size:11px">(${pctNov}%)</span></div></div>
-        <div class="card c-red" style="padding:10px"><div class="card-label">Cancelados</div><div class="card-val" style="font-size:18px">${d.cancelado} <span style="font-size:11px">(${pctCanc}%)</span></div></div>
-        <div class="card c-amber" style="padding:10px"><div class="card-label">Pendientes</div><div class="card-val" style="font-size:18px">${d.pendiente||0} <span style="font-size:11px">(${pctPend}%)</span></div></div>
+      <div class="cards-row c4" style="margin-bottom:8px">
+        <div class="card c-green" style="padding:10px"><div class="card-label">Entregados</div><div class="card-val">${d.entregado} <span style="font-size:12px">(${pctEnt}%)</span></div></div>
+        <div class="card c-red" style="padding:10px"><div class="card-label">Devueltos</div><div class="card-val">${d.devuelto} <span style="font-size:12px">(${pctDev}%)</span></div></div>
+        <div class="card c-blue" style="padding:10px"><div class="card-label">En tránsito</div><div class="card-val">${d.en_transito}</div></div>
+        <div class="card c-amber" style="padding:10px"><div class="card-label">Novedad</div><div class="card-val">${d.novedad}</div></div>
       </div>
-      <div style="font-size:12px;margin-bottom:6px;${sinClasif===0?'color:var(--green)':'color:var(--amber)'}">${sinClasif===0?'✅':'⚠️'} Suma: ${sumaPct}% — ${sumaCant}/${d.total} órdenes clasificadas${sinClasif!==0?` (faltan ${Math.abs(sinClasif)} sin clasificar)`:''}</div>
       <div style="font-size:13px">Devol. real: <strong style="color:${devColor}">${pctDev}%</strong>${devEstHtml}</div>
       ${d.novConFecha>0?(()=>{
         const promDias=d.novResueltas>0?Math.round(d.novDiasTotal/d.novResueltas):null
@@ -3815,7 +4134,7 @@ window.procesarSeguimiento=async()=>{
     const productosSet=new Set()
     for(const r of resultados){
       const lote=r.fecha_lote||'Sin lote'
-      if(!lotes[lote])lotes[lote]={entregado:0,devuelto:0,en_transito:0,novedad:0,cancelado:0,pendiente:0,otro:0,total:0,items:[]}
+      if(!lotes[lote])lotes[lote]={entregado:0,devuelto:0,en_transito:0,novedad:0,cancelado:0,otro:0,total:0,items:[]}
       lotes[lote].total++
       lotes[lote].items.push(r)
       productosSet.add(r.producto)
@@ -3825,7 +4144,6 @@ window.procesarSeguimiento=async()=>{
       else if(cat==='en_transito'||cat==='en_proceso'||cat==='en_bodega')lotes[lote].en_transito++
       else if(cat==='novedad')lotes[lote].novedad++
       else if(cat==='cancelado')lotes[lote].cancelado++
-      else if(cat==='pendiente')lotes[lote].pendiente++
       else lotes[lote].otro++
     }
 
@@ -3860,23 +4178,14 @@ window.procesarSeguimiento=async()=>{
           devEstHtml=` · Estimada: ${estPct}% → Real: <strong style="color:${diffColor}">${pctDev}%</strong> ${pctDev>estPct?'⚠️':'✅'}`
         }
       }
-      const pctNov=d.total>0?Math.round(d.novedad/d.total*100):0
-      const pctCanc=d.total>0?Math.round(d.cancelado/d.total*100):0
-      const pctPend=d.total>0?Math.round((d.pendiente||0)/d.total*100):0
-      const sumaPct=pctEnt+pctDev+pctTran+pctNov+pctCanc+pctPend
-      const sumaCant=d.entregado+d.devuelto+d.en_transito+d.novedad+d.cancelado+(d.pendiente||0)
-      const sinClasif=d.total-sumaCant
       return`<div class="card seg-lote" data-productos="${d.items.map(i=>i.producto).join(',')}" style="margin-bottom:12px">
         <div style="font-weight:600;margin-bottom:10px">📦 Lote ${fecha} <span style="color:var(--muted);font-weight:400">(${d.total} órdenes)</span></div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:8px">
-          <div class="card c-green" style="padding:10px"><div class="card-label">Entregados</div><div class="card-val">${pctEnt}%</div></div>
-          <div class="card c-red" style="padding:10px"><div class="card-label">Devueltos</div><div class="card-val" style="font-size:18px">${d.devuelto} <span style="font-size:11px">(${pctDev}%)</span></div></div>
-          <div class="card c-blue" style="padding:10px"><div class="card-label">En tránsito</div><div class="card-val" style="font-size:18px">${d.en_transito} <span style="font-size:11px">(${pctTran}%)</span></div></div>
-          <div class="card c-amber" style="padding:10px"><div class="card-label">Novedad</div><div class="card-val" style="font-size:18px">${d.novedad} <span style="font-size:11px">(${pctNov}%)</span></div></div>
-          <div class="card c-red" style="padding:10px"><div class="card-label">Cancelados</div><div class="card-val" style="font-size:18px">${d.cancelado} <span style="font-size:11px">(${pctCanc}%)</span></div></div>
-          <div class="card c-amber" style="padding:10px"><div class="card-label">Pendientes</div><div class="card-val" style="font-size:18px">${d.pendiente||0} <span style="font-size:11px">(${pctPend}%)</span></div></div>
+        <div class="cards-row c4" style="margin-bottom:8px">
+          <div class="card c-green" style="padding:10px"><div class="card-label">Entregados</div><div class="card-val">${d.entregado} <span style="font-size:12px">(${pctEnt}%)</span></div></div>
+          <div class="card c-red" style="padding:10px"><div class="card-label">Devueltos</div><div class="card-val">${d.devuelto} <span style="font-size:12px">(${pctDev}%)</span></div></div>
+          <div class="card c-blue" style="padding:10px"><div class="card-label">En tránsito</div><div class="card-val">${d.en_transito} <span style="font-size:12px">(${pctTran}%)</span></div></div>
+          <div class="card c-amber" style="padding:10px"><div class="card-label">Novedad</div><div class="card-val">${d.novedad}</div></div>
         </div>
-        <div style="font-size:12px;margin-bottom:6px;${sinClasif===0?'color:var(--green)':'color:var(--amber)'}">${sinClasif===0?'✅':'⚠️'} Suma: ${sumaPct}% — ${sumaCant}/${d.total} órdenes clasificadas${sinClasif!==0?` (faltan ${Math.abs(sinClasif)} sin clasificar)`:''}</div>
         <div style="font-size:13px">Devol. real: <strong style="color:${devColor}">${pctDev}%</strong>${devEstHtml}</div>
       </div>`
     }).join('')

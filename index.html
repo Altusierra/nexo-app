@@ -64,6 +64,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .cards-row.c2{grid-template-columns:1fr 1fr}
 .cards-row.c3{grid-template-columns:1fr 1fr 1fr}
 .cards-row.c4{grid-template-columns:1fr 1fr 1fr 1fr}
+.cards-row.c6{grid-template-columns:repeat(6,1fr)}
 .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
 .card-label{font-size:10px;font-weight:600;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px}
 .card-val{font-size:24px;font-weight:600;font-family:monospace}
@@ -206,7 +207,7 @@ tr:hover td{background:var(--card2)}
   .content{padding:14px}
   .page-title{font-size:18px}
   .page-sub{font-size:12px;margin-bottom:12px}
-  .cards-row.c4,.cards-row.c3,.cards-row.c2{grid-template-columns:1fr 1fr;gap:8px}
+  .cards-row.c6,.cards-row.c4,.cards-row.c3,.cards-row.c2{grid-template-columns:1fr 1fr;gap:8px}
   .card{padding:12px}
   .form-grid.g4,.form-grid.g3,.form-grid.g2{grid-template-columns:1fr;gap:10px}
   .modal-box{max-width:100%;padding:18px}
@@ -4473,7 +4474,7 @@ async function cargarSeguimientoHist(){
   const lotes={},fechasCompra=new Set()
   for(const m of data){
     const lote=m.fecha_dropi||'Sin lote'
-    if(!lotes[lote])lotes[lote]={entregado:0,devuelto:0,en_transito:0,novedad:0,cancelado:0,total:0,prods:new Set(),ventaEnt:0,fechas:new Set(),novConFecha:0,novResueltas:0,novDiasTotal:0}
+    if(!lotes[lote])lotes[lote]={entregado:0,devuelto:0,en_transito:0,novedad:0,cancelado:0,pendiente:0,total:0,prods:new Set(),ventaEnt:0,fechas:new Set(),novConFecha:0,novResueltas:0,novDiasTotal:0,telTransito:[],telNovedad:[],telPendiente:[]}
     lotes[lote].total++
     lotes[lote].prods.add(m.producto)
     if(m.fecha){lotes[lote].fechas.add(m.fecha);fechasCompra.add(m.fecha)}
@@ -4486,9 +4487,10 @@ async function cargarSeguimientoHist(){
       lotes[lote].ventaEnt+=precio
     }
     else if(st==='devuelto')lotes[lote].devuelto++
-    else if(st==='en_transito'||st==='en_proceso'||st==='en_bodega')lotes[lote].en_transito++
-    else if(st==='novedad')lotes[lote].novedad++
+    else if(st==='en_transito'||st==='en_proceso'||st==='en_bodega'){lotes[lote].en_transito++;if(m.telefono)lotes[lote].telTransito.push(m.telefono)}
+    else if(st==='novedad'){lotes[lote].novedad++;if(m.telefono)lotes[lote].telNovedad.push(m.telefono)}
     else if(st==='cancelado')lotes[lote].cancelado++
+    else if(st==='pendiente'){lotes[lote].pendiente++;if(m.telefono)lotes[lote].telPendiente.push(m.telefono)}
     if(m.fecha_novedad){
       lotes[lote].novConFecha++
       if(st==='entregado'||st==='novedad_ok'||st==='devuelto'){
@@ -4535,14 +4537,58 @@ async function cargarSeguimientoHist(){
         }
       }
     }
+    // Edad del lote (días desde fecha_dropi hasta hoy)
+    let edadDias=null
+    if(fecha&&fecha!=='Sin lote'){
+      const fDrp=new Date(fecha+'T12:00:00')
+      if(!isNaN(fDrp))edadDias=Math.floor((new Date()-fDrp)/86400000)
+    }
+    // Badge de estado del lote (interpretación B: pendientes cuentan como "no cerrado")
+    const enMovimientoCarrier=d.en_transito+d.novedad
+    const requierenAccion=enMovimientoCarrier+d.pendiente
+    let badgeHtml=''
+    if(requierenAccion===0){
+      badgeHtml=`<span class="pill" style="background:rgba(34,197,94,.12);color:var(--green);border:1px solid rgba(34,197,94,.3);font-size:11px">✅ Cerrado</span>`
+    }else if(edadDias!==null&&edadDias>=10&&enMovimientoCarrier>0){
+      badgeHtml=`<span class="pill" style="background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.4);font-size:11px">⚠️ Atascado</span>`
+    }else{
+      badgeHtml=`<span class="pill" style="background:rgba(245,158,11,.12);color:var(--amber);border:1px solid rgba(245,158,11,.3);font-size:11px">🔥 Activo</span>`
+    }
+    const edadHtml=edadDias!==null?`<span style="color:var(--muted);font-size:12px;font-weight:400">📅 hace ${edadDias} ${edadDias===1?'día':'días'}</span>`:''
+    // Porcentajes para todas las cards
+    const pctTran=d.total>0?Math.round(d.en_transito/d.total*100):0
+    const pctNov=d.total>0?Math.round(d.novedad/d.total*100):0
+    const pctCanc=d.total>0?Math.round(d.cancelado/d.total*100):0
+    const pctPend=d.total>0?Math.round(d.pendiente/d.total*100):0
+    // Validación de suma
+    const suma=d.entregado+d.devuelto+d.en_transito+d.novedad+d.cancelado+d.pendiente
+    const pctSuma=d.total>0?Math.round(suma/d.total*100):0
+    const falta=d.total-suma
+    // Teléfonos a contactar (En Tránsito + Pendientes + Novedad — únicos)
+    const telsContacto=[...new Set([...d.telTransito,...d.telPendiente,...d.telNovedad])].filter(Boolean)
     return`<div class="card" style="margin-bottom:12px">
-      <div style="font-weight:600;margin-bottom:10px">📦 Lote ${fecha} <span style="color:var(--muted);font-weight:400">(${d.total} órdenes · ${[...d.prods].join(', ')})</span></div>
-      <div class="cards-row c4" style="margin-bottom:8px">
-        <div class="card c-green" style="padding:10px"><div class="card-label">Entregados</div><div class="card-val">${d.entregado} <span style="font-size:12px">(${pctEnt}%)</span></div></div>
-        <div class="card c-red" style="padding:10px"><div class="card-label">Devueltos</div><div class="card-val">${d.devuelto} <span style="font-size:12px">(${pctDev}%)</span></div></div>
-        <div class="card c-blue" style="padding:10px"><div class="card-label">En tránsito</div><div class="card-val">${d.en_transito}</div></div>
-        <div class="card c-amber" style="padding:10px"><div class="card-label">Novedad</div><div class="card-val">${d.novedad}</div></div>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+        <div style="flex:1;min-width:240px">
+          <div style="font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap">📦 Lote ${fecha} ${edadHtml} ${badgeHtml}</div>
+          <div style="color:var(--muted);font-size:12px;margin-top:2px">${d.total} órdenes · ${[...d.prods].filter(Boolean).join(', ')}</div>
+        </div>
+        <button class="btn-sm btn-outline" onclick="cargarSeguimientoHist()" title="Refrescar este lote desde BD">🔄 Refrescar</button>
       </div>
+      <div class="cards-row c6" style="margin-bottom:8px">
+        <div class="card c-green" style="padding:10px"><div class="card-label">Entregados</div><div class="card-val">${pctEnt}%</div></div>
+        <div class="card c-red" style="padding:10px"><div class="card-label">Devueltos</div><div class="card-val">${d.devuelto} <span style="font-size:12px">(${pctDev}%)</span></div></div>
+        <div class="card c-blue" style="padding:10px"><div class="card-label">En tránsito</div><div class="card-val">${d.en_transito} <span style="font-size:12px">(${pctTran}%)</span></div></div>
+        <div class="card c-amber" style="padding:10px"><div class="card-label">Novedad</div><div class="card-val">${d.novedad} <span style="font-size:12px">(${pctNov}%)</span></div></div>
+        <div class="card c-red" style="padding:10px"><div class="card-label">Cancelados</div><div class="card-val">${d.cancelado} <span style="font-size:12px">(${pctCanc}%)</span></div></div>
+        <div class="card c-amber" style="padding:10px"><div class="card-label">Pendientes</div><div class="card-val">${d.pendiente} <span style="font-size:12px">(${pctPend}%)</span></div></div>
+      </div>
+      ${falta!==0?`<div style="font-size:12px;color:var(--amber);margin-bottom:8px;padding:6px 10px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);border-radius:6px">⚠️ Suma: ${pctSuma}% — ${suma}/${d.total} órdenes clasificadas${falta>0?` (faltan ${falta} sin clasificar)`:` (excede en ${-falta})`}</div>`:`<div style="font-size:11px;color:var(--green);margin-bottom:8px">✓ Suma 100% (${suma}/${d.total})</div>`}
+      ${telsContacto.length>0?`<div style="font-size:12px;margin-bottom:8px;padding:8px 10px;background:rgba(59,130,246,.06);border:1px solid rgba(59,130,246,.25);border-radius:6px">
+        <div style="margin-bottom:6px">📞 <strong>${telsContacto.length} órdenes requieren seguimiento</strong> (En Tránsito: ${d.en_transito} · Pendientes: ${d.pendiente}${d.novedad>0?` · Novedad: ${d.novedad}`:''}) — revisar en Dropi y contactar:</div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px">
+          ${telsContacto.map(t=>`<span onclick="navigator.clipboard.writeText('${t}').then(()=>{this.style.background='rgba(34,197,94,.3)';this.textContent='✓ ${t}';setTimeout(()=>{this.style.background='';this.textContent='${t}'},1200)})" style="cursor:pointer;padding:3px 8px;background:var(--card2);border:1px solid var(--border);border-radius:6px;font-family:monospace;font-size:11px;user-select:none" title="Clic para copiar">${t}</span>`).join('')}
+        </div>
+      </div>`:''}
       <div style="font-size:13px">Devol. real: <strong style="color:${devColor}">${pctDev}%</strong>${devEstHtml}</div>
       ${d.novConFecha>0?(()=>{
         const promDias=d.novResueltas>0?Math.round(d.novDiasTotal/d.novResueltas):null

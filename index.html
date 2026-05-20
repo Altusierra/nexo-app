@@ -321,10 +321,11 @@ async function loadMe(uid){
     const{data,error}=await sb.rpc('get_my_profile')
     if(error){console.error('loadMe error:',error);return false}
     if(!data){console.warn('loadMe: sin perfil');return false}
-    const{data:bData}=await sb.from('usuarios').select('bloqueado,rol,hora_inicio,hora_fin').eq('id',data.id).maybeSingle()
+    const{data:bData}=await sb.from('usuarios').select('bloqueado,rol,hora_inicio,hora_fin,modo_historico').eq('id',data.id).maybeSingle()
     if(bData?.bloqueado){console.warn('Usuario bloqueado');return false}
     if(!dentroDeHorario(bData?.rol,bData?.hora_inicio,bData?.hora_fin)){console.warn('Fuera de horario');return false}
     me=data
+    me.modo_historico=bData?.modo_historico||false
     return true
   }catch(e){console.error('loadMe exception:',e);return false}
 }
@@ -1540,27 +1541,51 @@ async function renderCampanasEnlazadas(id){
     const{data:cuentas}=await sb.from('meta_cuentas').select('account_id,nombre')
     const cuById={};for(const c of (cuentas||[]))cuById[c.account_id]=c.nombre
     const existById={};for(const c of (camps||[]))existById[c.meta_id]=c
-    let html='<div class="table-wrap"><table style="font-size:12px"><tr><th>Campaña</th><th>Cuenta</th><th>Estado</th><th>ID</th><th></th></tr>'
-    for(const cid of cids){
+    const renderRow=(cid,visible)=>{
       const c=existById[cid]
+      const cls=`ce-row-${id} ${visible?'':'ce-extra'}`
+      const styleHide=visible?'':' style="display:none"'
       if(c){
-        html+=`<tr><td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${c.nombre}">${c.nombre}</td>
+        return`<tr class="${cls}"${styleHide}><td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${c.nombre}">${c.nombre}</td>
           <td>${cuById[c.account_id]||c.account_id}</td>
           <td><span class="pill pill-${c.estado==='ACTIVE'?'green':'red'}">${c.estado}</span></td>
           <td style="font-family:monospace;font-size:10px">${cid}</td>
           <td><button class="btn-sm btn-outline" onclick="quitarCampanaProd('${id}','${cid}')" style="padding:3px 8px;font-size:10px">🗑️</button></td>
         </tr>`
       }else{
-        html+=`<tr style="opacity:0.5"><td colspan="3" style="font-style:italic;color:var(--muted)">ID no sincronizado en Meta (puede que la cuenta no esté en el sistema)</td>
+        return`<tr class="${cls}" style="${visible?'':'display:none;'}opacity:0.5"><td colspan="3" style="font-style:italic;color:var(--muted)">ID no sincronizado en Meta (puede que la cuenta no esté en el sistema)</td>
           <td style="font-family:monospace;font-size:10px">${cid}</td>
           <td><button class="btn-sm btn-outline" onclick="quitarCampanaProd('${id}','${cid}')" style="padding:3px 8px;font-size:10px">🗑️</button></td>
         </tr>`
       }
     }
+    const MAX_VISIBLE=3
+    let html='<div class="table-wrap"><table style="font-size:12px"><tr><th>Campaña</th><th>Cuenta</th><th>Estado</th><th>ID</th><th></th></tr>'
+    cids.forEach((cid,idx)=>{html+=renderRow(cid,idx<MAX_VISIBLE)})
     html+='</table></div>'
-    html+=`<div style="font-size:11px;color:var(--muted);margin-top:8px">📊 ${cids.length} campaña(s) atribuida(s)</div>`
+    html+=`<div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;font-size:11px;color:var(--muted)">
+      <span>📊 ${cids.length} campaña(s) atribuida(s)</span>
+      ${cids.length>MAX_VISIBLE?`<button class="btn-sm btn-outline" id="ce-toggle-${id}" data-expanded="0" onclick="toggleCampsEnlazadas('${id}')" style="padding:4px 10px;font-size:11px">▼ Ver ${cids.length-MAX_VISIBLE} más</button>`:''}
+    </div>`
     el.innerHTML=html
   }catch(e){el.innerHTML=`<div class="alert alert-red">${e.message}</div>`}
+}
+
+window.toggleCampsEnlazadas=(id)=>{
+  const btn=document.getElementById('ce-toggle-'+id)
+  if(!btn)return
+  const expanded=btn.dataset.expanded==='1'
+  document.querySelectorAll('.ce-row-'+id+'.ce-extra').forEach(row=>{
+    row.style.display=expanded?'none':''
+  })
+  if(expanded){
+    btn.dataset.expanded='0'
+    const extras=document.querySelectorAll('.ce-row-'+id+'.ce-extra').length
+    btn.innerHTML=`▼ Ver ${extras} más`
+  }else{
+    btn.dataset.expanded='1'
+    btn.innerHTML='▲ Ver menos'
+  }
 }
 
 window.quitarCampanaProd=async(prodId,cid)=>{
@@ -1899,12 +1924,25 @@ window.modalUserEdit=(u)=>{
         <div class="fld"><label>Hora inicio</label><input type="time" id="eu-hi" value="${u.hora_inicio?u.hora_inicio.slice(0,5):''}"></div>
         <div class="fld"><label>Hora fin</label><input type="time" id="eu-hf" value="${u.hora_fin?u.hora_fin.slice(0,5):''}"></div>
       </div>
+      <div class="fld" id="eu-modo-hist-wrap" style="${u.rol==='auxiliar'?'':'display:none'}">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="eu-modo-historico" ${u.modo_historico?'checked':''}>
+          <span><strong>⏳ Modo histórico</strong> — permite al auxiliar cargar órdenes de cualquier fecha (sin límite de 4 días atrás)</span>
+        </label>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-left:24px">Activa esta opción solo cuando necesites cargar datos viejos. Desactiva al terminar.</div>
+      </div>
     </div>
     <div id="eu-msg" style="margin-top:10px"></div>
     <div class="modal-actions">
       <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
       <button class="btn-sm btn-primary" id="eu-save" onclick="doEditUser('${u.id}')">Guardar cambios</button>
     </div>`)
+  // Mostrar/ocultar el toggle según el rol seleccionado
+  const rolSel=document.getElementById('eu-rol')
+  if(rolSel)rolSel.addEventListener('change',()=>{
+    const w=document.getElementById('eu-modo-hist-wrap')
+    if(w)w.style.display=rolSel.value==='auxiliar'?'':'none'
+  })
 }
 
 window.doEditUser=async(user_id)=>{
@@ -1915,7 +1953,8 @@ window.doEditUser=async(user_id)=>{
     rol:get('eu-rol'),
     password_nota:get('eu-nota')||null,
     hora_inicio:get('eu-hi')||null,
-    hora_fin:get('eu-hf')||null
+    hora_fin:get('eu-hf')||null,
+    modo_historico:document.getElementById('eu-modo-historico')?.checked||false
   }
   // Solo mandar username si el admin escribió algo — si está vacío no se toca
   if(usernameVal) fields.username=usernameVal
@@ -1928,7 +1967,9 @@ window.doEditUser=async(user_id)=>{
     btn.disabled=false;btn.textContent='Guardar cambios'
     return
   }
-  logAction('usuario_editado',{user_id}).catch(()=>{})
+  // Update directo de modo_historico (por si la Edge Function no lo soporta)
+  await sb.from('usuarios').update({modo_historico:fields.modo_historico}).eq('id',user_id).catch(()=>{})
+  logAction('usuario_editado',{user_id,modo_historico:fields.modo_historico}).catch(()=>{})
   closeModal();loadUsuarios()
 }
 
@@ -2280,22 +2321,27 @@ async function pageAuxAsignador(c){
     for(const p of productos){
       if(p.keywords)(p.keywords).split(',').map(k=>k.trim().toLowerCase()).filter(Boolean).forEach(k=>allKw.add(k))
     }
-    const kwFlat=[...allKw].sort().join(', ')
-    const kwHtml=kwFlat
-      ? `<span style="color:var(--blue);font-family:monospace;font-size:13px">${kwFlat}</span>`
-      : '<span style="color:var(--muted)">Sin keywords. Por defecto todo va a GEN (genérico).</span>'
+    const kwArray=[...allKw].sort()
+    const kwHtml=kwArray.length
+      ? kwArray.map(k=>`<span style="display:inline-block;padding:3px 9px;background:rgba(34,197,94,0.1);border:1px solid var(--green);color:var(--green);border-radius:14px;font-family:monospace;font-size:12px;margin:2px 4px 2px 0">🟢 ${k}</span>`).join('')
+      : '<span style="color:var(--muted)">⚠️ No hay productos configurados. Configura productos con keywords en la sección Productos.</span>'
+
+    // Verificar si está en modo histórico (admin permitió cargas viejas para este auxiliar)
+    const modoHistorico=me?.modo_historico===true
 
     document.getElementById('asign-content').innerHTML=`
       <div class="card" style="margin-bottom:14px">
-        <div style="font-size:12px;color:var(--muted);margin-bottom:6px"><strong>Palabras reconocidas en la columna PRODUCTO:</strong></div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px"><strong>Palabras reconocidas en la columna PRODUCTO:</strong></div>
         <div>${kwHtml}</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:8px">Cualquier otra palabra → Asignador Genérico (GEN)</div>
+        <div style="font-size:11px;color:var(--amber);margin-top:10px">⚠️ Si el producto del input no coincide con ninguna palabra → la fila NO se procesa</div>
       </div>
+
+      ${modoHistorico?`<div class="alert alert-amber" style="margin-bottom:14px">⏳ <strong>Modo histórico activado.</strong> Puedes cargar datos de cualquier fecha sin restricción.</div>`:''}
 
       <div class="card">
         <div style="font-size:12px;color:var(--muted);margin-bottom:8px">
           <strong>Formato (1 línea por orden):</strong> <code>CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, ID_ANUNCIO, [carrier]</code><br>
-          ID_ANUNCIO vacío = orgánico · carrier opcional · fecha en formato M/D/YYYY
+          ID_ANUNCIO vacío = orgánico · carrier opcional · fecha en formato M/D/YYYY${modoHistorico?'':'<br>📅 Fecha permitida: <strong>de hoy hasta 4 días atrás</strong>'}
         </div>
         <textarea id="asign-input" placeholder="MEDELLIN, 2, ANTIOQUIA, 3018022316, 5/17/2026, Colageno, 120243626234290122
 BOGOTA, 3, CUNDINAMARCA, 3018022317, 5/17/2026, Triflex, ,
@@ -2309,6 +2355,9 @@ CARTAGENA, 2, BOLIVAR, 3018022318, 5/17/2026, Colageno, , INTERRAPIDISIMO" style
 
       <div id="asign-resultado" style="margin-top:18px"></div>
     `
+    // Guardar contexto para validación
+    window._asignKw=kwArray
+    window._asignModoHist=modoHistorico
   }catch(e){
     document.getElementById('asign-content').innerHTML=`<div class="alert alert-red">Error cargando data del asignador: ${e.message}</div>`
   }
@@ -2337,9 +2386,35 @@ window.procesarAsignador=async()=>{
     else if(p.tipo==='invalido')conErrores.push({linea:i+1,raw:p.raw,faltan:[p.msg||`Número de campos inválido (${p.campos}). Formato: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, ID_ANUNCIO, [carrier]`]})
   })
 
+  // PASO 1.5: validar producto reconocido y fecha en rango
+  const kwList=window._asignKw||[]
+  const modoHistorico=window._asignModoHist===true
+  const hoyStr=today()
+  const limiteAtras=new Date(Date.now()-4*86400000).toISOString().slice(0,10)
+  parsed.forEach((p,i)=>{
+    if(p.tipo!=='nuevo'||p.errores.length>0)return
+    // Validar producto contra keywords
+    if(kwList.length){
+      const palabra=(p.producto||'').toLowerCase().trim()
+      const matchKw=kwList.some(k=>palabra.includes(k))
+      if(!matchKw){
+        conErrores.push({linea:i+1,raw:p.raw,faltan:[`producto "${p.producto}" no reconocido (no coincide con: ${kwList.join(', ')})`]})
+        return
+      }
+    }
+    // Validar fecha (a menos que esté en modo histórico)
+    if(!modoHistorico&&p.fecha){
+      if(p.fecha>hoyStr){
+        conErrores.push({linea:i+1,raw:p.raw,faltan:[`fecha ${p.fecha} es futura (máximo: ${hoyStr})`]})
+      }else if(p.fecha<limiteAtras){
+        conErrores.push({linea:i+1,raw:p.raw,faltan:[`fecha ${p.fecha} es anterior al límite (mínimo: ${limiteAtras}, máximo 4 días atrás)`]})
+      }
+    }
+  })
+
   if(conErrores.length>0){
     msg.innerHTML=`<div class="alert alert-red"><strong>❌ ${conErrores.length} línea(s) con errores. Corrige antes de procesar:</strong><ul style="margin-top:6px;margin-left:14px;font-size:12px">
-      ${conErrores.map(e=>`<li><strong>Línea ${e.linea}:</strong> falta ${e.faltan.join(', ')}<br><code style="font-size:10px;color:var(--muted)">${e.raw}</code></li>`).join('')}
+      ${conErrores.map(e=>`<li><strong>Línea ${e.linea}:</strong> ${e.faltan.join(', ')}<br><code style="font-size:10px;color:var(--muted)">${e.raw}</code></li>`).join('')}
     </ul></div>`
     return
   }
@@ -4255,12 +4330,19 @@ async function renderMetaPortafolio(el,isAdmin){
     insCountByAcc[c.account_id]=count||0
   }
 
-  // Gasto en RANGO seleccionado por cuenta (para filtro "Activas")
+  // Gasto en RANGO seleccionado por cuenta + tiene campañas ACTIVE (para filtro "Activas")
   const _defHasta=new Date().toISOString().slice(0,10)
   const _defDesde=new Date(Date.now()-30*86400000).toISOString().slice(0,10)
   const{data:insRango}=await sb.from('meta_insights').select('account_id,spend').eq('nivel','campaign').gte('fecha',_defDesde).lte('fecha',_defHasta).limit(20000)
+  const gastoRangoByAcc={}
+  for(const i of (insRango||[])){gastoRangoByAcc[i.account_id]=(gastoRangoByAcc[i.account_id]||0)+(i.spend||0)}
+  // Cuenta es ACTIVA si: tiene campañas ACTIVE registradas Y tiene gasto > 0 en el rango
   const tieneGastoRango={}
-  for(const i of (insRango||[])){if((i.spend||0)>0)tieneGastoRango[i.account_id]=true}
+  for(const c of cuentas){
+    const tieneCampActiva=(campsByAcc[c.account_id]?.activas||0)>0
+    const tieneGasto=(gastoRangoByAcc[c.account_id]||0)>0
+    tieneGastoRango[c.account_id]=tieneCampActiva&&tieneGasto
+  }
 
   // Break-even
   const prod=productos[0]||{}
@@ -4406,12 +4488,15 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   for(const ad of (allAds||[]))adToCamp[ad.meta_id]=adsetToCamp[ad.parent_id]||''
   const allAdIds=Object.keys(adToCamp)
 
+  // Determinar si el rango es solo HOY o incluye días anteriores
+  const esSoloHoy=(desde===hoy&&hasta===hoy)
   const ventasByCamp={}
   if(allAdIds.length){
     let mapeos=[]
     for(let i=0;i<allAdIds.length;i+=100){
       const batch=allAdIds.slice(i,i+100)
-      const{data}=await sb.from('mapeos').select('ad_id,estado_final,fecha_dropi').in('ad_id',batch).gte('fecha_dropi',desde).lte('fecha_dropi',hasta)
+      // Usar fecha de COMPRA (m.fecha), no fecha_dropi
+      const{data}=await sb.from('mapeos').select('ad_id,estado_final,fecha,fecha_dropi').in('ad_id',batch).gte('fecha',desde).lte('fecha',hasta)
       if(data)mapeos=mapeos.concat(data)
     }
     for(const m of mapeos){
@@ -4420,13 +4505,15 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       if(!ventasByCamp[campId])ventasByCamp[campId]={ventas:0,canceladas:0,pendientes:0,_src:'mapeos'}
       const v=ventasByCamp[campId]
       v._src='mapeos'
-      if(m.fecha_dropi===hoy||!m.estado_final){
-        v.ventas++
+      // Si la fecha de compra es HOY, todavía no está conciliada → aproximación pendiente
+      if(m.fecha===hoy){
+        v.pendientes++
       }else{
+        // Días anteriores: ya conciliado, mostrar solo el estado final
         const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
         if(cat==='cancelado')v.canceladas++
-        else if(cat==='pendiente')v.pendientes++
-        else v.ventas++
+        else if(cat==='pendiente'||!m.estado_final)v.pendientes++
+        else v.ventas++  // confirmadas (entregadas, en proceso, devueltas, etc.)
       }
     }
   }
@@ -4434,7 +4521,6 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   // ── También buscar ventas del reporte diario (ad_ids manuales del auxiliar) ──
   const{data:reportes}=await sb.from('reportes_diarios').select('ad_ids,fecha,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false})
   if(reportes?.length){
-    // Deduplicar: quedarse solo con la última fila por fecha+producto (evita duplicados por conflicto de upsert)
     const seen=new Set()
     const uniqueReportes=[]
     for(const rep of reportes){
@@ -4443,7 +4529,6 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       seen.add(key)
       uniqueReportes.push(rep)
     }
-    // Contar: cada línea de ad_id = 1 venta (repetidos dentro de un producto = múltiples ventas)
     for(const rep of uniqueReportes){
       if(!rep.ad_ids)continue
       const ids=rep.ad_ids.split(/[\n,]+/).map(s=>s.trim()).filter(s=>s.length>5)
@@ -4451,7 +4536,11 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
         const campId=adToCamp[adId]
         if(!campId)continue
         if(!ventasByCamp[campId])ventasByCamp[campId]={ventas:0,canceladas:0,pendientes:0}
-        if(ventasByCamp[campId]._src!=='mapeos')ventasByCamp[campId].ventas++
+        if(ventasByCamp[campId]._src!=='mapeos'){
+          // Si la fecha del reporte es hoy, va a pendientes (aproximación)
+          if(rep.fecha===hoy)ventasByCamp[campId].pendientes++
+          else ventasByCamp[campId].ventas++
+        }
       }
     }
   }
@@ -4475,7 +4564,8 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const m=agg[camp.meta_id]||{spend:0,imp:0,clicks:0,conv:0,ctrs:[],cpms:[],freqs:[]}
     const v=ventasByCamp[camp.meta_id]||{ventas:0,canceladas:0,pendientes:0}
     const cpa=m.conv>0?m.spend/m.conv:0
-    const cpaReal=v.ventas>0?m.spend/v.ventas:0
+    const ventasReales=esSoloHoy?v.pendientes:v.ventas
+    const cpaReal=ventasReales>0?m.spend/ventasReales:0
     const roasM=m.spend>0&&m.conv>0?(m.conv*ctx.p2)/m.spend:0
     const avgCtr=m.ctrs.length?(m.ctrs.reduce((a,b)=>a+b,0)/m.ctrs.length):0
     const avgCpm=m.cpms.length?(m.cpms.reduce((a,b)=>a+b,0)/m.cpms.length):0
@@ -4508,7 +4598,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
         <div style="font-size:11px"><span style="color:var(--muted)">ROAS</span><br><strong style="color:${roasM>=ctx.roasBE?'var(--green)':'var(--red)'}">${roasM.toFixed(2)}x</strong></div>
         <div style="font-size:11px"><span style="color:var(--muted)">CPA Meta</span><br><strong>${cpa>0?'$'+fmt(cpa):'—'}</strong></div>
         <div style="font-size:11px"><span style="color:var(--muted)">Conv.</span><br><strong>${m.conv}</strong></div>
-        <div style="font-size:11px"><span style="color:var(--muted)">Ventas</span><br><strong style="color:var(--green)">${v.ventas}</strong>${v.canceladas?`<span style="font-size:10px;color:var(--red)"> · ${v.canceladas}✗</span>`:''}${v.pendientes?`<span style="font-size:10px;color:var(--amber)"> · ${v.pendientes}⏳</span>`:''}</div>
+        <div style="font-size:11px"><span style="color:var(--muted)">Ventas</span><br>${esSoloHoy?`<strong style="color:var(--amber)">${v.pendientes} ⏳</strong>`:`<strong style="color:var(--green)">${v.ventas} ✅</strong>`}</div>
         <div style="font-size:11px"><span style="color:var(--muted)">CPA Real</span><br><strong${ctx.isAdmin&&cpaReal>0?` style="color:${cpaReal<=ctx.margenBE?'var(--green)':'var(--red)'}"`:''}>${cpaReal>0?'$'+fmt(cpaReal):'—'}</strong></div>
       </div>
       <div style="display:flex;gap:14px;margin-top:6px;font-size:11px;color:var(--muted)">
@@ -4705,14 +4795,20 @@ window.applyMetaDateRange=async()=>{
     if(accEl){accEl.style.display='none';accEl.innerHTML=''}
     if(chevron)chevron.textContent='▸'
   })
-  // Recalcular gasto en rango para filtro Activas
+  // Recalcular gasto en rango para filtro Activas (cuenta = activas + gasto > 0)
   const desde=document.getElementById('meta-desde')?.value||today()
   const hasta=document.getElementById('meta-hasta')?.value||today()
   const{data:insRango}=await sb.from('meta_insights').select('account_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).limit(20000)
-  const tieneGastoRango={}
-  for(const i of (insRango||[])){if((i.spend||0)>0)tieneGastoRango[i.account_id]=true}
+  const gastoRangoByAcc={}
+  for(const i of (insRango||[])){gastoRangoByAcc[i.account_id]=(gastoRangoByAcc[i.account_id]||0)+(i.spend||0)}
+  // Para saber qué cuentas tienen campañas ACTIVE
+  const{data:campsActive}=await sb.from('meta_campanas').select('account_id').eq('nivel','campaign').eq('estado','ACTIVE')
+  const cuentasConActivas=new Set((campsActive||[]).map(c=>c.account_id))
   document.querySelectorAll('.meta-cuenta-wrap').forEach(el=>{
-    el.dataset.tienegastohoy=tieneGastoRango[el.dataset.accid]?'1':'0'
+    const accId=el.dataset.accid
+    const hasGasto=(gastoRangoByAcc[accId]||0)>0
+    const hasActive=cuentasConActivas.has(accId)
+    el.dataset.tienegastohoy=(hasGasto&&hasActive)?'1':'0'
   })
   filterMetaCuentas()
 }

@@ -501,19 +501,38 @@ function render(page){
 
 // ── UTILS ──────────────────────────────────────────────────
 const fmt=n=>new Intl.NumberFormat('es-CO').format(Math.round(n||0))
-const today=()=>new Date().toISOString().split('T')[0]
+// Zona horaria Colombia (America/Bogota = UTC-5, sin DST). Toda la app usa esta fecha.
+const _coDate=(d)=>{
+  if(!d)d=new Date()
+  // Convertir a Colombia: restar 5 horas a UTC, luego sacar fecha
+  const ms=d.getTime()+(d.getTimezoneOffset()*60000)-(5*3600000)
+  const co=new Date(ms)
+  return co.toISOString().split('T')[0]
+}
+const today=()=>_coDate()
 const _normProd=s=>(s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()
-const _isoDate=(d)=>d.toISOString().split('T')[0]
-const _daysAgo=(n)=>{const d=new Date();d.setDate(d.getDate()-n);return _isoDate(d)}
+const _isoDate=(d)=>_coDate(d)
+const _daysAgo=(n)=>{
+  const ms=Date.now()+(new Date().getTimezoneOffset()*60000)-(5*3600000)-(n*86400000)
+  return new Date(ms).toISOString().split('T')[0]
+}
+// Helper para componer fechas en Colombia (mes, día específicos)
+const _coDateAt=(year,month,day)=>{
+  const d=new Date(Date.UTC(year,month,day,5,0,0))
+  return _coDate(d)
+}
 function _quickDateBtns(desdeId,hastaId,onchangeFn){
   const sets=[
     ['Hoy',0,0],['Ayer',1,1],['Hoy+Ayer',1,0],['7d',6,0],['14d',13,0],['30d',29,0],
     ['Este mes','cm',0],['Mes pasado','lm','lm']
   ]
+  // Fecha de Colombia para extraer mes/año actuales
+  const hoyCo=today()
+  const[hY,hM]=hoyCo.split('-').map(Number)
   return sets.map(([label,desde,hasta])=>{
     let d,h
-    if(desde==='cm'){const n=new Date();d=_isoDate(new Date(n.getFullYear(),n.getMonth(),1));h=today()}
-    else if(desde==='lm'){const n=new Date();d=_isoDate(new Date(n.getFullYear(),n.getMonth()-1,1));h=_isoDate(new Date(n.getFullYear(),n.getMonth(),0))}
+    if(desde==='cm'){d=_coDateAt(hY,hM-1,1);h=hoyCo}
+    else if(desde==='lm'){d=_coDateAt(hY,hM-2,1);h=_coDateAt(hY,hM-1,0)}
     else{d=_daysAgo(desde);h=_daysAgo(hasta)}
     return`<button class="btn-sm btn-outline" onclick="document.getElementById('${desdeId}').value='${d}';document.getElementById('${hastaId}').value='${h}';${onchangeFn}">${label}</button>`
   }).join('')
@@ -1745,25 +1764,18 @@ async function refreshProdResumen(id){
     📊 CPA real (${periodo}): ${cpaRealHtml} · ROAS real: ${roasRealHtml}`
 }
 
-// Convierte período a rango {desde, hasta}
+// Convierte período a rango {desde, hasta} — todo en zona Colombia
 function _periodoToRange(periodo){
   const hoy=today()
-  const ayer=new Date(Date.now()-86400000).toISOString().slice(0,10)
-  const d=new Date()
+  const ayer=_daysAgo(1)
+  const[y,m]=hoy.split('-').map(Number)
   if(periodo==='hoy')return{desde:hoy,hasta:hoy}
   if(periodo==='ayer')return{desde:ayer,hasta:ayer}
   if(periodo==='7d')return{desde:_daysAgo(6),hasta:hoy}
   if(periodo==='14d')return{desde:_daysAgo(13),hasta:hoy}
   if(periodo==='30d')return{desde:_daysAgo(29),hasta:hoy}
-  if(periodo==='este_mes'){
-    const ini=new Date(d.getFullYear(),d.getMonth(),1).toISOString().slice(0,10)
-    return{desde:ini,hasta:hoy}
-  }
-  if(periodo==='mes_pasado'){
-    const ini=new Date(d.getFullYear(),d.getMonth()-1,1).toISOString().slice(0,10)
-    const fin=new Date(d.getFullYear(),d.getMonth(),0).toISOString().slice(0,10)
-    return{desde:ini,hasta:fin}
-  }
+  if(periodo==='este_mes')return{desde:_coDateAt(y,m-1,1),hasta:hoy}
+  if(periodo==='mes_pasado')return{desde:_coDateAt(y,m-2,1),hasta:_coDateAt(y,m-1,0)}
   return{desde:_daysAgo(6),hasta:hoy}
 }
 
@@ -1924,10 +1936,10 @@ window.modalUserEdit=(u)=>{
         <div class="fld"><label>Hora inicio</label><input type="time" id="eu-hi" value="${u.hora_inicio?u.hora_inicio.slice(0,5):''}"></div>
         <div class="fld"><label>Hora fin</label><input type="time" id="eu-hf" value="${u.hora_fin?u.hora_fin.slice(0,5):''}"></div>
       </div>
-      <div class="fld" id="eu-modo-hist-wrap" style="${u.rol==='auxiliar'?'':'display:none'}">
+      <div class="fld" id="eu-modo-hist-wrap" style="background:rgba(245,158,11,0.05);border:1px solid var(--amber);border-radius:8px;padding:10px">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" id="eu-modo-historico" ${u.modo_historico?'checked':''}>
-          <span><strong>⏳ Modo histórico</strong> — permite al auxiliar cargar órdenes de cualquier fecha (sin límite de 4 días atrás)</span>
+          <span><strong>⏳ Modo histórico</strong> — permite cargar órdenes de cualquier fecha (sin límite de 4 días atrás)</span>
         </label>
         <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-left:24px">Activa esta opción solo cuando necesites cargar datos viejos. Desactiva al terminar.</div>
       </div>
@@ -1937,12 +1949,6 @@ window.modalUserEdit=(u)=>{
       <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
       <button class="btn-sm btn-primary" id="eu-save" onclick="doEditUser('${u.id}')">Guardar cambios</button>
     </div>`)
-  // Mostrar/ocultar el toggle según el rol seleccionado
-  const rolSel=document.getElementById('eu-rol')
-  if(rolSel)rolSel.addEventListener('change',()=>{
-    const w=document.getElementById('eu-modo-hist-wrap')
-    if(w)w.style.display=rolSel.value==='auxiliar'?'':'none'
-  })
 }
 
 window.doEditUser=async(user_id)=>{
@@ -2390,7 +2396,7 @@ window.procesarAsignador=async()=>{
   const kwList=window._asignKw||[]
   const modoHistorico=window._asignModoHist===true
   const hoyStr=today()
-  const limiteAtras=new Date(Date.now()-4*86400000).toISOString().slice(0,10)
+  const limiteAtras=_daysAgo(4)
   parsed.forEach((p,i)=>{
     if(p.tipo!=='nuevo'||p.errores.length>0)return
     // Validar producto contra keywords
@@ -4037,7 +4043,7 @@ window.runMetaSync=async(days)=>{
       await sb.from('meta_cuentas').upsert({account_id:accId,nombre:a.name||'',moneda:a.currency||'COP',timezone:a.timezone_name||'',estado:a.account_status===1?'ACTIVE':'INACTIVE',synced_at:new Date().toISOString()},{onConflict:'account_id'})
     }
 
-    const until=new Date().toISOString().slice(0,10)
+    const until=today()
     const sd=new Date()
     if(days==='all')sd.setFullYear(sd.getFullYear()-3);else sd.setDate(sd.getDate()-days)
     const since=sd.toISOString().slice(0,10)
@@ -4265,7 +4271,7 @@ window.runMetaSyncAccount=async(accountId,accountName,days)=>{
 async function _syncOneAccount(accountId,token,days,onProgress){
   const _p=onProgress||(()=>{})
   const actId='act_'+accountId
-  const until=new Date().toISOString().slice(0,10)
+  const until=today()
   const sd=new Date()
   if(days==='all')sd.setFullYear(sd.getFullYear()-3);else sd.setDate(sd.getDate()-days)
   const since=sd.toISOString().slice(0,10)
@@ -4331,8 +4337,8 @@ async function renderMetaPortafolio(el,isAdmin){
   }
 
   // Gasto en RANGO seleccionado por cuenta + tiene campañas ACTIVE (para filtro "Activas")
-  const _defHasta=new Date().toISOString().slice(0,10)
-  const _defDesde=new Date(Date.now()-30*86400000).toISOString().slice(0,10)
+  const _defHasta=today()
+  const _defDesde=_daysAgo(30)
   const{data:insRango}=await sb.from('meta_insights').select('account_id,spend').eq('nivel','campaign').gte('fecha',_defDesde).lte('fecha',_defHasta).limit(20000)
   const gastoRangoByAcc={}
   for(const i of (insRango||[])){gastoRangoByAcc[i.account_id]=(gastoRangoByAcc[i.account_id]||0)+(i.spend||0)}
@@ -4353,8 +4359,8 @@ async function renderMetaPortafolio(el,isAdmin){
   const roasBE=margenBE>0?p2/margenBE:999
 
   // Default dates: last 30 days
-  const defHasta=new Date().toISOString().slice(0,10)
-  const defDesde=new Date(Date.now()-30*86400000).toISOString().slice(0,10)
+  const defHasta=today()
+  const defDesde=_daysAgo(30)
 
   // Store portfolio context for expand/filter
   window._metaPort={campanas,p2,c2,fo,fd,dp,margenBE,roasBE,isAdmin}
@@ -4439,9 +4445,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   const ctx=window._metaPort
   if(!ctx)return
 
-  const desde=document.getElementById('meta-desde')?.value||new Date(Date.now()-30*86400000).toISOString().slice(0,10)
-  const hasta=document.getElementById('meta-hasta')?.value||new Date().toISOString().slice(0,10)
-  const hoy=new Date().toISOString().slice(0,10)
+  const desde=document.getElementById('meta-desde')?.value||_daysAgo(30)
+  const hasta=document.getElementById('meta-hasta')?.value||today()
+  const hoy=today()
   const actId='act_'+accountId
   let camps=[],agg={},source='meta'
 
@@ -4822,9 +4828,9 @@ window.viewCampDetail=async(campId,customDesde,customHasta)=>{
   if(!camp){alert('Campaña no encontrada');return}
 
   // Fecha: custom > inputs globales > default 30d
-  const desde=customDesde||document.getElementById('meta-desde')?.value||new Date(Date.now()-30*86400000).toISOString().slice(0,10)
-  const hasta=customHasta||document.getElementById('meta-hasta')?.value||new Date().toISOString().slice(0,10)
-  const hoy=new Date().toISOString().slice(0,10)
+  const desde=customDesde||document.getElementById('meta-desde')?.value||_daysAgo(30)
+  const hasta=customHasta||document.getElementById('meta-hasta')?.value||today()
+  const hoy=today()
 
   // Insights del rango
   const{data:ins}=await sb.from('meta_insights').select('*').eq('meta_id',campId).eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('fecha',{ascending:false})
@@ -5200,7 +5206,7 @@ async function gatherDataIA(nivel,targetId,desde,hasta){
 
 // Orquesta el análisis: reúne datos → llama Edge Function → muestra modal
 window.analizarConIA=async(nivel,targetId,targetNombre,desde,hasta)=>{
-  desde=desde||document.getElementById('meta-desde')?.value||new Date(Date.now()-30*86400000).toISOString().slice(0,10)
+  desde=desde||document.getElementById('meta-desde')?.value||_daysAgo(30)
   hasta=hasta||document.getElementById('meta-hasta')?.value||today()
   showIALoading(nivel,targetNombre)
   try{

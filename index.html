@@ -1026,7 +1026,7 @@ async function loadTracker(){
     }
 
     // 4. Mapeos del rango (cruzar con campañas vía ad_id → campaign)
-    const{data:mapeos}=await sb.from('mapeos').select('fecha,cantidad,producto_id,producto,estado_final,ad_id').gte('fecha',desde).lte('fecha',hasta).limit(20000)
+    const{data:mapeos}=await sb.from('mapeos').select('fecha,cantidad,producto,estado_final,ad_id').gte('fecha',desde).lte('fecha',hasta).limit(20000)
 
     // 5. Conversaciones (reportes_diarios)
     const{data:reps}=await sb.from('reportes_diarios').select('fecha,producto_id,conversaciones').gte('fecha',desde).lte('fecha',hasta)
@@ -1067,10 +1067,13 @@ async function loadTracker(){
       gastoPorProd[pid][f].gasto+=(i.spend||0)
     }
 
-    // 8. Mapeos por producto + fecha + estado
+    // 8. Mapeos por producto + fecha + estado (matching por nombre normalizado)
+    const prodByNorm={}
+    for(const p of productos){prodByNorm[_normProd(p.nombre)]=p.id}
     const dataPorProd={}
     for(const m of (mapeos||[])){
-      const pid=m.producto_id||null
+      const norm=_normProd(m.producto||'')
+      const pid=prodByNorm[norm]||null
       if(!pid)continue
       if(!dataPorProd[pid])dataPorProd[pid]={}
       const f=m.fecha||'?'
@@ -1080,7 +1083,6 @@ async function loadTracker(){
       const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
       if(cat==='cancelado'){d.canc++;continue}
       if(cat==='pendiente'||!m.estado_final){d.pend++;continue}
-      // Confirmada
       d.conf++
       if(q===1)d.o1++;else if(q===2)d.o2++;else if(q===3)d.o3++;else d.o4++
       if(cat==='entregado'||cat==='novedad_ok')d.ent++
@@ -1692,8 +1694,9 @@ async function refreshProdResumen(id){
         const{data:ins}=await sb.from('meta_insights').select('spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).in('meta_id',chunk)
         for(const x of (ins||[]))gasto+=(x.spend||0)
       }
-      // Ventas: confirmadas (cualquier estado_final no nulo y no CANCELADO/PENDIENTE CONFIRMACION) + entregadas
-      const{data:maps}=await sb.from('mapeos').select('estado_final').eq('producto_id',id).gte('fecha',desde).lte('fecha',hasta).limit(10000)
+      // Ventas: confirmadas + entregadas (matching por nombre)
+      const prodNorm=_normProd(prod.nombre)
+      const{data:maps}=await sb.from('mapeos').select('estado_final').ilike('producto',prod.nombre).gte('fecha',desde).lte('fecha',hasta).limit(10000)
       let conf=0,ent=0
       for(const m of (maps||[])){
         const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
@@ -1806,6 +1809,7 @@ function closeModal(){
   const m=document.getElementById('user-modal')
   if(m)m.remove()
 }
+window.closeModal=closeModal
 
 function openModal(html){
   closeModal()
@@ -4452,13 +4456,13 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     }
   }
 
-  // ── Clasificar: con/sin actividad ──
+  // ── Clasificar: con/sin actividad (gasto > 0 en el rango) ──
   const conActividad=[],sinActividad=[]
   for(const camp of camps){
     const m=agg[camp.meta_id]
-    const hasData=m&&(m.spend>0||m.imp>0)
-    camp._hasData=hasData
-    if(hasData)conActividad.push(camp)
+    const hasSpend=m&&m.spend>0
+    camp._hasData=hasSpend
+    if(hasSpend)conActividad.push(camp)
     else sinActividad.push(camp)
   }
   conActividad.sort((a,b)=>(agg[b.meta_id]?.spend||0)-(agg[a.meta_id]?.spend||0))
@@ -4489,11 +4493,15 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const opacity=inactive?'opacity:.5':''
 
     return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" style="margin-bottom:8px;${opacity}">
-      <div class="card" style="padding:12px;cursor:pointer;border-left:3px solid ${semBorder}" onclick="viewCampDetail('${camp.meta_id}')">
+      <div class="card" style="padding:12px;border-left:3px solid ${semBorder}">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-        <div><div style="font-weight:600;font-size:13px">${camp.nombre||camp.meta_id}</div>
+        <div style="flex:1;min-width:0;cursor:pointer" onclick="viewCampDetail('${camp.meta_id}')"><div style="font-weight:600;font-size:13px">${camp.nombre||camp.meta_id}</div>
           <div style="font-size:11px;color:var(--muted)">${camp.objetivo||''} · ${camp.estado}</div></div>
-        <span class="pill ${semCls}">${semTxt}</span>
+        <div style="display:flex;gap:4px;align-items:center;flex-shrink:0">
+          ${camp._hasData?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();toggleCampDesglose('${camp.meta_id}','${accountId}')" style="padding:4px 8px;font-size:10px" title="Ver conjuntos y anuncios">📊 Desglose</button>`:''}
+          <button class="btn-sm btn-outline" onclick="event.stopPropagation();analizarConIA('campana','${camp.meta_id}','${(camp.nombre||'').replace(/'/g,"\\'")}','${desde}','${hasta}')" style="padding:4px 8px;font-size:10px" title="Analizar con IA">🤖</button>
+          <span class="pill ${semCls}">${semTxt}</span>
+        </div>
       </div>
       ${camp._hasData?`<div class="cards-row" style="margin-top:10px;gap:6px;display:grid;grid-template-columns:repeat(6,1fr)">
         <div style="font-size:11px"><span style="color:var(--muted)">Gasto</span><br><strong>$${fmt(m.spend)}</strong></div>
@@ -4506,6 +4514,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       <div style="display:flex;gap:14px;margin-top:6px;font-size:11px;color:var(--muted)">
         <span>CTR: ${avgCtr.toFixed(2)}%</span><span>CPM: $${fmt(avgCpm)}</span><span>Freq: ${avgFreq.toFixed(1)}</span>
       </div>`:''}</div>
+      <div id="desglose-${camp.meta_id}" style="display:none;padding:4px 0 4px 16px"></div>
     </div>`
   }
 
@@ -4541,6 +4550,126 @@ window.filterCampsInAccount=(accountId,filter,btn)=>{
 }
 
 window.toggleExcluirGlobal=async(accountId,excluir)=>{
+
+// ── Desglose campaña → adsets → ads (lazy loading) ──
+window.toggleCampDesglose=async(campId,accountId)=>{
+  const el=document.getElementById('desglose-'+campId)
+  if(!el)return
+  if(el.style.display!=='none'){el.style.display='none';return}
+  el.style.display='block'
+  if(el.dataset.loaded){return}
+  el.innerHTML='<div class="loading">Cargando conjuntos...</div>'
+  try{
+    const desde=document.getElementById('meta-desde')?.value||_daysAgo(30)
+    const hasta=document.getElementById('meta-hasta')?.value||today()
+    let token=await getConfig('meta_access_token')
+    let adsets=[]
+    const agg={}
+    try{
+      if(token){
+        const timeRange=JSON.stringify({since:desde,until:hasta})
+        const raw=await metaGet(`/${campId}/adsets`,token,{fields:'id,name,status,effective_status',limit:'200'})
+        adsets=raw.map(a=>({meta_id:a.id,nombre:a.name||'',estado:a.effective_status||a.status||''}))
+        const ins=await metaGet(`/${campId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,actions',time_range:timeRange,level:'adset',time_increment:'all_days',limit:'200'})
+        for(const i of ins){
+          if(!agg[i.adset_id])agg[i.adset_id]={spend:0,conv:0,imp:0}
+          agg[i.adset_id].spend+=parseFloat(i.spend||0)
+          agg[i.adset_id].conv+=metaConv(i.actions)
+          agg[i.adset_id].imp+=parseInt(i.impressions||0)
+        }
+      }
+    }catch(_){}
+    if(!adsets.length){
+      const{data:dbAs}=await sb.from('meta_campanas').select('meta_id,nombre,estado').eq('parent_id',campId).eq('nivel','adset').order('nombre')
+      adsets=(dbAs||[]).map(a=>({meta_id:a.meta_id,nombre:a.nombre||'',estado:a.estado||''}))
+      const{data:ins}=await sb.from('meta_insights').select('meta_id,spend,impressions,conversions').eq('nivel','adset').gte('fecha',desde).lte('fecha',hasta).in('meta_id',adsets.map(a=>a.meta_id))
+      for(const i of (ins||[])){
+        if(!agg[i.meta_id])agg[i.meta_id]={spend:0,conv:0,imp:0}
+        agg[i.meta_id].spend+=i.spend||0;agg[i.meta_id].conv+=i.conversions||0;agg[i.meta_id].imp+=i.impressions||0
+      }
+    }
+    if(!adsets.length){el.innerHTML='<div style="font-size:12px;color:var(--muted);padding:8px">Sin conjuntos de anuncios</div>';el.dataset.loaded='1';return}
+    adsets.sort((a,b)=>(agg[b.meta_id]?.spend||0)-(agg[a.meta_id]?.spend||0))
+    el.innerHTML=`<div class="section-title" style="font-size:12px;margin-top:8px">📋 Conjuntos de anuncios (${adsets.length})</div>
+      ${adsets.map(as=>{
+        const d=agg[as.meta_id]||{spend:0,conv:0,imp:0}
+        const hasSpend=d.spend>0
+        return`<div style="margin-bottom:6px;${hasSpend?'':'opacity:0.4'}">
+          <div class="card" style="padding:8px 12px;border-left:2px solid ${hasSpend?'var(--blue)':'var(--border)'}">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+              <div style="flex:1;min-width:0">
+                <div style="font-weight:500;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${as.nombre}">${as.nombre}</div>
+                <div style="font-size:10px;color:var(--muted)">${as.estado} · $${fmt(d.spend)} · ${d.conv} conv · ${fmt(d.imp)} imp</div>
+              </div>
+              <div style="display:flex;gap:4px">
+                ${hasSpend?`<button class="btn-sm btn-outline" onclick="toggleAdsetDesglose('${as.meta_id}','${accountId}')" style="padding:3px 6px;font-size:9px">📌 Ads</button>`:''}
+                <button class="btn-sm btn-outline" onclick="analizarConIA('adset','${as.meta_id}','${(as.nombre||'').replace(/'/g,"\\'")}')" style="padding:3px 6px;font-size:9px">🤖</button>
+              </div>
+            </div>
+          </div>
+          <div id="desglose-as-${as.meta_id}" style="display:none;padding:2px 0 2px 20px"></div>
+        </div>`
+      }).join('')}`
+    el.dataset.loaded='1'
+  }catch(e){el.innerHTML=`<div class="alert alert-red" style="font-size:11px">${e.message}</div>`}
+}
+
+window.toggleAdsetDesglose=async(adsetId,accountId)=>{
+  const el=document.getElementById('desglose-as-'+adsetId)
+  if(!el)return
+  if(el.style.display!=='none'){el.style.display='none';return}
+  el.style.display='block'
+  if(el.dataset.loaded){return}
+  el.innerHTML='<div class="loading" style="font-size:11px">Cargando anuncios...</div>'
+  try{
+    const desde=document.getElementById('meta-desde')?.value||_daysAgo(30)
+    const hasta=document.getElementById('meta-hasta')?.value||today()
+    let token=await getConfig('meta_access_token')
+    let ads=[]
+    const agg={}
+    try{
+      if(token){
+        const raw=await metaGet(`/${adsetId}/ads`,token,{fields:'id,name,status,effective_status',limit:'200'})
+        ads=raw.map(a=>({meta_id:a.id,nombre:a.name||'',estado:a.effective_status||a.status||''}))
+        const timeRange=JSON.stringify({since:desde,until:hasta})
+        const ins=await metaGet(`/${adsetId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,actions',time_range:timeRange,level:'ad',time_increment:'all_days',limit:'200'})
+        for(const i of ins){
+          if(!agg[i.ad_id])agg[i.ad_id]={spend:0,conv:0,imp:0}
+          agg[i.ad_id].spend+=parseFloat(i.spend||0)
+          agg[i.ad_id].conv+=metaConv(i.actions)
+          agg[i.ad_id].imp+=parseInt(i.impressions||0)
+        }
+      }
+    }catch(_){}
+    if(!ads.length){
+      const{data:dbAds}=await sb.from('meta_campanas').select('meta_id,nombre,estado').eq('parent_id',adsetId).eq('nivel','ad').order('nombre')
+      ads=(dbAds||[]).map(a=>({meta_id:a.meta_id,nombre:a.nombre||'',estado:a.estado||''}))
+      const{data:ins}=await sb.from('meta_insights').select('meta_id,spend,impressions,conversions').eq('nivel','ad').gte('fecha',desde).lte('fecha',hasta).in('meta_id',ads.map(a=>a.meta_id))
+      for(const i of (ins||[])){
+        if(!agg[i.meta_id])agg[i.meta_id]={spend:0,conv:0,imp:0}
+        agg[i.meta_id].spend+=i.spend||0;agg[i.meta_id].conv+=i.conversions||0;agg[i.meta_id].imp+=i.impressions||0
+      }
+    }
+    if(!ads.length){el.innerHTML='<div style="font-size:11px;color:var(--muted);padding:6px">Sin anuncios</div>';el.dataset.loaded='1';return}
+    ads.sort((a,b)=>(agg[b.meta_id]?.spend||0)-(agg[a.meta_id]?.spend||0))
+    el.innerHTML=ads.map(ad=>{
+      const d=agg[ad.meta_id]||{spend:0,conv:0,imp:0}
+      const hasSpend=d.spend>0
+      return`<div style="padding:5px 10px;border-left:2px solid ${hasSpend?'var(--green)':'var(--border)'};margin-bottom:4px;background:var(--card2);border-radius:6px;${hasSpend?'':'opacity:0.4'}">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:6px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${ad.nombre}">${ad.nombre}</div>
+            <div style="font-size:10px;color:var(--muted)">${ad.estado} · $${fmt(d.spend)} · ${d.conv} conv</div>
+          </div>
+          <button class="btn-sm btn-outline" onclick="analizarConIA('anuncio','${ad.meta_id}','${(ad.nombre||'').replace(/'/g,"\\'")}')" style="padding:3px 6px;font-size:9px">🤖</button>
+        </div>
+      </div>`
+    }).join('')
+    el.dataset.loaded='1'
+  }catch(e){el.innerHTML=`<div class="alert alert-red" style="font-size:11px">${e.message}</div>`}
+}
+
+
   const{error}=await sb.from('meta_cuentas').update({excluir_global:excluir}).eq('account_id',accountId)
   if(error){alert('Error: '+error.message);return}
   logAction('cuenta_excluir_global',{account_id:accountId,excluir}).catch(()=>{})
@@ -5095,11 +5224,12 @@ async function loadIAHist(){
     <div class="card c-green"><div class="card-label">Costo total</div><div class="card-val">$${totCost.toFixed(2)}</div><div class="card-sub">USD</div></div>
   </div>`
   el.innerHTML=`<div class="table-wrap"><table>
-    <tr><th>Fecha</th><th>Nivel</th><th>Target</th><th>Usuario</th><th>Tokens</th><th>Costo</th><th>Acción</th></tr>
+    <tr><th>Fecha</th><th>Nivel</th><th>Target</th><th>ID</th><th>Usuario</th><th>Tokens</th><th>Costo</th><th>Acción</th></tr>
     ${data.map(r=>`<tr>
       <td data-label="Fecha" style="font-family:monospace;font-size:11px;white-space:nowrap">${new Date(r.created_at).toLocaleString('es-CO')}</td>
       <td data-label="Nivel"><span class="pill pill-blue">${r.nivel}</span></td>
       <td data-label="Target" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.target_nombre||r.target_id||''}">${r.target_nombre||r.target_id||'—'}</td>
+      <td data-label="ID" style="font-family:monospace;font-size:10px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.target_id||''}">${r.target_id||'—'}</td>
       <td data-label="Usuario">${r.usuarios?.nombre||'—'}</td>
       <td data-label="Tokens" style="font-size:11px">${fmt(r.tokens_in||0)} / ${fmt(r.tokens_out||0)}</td>
       <td data-label="Costo">$${parseFloat(r.costo_usd||0).toFixed(4)}</td>
@@ -5132,9 +5262,13 @@ async function cargarSeccionMaestros(){
     if(!maestros?.length){el.innerHTML='<div class="alert alert-blue">No hay maestros configurados</div>';return}
     const usoPorMaestro={}
     for(const p of productos){const code=p.maestro_codigo||'GEN';if(!usoPorMaestro[code])usoPorMaestro[code]=[];usoPorMaestro[code].push(p.nombre)}
-    // Versiones (todas, sin límite)
+    // Versiones (todas, con error visible)
     let versiones=[]
-    try{versiones=await fetchAllRows('maestros_versiones','maestro_codigo,version,desactivado_en')}catch(_){}
+    try{
+      const{data:vData,error:vErr}=await sb.from('maestros_versiones').select('maestro_codigo,version,desactivado_en').order('version',{ascending:false})
+      if(vErr)console.warn('maestros_versiones error:',vErr.message)
+      else versiones=vData||[]
+    }catch(e){console.warn('maestros_versiones exception:',e.message)}
     const versByCode={}
     for(const v of versiones){if(!versByCode[v.maestro_codigo])versByCode[v.maestro_codigo]=[];versByCode[v.maestro_codigo].push(v)}
     // Conteo ciudades por maestro (con count real, no limite 1000)

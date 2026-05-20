@@ -4309,8 +4309,45 @@ async function _syncOneAccount(accountId,token,days,onProgress){
   _p(100,'✅')
 }
 
+// ── META: AUTO-SYNC HOY (ligero, solo insights) ─────────
+// Solo trae insights de HOY para todas las cuentas. Sin struct (camps/adsets/ads).
+// Throttle: máximo una vez cada 5 minutos para no saturar la API.
+async function _syncTodayQuick(){
+  if(window._syncTodayBusy)return
+  const now=Date.now()
+  if(window._lastTodaySyncAt&&(now-window._lastTodaySyncAt)<300000)return
+  const token=await getConfig('meta_access_token')
+  if(!token)return
+  const{data:cuentas}=await sb.from('meta_cuentas').select('account_id')
+  if(!cuentas?.length)return
+  window._syncTodayBusy=true
+  const hoy=today()
+  const tr=JSON.stringify({since:hoy,until:hoy})
+  try{
+    for(const cu of cuentas){
+      const actId='act_'+cu.account_id
+      try{
+        const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:tr,level:'campaign',time_increment:'1',limit:'500'})
+        for(const i of cIns){
+          await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:cu.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        }
+        const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:tr,level:'ad',time_increment:'1',limit:'500'})
+        for(const i of aIns){
+          await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:cu.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        }
+      }catch(e){console.warn('_syncTodayQuick',cu.account_id,e.message)}
+    }
+    window._lastTodaySyncAt=Date.now()
+  }finally{window._syncTodayBusy=false}
+}
+
 async function renderMetaPortafolio(el,isAdmin){
   if(!el)return
+  // Auto-sync hoy desde Meta (throttled: max 1 vez cada 5 min)
+  const _needsSync=!window._lastTodaySyncAt||(Date.now()-window._lastTodaySyncAt)>=300000
+  if(_needsSync)el.innerHTML='<div class="loading">Actualizando datos de hoy desde Meta…</div>'
+  await _syncTodayQuick()
+  el.innerHTML='<div class="loading">Cargando portafolio…</div>'
   const{data:cuentas}=await sb.from('meta_cuentas').select('*').order('nombre')
   const{data:campanas}=await sb.from('meta_campanas').select('*').eq('nivel','campaign').order('nombre')
   const lastSync=await getConfig('meta_sync_last')
@@ -4799,9 +4836,11 @@ window.applyMetaDateRange=async()=>{
     if(accEl){accEl.style.display='none';accEl.innerHTML=''}
     if(chevron)chevron.textContent='▸'
   })
-  // Recalcular gasto en rango para filtro Activas (cuenta = gasto > 0 en el rango)
+  // Si el rango incluye hoy, auto-sync desde Meta (throttled)
   const desde=document.getElementById('meta-desde')?.value||today()
   const hasta=document.getElementById('meta-hasta')?.value||today()
+  if(hasta>=today())await _syncTodayQuick()
+  // Recalcular gasto en rango para filtro Activas (cuenta = gasto > 0 en el rango)
   const{data:insRango}=await sb.from('meta_insights').select('account_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).limit(20000)
   const gastoRangoByAcc={}
   for(const i of (insRango||[])){gastoRangoByAcc[i.account_id]=(gastoRangoByAcc[i.account_id]||0)+(i.spend||0)}

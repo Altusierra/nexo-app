@@ -501,38 +501,19 @@ function render(page){
 
 // ── UTILS ──────────────────────────────────────────────────
 const fmt=n=>new Intl.NumberFormat('es-CO').format(Math.round(n||0))
-// Zona horaria Colombia (America/Bogota = UTC-5, sin DST). Toda la app usa esta fecha.
-const _coDate=(d)=>{
-  if(!d)d=new Date()
-  // Convertir a Colombia: restar 5 horas a UTC, luego sacar fecha
-  const ms=d.getTime()+(d.getTimezoneOffset()*60000)-(5*3600000)
-  const co=new Date(ms)
-  return co.toISOString().split('T')[0]
-}
-const today=()=>_coDate()
+const today=()=>new Date().toISOString().split('T')[0]
 const _normProd=s=>(s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()
-const _isoDate=(d)=>_coDate(d)
-const _daysAgo=(n)=>{
-  const ms=Date.now()+(new Date().getTimezoneOffset()*60000)-(5*3600000)-(n*86400000)
-  return new Date(ms).toISOString().split('T')[0]
-}
-// Helper para componer fechas en Colombia (mes, día específicos)
-const _coDateAt=(year,month,day)=>{
-  const d=new Date(Date.UTC(year,month,day,5,0,0))
-  return _coDate(d)
-}
+const _isoDate=(d)=>d.toISOString().split('T')[0]
+const _daysAgo=(n)=>{const d=new Date();d.setDate(d.getDate()-n);return _isoDate(d)}
 function _quickDateBtns(desdeId,hastaId,onchangeFn){
   const sets=[
     ['Hoy',0,0],['Ayer',1,1],['Hoy+Ayer',1,0],['7d',6,0],['14d',13,0],['30d',29,0],
     ['Este mes','cm',0],['Mes pasado','lm','lm']
   ]
-  // Fecha de Colombia para extraer mes/año actuales
-  const hoyCo=today()
-  const[hY,hM]=hoyCo.split('-').map(Number)
   return sets.map(([label,desde,hasta])=>{
     let d,h
-    if(desde==='cm'){d=_coDateAt(hY,hM-1,1);h=hoyCo}
-    else if(desde==='lm'){d=_coDateAt(hY,hM-2,1);h=_coDateAt(hY,hM-1,0)}
+    if(desde==='cm'){const n=new Date();d=_isoDate(new Date(n.getFullYear(),n.getMonth(),1));h=today()}
+    else if(desde==='lm'){const n=new Date();d=_isoDate(new Date(n.getFullYear(),n.getMonth()-1,1));h=_isoDate(new Date(n.getFullYear(),n.getMonth(),0))}
     else{d=_daysAgo(desde);h=_daysAgo(hasta)}
     return`<button class="btn-sm btn-outline" onclick="document.getElementById('${desdeId}').value='${d}';document.getElementById('${hastaId}').value='${h}';${onchangeFn}">${label}</button>`
   }).join('')
@@ -1764,18 +1745,25 @@ async function refreshProdResumen(id){
     📊 CPA real (${periodo}): ${cpaRealHtml} · ROAS real: ${roasRealHtml}`
 }
 
-// Convierte período a rango {desde, hasta} — todo en zona Colombia
+// Convierte período a rango {desde, hasta}
 function _periodoToRange(periodo){
   const hoy=today()
-  const ayer=_daysAgo(1)
-  const[y,m]=hoy.split('-').map(Number)
+  const ayer=new Date(Date.now()-86400000).toISOString().slice(0,10)
+  const d=new Date()
   if(periodo==='hoy')return{desde:hoy,hasta:hoy}
   if(periodo==='ayer')return{desde:ayer,hasta:ayer}
   if(periodo==='7d')return{desde:_daysAgo(6),hasta:hoy}
   if(periodo==='14d')return{desde:_daysAgo(13),hasta:hoy}
   if(periodo==='30d')return{desde:_daysAgo(29),hasta:hoy}
-  if(periodo==='este_mes')return{desde:_coDateAt(y,m-1,1),hasta:hoy}
-  if(periodo==='mes_pasado')return{desde:_coDateAt(y,m-2,1),hasta:_coDateAt(y,m-1,0)}
+  if(periodo==='este_mes'){
+    const ini=new Date(d.getFullYear(),d.getMonth(),1).toISOString().slice(0,10)
+    return{desde:ini,hasta:hoy}
+  }
+  if(periodo==='mes_pasado'){
+    const ini=new Date(d.getFullYear(),d.getMonth()-1,1).toISOString().slice(0,10)
+    const fin=new Date(d.getFullYear(),d.getMonth(),0).toISOString().slice(0,10)
+    return{desde:ini,hasta:fin}
+  }
   return{desde:_daysAgo(6),hasta:hoy}
 }
 
@@ -1936,10 +1924,10 @@ window.modalUserEdit=(u)=>{
         <div class="fld"><label>Hora inicio</label><input type="time" id="eu-hi" value="${u.hora_inicio?u.hora_inicio.slice(0,5):''}"></div>
         <div class="fld"><label>Hora fin</label><input type="time" id="eu-hf" value="${u.hora_fin?u.hora_fin.slice(0,5):''}"></div>
       </div>
-      <div class="fld" id="eu-modo-hist-wrap" style="background:rgba(245,158,11,0.05);border:1px solid var(--amber);border-radius:8px;padding:10px">
+      <div class="fld" id="eu-modo-hist-wrap" style="${u.rol==='auxiliar'?'':'display:none'}">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" id="eu-modo-historico" ${u.modo_historico?'checked':''}>
-          <span><strong>⏳ Modo histórico</strong> — permite cargar órdenes de cualquier fecha (sin límite de 4 días atrás)</span>
+          <span><strong>⏳ Modo histórico</strong> — permite al auxiliar cargar órdenes de cualquier fecha (sin límite de 4 días atrás)</span>
         </label>
         <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-left:24px">Activa esta opción solo cuando necesites cargar datos viejos. Desactiva al terminar.</div>
       </div>
@@ -1949,6 +1937,12 @@ window.modalUserEdit=(u)=>{
       <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
       <button class="btn-sm btn-primary" id="eu-save" onclick="doEditUser('${u.id}')">Guardar cambios</button>
     </div>`)
+  // Mostrar/ocultar el toggle según el rol seleccionado
+  const rolSel=document.getElementById('eu-rol')
+  if(rolSel)rolSel.addEventListener('change',()=>{
+    const w=document.getElementById('eu-modo-hist-wrap')
+    if(w)w.style.display=rolSel.value==='auxiliar'?'':'none'
+  })
 }
 
 window.doEditUser=async(user_id)=>{
@@ -2396,7 +2390,7 @@ window.procesarAsignador=async()=>{
   const kwList=window._asignKw||[]
   const modoHistorico=window._asignModoHist===true
   const hoyStr=today()
-  const limiteAtras=_daysAgo(4)
+  const limiteAtras=new Date(Date.now()-4*86400000).toISOString().slice(0,10)
   parsed.forEach((p,i)=>{
     if(p.tipo!=='nuevo'||p.errores.length>0)return
     // Validar producto contra keywords
@@ -2986,10 +2980,7 @@ const NOV_PROTO={
     resp:`INTENTAR ENTREGA EN: [DIRECCIÓN COMPLETA].\nLLAMAR AL [TELÉFONO] AL LLEGAR.\nSI NO CONTESTA: DEJAR AVISO Y REPROGRAMAR AL DÍA SIGUIENTE.\nNO DEVOLVER AÚN.`},
 }
 
-// ── AUXILIAR: NOVEDADES (con persistencia BD) ───────────
-// Cache global del último render para acciones de marcar/desmarcar
-window._novCache={fechaActiva:null,items:[],reporteId:null}
-
+// ── AUXILIAR: NOVEDADES ─────────────────────────────────
 async function pageAuxNovedades(c){
   c.innerHTML=`<div class="page-title">⚠️ Novedades del carrier</div>
     <div class="page-sub">Sube el reporte de novedades de Dropi — se clasifican automáticamente por protocolo</div>
@@ -2999,217 +2990,33 @@ async function pageAuxNovedades(c){
         <input type="file" id="nov-file" accept=".xlsx,.xls"
           style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--text);width:100%">
       </div>
-      <button class="btn-full btn-primary" onclick="procesarNovedadesXlsx()">▶ Procesar y guardar</button>
+      <button class="btn-full btn-primary" onclick="procesarNovedadesXlsx()">▶ Procesar novedades</button>
       <div id="nov-msg" style="margin-top:10px"></div>
     </div>
-    <div class="card" style="margin-bottom:16px;padding:12px">
-      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
-        <div class="fld" style="margin:0"><label style="font-size:11px">Ver novedades del día</label>
-          <input type="date" id="nov-fecha" value="${today()}" style="font-size:12px;padding:6px 8px" onchange="cargarNovedadesPorFecha()"></div>
-        <button class="btn-sm btn-outline" onclick="cargarNovedadesPorFecha()">🔄 Recargar</button>
-      </div>
-    </div>
-    <div id="nov-content"><div class="loading">Cargando...</div></div>
-    <div class="divider"></div>
-    <div class="page-title" style="font-size:16px">📊 Historial de lotes</div>
-    <div class="page-sub">Resoluciones por lote — todas las subidas históricas</div>
-    <div id="nov-hist"><div class="loading">Cargando historial...</div></div>`
-  // Cargar de inmediato lo que haya en BD para hoy
-  cargarNovedadesPorFecha()
-  cargarHistorialNovedades()
-}
-
-// ── Helper: clave única por item (telefono + orden_id, fallback solo telefono)
-function _novKey(it){return (it.telefono||'')+'|'+(it.orden_id||'')}
-
-// ── Cargar novedades guardadas en BD para una fecha
-async function cargarNovedadesPorFecha(){
-  const el=document.getElementById('nov-content')
-  if(!el)return
-  const fecha=document.getElementById('nov-fecha')?.value||today()
-  el.innerHTML='<div class="loading">Cargando novedades de '+fecha+'...</div>'
-  try{
-    // 1. Reporte de esa fecha
-    const{data:rep}=await sb.from('novedades_reportes').select('*').eq('fecha_lote',fecha).maybeSingle()
-    if(!rep){
-      el.innerHTML=`<div class="alert alert-blue">Sin novedades guardadas para ${fecha}. Sube un archivo arriba.</div>`
-      window._novCache={fechaActiva:fecha,items:[],reporteId:null}
-      return
-    }
-    // 2. Items del reporte
-    const{data:items}=await sb.from('novedades_items').select('*').eq('reporte_id',rep.id).limit(5000)
-    // 3. Resoluciones por (telefono, orden_id) — última acción gana
-    const{data:resols}=await sb.from('novedades_resoluciones').select('*').order('created_at',{ascending:false}).limit(10000)
-    const resolByKey={}
-    for(const r of (resols||[])){
-      const k=(r.telefono||'')+'|'+(r.orden_id||'')
-      if(!resolByKey[k])resolByKey[k]=r // la primera (más reciente) gana
-    }
-    // 4. Enriquecer items con su resolución actual
-    const enriched=(items||[]).map(it=>{
-      const k=_novKey(it)
-      const r=resolByKey[k]
-      const cat=NOV_RULES[it.cat_idx-1]||{pri:'NORMAL',tipo:it.tipo||'Otra novedad',color:'var(--muted)',bg:'var(--card2)',border:'var(--border)',idx:99}
-      // Recalcular días desde fecha_novedad
-      let dias=it.dias_desde_novedad
-      if(it.fecha_novedad){
-        const p=it.fecha_novedad.split('-')
-        if(p.length===3){
-          const fNov=new Date(`${p[2]}-${p[1]}-${p[0]}T12:00:00`)
-          if(!isNaN(fNov))dias=Math.floor((new Date()-fNov)/(1000*60*60*24))
-        }
-      }
-      return{
-        tel:it.telefono,orden_id:it.orden_id,guia:it.guia,nombre:it.cliente_nombre,
-        carrier:it.carrier,ciudad:it.ciudad,depto:it.depto,direccion:it.direccion,
-        producto:it.producto,causal:it.causal,aclaracion:it.aclaracion,
-        fechaNov:it.fecha_novedad,horaNov:it.hora_novedad,
-        cat:{...cat,idx:it.cat_idx,tipo:it.tipo||cat.tipo,pri:it.prioridad||cat.pri},
-        dias,ad_id:it.ad_id,
-        resol:r?{accion:r.accion,usuario:r.usuario_nombre,cuando:r.created_at,motivo:r.motivo}:null
-      }
-    })
-    // Ordenar: prioridad → días desc
-    enriched.sort((a,b)=>a.cat.idx-b.cat.idx||(b.dias||0)-(a.dias||0))
-    window._novCache={fechaActiva:fecha,items:enriched,reporteId:rep.id}
-    renderNovedadesContent(rep,enriched)
-  }catch(e){
-    el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
-  }
-}
-window.cargarNovedadesPorFecha=cargarNovedadesPorFecha
-
-function renderNovedadesContent(rep,items){
-  const el=document.getElementById('nov-content')
-  if(!el)return
-  const urgentes=items.filter(i=>i.cat.pri==='URGENTE'&&i.resol?.accion!=='resuelta')
-  const medias=items.filter(i=>i.cat.pri==='MEDIA'&&i.resol?.accion!=='resuelta')
-  const normales=items.filter(i=>i.cat.pri==='NORMAL'&&i.resol?.accion!=='resuelta')
-  const resueltas=items.filter(i=>i.resol?.accion==='resuelta')
-
-  const renderCard=(m)=>{
-    const diasTxt=m.dias!==null&&m.dias!==undefined?`${m.dias}d`:'—'
-    const diasColor=m.dias>5?'var(--red)':m.dias>3?'var(--amber)':'var(--green)'
-    const proto=NOV_PROTO[m.cat.idx]
-    const esc=(s)=>(s||'').replace(/'/g,"\\'").replace(/\n/g,' ')
-    const protoBtn=proto?`<button class="btn-sm btn-outline" onclick="mostrarProtocolo(${m.cat.idx},'${esc(m.nombre)}','${m.tel}','${esc(m.producto)}','${esc(m.carrier)}','${esc(m.direccion)}')">📋 Protocolo</button>`:''
-    const isResuelta=m.resol?.accion==='resuelta'
-    const borderStyle=isResuelta?'border-left:3px solid var(--green);border:1px solid var(--green);background:rgba(34,197,94,0.05)':`border-left:3px solid ${m.cat.color}`
-    const resolBadge=isResuelta
-      ?`<div style="font-size:10px;color:var(--green);margin-top:6px;font-weight:600">✅ Marcada por ${m.resol.usuario||'—'} · ${new Date(m.resol.cuando).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})}</div>`
-      :''
-    const actionBtn=isResuelta
-      ?`<button class="btn-sm btn-outline" onclick="desmarcarNovedad('${m.tel}','${m.orden_id||''}')" style="color:var(--amber)">↩️ Desmarcar</button>`
-      :`<button class="btn-sm btn-green" onclick="marcarNovedad('${m.tel}','${m.orden_id||''}')">✅ Marcar resuelta</button>`
-    return`<div class="card" style="margin-bottom:8px;${borderStyle}">
-      <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;flex-wrap:wrap">
-        <div style="flex:1;min-width:200px">
-          <div style="font-size:14px;font-weight:600;font-family:monospace">${m.tel}</div>
-          <div style="font-size:13px;margin-top:2px">${m.nombre||'—'} · <strong>${m.producto||'—'}</strong></div>
-          <div style="font-size:11px;color:var(--muted);margin-top:2px">${m.ciudad||''}, ${m.depto||''} · ${m.carrier||''} · Guía: ${m.guia||'—'}${m.orden_id?' · Orden: '+m.orden_id:''}</div>
-          <div style="font-size:12px;margin-top:4px"><span class="pill" style="background:${m.cat.bg};color:${m.cat.color};border:1px solid ${m.cat.border}">${m.cat.tipo}</span></div>
-          <div style="font-size:11px;color:var(--muted);margin-top:4px;font-style:italic">"${m.causal||''}"</div>
-          ${m.aclaracion?`<div style="font-size:10px;color:var(--subtle);margin-top:2px">↳ ${m.aclaracion}</div>`:''}
-          ${resolBadge}
-        </div>
-        <div style="text-align:right;flex-shrink:0">
-          <div style="font-size:18px;font-weight:700;color:${diasColor}">${diasTxt}</div>
-          <div style="font-size:10px;color:var(--muted)">días</div>
-          <div style="font-size:10px;color:var(--muted)">${m.fechaNov||''} ${m.horaNov||''}</div>
-          <div style="margin-top:6px;display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
-            ${protoBtn}
-            ${actionBtn}
-          </div>
-        </div>
-      </div>
-    </div>`
-  }
-
-  const renderSection=(titulo,pri,items,color)=>{
-    if(!items.length)return''
-    return`<div style="margin-bottom:20px">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${color}"></span>
-        <span style="font-size:13px;font-weight:600;color:${color};text-transform:uppercase;letter-spacing:.06em">${pri} — ${titulo} (${items.length})</span>
-      </div>
-      ${items.map(renderCard).join('')}
-    </div>`
-  }
-
-  const subInfo=rep?`<div style="font-size:11px;color:var(--muted);margin-bottom:12px">📦 Lote ${rep.fecha_lote} · subido ${new Date(rep.uploaded_at).toLocaleString('es-CO')} por ${rep.uploaded_by_name||'—'} · ${rep.total_items} items totales</div>`:''
-
-  el.innerHTML=`
-    ${subInfo}
-    <div class="cards-row c4" style="margin-bottom:16px">
-      <div class="card" style="border-left:3px solid var(--red)"><div class="card-label">🔴 Urgentes</div><div class="card-val" style="color:var(--red)">${urgentes.length}</div></div>
-      <div class="card" style="border-left:3px solid var(--amber)"><div class="card-label">🟡 Media</div><div class="card-val" style="color:var(--amber)">${medias.length}</div></div>
-      <div class="card" style="border-left:3px solid var(--blue)"><div class="card-label">🔵 Normal</div><div class="card-val" style="color:var(--blue)">${normales.length}</div></div>
-      <div class="card" style="border-left:3px solid var(--green)"><div class="card-label">✅ Resueltas</div><div class="card-val" style="color:var(--green)">${resueltas.length}</div></div>
-    </div>
-    <div class="alert alert-yellow" style="margin-bottom:16px">⏱️ Tiempo máximo de respuesta: <strong>1 HORA</strong> en horario laboral. Atender primero las 🔴 rojas.</div>
-    ${renderSection('Atender primero','URGENTE',urgentes,'var(--red)')}
-    ${renderSection('Resolver hoy','MEDIA',medias,'var(--amber)')}
-    ${renderSection('Más tiempo disponible','NORMAL',normales,'var(--blue)')}
-    ${resueltas.length?`<div style="margin-top:20px">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--green)"></span>
-        <span style="font-size:13px;font-weight:600;color:var(--green);text-transform:uppercase;letter-spacing:.06em">✅ Resueltas por el auxiliar (${resueltas.length})</span>
-      </div>
-      ${resueltas.map(renderCard).join('')}
-    </div>`:''}
-  `
-}
-
-// ── Marcar novedad como resuelta
-window.marcarNovedad=async(tel,ordenId)=>{
-  try{
-    const{error}=await sb.from('novedades_resoluciones').insert({
-      telefono:tel,orden_id:ordenId||null,accion:'resuelta',
-      usuario_id:me?.id,usuario_nombre:me?.nombre||null,motivo:null
-    })
-    if(error){alert('Error: '+error.message);return}
-    logAction('novedad_marcada_resuelta',{telefono:tel,orden_id:ordenId}).catch(()=>{})
-    cargarNovedadesPorFecha()
-    cargarHistorialNovedades()
-  }catch(e){alert('Error: '+e.message)}
-}
-
-// ── Desmarcar novedad (con motivo obligatorio)
-window.desmarcarNovedad=async(tel,ordenId)=>{
-  const motivo=prompt('Motivo del desmarcado (obligatorio):')
-  if(!motivo||!motivo.trim()){alert('Motivo obligatorio');return}
-  try{
-    const{error}=await sb.from('novedades_resoluciones').insert({
-      telefono:tel,orden_id:ordenId||null,accion:'desmarcada',
-      usuario_id:me?.id,usuario_nombre:me?.nombre||null,motivo:motivo.trim()
-    })
-    if(error){alert('Error: '+error.message);return}
-    logAction('novedad_desmarcada',{telefono:tel,orden_id:ordenId,motivo:motivo.trim()}).catch(()=>{})
-    cargarNovedadesPorFecha()
-    cargarHistorialNovedades()
-  }catch(e){alert('Error: '+e.message)}
+    <div id="nov-content"></div>`
 }
 
 window.procesarNovedadesXlsx=async()=>{
   const fileInput=document.getElementById('nov-file')
   const msg=document.getElementById('nov-msg')
+  const el=document.getElementById('nov-content')
   if(!fileInput.files.length){msg.innerHTML='<div class="alert alert-red">Selecciona un archivo</div>';return}
   msg.innerHTML='<div class="alert alert-blue">Procesando novedades...</div>'
 
   try{
     const buf=await fileInput.files[0].arrayBuffer()
-    const filename=fileInput.files[0].name
     const wbook=XLSX.read(buf,{type:'array'})
     const rows=XLSX.utils.sheet_to_json(wbook.Sheets[wbook.SheetNames[0]],{defval:''})
     if(!rows.length){msg.innerHTML='<div class="alert alert-red">Archivo vacío</div>';return}
 
-    // Parsear filas
+    // Parsear filas del xlsx de novedades Dropi
     const items=rows.map(r=>{
       const tel=String(r['TELÉFONO']||r['TELEFONO']||'').replace(/\D/g,'')
       const causal=String(r['CAUSAL DE NOVEDAD']||'').trim()
       const aclaracion=String(r['ACLARACION DE LA TRANSPORTADORA']||'').trim()
       const comentario=String(r['COMENTARIO DE LA TRANSPORTADORA']||'').trim()
       const fechaNov=String(r['FECHA DE NOVEDAD']||'')
+      // Hora real: extraer del inicio de la aclaración (ej: "11:32 : ...") porque HORA DE NOVEDAD viene 00:00
       const horaMatch=aclaracion.match(/^(\d{1,2}:\d{2})\s*:/)
       const horaNov=horaMatch?horaMatch[1]:String(r['HORA DE NOVEDAD']||'')
       const nombre=`${r['NOMBRE']||''} ${r['APELLIDO']||''}`.trim()
@@ -3219,8 +3026,10 @@ window.procesarNovedadesXlsx=async()=>{
       const direccion=String(r['DIRECCION']||'')
       const guia=String(r['GUIA']||'')
       const ordenId=String(r['ORDEN ID']||'')
+      // Clasificar combinando causal + aclaración
       const textoClasif=causal+(aclaracion?' '+aclaracion:'')
       const cat=clasificarNovedad(textoClasif)
+      // Calcular días desde novedad
       let dias=null
       if(fechaNov){
         const p=fechaNov.split('-')
@@ -3232,7 +3041,7 @@ window.procesarNovedadesXlsx=async()=>{
       return{tel,causal,aclaracion,comentario,fechaNov,horaNov,nombre,carrier,ciudad,depto,direccion,guia,ordenId,cat,dias}
     }).filter(i=>i.tel.length>=7)
 
-    // Cruzar con mapeos por teléfono para obtener producto + ad_id
+    // Cruzar con mapeos por teléfono para obtener producto
     const telefonos=[...new Set(items.map(i=>i.tel))]
     let mapeos=[]
     for(let i=0;i<telefonos.length;i+=100){
@@ -3243,6 +3052,7 @@ window.procesarNovedadesXlsx=async()=>{
     const mByTel={}
     for(const m of mapeos){if(!mByTel[m.telefono])mByTel[m.telefono]=m}
 
+    // Enriquecer con producto del mapeo + guardar fecha_novedad
     const novUpdates=[]
     for(const item of items){
       const m=mByTel[item.tel]
@@ -3259,137 +3069,70 @@ window.procesarNovedadesXlsx=async()=>{
       if(!error)novUpdated++
     }
 
-    // ── GUARDAR EN BD ──
-    const fechaLote=today()
-    msg.innerHTML='<div class="alert alert-blue">Guardando en BD...</div>'
+    // Ordenar: prioridad primero, dentro de cada prioridad los más viejos primero
+    items.sort((a,b)=>a.cat.idx-b.cat.idx||(b.dias||0)-(a.dias||0))
 
-    // 1. Buscar si ya existe reporte para esta fecha (UNIQUE → reemplazar)
-    const{data:existing}=await sb.from('novedades_reportes').select('id').eq('fecha_lote',fechaLote).maybeSingle()
-    if(existing){
-      // Borrar reporte existente (CASCADE borra items)
-      const{error:delErr}=await sb.from('novedades_reportes').delete().eq('id',existing.id)
-      if(delErr){msg.innerHTML=`<div class="alert alert-red">Error reemplazando: ${delErr.message}</div>`;return}
+    const urgentes=items.filter(i=>i.cat.pri==='URGENTE')
+    const medias=items.filter(i=>i.cat.pri==='MEDIA')
+    const normales=items.filter(i=>i.cat.pri==='NORMAL')
+
+    msg.innerHTML=`<div class="alert alert-green">✅ ${items.length} novedades procesadas del reporte${novUpdated>0?` · 📅 ${novUpdated} fechas de novedad guardadas`:''}</div>`
+
+    const renderCard=(m)=>{
+      const diasTxt=m.dias!==null?`${m.dias}d`:'—'
+      const diasColor=m.dias>5?'var(--red)':m.dias>3?'var(--amber)':'var(--green)'
+      const proto=NOV_PROTO[m.cat.idx]
+      const esc=(s)=>(s||'').replace(/'/g,"\\'").replace(/\n/g,' ')
+      const protoBtn=proto?`<button class="btn-sm btn-outline" onclick="mostrarProtocolo(${m.cat.idx},'${esc(m.nombre)}','${m.tel}','${esc(m.producto)}','${esc(m.carrier)}','${esc(m.direccion)}')">📋 Protocolo</button>`:''
+      return`<div class="card" style="margin-bottom:8px;border-left:3px solid ${m.cat.color}">
+        <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;flex-wrap:wrap">
+          <div style="flex:1;min-width:200px">
+            <div style="font-size:14px;font-weight:600;font-family:monospace">${m.tel}</div>
+            <div style="font-size:13px;margin-top:2px">${m.nombre||'—'} · <strong>${m.producto}</strong></div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">${m.ciudad}, ${m.depto} · ${m.carrier} · Guía: ${m.guia||'—'}</div>
+            <div style="font-size:12px;margin-top:4px"><span class="pill" style="background:${m.cat.bg};color:${m.cat.color};border:1px solid ${m.cat.border}">${m.cat.tipo}</span></div>
+            <div style="font-size:11px;color:var(--muted);margin-top:4px;font-style:italic">"${m.causal}"</div>
+            ${m.aclaracion?`<div style="font-size:10px;color:var(--subtle);margin-top:2px">↳ ${m.aclaracion}</div>`:''}
+          </div>
+          <div style="text-align:right;flex-shrink:0">
+            <div style="font-size:18px;font-weight:700;color:${diasColor}">${diasTxt}</div>
+            <div style="font-size:10px;color:var(--muted)">días</div>
+            <div style="font-size:10px;color:var(--muted)">${m.fechaNov} ${m.horaNov}</div>
+            <div style="margin-top:6px;display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
+              ${protoBtn}
+            </div>
+          </div>
+        </div>
+      </div>`
     }
 
-    // 2. Insertar nuevo reporte
-    const{data:newRep,error:repErr}=await sb.from('novedades_reportes').insert({
-      fecha_lote:fechaLote,uploaded_by:me?.id,uploaded_by_name:me?.nombre||null,
-      filename,total_items:items.length
-    }).select().single()
-    if(repErr){msg.innerHTML=`<div class="alert alert-red">Error guardando reporte: ${repErr.message}</div>`;return}
-
-    // 3. Insertar items en chunks
-    const itemsInsert=items.map(it=>({
-      reporte_id:newRep.id,fecha_lote:fechaLote,
-      telefono:it.tel,orden_id:it.ordenId||null,guia:it.guia||null,
-      cliente_nombre:it.nombre||null,carrier:it.carrier||null,
-      ciudad:it.ciudad||null,depto:it.depto||null,direccion:it.direccion||null,
-      producto:it.producto||null,causal:it.causal||null,
-      aclaracion:it.aclaracion||null,fecha_novedad:it.fechaNov||null,
-      hora_novedad:it.horaNov||null,prioridad:it.cat.pri,tipo:it.cat.tipo,
-      cat_idx:it.cat.idx,ad_id:it.ad_id||null,dias_desde_novedad:it.dias
-    }))
-    for(let i=0;i<itemsInsert.length;i+=500){
-      const chunk=itemsInsert.slice(i,i+500)
-      const{error:insErr}=await sb.from('novedades_items').insert(chunk)
-      if(insErr){msg.innerHTML=`<div class="alert alert-red">Error guardando items: ${insErr.message}</div>`;return}
+    const renderSection=(titulo,pri,items,color)=>{
+      if(!items.length)return''
+      return`<div style="margin-bottom:20px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+          <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${color}"></span>
+          <span style="font-size:13px;font-weight:600;color:${color};text-transform:uppercase;letter-spacing:.06em">${pri} — ${titulo} (${items.length})</span>
+        </div>
+        ${items.map(renderCard).join('')}
+      </div>`
     }
 
-    msg.innerHTML=`<div class="alert alert-green">✅ ${items.length} novedades guardadas en BD${novUpdated>0?` · 📅 ${novUpdated} fechas de novedad actualizadas en mapeos`:''}${existing?' · ♻️ Reemplazó el lote anterior de hoy':''}</div>`
-
-    // Recargar vista del día actual e historial
-    document.getElementById('nov-fecha').value=fechaLote
-    cargarNovedadesPorFecha()
-    cargarHistorialNovedades()
-
-    logAction('novedades_procesadas',{total:items.length,fecha_lote:fechaLote,reemplazo:!!existing}).catch(()=>{})
+    el.innerHTML=`
+      <div class="cards-row c3" style="margin-bottom:16px">
+        <div class="card" style="border-left:3px solid var(--red)"><div class="card-label">🔴 Urgentes</div><div class="card-val" style="color:var(--red)">${urgentes.length}</div></div>
+        <div class="card" style="border-left:3px solid var(--amber)"><div class="card-label">🟡 Media</div><div class="card-val" style="color:var(--amber)">${medias.length}</div></div>
+        <div class="card" style="border-left:3px solid var(--blue)"><div class="card-label">🔵 Normal</div><div class="card-val" style="color:var(--blue)">${normales.length}</div></div>
+      </div>
+      <div class="alert alert-yellow" style="margin-bottom:16px">⏱️ Tiempo máximo de respuesta: <strong>1 HORA</strong> en horario laboral. Atender primero las 🔴 rojas.</div>
+      ${renderSection('Atender primero','URGENTE',urgentes,'var(--red)')}
+      ${renderSection('Resolver hoy','MEDIA',medias,'var(--amber)')}
+      ${renderSection('Más tiempo disponible','NORMAL',normales,'var(--blue)')}
+    `
+    logAction('novedades_procesadas',{total:items.length,urgentes:urgentes.length,medias:medias.length,normales:normales.length}).catch(()=>{})
   }catch(e){
     msg.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
   }
 }
-
-// ── HISTORIAL DE LOTES (todos los reportes guardados) ──
-async function cargarHistorialNovedades(){
-  const el=document.getElementById('nov-hist')
-  if(!el)return
-  el.innerHTML='<div class="loading">Cargando historial...</div>'
-  try{
-    const{data:reportes}=await sb.from('novedades_reportes').select('*').order('fecha_lote',{ascending:false}).limit(60)
-    if(!reportes?.length){el.innerHTML='<div class="alert alert-blue">Sin lotes históricos aún</div>';return}
-
-    // Traer todas las resoluciones de una sola vez (última por key gana)
-    const{data:resols}=await sb.from('novedades_resoluciones').select('*').order('created_at',{ascending:false}).limit(20000)
-    const resolByKey={}
-    for(const r of (resols||[])){
-      const k=(r.telefono||'')+'|'+(r.orden_id||'')
-      if(!resolByKey[k])resolByKey[k]=r
-    }
-
-    // Para cada reporte: traer sus items y calcular stats
-    const repIds=reportes.map(r=>r.id)
-    let allItems=[]
-    for(let i=0;i<repIds.length;i+=20){
-      const batch=repIds.slice(i,i+20)
-      const{data:its}=await sb.from('novedades_items').select('reporte_id,telefono,orden_id').in('reporte_id',batch).limit(20000)
-      if(its)allItems=allItems.concat(its)
-    }
-    const itemsByRep={}
-    for(const it of allItems){
-      if(!itemsByRep[it.reporte_id])itemsByRep[it.reporte_id]=[]
-      itemsByRep[it.reporte_id].push(it)
-    }
-
-    // Para detectar "fantasmas": un item es fantasma si:
-    //   - está en este lote
-    //   - NO aparece en el lote más reciente
-    //   - NO está marcado como resuelta
-    //   - NO está en estado ENTREGADO/DEVOLUCION en mapeos (eso lo dejamos opcional por ahora — sin consulta extra)
-    const lotesPorFecha=reportes.map(r=>r.fecha_lote).sort()
-    const fechaMasReciente=lotesPorFecha[lotesPorFecha.length-1]
-    const repMasReciente=reportes.find(r=>r.fecha_lote===fechaMasReciente)
-    const keysEnReciente=new Set()
-    if(repMasReciente){
-      for(const it of (itemsByRep[repMasReciente.id]||[]))keysEnReciente.add((it.telefono||'')+'|'+(it.orden_id||''))
-    }
-
-    let html=''
-    for(const rep of reportes){
-      const items=itemsByRep[rep.id]||[]
-      const total=items.length
-      let marcadas=0,fantasmas=0
-      for(const it of items){
-        const k=(it.telefono||'')+'|'+(it.orden_id||'')
-        const r=resolByKey[k]
-        if(r?.accion==='resuelta')marcadas++
-        else if(rep.fecha_lote!==fechaMasReciente&&!keysEnReciente.has(k)){
-          // Es un lote anterior + el item no aparece en el más reciente + no está marcado → fantasma
-          fantasmas++
-        }
-      }
-      const pendientes=total-marcadas
-      const pctMarc=total>0?Math.round(marcadas/total*100):0
-
-      html+=`<div class="card" style="margin-bottom:10px;padding:12px">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">
-          <div style="flex:1;min-width:200px">
-            <div style="font-weight:600;font-size:14px">📦 Lote ${rep.fecha_lote}</div>
-            <div style="font-size:11px;color:var(--muted);margin-top:2px">${total} novedades · subido ${new Date(rep.uploaded_at).toLocaleString('es-CO')} por ${rep.uploaded_by_name||'—'}</div>
-          </div>
-          <button class="btn-sm btn-outline" onclick="document.getElementById('nov-fecha').value='${rep.fecha_lote}';cargarNovedadesPorFecha();window.scrollTo({top:0,behavior:'smooth'})">👁️ Ver</button>
-        </div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;font-size:12px">
-          <span style="color:var(--green)">🟢 Marcadas: <strong>${marcadas}/${total} (${pctMarc}%)</strong></span>
-          <span style="color:var(--amber)">🔴 Pendientes: <strong>${pendientes}</strong></span>
-          ${rep.fecha_lote!==fechaMasReciente?`<span style="color:var(--purple)">⚠️ Fantasmas: <strong>${fantasmas}</strong></span>`:''}
-        </div>
-      </div>`
-    }
-    el.innerHTML=html
-  }catch(e){
-    el.innerHTML=`<div class="alert alert-red">Error cargando historial: ${e.message}</div>`
-  }
-}
-window.cargarHistorialNovedades=cargarHistorialNovedades
 
 window.mostrarProtocolo=(idx,nombre,tel,producto,carrier,direccion)=>{
   const proto=NOV_PROTO[idx]
@@ -3873,7 +3616,7 @@ async function cargarSeguimientoHist(){
   const lotes={},fechasCompra=new Set()
   for(const m of data){
     const lote=m.fecha_dropi||'Sin lote'
-    if(!lotes[lote])lotes[lote]={entregado:0,devuelto:0,en_transito:0,novedad:0,cancelado:0,total:0,prods:new Set(),ventaEnt:0,fechas:new Set(),novConFecha:0,novResueltas:0,novDiasTotal:0}
+    if(!lotes[lote])lotes[lote]={entregado:0,devuelto:0,en_transito:0,novedad:0,cancelado:0,pendiente:0,total:0,prods:new Set(),ventaEnt:0,fechas:new Set(),novConFecha:0,novResueltas:0,novDiasTotal:0}
     lotes[lote].total++
     lotes[lote].prods.add(m.producto)
     if(m.fecha){lotes[lote].fechas.add(m.fecha);fechasCompra.add(m.fecha)}
@@ -3889,6 +3632,7 @@ async function cargarSeguimientoHist(){
     else if(st==='en_transito'||st==='en_proceso'||st==='en_bodega')lotes[lote].en_transito++
     else if(st==='novedad')lotes[lote].novedad++
     else if(st==='cancelado')lotes[lote].cancelado++
+    else if(st==='pendiente')lotes[lote].pendiente++
     if(m.fecha_novedad){
       lotes[lote].novConFecha++
       if(st==='entregado'||st==='novedad_ok'||st==='devuelto'){
@@ -3935,14 +3679,25 @@ async function cargarSeguimientoHist(){
         }
       }
     }
+    // Calcular % de cada categoría + validación de suma
+    const pctTran=d.total>0?Math.round(d.en_transito/d.total*100):0
+    const pctNov=d.total>0?Math.round(d.novedad/d.total*100):0
+    const pctCanc=d.total>0?Math.round(d.cancelado/d.total*100):0
+    const pctPend=d.total>0?Math.round((d.pendiente||0)/d.total*100):0
+    const sumaPct=pctEnt+pctDev+pctTran+pctNov+pctCanc+pctPend
+    const sumaCant=d.entregado+d.devuelto+d.en_transito+d.novedad+d.cancelado+(d.pendiente||0)
+    const sinClasif=d.total-sumaCant
     return`<div class="card" style="margin-bottom:12px">
       <div style="font-weight:600;margin-bottom:10px">📦 Lote ${fecha} <span style="color:var(--muted);font-weight:400">(${d.total} órdenes · ${[...d.prods].join(', ')})</span></div>
-      <div class="cards-row c4" style="margin-bottom:8px">
-        <div class="card c-green" style="padding:10px"><div class="card-label">Entregados</div><div class="card-val">${d.entregado} <span style="font-size:12px">(${pctEnt}%)</span></div></div>
-        <div class="card c-red" style="padding:10px"><div class="card-label">Devueltos</div><div class="card-val">${d.devuelto} <span style="font-size:12px">(${pctDev}%)</span></div></div>
-        <div class="card c-blue" style="padding:10px"><div class="card-label">En tránsito</div><div class="card-val">${d.en_transito}</div></div>
-        <div class="card c-amber" style="padding:10px"><div class="card-label">Novedad</div><div class="card-val">${d.novedad}</div></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:8px">
+        <div class="card c-green" style="padding:10px"><div class="card-label">Entregados</div><div class="card-val">${pctEnt}%</div></div>
+        <div class="card c-red" style="padding:10px"><div class="card-label">Devueltos</div><div class="card-val" style="font-size:18px">${d.devuelto} <span style="font-size:11px">(${pctDev}%)</span></div></div>
+        <div class="card c-blue" style="padding:10px"><div class="card-label">En tránsito</div><div class="card-val" style="font-size:18px">${d.en_transito} <span style="font-size:11px">(${pctTran}%)</span></div></div>
+        <div class="card c-amber" style="padding:10px"><div class="card-label">Novedad</div><div class="card-val" style="font-size:18px">${d.novedad} <span style="font-size:11px">(${pctNov}%)</span></div></div>
+        <div class="card c-red" style="padding:10px"><div class="card-label">Cancelados</div><div class="card-val" style="font-size:18px">${d.cancelado} <span style="font-size:11px">(${pctCanc}%)</span></div></div>
+        <div class="card c-amber" style="padding:10px"><div class="card-label">Pendientes</div><div class="card-val" style="font-size:18px">${d.pendiente||0} <span style="font-size:11px">(${pctPend}%)</span></div></div>
       </div>
+      <div style="font-size:12px;margin-bottom:6px;${sinClasif===0?'color:var(--green)':'color:var(--amber)'}">${sinClasif===0?'✅':'⚠️'} Suma: ${sumaPct}% — ${sumaCant}/${d.total} órdenes clasificadas${sinClasif!==0?` (faltan ${Math.abs(sinClasif)} sin clasificar)`:''}</div>
       <div style="font-size:13px">Devol. real: <strong style="color:${devColor}">${pctDev}%</strong>${devEstHtml}</div>
       ${d.novConFecha>0?(()=>{
         const promDias=d.novResueltas>0?Math.round(d.novDiasTotal/d.novResueltas):null
@@ -4060,7 +3815,7 @@ window.procesarSeguimiento=async()=>{
     const productosSet=new Set()
     for(const r of resultados){
       const lote=r.fecha_lote||'Sin lote'
-      if(!lotes[lote])lotes[lote]={entregado:0,devuelto:0,en_transito:0,novedad:0,cancelado:0,otro:0,total:0,items:[]}
+      if(!lotes[lote])lotes[lote]={entregado:0,devuelto:0,en_transito:0,novedad:0,cancelado:0,pendiente:0,otro:0,total:0,items:[]}
       lotes[lote].total++
       lotes[lote].items.push(r)
       productosSet.add(r.producto)
@@ -4070,6 +3825,7 @@ window.procesarSeguimiento=async()=>{
       else if(cat==='en_transito'||cat==='en_proceso'||cat==='en_bodega')lotes[lote].en_transito++
       else if(cat==='novedad')lotes[lote].novedad++
       else if(cat==='cancelado')lotes[lote].cancelado++
+      else if(cat==='pendiente')lotes[lote].pendiente++
       else lotes[lote].otro++
     }
 
@@ -4104,14 +3860,23 @@ window.procesarSeguimiento=async()=>{
           devEstHtml=` · Estimada: ${estPct}% → Real: <strong style="color:${diffColor}">${pctDev}%</strong> ${pctDev>estPct?'⚠️':'✅'}`
         }
       }
+      const pctNov=d.total>0?Math.round(d.novedad/d.total*100):0
+      const pctCanc=d.total>0?Math.round(d.cancelado/d.total*100):0
+      const pctPend=d.total>0?Math.round((d.pendiente||0)/d.total*100):0
+      const sumaPct=pctEnt+pctDev+pctTran+pctNov+pctCanc+pctPend
+      const sumaCant=d.entregado+d.devuelto+d.en_transito+d.novedad+d.cancelado+(d.pendiente||0)
+      const sinClasif=d.total-sumaCant
       return`<div class="card seg-lote" data-productos="${d.items.map(i=>i.producto).join(',')}" style="margin-bottom:12px">
         <div style="font-weight:600;margin-bottom:10px">📦 Lote ${fecha} <span style="color:var(--muted);font-weight:400">(${d.total} órdenes)</span></div>
-        <div class="cards-row c4" style="margin-bottom:8px">
-          <div class="card c-green" style="padding:10px"><div class="card-label">Entregados</div><div class="card-val">${d.entregado} <span style="font-size:12px">(${pctEnt}%)</span></div></div>
-          <div class="card c-red" style="padding:10px"><div class="card-label">Devueltos</div><div class="card-val">${d.devuelto} <span style="font-size:12px">(${pctDev}%)</span></div></div>
-          <div class="card c-blue" style="padding:10px"><div class="card-label">En tránsito</div><div class="card-val">${d.en_transito} <span style="font-size:12px">(${pctTran}%)</span></div></div>
-          <div class="card c-amber" style="padding:10px"><div class="card-label">Novedad</div><div class="card-val">${d.novedad}</div></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:8px">
+          <div class="card c-green" style="padding:10px"><div class="card-label">Entregados</div><div class="card-val">${pctEnt}%</div></div>
+          <div class="card c-red" style="padding:10px"><div class="card-label">Devueltos</div><div class="card-val" style="font-size:18px">${d.devuelto} <span style="font-size:11px">(${pctDev}%)</span></div></div>
+          <div class="card c-blue" style="padding:10px"><div class="card-label">En tránsito</div><div class="card-val" style="font-size:18px">${d.en_transito} <span style="font-size:11px">(${pctTran}%)</span></div></div>
+          <div class="card c-amber" style="padding:10px"><div class="card-label">Novedad</div><div class="card-val" style="font-size:18px">${d.novedad} <span style="font-size:11px">(${pctNov}%)</span></div></div>
+          <div class="card c-red" style="padding:10px"><div class="card-label">Cancelados</div><div class="card-val" style="font-size:18px">${d.cancelado} <span style="font-size:11px">(${pctCanc}%)</span></div></div>
+          <div class="card c-amber" style="padding:10px"><div class="card-label">Pendientes</div><div class="card-val" style="font-size:18px">${d.pendiente||0} <span style="font-size:11px">(${pctPend}%)</span></div></div>
         </div>
+        <div style="font-size:12px;margin-bottom:6px;${sinClasif===0?'color:var(--green)':'color:var(--amber)'}">${sinClasif===0?'✅':'⚠️'} Suma: ${sumaPct}% — ${sumaCant}/${d.total} órdenes clasificadas${sinClasif!==0?` (faltan ${Math.abs(sinClasif)} sin clasificar)`:''}</div>
         <div style="font-size:13px">Devol. real: <strong style="color:${devColor}">${pctDev}%</strong>${devEstHtml}</div>
       </div>`
     }).join('')
@@ -4294,7 +4059,7 @@ window.runMetaSync=async(days)=>{
       await sb.from('meta_cuentas').upsert({account_id:accId,nombre:a.name||'',moneda:a.currency||'COP',timezone:a.timezone_name||'',estado:a.account_status===1?'ACTIVE':'INACTIVE',synced_at:new Date().toISOString()},{onConflict:'account_id'})
     }
 
-    const until=today()
+    const until=new Date().toISOString().slice(0,10)
     const sd=new Date()
     if(days==='all')sd.setFullYear(sd.getFullYear()-3);else sd.setDate(sd.getDate()-days)
     const since=sd.toISOString().slice(0,10)
@@ -4522,7 +4287,7 @@ window.runMetaSyncAccount=async(accountId,accountName,days)=>{
 async function _syncOneAccount(accountId,token,days,onProgress){
   const _p=onProgress||(()=>{})
   const actId='act_'+accountId
-  const until=today()
+  const until=new Date().toISOString().slice(0,10)
   const sd=new Date()
   if(days==='all')sd.setFullYear(sd.getFullYear()-3);else sd.setDate(sd.getDate()-days)
   const since=sd.toISOString().slice(0,10)
@@ -4560,45 +4325,8 @@ async function _syncOneAccount(accountId,token,days,onProgress){
   _p(100,'✅')
 }
 
-// ── META: AUTO-SYNC HOY (ligero, solo insights) ─────────
-// Solo trae insights de HOY para todas las cuentas. Sin struct (camps/adsets/ads).
-// Throttle: máximo una vez cada 5 minutos para no saturar la API.
-async function _syncTodayQuick(){
-  if(window._syncTodayBusy)return
-  const now=Date.now()
-  if(window._lastTodaySyncAt&&(now-window._lastTodaySyncAt)<300000)return
-  const token=await getConfig('meta_access_token')
-  if(!token)return
-  const{data:cuentas}=await sb.from('meta_cuentas').select('account_id')
-  if(!cuentas?.length)return
-  window._syncTodayBusy=true
-  const hoy=today()
-  const tr=JSON.stringify({since:hoy,until:hoy})
-  try{
-    for(const cu of cuentas){
-      const actId='act_'+cu.account_id
-      try{
-        const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:tr,level:'campaign',time_increment:'1',limit:'500'})
-        for(const i of cIns){
-          await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:cu.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
-        }
-        const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:tr,level:'ad',time_increment:'1',limit:'500'})
-        for(const i of aIns){
-          await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:cu.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
-        }
-      }catch(e){console.warn('_syncTodayQuick',cu.account_id,e.message)}
-    }
-    window._lastTodaySyncAt=Date.now()
-  }finally{window._syncTodayBusy=false}
-}
-
 async function renderMetaPortafolio(el,isAdmin){
   if(!el)return
-  // Auto-sync hoy desde Meta (throttled: max 1 vez cada 5 min)
-  const _needsSync=!window._lastTodaySyncAt||(Date.now()-window._lastTodaySyncAt)>=300000
-  if(_needsSync)el.innerHTML='<div class="loading">Actualizando datos de hoy desde Meta…</div>'
-  await _syncTodayQuick()
-  el.innerHTML='<div class="loading">Cargando portafolio…</div>'
   const{data:cuentas}=await sb.from('meta_cuentas').select('*').order('nombre')
   const{data:campanas}=await sb.from('meta_campanas').select('*').eq('nivel','campaign').order('nombre')
   const lastSync=await getConfig('meta_sync_last')
@@ -4624,16 +4352,18 @@ async function renderMetaPortafolio(el,isAdmin){
     insCountByAcc[c.account_id]=count||0
   }
 
-  // Gasto en RANGO seleccionado por cuenta (para filtro "Activas")
-  const _defHasta=today()
-  const _defDesde=_daysAgo(30)
+  // Gasto en RANGO seleccionado por cuenta + tiene campañas ACTIVE (para filtro "Activas")
+  const _defHasta=new Date().toISOString().slice(0,10)
+  const _defDesde=new Date(Date.now()-30*86400000).toISOString().slice(0,10)
   const{data:insRango}=await sb.from('meta_insights').select('account_id,spend').eq('nivel','campaign').gte('fecha',_defDesde).lte('fecha',_defHasta).limit(20000)
   const gastoRangoByAcc={}
   for(const i of (insRango||[])){gastoRangoByAcc[i.account_id]=(gastoRangoByAcc[i.account_id]||0)+(i.spend||0)}
-  // Cuenta es ACTIVA si tiene gasto > 0 en el rango (misma lógica que campañas)
+  // Cuenta es ACTIVA si: tiene campañas ACTIVE registradas Y tiene gasto > 0 en el rango
   const tieneGastoRango={}
   for(const c of cuentas){
-    tieneGastoRango[c.account_id]=(gastoRangoByAcc[c.account_id]||0)>0
+    const tieneCampActiva=(campsByAcc[c.account_id]?.activas||0)>0
+    const tieneGasto=(gastoRangoByAcc[c.account_id]||0)>0
+    tieneGastoRango[c.account_id]=tieneCampActiva&&tieneGasto
   }
 
   // Break-even
@@ -4645,8 +4375,8 @@ async function renderMetaPortafolio(el,isAdmin){
   const roasBE=margenBE>0?p2/margenBE:999
 
   // Default dates: last 30 days
-  const defHasta=today()
-  const defDesde=_daysAgo(30)
+  const defHasta=new Date().toISOString().slice(0,10)
+  const defDesde=new Date(Date.now()-30*86400000).toISOString().slice(0,10)
 
   // Store portfolio context for expand/filter
   window._metaPort={campanas,p2,c2,fo,fd,dp,margenBE,roasBE,isAdmin}
@@ -4731,9 +4461,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   const ctx=window._metaPort
   if(!ctx)return
 
-  const desde=document.getElementById('meta-desde')?.value||_daysAgo(30)
-  const hasta=document.getElementById('meta-hasta')?.value||today()
-  const hoy=today()
+  const desde=document.getElementById('meta-desde')?.value||new Date(Date.now()-30*86400000).toISOString().slice(0,10)
+  const hasta=document.getElementById('meta-hasta')?.value||new Date().toISOString().slice(0,10)
+  const hoy=new Date().toISOString().slice(0,10)
   const actId='act_'+accountId
   let camps=[],agg={},source='meta'
 
@@ -5087,18 +4817,20 @@ window.applyMetaDateRange=async()=>{
     if(accEl){accEl.style.display='none';accEl.innerHTML=''}
     if(chevron)chevron.textContent='▸'
   })
-  // Si el rango incluye hoy, auto-sync desde Meta (throttled)
+  // Recalcular gasto en rango para filtro Activas (cuenta = activas + gasto > 0)
   const desde=document.getElementById('meta-desde')?.value||today()
   const hasta=document.getElementById('meta-hasta')?.value||today()
-  if(hasta>=today())await _syncTodayQuick()
-  // Recalcular gasto en rango para filtro Activas (cuenta = gasto > 0 en el rango)
   const{data:insRango}=await sb.from('meta_insights').select('account_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).limit(20000)
   const gastoRangoByAcc={}
   for(const i of (insRango||[])){gastoRangoByAcc[i.account_id]=(gastoRangoByAcc[i.account_id]||0)+(i.spend||0)}
+  // Para saber qué cuentas tienen campañas ACTIVE
+  const{data:campsActive}=await sb.from('meta_campanas').select('account_id').eq('nivel','campaign').eq('estado','ACTIVE')
+  const cuentasConActivas=new Set((campsActive||[]).map(c=>c.account_id))
   document.querySelectorAll('.meta-cuenta-wrap').forEach(el=>{
     const accId=el.dataset.accid
     const hasGasto=(gastoRangoByAcc[accId]||0)>0
-    el.dataset.tienegastohoy=hasGasto?'1':'0'
+    const hasActive=cuentasConActivas.has(accId)
+    el.dataset.tienegastohoy=(hasGasto&&hasActive)?'1':'0'
   })
   filterMetaCuentas()
 }
@@ -5112,9 +4844,9 @@ window.viewCampDetail=async(campId,customDesde,customHasta)=>{
   if(!camp){alert('Campaña no encontrada');return}
 
   // Fecha: custom > inputs globales > default 30d
-  const desde=customDesde||document.getElementById('meta-desde')?.value||_daysAgo(30)
-  const hasta=customHasta||document.getElementById('meta-hasta')?.value||today()
-  const hoy=today()
+  const desde=customDesde||document.getElementById('meta-desde')?.value||new Date(Date.now()-30*86400000).toISOString().slice(0,10)
+  const hasta=customHasta||document.getElementById('meta-hasta')?.value||new Date().toISOString().slice(0,10)
+  const hoy=new Date().toISOString().slice(0,10)
 
   // Insights del rango
   const{data:ins}=await sb.from('meta_insights').select('*').eq('meta_id',campId).eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('fecha',{ascending:false})
@@ -5490,7 +5222,7 @@ async function gatherDataIA(nivel,targetId,desde,hasta){
 
 // Orquesta el análisis: reúne datos → llama Edge Function → muestra modal
 window.analizarConIA=async(nivel,targetId,targetNombre,desde,hasta)=>{
-  desde=desde||document.getElementById('meta-desde')?.value||_daysAgo(30)
+  desde=desde||document.getElementById('meta-desde')?.value||new Date(Date.now()-30*86400000).toISOString().slice(0,10)
   hasta=hasta||document.getElementById('meta-hasta')?.value||today()
   showIALoading(nivel,targetNombre)
   try{

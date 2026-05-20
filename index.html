@@ -503,6 +503,30 @@ function render(page){
 const fmt=n=>new Intl.NumberFormat('es-CO').format(Math.round(n||0))
 const today=()=>new Date().toISOString().split('T')[0]
 const _normProd=s=>(s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()
+// Resuelve un texto crudo (de Dropi/SellerChat) al producto canónico mediante aliases + nombre
+// Devuelve {id, nombre} si encuentra, o {id:null, nombre:raw_original} si no encuentra
+function resolveProdName(raw){
+  const norm=_normProd(raw)
+  if(!norm)return{id:null,nombre:raw||'Sin producto'}
+  if(!Array.isArray(productos))return{id:null,nombre:raw}
+  for(const p of productos){
+    // Match por nombre canónico
+    if(_normProd(p.nombre)===norm)return{id:p.id,nombre:p.nombre}
+    // Match por alias
+    if(Array.isArray(p.aliases)){
+      for(const a of p.aliases){
+        if(_normProd(a)===norm)return{id:p.id,nombre:p.nombre}
+      }
+    }
+    // Match por keywords legacy
+    if(p.keywords){
+      const kws=p.keywords.split(',').map(k=>_normProd(k))
+      if(kws.includes(norm))return{id:p.id,nombre:p.nombre}
+    }
+  }
+  return{id:null,nombre:raw}
+}
+window.resolveProdName=resolveProdName
 const _isoDate=(d)=>d.toISOString().split('T')[0]
 const _daysAgo=(n)=>{const d=new Date();d.setDate(d.getDate()-n);return _isoDate(d)}
 function _quickDateBtns(desdeId,hastaId,onchangeFn){
@@ -604,7 +628,7 @@ async function loadDash(){
     if(m.estado_final==='CANCELADO')canc++
     else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)pend++
     else conf++
-    const pn=m.producto||'Sin producto'
+    const pn=resolveProdName(m.producto).nombre||'Sin producto'
     if(!prodStats[pn])prodStats[pn]={o1:0,o2:0,o3:0,o4:0}
     if(q===1)prodStats[pn].o1++;else if(q===2)prodStats[pn].o2++;else if(q===3)prodStats[pn].o3++;else prodStats[pn].o4++
   }
@@ -834,9 +858,12 @@ async function cargarResumenSemanal(){
   const gastoFijoMensual=(gfData||[]).reduce((s,g)=>s+(g.monto||0),0)
   const fijosSemana=Math.round(gastoFijoMensual/30*7)
 
-  // Lookup de producto por nombre normalizado
+  // Lookup de producto por nombre normalizado + aliases
   const prodByKey={}
-  for(const p of productos){prodByKey[_normProd(p.nombre)]=p}
+  for(const p of productos){
+    prodByKey[_normProd(p.nombre)]=p
+    if(Array.isArray(p.aliases))for(const a of p.aliases)prodByKey[_normProd(a)]=p
+  }
   const ccDefault=(productos[0]?.costo_conversacion)||100
 
   // Agrupar mapeos por semana + acumular ventas/costos por estado
@@ -1068,9 +1095,12 @@ async function loadTracker(){
       gastoPorProd[pid][f].gasto+=(i.spend||0)
     }
 
-    // 8. Mapeos por producto + fecha + estado (matching por nombre normalizado)
+    // 8. Mapeos por producto + fecha + estado (matching por nombre normalizado + aliases)
     const prodByNorm={}
-    for(const p of productos){prodByNorm[_normProd(p.nombre)]=p.id}
+    for(const p of productos){
+      prodByNorm[_normProd(p.nombre)]=p.id
+      if(Array.isArray(p.aliases))for(const a of p.aliases)prodByNorm[_normProd(a)]=p.id
+    }
     const dataPorProd={}
     for(const m of (mapeos||[])){
       const norm=_normProd(m.producto||'')
@@ -1361,11 +1391,48 @@ async function pageAdminProductos(c){
     const prod=productos.find(p=>p.id===id);if(!prod)return
     // Guardar preferencia en localStorage por producto
     try{localStorage.setItem('prod_oferta_'+id,oferta)}catch(_){}
+    // Actualizar botones de oferta visualmente
+    document.querySelectorAll(`button[onclick*="changeOferta('${id}'"]`).forEach(b=>{
+      const m=b.getAttribute('onclick').match(/changeOferta\('[^']+',(\d+)\)/)
+      if(m){const n=parseInt(m[1]);b.className='btn-sm '+(n===oferta?'btn-primary':'btn-outline')+(b.disabled?' ':'')}
+    })
     await refreshProdResumen(id)
+    if(typeof recalcProdAuto==='function')recalcProdAuto(id)
   }
 
   window.changePeriodo=async(id,periodo)=>{
     try{localStorage.setItem('prod_periodo_'+id,periodo)}catch(_){}
+    // Mostrar/ocultar el rango personalizado
+    const cr=document.getElementById('prod-customrange-'+id)
+    if(cr)cr.style.display=(periodo==='custom')?'flex':'none'
+    await refreshProdResumen(id)
+  }
+
+  window.changeVistaProd=async(id,vista)=>{
+    try{localStorage.setItem('prod_vista_'+id,vista)}catch(_){}
+    // Actualizar botones visualmente
+    const btns=document.querySelectorAll(`button[onclick*="changeVistaProd('${id}'"]`)
+    btns.forEach(b=>{
+      const m=b.getAttribute('onclick').match(/changeVistaProd\('[^']+','([^']+)'\)/)
+      if(m){b.className='btn-sm '+(m[1]===vista?'btn-primary':'btn-outline')}
+    })
+    await refreshProdResumen(id)
+  }
+
+  window.setCustomDesde=async(id,v)=>{
+    try{localStorage.setItem('prod_desde_'+id,v||'')}catch(_){}
+    // Si selecciona desde sin estar en custom, cambiar a custom
+    if(localStorage.getItem('prod_periodo_'+id)!=='custom'){
+      try{localStorage.setItem('prod_periodo_'+id,'custom')}catch(_){}
+    }
+    await refreshProdResumen(id)
+  }
+
+  window.setCustomHasta=async(id,v)=>{
+    try{localStorage.setItem('prod_hasta_'+id,v||'')}catch(_){}
+    if(localStorage.getItem('prod_periodo_'+id)!=='custom'){
+      try{localStorage.setItem('prod_periodo_'+id,'custom')}catch(_){}
+    }
     await refreshProdResumen(id)
   }
 
@@ -1377,6 +1444,10 @@ async function pageAdminProductos(c){
     const nombre=document.getElementById('pname-'+id)?.value?.trim()
     const aliasesRaw=document.getElementById('paliases-'+id)?.value||''
     const aliases=aliasesRaw.split(/[,;\n]+/).map(s=>s.trim()).filter(Boolean)
+    const aliasesVisRaw=document.getElementById('paliasesvis-'+id)?.value||''
+    const aliases_visibles=aliasesVisRaw.split(/[,;\n]+/).map(s=>s.trim()).filter(Boolean)
+    const tipo_producto=document.getElementById('tp-'+id)?.value||'dropshipping'
+    const almacenamiento=tipo_producto==='marca_propia'?(parseInt(document.getElementById('alm-'+id)?.value)||0):0
 
     const updateData={
       flete_outbound:g('fo'),flete_devolucion:g('fd'),dev_pct:gf('dp')/100,
@@ -1384,21 +1455,27 @@ async function pageAdminProductos(c){
     }
     if(nombre)updateData.nombre=nombre
 
-    // Intentar guardar aliases (campo nuevo)
-    try{
-      const{error:aliasErr}=await sb.from('productos').update({...updateData,aliases}).eq('id',id)
-      if(aliasErr){
-        // Si falla por columna aliases inexistente, guardar sin ella
-        if(aliasErr.message.includes('aliases')||aliasErr.code==='42703'){
-          const{error}=await sb.from('productos').update(updateData).eq('id',id)
-          if(error){document.getElementById('pmsg-'+id).innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
-          document.getElementById('pmsg-'+id).innerHTML='<div class="alert alert-amber">⚠️ Guardado (sin aliases — ejecuta SQL para agregar columna)</div>'
-        }else{
-          document.getElementById('pmsg-'+id).innerHTML=`<div class="alert alert-red">${aliasErr.message}</div>`
-          return
-        }
-      }
-    }catch(e){document.getElementById('pmsg-'+id).innerHTML=`<div class="alert alert-red">${e.message}</div>`;return}
+    // Intentar guardar incluyendo todos los campos nuevos; si una columna no existe, ir quitándola
+    const fullPayload={...updateData,aliases,aliases_visibles,tipo_producto,almacenamiento}
+    const tryUpdate=async(payload)=>sb.from('productos').update(payload).eq('id',id)
+    let{error:err}=await tryUpdate(fullPayload)
+    // Fallbacks progresivos por columnas faltantes
+    const removeMissing=(p,col)=>{const c={...p};delete c[col];return c}
+    let payload=fullPayload
+    const missingCols=[]
+    while(err&&(err.code==='42703'||/column/i.test(err.message||''))){
+      // Detectar columna faltante por mensaje
+      const m=(err.message||'').match(/'([a-z_]+)' column|column "([a-z_]+)"/i)
+      const col=m?(m[1]||m[2]):null
+      if(!col||!(col in payload))break
+      missingCols.push(col)
+      payload=removeMissing(payload,col)
+      ;({error:err}=await tryUpdate(payload))
+    }
+    if(err){document.getElementById('pmsg-'+id).innerHTML=`<div class="alert alert-red">${err.message}</div>`;return}
+    if(missingCols.length){
+      document.getElementById('pmsg-'+id).innerHTML=`<div class="alert alert-amber">⚠️ Guardado parcial. Faltan columnas en DB: ${missingCols.join(', ')}. Ejecuta el SQL al final.</div>`
+    }
 
     // Guardar ofertas: leer todas las cards y actualizar precios/costos
     const precioInputs=document.querySelectorAll('.of-precio-'+id)
@@ -1497,15 +1574,27 @@ async function pageAdminProductos(c){
       dev_pct:(parseFloat(document.getElementById('np-dp').value)||19)/100,
       costo_conversacion:parseInt(document.getElementById('np-cc').value)||100,
       campaign_ids:cids,
-      maestro_codigo:document.getElementById('np-mc').value||'GEN'
+      maestro_codigo:document.getElementById('np-mc').value||'GEN',
+      aliases,aliases_visibles:[],tipo_producto:'dropshipping',almacenamiento:0
     }
-    // Intentar incluir aliases — si la columna no existe, hacer fallback
-    let result=await sb.from('productos').insert({...payload,aliases}).select().single()
-    if(result.error&&(result.error.message.includes('aliases')||result.error.code==='42703')){
-      result=await sb.from('productos').insert(payload).select().single()
-      if(result.error){document.getElementById('np-msg').innerHTML=`<div class="alert alert-amber">Creado sin aliases (columna no existe). ${result.error.message}</div>`;return}
+    // Fallback progresivo si alguna columna no existe en DB
+    const tryInsert=async(p)=>sb.from('productos').insert(p).select().single()
+    let{data,error:err}=await tryInsert(payload)
+    const removeMissing=(p,col)=>{const c={...p};delete c[col];return c}
+    let curPayload=payload
+    const missingCols=[]
+    while(err&&(err.code==='42703'||/column/i.test(err.message||''))){
+      const m=(err.message||'').match(/'([a-z_]+)' column|column "([a-z_]+)"/i)
+      const col=m?(m[1]||m[2]):null
+      if(!col||!(col in curPayload))break
+      missingCols.push(col)
+      curPayload=removeMissing(curPayload,col)
+      ;({data,error:err}=await tryInsert(curPayload))
     }
-    if(result.error){document.getElementById('np-msg').innerHTML=`<div class="alert alert-red">${result.error.message}</div>`;return}
+    if(err){document.getElementById('np-msg').innerHTML=`<div class="alert alert-red">${err.message}</div>`;return}
+    if(missingCols.length){
+      document.getElementById('np-msg').innerHTML=`<div class="alert alert-amber">⚠️ Creado, pero faltan columnas en DB: ${missingCols.join(', ')}. Ejecuta el SQL al final.</div>`
+    }
     await loadProductos()
     logAction('producto_creado',{nombre}).catch(()=>{})
     pageAdminProductos(document.getElementById('content'))
@@ -1516,6 +1605,9 @@ async function pageAdminProductos(c){
 function renderProdAccordion(prod,maestrosList){
   const ofertaPref=parseInt(localStorage.getItem('prod_oferta_'+prod.id))||2
   const periodoPref=localStorage.getItem('prod_periodo_'+prod.id)||'7d'
+  const vistaPref=localStorage.getItem('prod_vista_'+prod.id)||'proyectado'
+  const desdePref=localStorage.getItem('prod_desde_'+prod.id)||''
+  const hastaPref=localStorage.getItem('prod_hasta_'+prod.id)||''
   return`<div class="card prod-card" data-nombre="${(prod.nombre||'').toLowerCase()}" style="margin-bottom:10px;padding:0">
     <div style="padding:14px;cursor:pointer;user-select:none" onclick="toggleProd('${prod.id}')">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -1538,13 +1630,23 @@ function renderProdAccordion(prod,maestrosList){
           }).join('')}
         </div>
         <div style="display:flex;gap:4px;align-items:center">
+          <span style="font-size:11px;color:var(--muted)">Vista:</span>
+          <button class="btn-sm ${vistaPref==='proyectado'?'btn-primary':'btn-outline'}" onclick="event.stopPropagation();changeVistaProd('${prod.id}','proyectado')" style="padding:4px 10px;font-size:11px" title="Confirmados + % devolución simulado">🔮 Proyectado</button>
+          <button class="btn-sm ${vistaPref==='real'?'btn-primary':'btn-outline'}" onclick="event.stopPropagation();changeVistaProd('${prod.id}','real')" style="padding:4px 10px;font-size:11px" title="Entregados, devueltos y rechazados reales">📊 Real</button>
+        </div>
+        <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
           <span style="font-size:11px;color:var(--muted)">Período:</span>
           <select onchange="event.stopPropagation();changePeriodo('${prod.id}',this.value)" style="background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:11px;color:var(--text)">
-            ${['hoy','ayer','7d','14d','30d','este_mes','mes_pasado'].map(p=>{
-              const lbl={hoy:'Hoy',ayer:'Ayer','7d':'7d','14d':'14d','30d':'30d',este_mes:'Este mes',mes_pasado:'Mes pasado'}[p]
+            ${['hoy','ayer','7d','14d','30d','este_mes','mes_pasado','custom','todo'].map(p=>{
+              const lbl={hoy:'Hoy',ayer:'Ayer','7d':'7d','14d':'14d','30d':'30d',este_mes:'Este mes',mes_pasado:'Mes pasado',custom:'📅 Personalizado',todo:'♾️ Todo'}[p]
               return`<option value="${p}" ${p===periodoPref?'selected':''}>${lbl}</option>`
             }).join('')}
           </select>
+        </div>
+        <div id="prod-customrange-${prod.id}" style="display:${periodoPref==='custom'?'flex':'none'};gap:4px;align-items:center;flex-wrap:wrap">
+          <input type="date" value="${desdePref}" onchange="event.stopPropagation();setCustomDesde('${prod.id}',this.value)" style="background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:3px 6px;font-size:11px;color:var(--text)">
+          <span style="font-size:11px;color:var(--muted)">→</span>
+          <input type="date" value="${hastaPref}" onchange="event.stopPropagation();setCustomHasta('${prod.id}',this.value)" style="background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:3px 6px;font-size:11px;color:var(--text)">
         </div>
       </div>
     </div>
@@ -1558,6 +1660,9 @@ async function renderProdBody(id,maestrosList){
   const body=document.getElementById('prod-body-'+id)
   const cids=Array.isArray(prod.campaign_ids)?prod.campaign_ids.join(', '):(prod.campaign_ids||'')
   const aliases=Array.isArray(prod.aliases)?prod.aliases:[]
+  const aliasesVis=Array.isArray(prod.aliases_visibles)?prod.aliases_visibles:[]
+  const tipoProd=prod.tipo_producto||'dropshipping'
+  const ofertaSel=parseInt(localStorage.getItem('prod_oferta_'+id))||2
 
   // Cargar ofertas dinámicas (si existe la tabla)
   let ofertasDB=[]
@@ -1586,6 +1691,11 @@ async function renderProdBody(id,maestrosList){
       <textarea id="paliases-${id}" rows="2" style="font-family:monospace;font-size:11px" placeholder="neocell, colageno, NeoCell Multi Collagen">${aliases.join(', ')}</textarea>
       <div style="font-size:11px;color:var(--muted);margin-top:4px">El asignador reconoce el producto por cualquier alias. No se muestra en ningún lado al cliente.</div>
     </div>
+    <div class="fld" style="margin-top:10px">
+      <label>👁️ Aliases visibles en asignador <span style="color:var(--muted);font-size:10px">(opcional — separados por coma. Si está vacío se muestran todos)</span></label>
+      <textarea id="paliasesvis-${id}" rows="2" style="font-family:monospace;font-size:11px" placeholder="Vacío = mostrar todos. Ej: neocell, colageno">${aliasesVis.join(', ')}</textarea>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">Solo afecta los badges verdes del asignador. Todos los aliases siguen funcionando internamente.</div>
+    </div>
     <div class="divider"></div>
     <div class="section-title">🏷️ Ofertas (cantidades de unidades)</div>
     <div id="ofertas-list-${id}" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:10px">
@@ -1595,11 +1705,30 @@ async function renderProdBody(id,maestrosList){
       <button class="btn-sm btn-primary" onclick="modalAgregarOferta('${id}')">➕ Agregar oferta</button>
     </div>
     <div class="divider"></div>
+    <div class="fld" style="margin-bottom:10px">
+      <label>📦 Tipo de producto</label>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button type="button" class="btn-sm ${tipoProd==='dropshipping'?'btn-primary':'btn-outline'}" onclick="setTipoProd('${id}','dropshipping')" id="tp-drop-${id}">🚚 Dropshipping</button>
+        <button type="button" class="btn-sm ${tipoProd==='marca_propia'?'btn-primary':'btn-outline'}" onclick="setTipoProd('${id}','marca_propia')" id="tp-marca-${id}">🏭 Marca propia (stock)</button>
+      </div>
+      <input type="hidden" id="tp-${id}" value="${tipoProd}">
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">Marca propia = tú compras y guardas el stock. Agrega costo de almacenamiento.</div>
+    </div>
     <div class="form-grid g4">
-      <div class="fld"><label>Flete outbound</label><input type="number" id="fo-${id}" value="${prod.flete_outbound||21000}"></div>
-      <div class="fld"><label>Flete devolución</label><input type="number" id="fd-${id}" value="${prod.flete_devolucion||18000}"></div>
-      <div class="fld"><label>% Devolución</label><input type="number" step="0.01" id="dp-${id}" value="${(prod.dev_pct*100)||19}"></div>
-      <div class="fld"><label>Costo/conversación</label><input type="number" id="cc-${id}" value="${prod.costo_conversacion||100}"></div>
+      <div class="fld"><label>Flete outbound</label><input type="number" id="fo-${id}" value="${prod.flete_outbound||21000}" oninput="recalcProdAuto('${id}')"></div>
+      <div class="fld"><label>Flete devolución</label><input type="number" id="fd-${id}" value="${prod.flete_devolucion||18000}" oninput="recalcProdAuto('${id}')"></div>
+      <div class="fld"><label>% Devolución</label><input type="number" step="0.01" id="dp-${id}" value="${(prod.dev_pct*100)||19}" oninput="recalcProdAuto('${id}')"></div>
+      <div class="fld"><label>Costo/conversación</label><input type="number" id="cc-${id}" value="${prod.costo_conversacion||100}" oninput="recalcProdAuto('${id}')"></div>
+    </div>
+    <div class="fld" id="alm-wrap-${id}" style="margin-top:10px;display:${tipoProd==='marca_propia'?'block':'none'}">
+      <label>📦 Almacenamiento (por orden)</label>
+      <input type="number" id="alm-${id}" value="${prod.almacenamiento||0}" oninput="recalcProdAuto('${id}')" style="max-width:200px">
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">Hoy en Colombia: $2,000 promedio. Cámbialo cuando varíe.</div>
+    </div>
+    <div class="divider"></div>
+    <div class="section-title">🧮 Cálculos automáticos (oferta ${ofertaSel}u)</div>
+    <div id="autocalc-${id}" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:14px">
+      <!-- llenado dinámico por recalcProdAuto -->
     </div>
     <div class="divider"></div>
     <div class="form-grid g2">
@@ -1621,6 +1750,65 @@ async function renderProdBody(id,maestrosList){
     <div id="camps-enlazadas-${id}"><div class="loading">Cargando...</div></div>
   </div>`
   renderCampanasEnlazadas(id)
+  // Inyectar listeners a inputs de ofertas para recalcular en vivo
+  document.querySelectorAll('.of-precio-'+id+', .of-costo-'+id).forEach(inp=>{
+    inp.addEventListener('input',()=>recalcProdAuto(id))
+  })
+  // Render inicial del panel de cálculos automáticos
+  recalcProdAuto(id)
+}
+
+// Cambia el tipo de producto (dropshipping / marca_propia) y muestra/oculta almacenamiento
+window.setTipoProd=(id,tipo)=>{
+  const hidden=document.getElementById('tp-'+id);if(hidden)hidden.value=tipo
+  const btnDrop=document.getElementById('tp-drop-'+id)
+  const btnMarca=document.getElementById('tp-marca-'+id)
+  if(btnDrop&&btnMarca){
+    btnDrop.className='btn-sm '+(tipo==='dropshipping'?'btn-primary':'btn-outline')
+    btnMarca.className='btn-sm '+(tipo==='marca_propia'?'btn-primary':'btn-outline')
+  }
+  const almWrap=document.getElementById('alm-wrap-'+id)
+  if(almWrap)almWrap.style.display=tipo==='marca_propia'?'block':'none'
+  recalcProdAuto(id)
+}
+
+// Recalcula el panel de cálculos automáticos en vivo (CPA BE, ROAS BE, ingreso efectivo, etc.)
+window.recalcProdAuto=(id)=>{
+  const cont=document.getElementById('autocalc-'+id);if(!cont)return
+  const ofertaSel=parseInt(localStorage.getItem('prod_oferta_'+id))||2
+  // Leer precio/costo de la oferta seleccionada desde los inputs del DOM (si están)
+  let precio=0,costo=0
+  const precioInput=document.querySelector('.of-precio-'+id+'[data-cantidad="'+ofertaSel+'"]')
+  const costoInput=document.querySelector('.of-costo-'+id+'[data-cantidad="'+ofertaSel+'"]')
+  if(precioInput)precio=parseInt(precioInput.value)||0
+  if(costoInput)costo=parseInt(costoInput.value)||0
+  // Fallback al producto cargado en memoria si no hay input visible
+  if(!precio){const prod=productos.find(p=>p.id===id);precio=prod?.['precio_'+ofertaSel+'u']||0}
+  if(!costo){const prod=productos.find(p=>p.id===id);costo=prod?.['costo_'+ofertaSel+'u']||0}
+  const fo=parseInt(document.getElementById('fo-'+id)?.value)||0
+  const fd=parseInt(document.getElementById('fd-'+id)?.value)||0
+  const dpPct=parseFloat(document.getElementById('dp-'+id)?.value)||0
+  const dp=dpPct/100
+  const cc=parseInt(document.getElementById('cc-'+id)?.value)||0
+  const tipo=document.getElementById('tp-'+id)?.value||'dropshipping'
+  const alm=tipo==='marca_propia'?(parseInt(document.getElementById('alm-'+id)?.value)||0):0
+  // Cálculos
+  const ingresoEf=precio*(1-dp)
+  const costoSinAds=costo+fo+(fd*dp)+alm
+  const margenBE=ingresoEf-costoSinAds
+  const cpaBE=margenBE
+  const roasBE=margenBE>0?precio/margenBE:0
+  const card=(label,val,sub,color)=>`<div class="card" style="padding:10px;${color?'border-left:3px solid '+color:''}">
+    <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">${label}</div>
+    <div style="font-size:18px;font-weight:700;margin-top:2px${color?';color:'+color:''}">${val}</div>
+    ${sub?`<div style="font-size:10px;color:var(--muted);margin-top:2px">${sub}</div>`:''}
+  </div>`
+  cont.innerHTML=
+    card('💵 Ingreso efectivo','$'+fmt(ingresoEf),`Precio × ${((1-dp)*100).toFixed(0)}% entrega`)+
+    card('💸 Costo total sin ads','$'+fmt(costoSinAds),`Producto + flete + dev${alm?' + alm.':''}`)+
+    card('🎯 Margen disponible','$'+fmt(margenBE),'Para pagar ads',margenBE>0?'var(--green)':'var(--red)')+
+    card('📊 CPA Break-even','$'+fmt(cpaBE),'CPA máximo viable',margenBE>0?'var(--green)':'var(--red)')+
+    card('📈 ROAS Break-even',roasBE.toFixed(2)+'x','ROAS bruto mínimo')
 }
 
 // Render de una card de oferta individual
@@ -1899,51 +2087,145 @@ async function refreshProdResumen(id){
   const prod=productos.find(p=>p.id===id);if(!prod)return
   const oferta=parseInt(localStorage.getItem('prod_oferta_'+id))||2
   const periodo=localStorage.getItem('prod_periodo_'+id)||'7d'
-  const{desde,hasta}=_periodoToRange(periodo)
+  const vista=localStorage.getItem('prod_vista_'+id)||'proyectado'
+  const desdeCustom=localStorage.getItem('prod_desde_'+id)||''
+  const hastaCustom=localStorage.getItem('prod_hasta_'+id)||''
+  const{desde,hasta}=await _periodoToRangeProd(periodo,id,desdeCustom,hastaCustom)
   const precio=prod['precio_'+oferta+'u']||0
   const costo=prod['costo_'+oferta+'u']||0
   const fo=prod.flete_outbound||21000,fd=prod.flete_devolucion||18000
   const dp=prod.dev_pct||0.19
-  // BE teórico
-  const margenBE=precio*(1-dp)-costo-fo-(fd*dp)
+  const cc=prod.costo_conversacion||100
+  const tipoProd=prod.tipo_producto||'dropshipping'
+  const alm=tipoProd==='marca_propia'?(prod.almacenamiento||0):0
+  // Margen disponible (=CPA BE)
+  const margenBE=precio*(1-dp)-costo-fo-(fd*dp)-alm
   const roasBE=margenBE>0?precio/margenBE:0
-  // CPA real y ROAS real
+  const lblPeriodo=periodo==='todo'?'Todo':(periodo==='custom'?(desde+' → '+hasta):periodo)
+
+  // Datos reales: gasto + conteos de mapeos
   let cpaRealHtml='<span style="color:var(--muted)">—</span>'
   let roasRealHtml='<span style="color:var(--muted)">—</span>'
+  let ganHtml='<span style="color:var(--muted)">—</span>'
+  let extraInfo=''
   try{
     const cids=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
+    // Gasto: SUMA de TODAS las campañas vinculadas, incluso las sin ventas
+    let gasto=0
     if(cids.length){
-      // Gasto del periodo de las campañas atribuidas
-      let gasto=0
       for(let i=0;i<cids.length;i+=80){
         const chunk=cids.slice(i,i+80)
         const{data:ins}=await sb.from('meta_insights').select('spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).in('meta_id',chunk)
         for(const x of (ins||[]))gasto+=(x.spend||0)
       }
-      // Ventas: confirmadas + entregadas (matching por nombre)
-      const prodNorm=_normProd(prod.nombre)
-      const{data:maps}=await sb.from('mapeos').select('estado_final').ilike('producto',prod.nombre).gte('fecha',desde).lte('fecha',hasta).limit(10000)
-      let conf=0,ent=0
-      for(const m of (maps||[])){
-        const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
-        if(cat==='cancelado'||cat==='pendiente'||!m.estado_final)continue
-        conf++
-        if(cat==='entregado'||cat==='novedad_ok')ent++
-      }
+    }
+    // Conteos de mapeos: resolver producto (incluye aliases) y filtrar por rango
+    // Buscamos por nombre canónico + cualquier alias
+    const nombresBuscar=[prod.nombre,...(Array.isArray(prod.aliases)?prod.aliases:[])].filter(Boolean)
+    let maps=[]
+    for(const nm of nombresBuscar){
+      const{data:rows}=await sb.from('mapeos').select('estado_final,cantidad').ilike('producto',nm).gte('fecha',desde).lte('fecha',hasta).limit(10000)
+      if(rows)maps.push(...rows)
+    }
+    // Clasificar
+    let conf=0,ent=0,dev=0,canc=0,pend=0
+    for(const m of maps){
+      const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
+      if(cat==='cancelado'){canc++;continue}
+      if(cat==='pendiente'||!m.estado_final){pend++;continue}
+      conf++
+      if(cat==='entregado'||cat==='novedad_ok')ent++
+      else if(cat==='devuelto')dev++ // incluye DEVOLUCION + RECHAZADO
+    }
+
+    // CPA Real (siempre = Gasto / Confirmados, igual que Meta)
+    if(gasto>0&&conf>0){
+      const cpaReal=gasto/conf
+      const cpaCol=cpaReal<=margenBE?'var(--green)':'var(--red)'
+      cpaRealHtml=`<strong style="color:${cpaCol}">$${fmt(Math.round(cpaReal))}</strong>`
+    }
+
+    if(vista==='proyectado'){
+      // PROYECTADO: confirmados + % devolución simulado
+      // ROAS proyectado = (Confirmados × Precio × (1 - %dev)) / Gasto
       if(gasto>0&&conf>0){
-        const cpaReal=gasto/conf
-        const cpaCol=cpaReal<=margenBE?'var(--green)':'var(--red)'
-        cpaRealHtml=`<strong style="color:${cpaCol}">$${fmt(Math.round(cpaReal))}</strong>`
+        const ingresoProy=conf*precio*(1-dp)
+        const roasP=ingresoProy/gasto
+        const col=roasP>=1?'var(--green)':'var(--red)'
+        roasRealHtml=`<strong style="color:${col}">${roasP.toFixed(2)}x</strong>`
+        // Ganancia proyectada = (conf × margenBE) - (conf × cc) - gasto
+        const ganProy=(conf*margenBE)-(conf*cc)-gasto
+        const ganCol=ganProy>=0?'var(--green)':'var(--red)'
+        ganHtml=`<strong style="color:${ganCol}">$${fmt(Math.round(ganProy))}</strong>`
       }
-      if(gasto>0&&ent>0){
-        const roasReal=(ent*precio)/gasto
-        const roasCol=roasReal>=1?'var(--green)':'var(--red)'
-        roasRealHtml=`<strong style="color:${roasCol}">${roasReal.toFixed(2)}x</strong>`
+      extraInfo=` · Conf: <strong>${conf}</strong>`
+    }else{
+      // REAL: entregados, devueltos+rechazados (cobran flete), cancelados no cuentan
+      if(ent+dev===0&&conf>0){
+        // Hay confirmados pero todavía no hay data de tracking
+        roasRealHtml='<span style="color:var(--amber)">Sin tracking</span>'
+        ganHtml='<span style="color:var(--amber)">Sin tracking</span>'
+        extraInfo=` · Conf: <strong>${conf}</strong> · Sin entregas reales aún`
+      }else if(gasto>0&&ent+dev>0){
+        // ROAS Real = (Entregados × Precio) / Gasto
+        const roasR=(ent*precio)/gasto
+        const col=roasR>=1?'var(--green)':'var(--red)'
+        roasRealHtml=`<strong style="color:${col}">${roasR.toFixed(2)}x</strong>`
+        // Ganancia Real = (ent × precio) - (conf × costo) - ((ent+dev) × fo) - (dev × fd) - (conf × alm) - (conf × cc) - gasto
+        // Nota: el costo del producto solo se asume cuando se despachó (conf). Cancelados no salieron.
+        const enviados=ent+dev
+        const ingresoReal=ent*precio
+        const costoProd=conf*costo
+        const fleteOut=enviados*fo
+        const fleteDev=dev*fd
+        const almTotal=conf*alm
+        const ccTotal=conf*cc
+        const ganReal=ingresoReal-costoProd-fleteOut-fleteDev-almTotal-ccTotal-gasto
+        const ganCol=ganReal>=0?'var(--green)':'var(--red)'
+        ganHtml=`<strong style="color:${ganCol}">$${fmt(Math.round(ganReal))}</strong>`
+        extraInfo=` · Ent: <strong>${ent}</strong> · Dev: <strong style="color:var(--red)">${dev}</strong> · Pend: ${pend}`
+      }else{
+        extraInfo=` · Conf: <strong>${conf}</strong>`
       }
     }
-  }catch(_){}
-  el.innerHTML=`💰 Precio ${oferta}u: <strong>$${fmt(precio)}</strong> · BE: <strong>$${fmt(Math.round(margenBE))}</strong> · ROAS BE: <strong>${roasBE.toFixed(2)}x</strong> · % Dev: <strong>${(dp*100).toFixed(0)}%</strong><br>
-    📊 CPA real (${periodo}): ${cpaRealHtml} · ROAS real: ${roasRealHtml}`
+  }catch(e){console.error('refreshProdResumen:',e)}
+
+  const vistaLabel=vista==='proyectado'?'🔮 Proyectado':'📊 Real'
+  el.innerHTML=`💰 Precio ${oferta}u: <strong>$${fmt(precio)}</strong> · BE: <strong>$${fmt(Math.round(margenBE))}</strong> · ROAS BE: <strong>${roasBE.toFixed(2)}x</strong> · % Dev: <strong>${(dp*100).toFixed(0)}%</strong>${tipoProd==='marca_propia'?' · 🏭 Marca propia':''}<br>
+    ${vistaLabel} (${lblPeriodo}): CPA <strong>${cpaRealHtml}</strong> · ROAS <strong>${roasRealHtml}</strong> · Ganancia <strong>${ganHtml}</strong>${extraInfo}`
+}
+
+// Convierte período a rango {desde, hasta} con soporte para custom y todo
+// Versión async: 'todo' requiere consultar la primera fecha del producto
+async function _periodoToRangeProd(periodo,prodId,desdeCustom,hastaCustom){
+  const hoy=today()
+  if(periodo==='custom'){
+    return{desde:desdeCustom||'2024-01-01',hasta:hastaCustom||hoy}
+  }
+  if(periodo==='todo'){
+    // Buscar la fecha más temprana entre los mapeos del producto y los insights de sus campañas
+    let desde='2024-01-01'
+    try{
+      const prod=productos.find(p=>p.id===prodId)
+      const nombres=[prod?.nombre,...(Array.isArray(prod?.aliases)?prod.aliases:[])].filter(Boolean)
+      let minFecha=null
+      for(const nm of nombres){
+        const{data}=await sb.from('mapeos').select('fecha').ilike('producto',nm).order('fecha',{ascending:true}).limit(1)
+        if(data&&data[0]?.fecha&&(!minFecha||data[0].fecha<minFecha))minFecha=data[0].fecha
+      }
+      const cids=Array.isArray(prod?.campaign_ids)?prod.campaign_ids:[]
+      if(cids.length){
+        for(let i=0;i<cids.length;i+=80){
+          const chunk=cids.slice(i,i+80)
+          const{data:ins}=await sb.from('meta_insights').select('fecha').eq('nivel','campaign').in('meta_id',chunk).order('fecha',{ascending:true}).limit(1)
+          if(ins&&ins[0]?.fecha&&(!minFecha||ins[0].fecha<minFecha))minFecha=ins[0].fecha
+        }
+      }
+      if(minFecha)desde=minFecha
+    }catch(_){}
+    return{desde,hasta:hoy}
+  }
+  return _periodoToRange(periodo)
 }
 
 // Convierte período a rango {desde, hasta}
@@ -2517,17 +2799,27 @@ async function pageAuxAsignador(c){
 
   try{
     const{D,M,kw,masterByCode}=await cargarAsignDataSiNecesario()
-    // Palabras reconocidas: aliases (nuevo), keywords legacy y nombres de productos
+    // Lista COMPLETA de palabras reconocidas (para validación interna del asignador)
+    const allKwFull=new Set(Object.keys(kw))
+    for(const p of productos){
+      if(Array.isArray(p.aliases))p.aliases.forEach(a=>{if(a)allKwFull.add(a.toLowerCase().trim())})
+      if(p.keywords)(p.keywords).split(',').map(k=>k.trim().toLowerCase()).filter(Boolean).forEach(k=>allKwFull.add(k))
+      if(p.nombre)allKwFull.add(p.nombre.toLowerCase().trim())
+    }
+    // Lista VISIBLE de palabras (para badges en UI): si producto tiene aliases_visibles, usa solo esos
     const allKw=new Set(Object.keys(kw))
     for(const p of productos){
-      // Aliases (nuevo sistema)
-      if(Array.isArray(p.aliases))p.aliases.forEach(a=>{if(a)allKw.add(a.toLowerCase().trim())})
-      // Keywords legacy
-      if(p.keywords)(p.keywords).split(',').map(k=>k.trim().toLowerCase()).filter(Boolean).forEach(k=>allKw.add(k))
-      // El propio nombre del producto (normalizado) también debe reconocerse
-      if(p.nombre)allKw.add(p.nombre.toLowerCase().trim())
+      const tieneVis=Array.isArray(p.aliases_visibles)&&p.aliases_visibles.length>0
+      if(tieneVis){
+        p.aliases_visibles.forEach(a=>{if(a)allKw.add(a.toLowerCase().trim())})
+      }else{
+        if(Array.isArray(p.aliases))p.aliases.forEach(a=>{if(a)allKw.add(a.toLowerCase().trim())})
+        if(p.keywords)(p.keywords).split(',').map(k=>k.trim().toLowerCase()).filter(Boolean).forEach(k=>allKw.add(k))
+        if(p.nombre)allKw.add(p.nombre.toLowerCase().trim())
+      }
     }
     const kwArray=[...allKw].sort()
+    const kwArrayFull=[...allKwFull].sort()
     const kwHtml=kwArray.length
       ? kwArray.map(k=>`<span style="display:inline-block;padding:3px 9px;background:rgba(34,197,94,0.1);border:1px solid var(--green);color:var(--green);border-radius:14px;font-family:monospace;font-size:12px;margin:2px 4px 2px 0">🟢 ${k}</span>`).join('')
       : '<span style="color:var(--muted)">⚠️ No hay productos configurados. Configura productos con keywords en la sección Productos.</span>'
@@ -2562,7 +2854,8 @@ CARTAGENA, 2, BOLIVAR, 3018022318, 5/17/2026, Colageno, , INTERRAPIDISIMO" style
       <div id="asign-resultado" style="margin-top:18px"></div>
     `
     // Guardar contexto para validación
-    window._asignKw=kwArray
+    window._asignKw=kwArrayFull
+    window._asignKwVisibles=kwArray
     window._asignModoHist=modoHistorico
   }catch(e){
     document.getElementById('asign-content').innerHTML=`<div class="alert alert-red">Error cargando data del asignador: ${e.message}</div>`
@@ -2599,12 +2892,13 @@ window.procesarAsignador=async()=>{
   const limiteAtras=new Date(Date.now()-4*86400000).toISOString().slice(0,10)
   parsed.forEach((p,i)=>{
     if(p.tipo!=='nuevo'||p.errores.length>0)return
-    // Validar producto contra keywords
+    // Validar producto contra keywords (toda la lista, incluyendo aliases no visibles)
     if(kwList.length){
       const palabra=(p.producto||'').toLowerCase().trim()
       const matchKw=kwList.some(k=>palabra.includes(k))
       if(!matchKw){
-        conErrores.push({linea:i+1,raw:p.raw,faltan:[`producto "${p.producto}" no reconocido (no coincide con: ${kwList.join(', ')})`]})
+        const visibles=window._asignKwVisibles||kwList
+        conErrores.push({linea:i+1,raw:p.raw,faltan:[`producto "${p.producto}" no reconocido (debe contener una de las palabras visibles: ${visibles.join(', ')})`]})
         return
       }
     }
@@ -2804,12 +3098,13 @@ async function cargarReporteData(){
   const usandoDropi=tipo==='dropi'
   const campo=usandoDropi?'fecha_dropi':'fecha'
 
-  // 1. Auto: mapeos agrupados por producto (normalizado: case + tildes)
+  // 1. Auto: mapeos agrupados por producto (resolviendo alias → nombre canónico)
   const{data:mapeos}=await sb.from('mapeos').select('*').eq(campo,fecha)
   const porProd={}
   let totConf=0,totCanc=0,totPend=0,totOrd=0
   if(mapeos)for(const m of mapeos){
-    const display=m.producto||'Sin producto'
+    const resolved=resolveProdName(m.producto)
+    const display=resolved.nombre||'Sin producto'
     const key=_normProd(display)||'sin_producto'
     if(!porProd[key])porProd[key]={display,ord:0,conf:0,canc:0,pend:0,byQtyConf:{},byQtyCanc:{},byQtyPend:{},byFechaDropi:{}}
     porProd[key].ord++;totOrd++
@@ -3569,6 +3864,7 @@ const DROPI_STATUS={
   'ENTREGADO':{cat:'entregado',emoji:'✅',pill:'pill-green',label:'Entregado'},
   'CANCELADO':{cat:'cancelado',emoji:'❌',pill:'pill-red',label:'Cancelado'},
   'DEVOLUCION':{cat:'devuelto',emoji:'↩️',pill:'pill-red',label:'Devuelto'},
+  'RECHAZADO':{cat:'devuelto',emoji:'🚫',pill:'pill-red',label:'Rechazado'},
   'PENDIENTE CONFIRMACION':{cat:'pendiente',emoji:'⏳',pill:'pill-amber',label:'Pendiente'},
   'PENDIENTE':{cat:'pendiente',emoji:'⏳',pill:'pill-amber',label:'Pendiente'},
   'DESPACHADA':{cat:'en_proceso',emoji:'📦',pill:'pill-blue',label:'Despachada'},
@@ -4897,17 +5193,27 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const cpa=m.conv>0?m.spend/m.conv:0
     const ventasReales=esSoloHoy?v.pendientes:v.ventas
     const cpaReal=ventasReales>0?m.spend/ventasReales:0
-    const roasM=m.spend>0&&m.conv>0?(m.conv*ctx.p2)/m.spend:0
+    // ROAS Real = (Ventas confirmadas reales × Precio) / Gasto — reemplaza ROAS Meta inflado
+    const roasReal=m.spend>0&&ventasReales>0?(ventasReales*ctx.p2)/m.spend:0
     const avgCtr=m.ctrs.length?(m.ctrs.reduce((a,b)=>a+b,0)/m.ctrs.length):0
     const avgCpm=m.cpms.length?(m.cpms.reduce((a,b)=>a+b,0)/m.cpms.length):0
     const avgFreq=m.freqs.length?(m.freqs.reduce((a,b)=>a+b,0)/m.freqs.length):0
 
+    // Semáforo basado en CPA Real vs CPA Break-even (ctx.margenBE)
     let semCls='',semTxt='Sin actividad',semBorder='var(--border)'
     if(camp._hasData&&m.spend>0){
-      if(roasM<ctx.roasBE){semCls='pill-red';semTxt='🔴 STOP';semBorder='var(--red)'}
-      else if(roasM<ctx.roasBE*1.4){semCls='pill-amber';semTxt='🟡 Precaución';semBorder='var(--amber)'}
-      else if(roasM<ctx.roasBE*2.2){semCls='pill-green';semTxt='🟢 Escalar';semBorder='var(--green)'}
-      else{semCls='pill-blue';semTxt='🟣 Fuego';semBorder='var(--purple)'}
+      if(cpaReal===0&&ventasReales===0){
+        // Hay gasto pero no hay ventas reales aún
+        semCls='pill-amber';semTxt='⏳ Sin ventas';semBorder='var(--amber)'
+      }else if(cpaReal>ctx.margenBE){
+        semCls='pill-red';semTxt='🔴 STOP';semBorder='var(--red)'
+      }else if(cpaReal>ctx.margenBE*0.7){
+        semCls='pill-amber';semTxt='🟡 Precaución';semBorder='var(--amber)'
+      }else if(cpaReal>ctx.margenBE*0.45){
+        semCls='pill-green';semTxt='🟢 Escalar';semBorder='var(--green)'
+      }else{
+        semCls='pill-blue';semTxt='🟣 Fuego';semBorder='var(--purple)'
+      }
     }
 
     const inactive=!camp._hasData
@@ -4926,7 +5232,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       </div>
       ${camp._hasData?`<div class="cards-row" style="margin-top:10px;gap:6px;display:grid;grid-template-columns:repeat(6,1fr)">
         <div style="font-size:11px"><span style="color:var(--muted)">Gasto</span><br><strong>$${fmt(m.spend)}</strong></div>
-        <div style="font-size:11px"><span style="color:var(--muted)">ROAS</span><br><strong style="color:${roasM>=ctx.roasBE?'var(--green)':'var(--red)'}">${roasM.toFixed(2)}x</strong></div>
+        <div style="font-size:11px"><span style="color:var(--muted)" title="(Ventas reales × Precio) / Gasto">ROAS Real</span><br><strong style="color:${roasReal>=1?'var(--green)':roasReal>0?'var(--red)':'var(--muted)'}">${roasReal>0?roasReal.toFixed(2)+'x':'—'}</strong></div>
         <div style="font-size:11px"><span style="color:var(--muted)">CPA Meta</span><br><strong>${cpa>0?'$'+fmt(cpa):'—'}</strong></div>
         <div style="font-size:11px"><span style="color:var(--muted)">Conv.</span><br><strong>${m.conv}</strong></div>
         <div style="font-size:11px"><span style="color:var(--muted)">Ventas</span><br>${esSoloHoy?`<strong style="color:var(--amber)">${v.pendientes} ⏳</strong>`:`<strong style="color:var(--green)">${v.ventas} ✅</strong>`}</div>

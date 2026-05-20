@@ -3609,7 +3609,10 @@ const NOV_PROTO={
     resp:`INTENTAR ENTREGA EN: [DIRECCIÓN COMPLETA].\nLLAMAR AL [TELÉFONO] AL LLEGAR.\nSI NO CONTESTA: DEJAR AVISO Y REPROGRAMAR AL DÍA SIGUIENTE.\nNO DEVOLVER AÚN.`},
 }
 
-// ── AUXILIAR: NOVEDADES ─────────────────────────────────
+// ── AUXILIAR: NOVEDADES (con persistencia BD) ───────────
+// Cache global del último render para acciones de marcar/desmarcar
+window._novCache={fechaActiva:null,items:[],reporteId:null}
+
 async function pageAuxNovedades(c){
   c.innerHTML=`<div class="page-title">⚠️ Novedades del carrier</div>
     <div class="page-sub">Sube el reporte de novedades de Dropi — se clasifican automáticamente por protocolo</div>
@@ -3619,33 +3622,172 @@ async function pageAuxNovedades(c){
         <input type="file" id="nov-file" accept=".xlsx,.xls"
           style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--text);width:100%">
       </div>
-      <button class="btn-full btn-primary" onclick="procesarNovedadesXlsx()">▶ Procesar novedades</button>
+      <button class="btn-full btn-primary" onclick="procesarNovedadesXlsx()">▶ Procesar y guardar</button>
       <div id="nov-msg" style="margin-top:10px"></div>
     </div>
-    <div id="nov-content"></div>`
+    <div class="card" style="margin-bottom:16px;padding:12px">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <div class="fld" style="margin:0"><label style="font-size:11px">Ver novedades del día</label>
+          <input type="date" id="nov-fecha" value="${today()}" style="font-size:12px;padding:6px 8px" onchange="cargarNovedadesPorFecha()"></div>
+        <button class="btn-sm btn-outline" onclick="cargarNovedadesPorFecha()">🔄 Recargar</button>
+      </div>
+    </div>
+    <div id="nov-content"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div></div>
+    <div style="margin:24px 0;border-top:1px solid var(--border)"></div>
+    <div class="page-title" style="font-size:16px">📊 Historial de lotes</div>
+    <div class="page-sub">Resoluciones por lote — todas las subidas históricas</div>
+    <div id="nov-hist"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando historial...</div></div>`
+  cargarNovedadesPorFecha()
+  cargarHistorialNovedades()
+}
+
+function _novKey(it){return (it.telefono||it.tel||'')+'|'+(it.orden_id||it.ordenId||'')}
+
+// ── Cargar novedades guardadas en BD para una fecha ──
+async function cargarNovedadesPorFecha(){
+  const el=document.getElementById('nov-content')
+  if(!el)return
+  const fecha=document.getElementById('nov-fecha')?.value||today()
+  el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando novedades de '+fecha+'...</div>'
+  try{
+    const{data:rep}=await sb.from('novedades_reportes').select('*').eq('fecha_lote',fecha).maybeSingle()
+    if(!rep){
+      el.innerHTML=`<div class="alert alert-blue">Sin novedades guardadas para ${fecha}. Sube un archivo arriba.</div>`
+      window._novCache={fechaActiva:fecha,items:[],reporteId:null}
+      return
+    }
+    const{data:items}=await sb.from('novedades_items').select('*').eq('reporte_id',rep.id).limit(5000)
+    const{data:resols}=await sb.from('novedades_resoluciones').select('*').order('created_at',{ascending:false}).limit(10000)
+    const resolByKey={}
+    for(const r of (resols||[])){
+      const k=(r.telefono||'')+'|'+(r.orden_id||'')
+      if(!resolByKey[k])resolByKey[k]=r
+    }
+    const enriched=(items||[]).map(it=>{
+      const k=_novKey(it)
+      const r=resolByKey[k]
+      const cat=NOV_RULES[(it.cat_idx||1)-1]||{pri:'NORMAL',tipo:it.tipo||'Otra novedad',color:'var(--muted)',bg:'var(--card2)',border:'var(--border)',idx:99}
+      let dias=it.dias_desde_novedad
+      if(it.fecha_novedad){
+        const p=it.fecha_novedad.split('-')
+        if(p.length===3){
+          const fNov=new Date(`${p[2]}-${p[1]}-${p[0]}T12:00:00`)
+          if(!isNaN(fNov))dias=Math.floor((new Date()-fNov)/(1000*60*60*24))
+        }
+      }
+      return{
+        tel:it.telefono,orden_id:it.orden_id,guia:it.guia,nombre:it.cliente_nombre,
+        carrier:it.carrier,ciudad:it.ciudad,depto:it.depto,direccion:it.direccion,
+        producto:it.producto,causal:it.causal,aclaracion:it.aclaracion,
+        fechaNov:it.fecha_novedad,horaNov:it.hora_novedad,
+        cat:{...cat,idx:it.cat_idx||cat.idx,tipo:it.tipo||cat.tipo,pri:it.prioridad||cat.pri},
+        dias,ad_id:it.ad_id,
+        resol:r?{accion:r.accion,usuario:r.usuario_nombre,cuando:r.created_at,motivo:r.motivo}:null
+      }
+    })
+    enriched.sort((a,b)=>a.cat.idx-b.cat.idx||(b.dias||0)-(a.dias||0))
+    window._novCache={fechaActiva:fecha,items:enriched,reporteId:rep.id}
+    renderNovedadesContent(rep,enriched)
+  }catch(e){
+    el.innerHTML=`<div class="alert alert-red">Error cargando: ${e.message}</div>`
+  }
+}
+window.cargarNovedadesPorFecha=cargarNovedadesPorFecha
+
+function renderNovedadesContent(rep,items){
+  const el=document.getElementById('nov-content')
+  if(!el)return
+  const isResuelta=(m)=>m.resol?.accion==='resuelta'
+  const urgentes=items.filter(i=>i.cat.pri==='URGENTE'&&!isResuelta(i))
+  const medias=items.filter(i=>i.cat.pri==='MEDIA'&&!isResuelta(i))
+  const normales=items.filter(i=>i.cat.pri==='NORMAL'&&!isResuelta(i))
+  const resueltas=items.filter(isResuelta)
+
+  const esc=(s)=>(s||'').toString().replace(/'/g,"\\'").replace(/\n/g,' ')
+  const renderCard=(m)=>{
+    const diasTxt=(m.dias!==null&&m.dias!==undefined)?`${m.dias}d`:'—'
+    const diasColor=m.dias>5?'var(--red)':m.dias>3?'var(--amber)':'var(--green)'
+    const proto=NOV_PROTO[m.cat.idx]
+    const protoBtn=proto?`<button class="btn-sm btn-outline" onclick="mostrarProtocolo(${m.cat.idx},'${esc(m.nombre)}','${m.tel}','${esc(m.producto)}','${esc(m.carrier)}','${esc(m.direccion)}')">📋 Protocolo</button>`:''
+    const marcada=isResuelta(m)
+    const accionBtn=marcada
+      ?`<button class="btn-sm btn-outline" onclick="desmarcarResuelta('${m.tel}','${esc(m.orden_id)}')">↩️ Desmarcar</button>`
+      :`<button class="btn-sm btn-primary" onclick="marcarResuelta('${m.tel}','${esc(m.orden_id)}')">✅ Marcar resuelta</button>`
+    const badge=marcada?`<div style="margin-top:6px;padding:6px 8px;background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.4);border-radius:6px;font-size:11px;color:var(--green)">✅ Marcada por ${m.resol.usuario||'—'} · ${(m.resol.cuando||'').slice(11,16)}</div>`:''
+    const bgCard=marcada?'background:rgba(34,197,94,.05)':''
+    return`<div class="card" style="margin-bottom:8px;border-left:3px solid ${m.cat.color};${bgCard}">
+      <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;flex-wrap:wrap">
+        <div style="flex:1;min-width:200px">
+          <div style="font-size:14px;font-weight:600;font-family:monospace">${m.tel||'—'}</div>
+          <div style="font-size:13px;margin-top:2px">${m.nombre||'—'} · <strong>${m.producto||'—'}</strong></div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">${m.ciudad||'—'}, ${m.depto||'—'} · ${m.carrier||'—'} · Guía: ${m.guia||'—'}</div>
+          <div style="font-size:12px;margin-top:4px"><span class="pill" style="background:${m.cat.bg};color:${m.cat.color};border:1px solid ${m.cat.border}">${m.cat.tipo}</span></div>
+          <div style="font-size:11px;color:var(--muted);margin-top:4px;font-style:italic">"${m.causal||''}"</div>
+          ${m.aclaracion?`<div style="font-size:10px;color:var(--subtle);margin-top:2px">↳ ${m.aclaracion}</div>`:''}
+          ${badge}
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-size:18px;font-weight:700;color:${diasColor}">${diasTxt}</div>
+          <div style="font-size:10px;color:var(--muted)">días</div>
+          <div style="font-size:10px;color:var(--muted)">${m.fechaNov||''} ${m.horaNov||''}</div>
+          <div style="margin-top:6px;display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
+            ${protoBtn}
+            ${accionBtn}
+          </div>
+        </div>
+      </div>
+    </div>`
+  }
+  const renderSection=(titulo,pri,arr,color)=>{
+    if(!arr.length)return''
+    return`<div style="margin-bottom:20px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${color}"></span>
+        <span style="font-size:13px;font-weight:600;color:${color};text-transform:uppercase;letter-spacing:.06em">${pri} — ${titulo} (${arr.length})</span>
+      </div>
+      ${arr.map(renderCard).join('')}
+    </div>`
+  }
+  const total=items.length, pendientes=urgentes.length+medias.length+normales.length, marcadas=resueltas.length
+  const pctMarcadas=total>0?Math.round(marcadas*100/total):0
+  el.innerHTML=`
+    <div class="alert alert-blue" style="margin-bottom:12px">
+      📅 Lote del <strong>${rep.fecha_lote}</strong> · ${total} novedades · ✅ ${marcadas} marcadas (${pctMarcadas}%) · ⏳ ${pendientes} pendientes
+      ${rep.uploaded_by_name?` · 👤 subido por ${rep.uploaded_by_name}`:''}
+    </div>
+    <div class="cards-row c3" style="margin-bottom:16px">
+      <div class="card" style="border-left:3px solid var(--red)"><div class="card-label">🔴 Urgentes</div><div class="card-val" style="color:var(--red)">${urgentes.length}</div></div>
+      <div class="card" style="border-left:3px solid var(--amber)"><div class="card-label">🟡 Media</div><div class="card-val" style="color:var(--amber)">${medias.length}</div></div>
+      <div class="card" style="border-left:3px solid var(--blue)"><div class="card-label">🔵 Normal</div><div class="card-val" style="color:var(--blue)">${normales.length}</div></div>
+    </div>
+    <div class="alert alert-yellow" style="margin-bottom:16px">⏱️ Tiempo máximo de respuesta: <strong>1 HORA</strong> en horario laboral. Atender primero las 🔴 rojas.</div>
+    ${renderSection('Atender primero','URGENTE',urgentes,'var(--red)')}
+    ${renderSection('Resolver hoy','MEDIA',medias,'var(--amber)')}
+    ${renderSection('Más tiempo disponible','NORMAL',normales,'var(--blue)')}
+    ${resueltas.length?renderSection('Resueltas','RESUELTAS',resueltas,'var(--green)'):''}
+  `
 }
 
 window.procesarNovedadesXlsx=async()=>{
   const fileInput=document.getElementById('nov-file')
   const msg=document.getElementById('nov-msg')
-  const el=document.getElementById('nov-content')
   if(!fileInput.files.length){msg.innerHTML='<div class="alert alert-red">Selecciona un archivo</div>';return}
   msg.innerHTML='<div class="alert alert-blue">Procesando novedades...</div>'
 
   try{
-    const buf=await fileInput.files[0].arrayBuffer()
+    const file=fileInput.files[0]
+    const filename=file.name
+    const buf=await file.arrayBuffer()
     const wbook=XLSX.read(buf,{type:'array'})
     const rows=XLSX.utils.sheet_to_json(wbook.Sheets[wbook.SheetNames[0]],{defval:''})
     if(!rows.length){msg.innerHTML='<div class="alert alert-red">Archivo vacío</div>';return}
 
-    // Parsear filas del xlsx de novedades Dropi
     const items=rows.map(r=>{
       const tel=String(r['TELÉFONO']||r['TELEFONO']||'').replace(/\D/g,'')
       const causal=String(r['CAUSAL DE NOVEDAD']||'').trim()
       const aclaracion=String(r['ACLARACION DE LA TRANSPORTADORA']||'').trim()
       const comentario=String(r['COMENTARIO DE LA TRANSPORTADORA']||'').trim()
       const fechaNov=String(r['FECHA DE NOVEDAD']||'')
-      // Hora real: extraer del inicio de la aclaración (ej: "11:32 : ...") porque HORA DE NOVEDAD viene 00:00
       const horaMatch=aclaracion.match(/^(\d{1,2}:\d{2})\s*:/)
       const horaNov=horaMatch?horaMatch[1]:String(r['HORA DE NOVEDAD']||'')
       const nombre=`${r['NOMBRE']||''} ${r['APELLIDO']||''}`.trim()
@@ -3655,10 +3797,8 @@ window.procesarNovedadesXlsx=async()=>{
       const direccion=String(r['DIRECCION']||'')
       const guia=String(r['GUIA']||'')
       const ordenId=String(r['ORDEN ID']||'')
-      // Clasificar combinando causal + aclaración
       const textoClasif=causal+(aclaracion?' '+aclaracion:'')
       const cat=clasificarNovedad(textoClasif)
-      // Calcular días desde novedad
       let dias=null
       if(fechaNov){
         const p=fechaNov.split('-')
@@ -3681,7 +3821,6 @@ window.procesarNovedadesXlsx=async()=>{
     const mByTel={}
     for(const m of mapeos){if(!mByTel[m.telefono])mByTel[m.telefono]=m}
 
-    // Enriquecer con producto del mapeo + guardar fecha_novedad
     const novUpdates=[]
     for(const item of items){
       const m=mByTel[item.tel]
@@ -3698,69 +3837,157 @@ window.procesarNovedadesXlsx=async()=>{
       if(!error)novUpdated++
     }
 
-    // Ordenar: prioridad primero, dentro de cada prioridad los más viejos primero
-    items.sort((a,b)=>a.cat.idx-b.cat.idx||(b.dias||0)-(a.dias||0))
+    const fechaLote=today()
 
-    const urgentes=items.filter(i=>i.cat.pri==='URGENTE')
-    const medias=items.filter(i=>i.cat.pri==='MEDIA')
-    const normales=items.filter(i=>i.cat.pri==='NORMAL')
-
-    msg.innerHTML=`<div class="alert alert-green">✅ ${items.length} novedades procesadas del reporte${novUpdated>0?` · 📅 ${novUpdated} fechas de novedad guardadas`:''}</div>`
-
-    const renderCard=(m)=>{
-      const diasTxt=m.dias!==null?`${m.dias}d`:'—'
-      const diasColor=m.dias>5?'var(--red)':m.dias>3?'var(--amber)':'var(--green)'
-      const proto=NOV_PROTO[m.cat.idx]
-      const esc=(s)=>(s||'').replace(/'/g,"\\'").replace(/\n/g,' ')
-      const protoBtn=proto?`<button class="btn-sm btn-outline" onclick="mostrarProtocolo(${m.cat.idx},'${esc(m.nombre)}','${m.tel}','${esc(m.producto)}','${esc(m.carrier)}','${esc(m.direccion)}')">📋 Protocolo</button>`:''
-      return`<div class="card" style="margin-bottom:8px;border-left:3px solid ${m.cat.color}">
-        <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;flex-wrap:wrap">
-          <div style="flex:1;min-width:200px">
-            <div style="font-size:14px;font-weight:600;font-family:monospace">${m.tel}</div>
-            <div style="font-size:13px;margin-top:2px">${m.nombre||'—'} · <strong>${m.producto}</strong></div>
-            <div style="font-size:11px;color:var(--muted);margin-top:2px">${m.ciudad}, ${m.depto} · ${m.carrier} · Guía: ${m.guia||'—'}</div>
-            <div style="font-size:12px;margin-top:4px"><span class="pill" style="background:${m.cat.bg};color:${m.cat.color};border:1px solid ${m.cat.border}">${m.cat.tipo}</span></div>
-            <div style="font-size:11px;color:var(--muted);margin-top:4px;font-style:italic">"${m.causal}"</div>
-            ${m.aclaracion?`<div style="font-size:10px;color:var(--subtle);margin-top:2px">↳ ${m.aclaracion}</div>`:''}
-          </div>
-          <div style="text-align:right;flex-shrink:0">
-            <div style="font-size:18px;font-weight:700;color:${diasColor}">${diasTxt}</div>
-            <div style="font-size:10px;color:var(--muted)">días</div>
-            <div style="font-size:10px;color:var(--muted)">${m.fechaNov} ${m.horaNov}</div>
-            <div style="margin-top:6px;display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
-              ${protoBtn}
-            </div>
-          </div>
-        </div>
-      </div>`
+    // 1. Buscar si ya existe reporte para esta fecha (UNIQUE → reemplazar)
+    const{data:existing}=await sb.from('novedades_reportes').select('id').eq('fecha_lote',fechaLote).maybeSingle()
+    if(existing){
+      const{error:delErr}=await sb.from('novedades_reportes').delete().eq('id',existing.id)
+      if(delErr){msg.innerHTML=`<div class="alert alert-red">Error reemplazando: ${delErr.message}</div>`;return}
     }
 
-    const renderSection=(titulo,pri,items,color)=>{
-      if(!items.length)return''
-      return`<div style="margin-bottom:20px">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-          <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${color}"></span>
-          <span style="font-size:13px;font-weight:600;color:${color};text-transform:uppercase;letter-spacing:.06em">${pri} — ${titulo} (${items.length})</span>
-        </div>
-        ${items.map(renderCard).join('')}
-      </div>`
+    // 2. Insertar nuevo reporte
+    const{data:newRep,error:repErr}=await sb.from('novedades_reportes').insert({
+      fecha_lote:fechaLote,uploaded_by:me?.id||null,uploaded_by_name:me?.nombre||null,
+      filename,total_items:items.length
+    }).select().single()
+    if(repErr){msg.innerHTML=`<div class="alert alert-red">Error guardando reporte: ${repErr.message}</div>`;return}
+
+    // 3. Insertar items en chunks
+    const itemsInsert=items.map(it=>({
+      reporte_id:newRep.id,fecha_lote:fechaLote,
+      telefono:it.tel,orden_id:it.ordenId||null,guia:it.guia||null,
+      cliente_nombre:it.nombre||null,carrier:it.carrier||null,
+      ciudad:it.ciudad||null,depto:it.depto||null,direccion:it.direccion||null,
+      producto:it.producto||null,causal:it.causal||null,
+      aclaracion:it.aclaracion||null,fecha_novedad:it.fechaNov||null,
+      hora_novedad:it.horaNov||null,prioridad:it.cat.pri,tipo:it.cat.tipo,
+      cat_idx:it.cat.idx,ad_id:it.ad_id||null,dias_desde_novedad:it.dias
+    }))
+    for(let i=0;i<itemsInsert.length;i+=500){
+      const chunk=itemsInsert.slice(i,i+500)
+      const{error:insErr}=await sb.from('novedades_items').insert(chunk)
+      if(insErr){msg.innerHTML=`<div class="alert alert-red">Error guardando items: ${insErr.message}</div>`;return}
     }
 
-    el.innerHTML=`
-      <div class="cards-row c3" style="margin-bottom:16px">
-        <div class="card" style="border-left:3px solid var(--red)"><div class="card-label">🔴 Urgentes</div><div class="card-val" style="color:var(--red)">${urgentes.length}</div></div>
-        <div class="card" style="border-left:3px solid var(--amber)"><div class="card-label">🟡 Media</div><div class="card-val" style="color:var(--amber)">${medias.length}</div></div>
-        <div class="card" style="border-left:3px solid var(--blue)"><div class="card-label">🔵 Normal</div><div class="card-val" style="color:var(--blue)">${normales.length}</div></div>
-      </div>
-      <div class="alert alert-yellow" style="margin-bottom:16px">⏱️ Tiempo máximo de respuesta: <strong>1 HORA</strong> en horario laboral. Atender primero las 🔴 rojas.</div>
-      ${renderSection('Atender primero','URGENTE',urgentes,'var(--red)')}
-      ${renderSection('Resolver hoy','MEDIA',medias,'var(--amber)')}
-      ${renderSection('Más tiempo disponible','NORMAL',normales,'var(--blue)')}
-    `
-    logAction('novedades_procesadas',{total:items.length,urgentes:urgentes.length,medias:medias.length,normales:normales.length}).catch(()=>{})
+    msg.innerHTML=`<div class="alert alert-green">✅ ${items.length} novedades guardadas en BD${novUpdated>0?` · 📅 ${novUpdated} fechas actualizadas en mapeos`:''}${existing?' · ♻️ Reemplazó el lote anterior de hoy':''}</div>`
+
+    document.getElementById('nov-fecha').value=fechaLote
+    cargarNovedadesPorFecha()
+    cargarHistorialNovedades()
+
+    logAction('novedades_procesadas',{total:items.length,fecha_lote:fechaLote,reemplazo:!!existing}).catch(()=>{})
   }catch(e){
     msg.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
   }
+}
+
+// ── HISTORIAL DE LOTES + DETECCIÓN DE FANTASMAS ──
+async function cargarHistorialNovedades(){
+  const el=document.getElementById('nov-hist')
+  if(!el)return
+  el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando historial...</div>'
+  try{
+    const{data:reportes}=await sb.from('novedades_reportes').select('*').order('fecha_lote',{ascending:false}).limit(60)
+    if(!reportes?.length){el.innerHTML='<div class="alert alert-blue">Sin lotes históricos aún</div>';return}
+
+    const{data:resols}=await sb.from('novedades_resoluciones').select('*').order('created_at',{ascending:false}).limit(20000)
+    const resolByKey={}
+    for(const r of (resols||[])){
+      const k=(r.telefono||'')+'|'+(r.orden_id||'')
+      if(!resolByKey[k])resolByKey[k]=r
+    }
+
+    const repIds=reportes.map(r=>r.id)
+    let allItems=[]
+    for(let i=0;i<repIds.length;i+=20){
+      const batch=repIds.slice(i,i+20)
+      const{data:its}=await sb.from('novedades_items').select('reporte_id,telefono,orden_id').in('reporte_id',batch).limit(20000)
+      if(its)allItems=allItems.concat(its)
+    }
+    const itemsByRep={}
+    for(const it of allItems){
+      if(!itemsByRep[it.reporte_id])itemsByRep[it.reporte_id]=[]
+      itemsByRep[it.reporte_id].push(it)
+    }
+
+    // Lote más reciente: keys que SÍ están hoy
+    const latestRep=reportes[0]
+    const latestKeys=new Set((itemsByRep[latestRep.id]||[]).map(it=>(it.telefono||'')+'|'+(it.orden_id||'')))
+
+    const rows=reportes.map(rep=>{
+      const its=itemsByRep[rep.id]||[]
+      const total=its.length
+      let marcadas=0, fantasmas=0
+      for(const it of its){
+        const k=(it.telefono||'')+'|'+(it.orden_id||'')
+        const r=resolByKey[k]
+        const resuelta=r?.accion==='resuelta'
+        if(resuelta)marcadas++
+        // Fantasma: en un lote NO último, NO marcada y NO presente en el lote más reciente
+        if(rep.id!==latestRep.id&&!resuelta&&!latestKeys.has(k))fantasmas++
+      }
+      const pct=total>0?Math.round(marcadas*100/total):0
+      const pendientes=total-marcadas
+      return{rep,total,marcadas,pendientes,fantasmas,pct}
+    })
+
+    el.innerHTML=rows.map(r=>{
+      const isToday=r.rep.fecha_lote===today()
+      return`<div class="card" style="margin-bottom:8px;border-left:3px solid ${isToday?'var(--green)':'var(--border)'}">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+          <div style="flex:1;min-width:200px">
+            <div style="font-size:14px;font-weight:600">📅 ${r.rep.fecha_lote} ${isToday?'<span class="pill" style="background:rgba(34,197,94,.1);color:var(--green);border:1px solid rgba(34,197,94,.3)">HOY</span>':''}</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">${r.rep.filename||'—'} ${r.rep.uploaded_by_name?` · 👤 ${r.rep.uploaded_by_name}`:''}</div>
+          </div>
+          <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+            <div style="text-align:center"><div style="font-size:16px;font-weight:700">${r.total}</div><div style="font-size:10px;color:var(--muted)">total</div></div>
+            <div style="text-align:center"><div style="font-size:16px;font-weight:700;color:var(--green)">${r.marcadas}</div><div style="font-size:10px;color:var(--muted)">marcadas (${r.pct}%)</div></div>
+            <div style="text-align:center"><div style="font-size:16px;font-weight:700;color:var(--amber)">${r.pendientes}</div><div style="font-size:10px;color:var(--muted)">pendientes</div></div>
+            ${r.fantasmas>0?`<div style="text-align:center"><div style="font-size:16px;font-weight:700;color:var(--red)">⚠️ ${r.fantasmas}</div><div style="font-size:10px;color:var(--red)">fantasmas</div></div>`:''}
+            <button class="btn-sm btn-outline" onclick="verLote('${r.rep.fecha_lote}')">👁️ Ver</button>
+          </div>
+        </div>
+      </div>`
+    }).join('')
+  }catch(e){
+    el.innerHTML=`<div class="alert alert-red">Error historial: ${e.message}</div>`
+  }
+}
+window.cargarHistorialNovedades=cargarHistorialNovedades
+
+window.verLote=(fecha)=>{
+  const inp=document.getElementById('nov-fecha')
+  if(inp){inp.value=fecha;cargarNovedadesPorFecha();inp.scrollIntoView({behavior:'smooth',block:'start'})}
+}
+
+// ── MARCAR / DESMARCAR ──
+window.marcarResuelta=async(tel,ordenId)=>{
+  try{
+    const{error}=await sb.from('novedades_resoluciones').insert({
+      telefono:tel,orden_id:ordenId||null,accion:'resuelta',motivo:null,
+      usuario_id:me?.id||null,usuario_nombre:me?.nombre||null
+    })
+    if(error){alert('Error marcando: '+error.message);return}
+    logAction('novedad_marcada',{tel,orden_id:ordenId}).catch(()=>{})
+    cargarNovedadesPorFecha()
+    cargarHistorialNovedades()
+  }catch(e){alert('Error: '+e.message)}
+}
+
+window.desmarcarResuelta=async(tel,ordenId)=>{
+  const motivo=prompt('Motivo para desmarcar (obligatorio):')
+  if(!motivo||!motivo.trim()){alert('Motivo obligatorio para desmarcar.');return}
+  try{
+    const{error}=await sb.from('novedades_resoluciones').insert({
+      telefono:tel,orden_id:ordenId||null,accion:'desmarcada',motivo:motivo.trim(),
+      usuario_id:me?.id||null,usuario_nombre:me?.nombre||null
+    })
+    if(error){alert('Error desmarcando: '+error.message);return}
+    logAction('novedad_desmarcada',{tel,orden_id:ordenId,motivo:motivo.trim()}).catch(()=>{})
+    cargarNovedadesPorFecha()
+    cargarHistorialNovedades()
+  }catch(e){alert('Error: '+e.message)}
 }
 
 window.mostrarProtocolo=(idx,nombre,tel,producto,carrier,direccion)=>{

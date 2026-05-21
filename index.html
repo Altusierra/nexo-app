@@ -2475,29 +2475,41 @@ window.modalUserEdit=(u)=>{
 window.doEditUser=async(user_id)=>{
   const get=id=>document.getElementById(id).value.trim()
   const usernameVal=get('eu-username').toLowerCase()
+  const modoHistorico=document.getElementById('eu-modo-historico')?.checked||false
+  // Campos que SÍ van a la Edge Function (sin modo_historico, que no está en su schema)
   const fields={
     nombre:get('eu-nombre'),
     rol:get('eu-rol'),
     password_nota:get('eu-nota')||null,
     hora_inicio:get('eu-hi')||null,
-    hora_fin:get('eu-hf')||null,
-    modo_historico:document.getElementById('eu-modo-historico')?.checked||false
+    hora_fin:get('eu-hf')||null
   }
   // Solo mandar username si el admin escribió algo — si está vacío no se toca
   if(usernameVal) fields.username=usernameVal
   const msg=document.getElementById('eu-msg')
   const btn=document.getElementById('eu-save')
   btn.disabled=true;btn.textContent='Guardando...'
-  const res=await callEdge('update_user',{user_id,fields})
-  if(!res.ok){
-    msg.innerHTML=`<div class="alert alert-red">${res.error}</div>`
+  try{
+    // 1. Actualizar modo_historico directo en la tabla (no lo soporta la Edge Function)
+    const{error:mhErr}=await sb.from('usuarios').update({modo_historico:modoHistorico}).eq('id',user_id)
+    if(mhErr){
+      msg.innerHTML=`<div class="alert alert-red">No se pudo actualizar modo histórico: ${mhErr.message}</div>`
+      btn.disabled=false;btn.textContent='Guardar cambios'
+      return
+    }
+    // 2. Resto de campos vía Edge Function (toca Supabase Auth)
+    const res=await callEdge('update_user',{user_id,fields})
+    if(!res.ok){
+      msg.innerHTML=`<div class="alert alert-red">${res.error}</div>`
+      btn.disabled=false;btn.textContent='Guardar cambios'
+      return
+    }
+    logAction('usuario_editado',{user_id,modo_historico:modoHistorico}).catch(()=>{})
+    closeModal();loadUsuarios()
+  }catch(e){
+    msg.innerHTML=`<div class="alert alert-red">Error inesperado: ${e.message}</div>`
     btn.disabled=false;btn.textContent='Guardar cambios'
-    return
   }
-  // Update directo de modo_historico (por si la Edge Function no lo soporta)
-  await sb.from('usuarios').update({modo_historico:fields.modo_historico}).eq('id',user_id).catch(()=>{})
-  logAction('usuario_editado',{user_id,modo_historico:fields.modo_historico}).catch(()=>{})
-  closeModal();loadUsuarios()
 }
 
 window.modalUserPassword=(u)=>{

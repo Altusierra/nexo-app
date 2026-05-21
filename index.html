@@ -411,6 +411,7 @@ const NAV={
     {id:'aux-asignador',icon:'📍',label:'Asignador'},
     {id:'aux-dropi',icon:'📊',label:'Cruce Dropi'},
     {id:'aux-novedades',icon:'⚠️',label:'Novedades'},
+    {id:'aux-reclame',icon:'📦',label:'Reclame en Oficina'},
     {id:'aux-seguimiento',icon:'🚚',label:'Seguimiento'},
     {id:'aux-reporte',icon:'📝',label:'Reporte del día'},
     {id:'aux-reservado',icon:'🔍',label:'Reservados y Cancelados'},
@@ -489,6 +490,7 @@ function render(page){
     'aux-reservado':pageAuxReservado,
     'aux-dropi':pageAuxDropi,
     'aux-novedades':pageAuxNovedades,
+    'aux-reclame':pageAuxReclame,
     'aux-seguimiento':pageAuxSeguimiento,
     'aux-cierre':pageAuxCierre,
     'admin-meta':pageAdminMeta,
@@ -4233,6 +4235,461 @@ window._colaSiguiente=()=>{window._colaState.idx++;_colaRender()}
 window._colaSaltar=()=>{window._colaState.saltadas++;window._colaState.idx++;_colaRender()}
 window._colaConfirmarCerrar=()=>{if(confirm('¿Pausar la cola? Tu progreso ya está guardado.'))_colaCerrar()}
 window._colaCerrarBtn=()=>{_colaCerrar()}
+
+// ── RECLAME EN OFICINA: Mensajes por nivel de envío ────────
+const RECLAME_MSGS=[
+  // Nivel 1 (primer envío)
+  `Hola [NOMBRE] 👋, te informamos que tu pedido de [PRODUCTO] ([CANTIDAD]) ya está disponible en la oficina de [TRANSPORTADORA] en [CIUDAD] para su recogida 📦.
+
+Tu número de guía es:
+*[GUIA]*
+
+⚠️ La oficina solo guarda los paquetes por 5 días hábiles. Después de eso, el pedido se devuelve automáticamente.
+
+¡Te esperamos! 😊`,
+  // Nivel 2 (segundo envío)
+  `Hola [NOMBRE], este es un segundo aviso sobre tu pedido de [PRODUCTO] ([CANTIDAD]) 📦.
+
+Sigue esperándote en la oficina de [TRANSPORTADORA] en [CIUDAD].
+
+Guía: *[GUIA]*
+
+⏳ El tiempo para reclamarlo se está acabando. Si no lo recoges pronto, será devuelto y no podremos garantizar un nuevo envío.
+
+Por favor acércate lo antes posible 🙏`,
+  // Nivel 3+ (tercer envío en adelante)
+  `[NOMBRE], ÚLTIMO AVISO sobre tu pedido de [PRODUCTO] ([CANTIDAD]) ⚠️
+
+Tu paquete sigue en la oficina de [TRANSPORTADORA] en [CIUDAD] pero está a punto de ser devuelto.
+
+Guía: *[GUIA]*
+
+❌ Si se devuelve, perderás tu pedido y no podemos asegurar un reenvío.
+
+Reclámalo HOY. Es urgente.`
+]
+
+function getNivelMensajeReclame(envios){
+  if(envios===0)return 1
+  if(envios===1)return 2
+  return 3
+}
+
+function armarMensajeReclame(m,nivel){
+  const idx=Math.min(Math.max(nivel,1),3)-1
+  const tpl=RECLAME_MSGS[idx]
+  const prodNom=(typeof resolveProdName==='function'?(resolveProdName(m.producto)||{}).nombre:null)||m.producto||'[PRODUCTO]'
+  const cantTxt=m.cantidad?`${m.cantidad} unidad${m.cantidad>1?'es':''}`:'[CANTIDAD]'
+  return tpl
+    .replace(/\[NOMBRE\]/g,m.nombre||'[NOMBRE]')
+    .replace(/\[PRODUCTO\]/g,prodNom)
+    .replace(/\[CANTIDAD\]/g,cantTxt)
+    .replace(/\[TRANSPORTADORA\]/g,m.carrier||'la transportadora')
+    .replace(/\[CIUDAD\]/g,m.ciudad||'[CIUDAD]')
+    .replace(/\[GUIA\]/g,m.guia||'[GUÍA]')
+}
+
+window._reclameCache={fechaActiva:null,items:[],reporteId:null}
+
+async function pageAuxReclame(c){
+  c.innerHTML=`<div class="page-title">📦 Reclame en Oficina</div>
+    <div class="page-sub">Sube el reporte Dropi — se filtran solo los pedidos en RECLAME EN OFICINA</div>
+    <div class="card" style="max-width:600px;margin-bottom:16px">
+      <div class="fld" style="margin-bottom:12px">
+        <label>Reporte de órdenes Dropi (.xlsx)</label>
+        <input type="file" id="rec-file" accept=".xlsx,.xls"
+          style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--text);width:100%">
+      </div>
+      <button class="btn-full btn-primary" onclick="procesarReclameXlsx()">▶ Procesar y guardar</button>
+      <div id="rec-msg" style="margin-top:10px"></div>
+    </div>
+    <div class="card" style="margin-bottom:16px;padding:12px">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <div class="fld" style="margin:0"><label style="font-size:11px">Ver lote del día</label>
+          <input type="date" id="rec-fecha" value="${today()}" style="font-size:12px;padding:6px 8px" onchange="cargarReclamePorFecha()"></div>
+        <button class="btn-sm btn-outline" onclick="cargarReclamePorFecha()">🔄 Recargar</button>
+      </div>
+    </div>
+    <div id="rec-content"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div></div>`
+  cargarReclamePorFecha()
+}
+
+async function cargarReclamePorFecha(){
+  const el=document.getElementById('rec-content')
+  if(!el)return
+  const fecha=document.getElementById('rec-fecha')?.value||today()
+  el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando lote de '+fecha+'...</div>'
+  try{
+    const{data:rep}=await sb.from('reclame_reportes').select('*').eq('fecha_lote',fecha).maybeSingle()
+    if(!rep){
+      el.innerHTML=`<div class="alert alert-blue">Sin lote guardado para ${fecha}. Sube un archivo arriba.</div>`
+      window._reclameCache={fechaActiva:fecha,items:[],reporteId:null}
+      return
+    }
+    const{data:items}=await sb.from('reclame_items').select('*').eq('reporte_id',rep.id).limit(5000)
+    const tels=[...new Set((items||[]).map(i=>i.telefono))]
+    let envios=[]
+    if(tels.length){
+      for(let i=0;i<tels.length;i+=100){
+        const batch=tels.slice(i,i+100)
+        const{data:ed}=await sb.from('reclame_envios').select('telefono,guia,created_at,usuario_nombre,nivel_mensaje').in('telefono',batch).order('created_at',{ascending:false}).limit(20000)
+        if(ed)envios=envios.concat(ed)
+      }
+    }
+    const enviosMap={}
+    for(const e of envios){
+      const k=(e.telefono||'')+'|'+(e.guia||'')
+      if(!enviosMap[k])enviosMap[k]={count:0,ultimo:null,usuario:null}
+      enviosMap[k].count++
+      if(!enviosMap[k].ultimo)enviosMap[k].ultimo=e.created_at
+      if(!enviosMap[k].usuario)enviosMap[k].usuario=e.usuario_nombre
+    }
+    const enriched=(items||[]).map(it=>{
+      const k=(it.telefono||'')+'|'+(it.guia||'')
+      const env=enviosMap[k]||{count:0,ultimo:null,usuario:null}
+      return{
+        tel:it.telefono,guia:it.guia,nombre:it.cliente_nombre,
+        carrier:it.carrier,ciudad:it.ciudad,depto:it.depto,direccion:it.direccion,
+        producto:it.producto,cantidad:it.cantidad,orden_id:it.orden_id,
+        envios:env.count,ultimoEnvio:env.ultimo,ultimoUsuario:env.usuario
+      }
+    })
+    enriched.sort((a,b)=>a.envios-b.envios||(a.nombre||'').localeCompare(b.nombre||''))
+    window._reclameCache={fechaActiva:fecha,items:enriched,reporteId:rep.id}
+    renderReclameContent(rep,enriched)
+  }catch(e){
+    el.innerHTML=`<div class="alert alert-red">Error cargando: ${e.message}</div>`
+  }
+}
+window.cargarReclamePorFecha=cargarReclamePorFecha
+
+function renderReclameContent(rep,items){
+  const el=document.getElementById('rec-content')
+  if(!el)return
+  const total=items.length
+  const sinEnviar=items.filter(i=>i.envios===0).length
+  const yaEnviados=total-sinEnviar
+  const totalMsgs=items.reduce((s,i)=>s+i.envios,0)
+  const esc=(s)=>(s||'').toString().replace(/'/g,"\\'").replace(/\n/g,' ')
+  const fmtDelta=(ms)=>{
+    if(!ms||ms<0)return'—'
+    const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor((s%3600)/60)
+    if(h>=24){const d=Math.floor(h/24),hr=h%24;return`${d}d ${hr}h`}
+    if(h>0)return`${h}h ${m}m`
+    return`${m}m`
+  }
+  const renderCard=(m)=>{
+    const nivel=getNivelMensajeReclame(m.envios)
+    const nivelColor=nivel===1?'var(--green)':nivel===2?'var(--amber)':'var(--red)'
+    const nivelTxt=nivel===1?'1er aviso':nivel===2?'2do aviso':`Último aviso`
+    const contadorBadge=m.envios>0
+      ?`<span class="pill" style="background:rgba(96,165,250,.15);color:var(--blue);border:1px solid rgba(96,165,250,.4);font-weight:700">📨 ${m.envios} ${m.envios===1?'vez enviado':'veces enviado'}</span>`
+      :`<span class="pill" style="background:var(--card2);color:var(--muted);border:1px solid var(--border)">⏳ Sin enviar</span>`
+    let ultimoEnvioBadge=''
+    if(m.ultimoEnvio){
+      const deltaMs=new Date()-new Date(m.ultimoEnvio)
+      ultimoEnvioBadge=`<div style="margin-top:6px;padding:6px 8px;background:rgba(96,165,250,.10);border:1px solid rgba(96,165,250,.3);border-radius:6px;font-size:11px;color:var(--blue)">📨 Último envío hace ${fmtDelta(deltaMs)}${m.ultimoUsuario?' · por '+m.ultimoUsuario:''}</div>`
+    }
+    const btnEnviar=`<button class="btn-sm btn-primary" onclick="enviarReclameUno('${m.tel}','${esc(m.guia)}')">📨 Enviar aviso ${nivel}</button>`
+    return`<div class="card" style="margin-bottom:8px;border-left:3px solid ${nivelColor}">
+      <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;flex-wrap:wrap">
+        <div style="flex:1;min-width:220px">
+          <div style="font-size:14px;font-weight:600;font-family:monospace">${m.tel||'—'}</div>
+          <div style="font-size:13px;margin-top:2px">${m.nombre||'—'} · <strong>${m.producto||'—'}</strong> ${m.cantidad?`(${m.cantidad}u)`:''}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">${m.ciudad||'—'}, ${m.depto||'—'} · ${m.carrier||'—'} · Guía: ${m.guia||'—'}</div>
+          <div style="font-size:12px;margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            ${contadorBadge}
+            <span class="pill" style="background:${nivel===1?'rgba(34,197,94,.12)':nivel===2?'rgba(245,158,11,.12)':'rgba(239,68,68,.12)'};color:${nivelColor};border:1px solid ${nivelColor}">📋 ${nivelTxt}</span>
+          </div>
+          ${ultimoEnvioBadge}
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
+            ${btnEnviar}
+          </div>
+        </div>
+      </div>
+    </div>`
+  }
+  const sinEnviarItems=items.filter(i=>i.envios===0)
+  const yaEnviadosItems=items.filter(i=>i.envios>0)
+  const botonCola=items.length>0?`
+    <div style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <button class="btn-primary" style="padding:12px 18px;font-size:14px;font-weight:600;border-radius:10px;background:linear-gradient(135deg,#7c5cff,#5b8def);border:none;color:#fff;cursor:pointer;box-shadow:0 4px 14px rgba(124,92,255,.35)" onclick="abrirColaReclame()">
+        📨 Enviar en cola (${sinEnviar} sin enviar${yaEnviados>0?` · ${yaEnviados} con seguimiento`:''})
+      </button>
+      <span style="font-size:11px;color:var(--muted)">Modo cola — envía mensajes uno por uno con timer</span>
+    </div>`:''
+  el.innerHTML=`
+    <div class="alert alert-blue" style="margin-bottom:12px">
+      📅 Lote del <strong>${rep.fecha_lote}</strong> · ${total} pedidos en reclame · 📨 ${totalMsgs} mensajes enviados en total · ⏳ ${sinEnviar} sin contactar
+      ${rep.uploaded_by_name?` · 👤 subido por ${rep.uploaded_by_name}`:''}
+    </div>
+    <div class="cards-row c3" style="margin-bottom:16px">
+      <div class="card" style="border-left:3px solid var(--green)"><div class="card-label">⏳ Sin enviar</div><div class="card-val" style="color:var(--green)">${sinEnviar}</div></div>
+      <div class="card" style="border-left:3px solid var(--blue)"><div class="card-label">📨 Con envíos</div><div class="card-val" style="color:var(--blue)">${yaEnviados}</div></div>
+      <div class="card" style="border-left:3px solid #a78bfa"><div class="card-label">📊 Total mensajes</div><div class="card-val" style="color:#a78bfa">${totalMsgs}</div></div>
+    </div>
+    ${botonCola}
+    ${sinEnviarItems.length?`<div style="margin-bottom:20px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--green)"></span>
+        <span style="font-size:13px;font-weight:600;color:var(--green);text-transform:uppercase;letter-spacing:.06em">SIN ENVIAR (${sinEnviarItems.length})</span>
+      </div>
+      ${sinEnviarItems.map(renderCard).join('')}
+    </div>`:''}
+    ${yaEnviadosItems.length?`<div style="margin-bottom:20px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--blue)"></span>
+        <span style="font-size:13px;font-weight:600;color:var(--blue);text-transform:uppercase;letter-spacing:.06em">CON SEGUIMIENTO (${yaEnviadosItems.length})</span>
+      </div>
+      ${yaEnviadosItems.map(renderCard).join('')}
+    </div>`:''}
+  `
+}
+
+window.procesarReclameXlsx=async()=>{
+  const fileInput=document.getElementById('rec-file')
+  const msg=document.getElementById('rec-msg')
+  if(!fileInput.files.length){msg.innerHTML='<div class="alert alert-red">Selecciona un archivo</div>';return}
+  msg.innerHTML='<div class="alert alert-blue">Procesando...</div>'
+  try{
+    const file=fileInput.files[0]
+    const filename=file.name
+    const buf=await file.arrayBuffer()
+    const wbook=XLSX.read(buf,{type:'array'})
+    const rows=XLSX.utils.sheet_to_json(wbook.Sheets[wbook.SheetNames[0]],{defval:''})
+    if(!rows.length){msg.innerHTML='<div class="alert alert-red">Archivo vacío</div>';return}
+    const filtered=rows.filter(r=>{
+      const status=String(r['ESTATUS']||'').toUpperCase().trim()
+      return status==='RECLAME EN OFICINA'
+    })
+    if(!filtered.length){msg.innerHTML='<div class="alert alert-yellow">No hay pedidos en RECLAME EN OFICINA en este archivo</div>';return}
+    const items=filtered.map(r=>{
+      const tel=String(r['TELÉFONO']||r['TELEFONO']||'').replace(/\D/g,'')
+      const nombre=String(r['NOMBRE CLIENTE']||'').trim()
+      const guia=String(r['NÚMERO GUIA']||r['NUMERO GUIA']||r['NUMERO DE GUIA']||'').trim()
+      const carrier=String(r['TRANSPORTADORA']||'').trim()
+      const ciudad=String(r['CIUDAD DESTINO']||r['CIUDAD']||'').trim()
+      const depto=String(r['DEPARTAMENTO DESTINO']||r['DEPARTAMENTO']||'').trim()
+      const direccion=String(r['DIRECCION']||r['DIRECCIÓN']||'').trim()
+      const producto=String(r['PRODUCTO']||'').trim()
+      const cantidad=parseInt(r['CANTIDAD']||'0')||null
+      const ordenId=String(r['ID']||'').trim()
+      const fechaOrden=String(r['FECHA']||'').trim()
+      return{tel,nombre,guia,carrier,ciudad,depto,direccion,producto,cantidad,ordenId,fechaOrden}
+    }).filter(i=>i.tel.length>=7)
+    const telefonos=[...new Set(items.map(i=>i.tel))]
+    let mapeos=[]
+    for(let i=0;i<telefonos.length;i+=100){
+      const batch=telefonos.slice(i,i+100)
+      const{data}=await sb.from('mapeos').select('telefono,ad_id,producto').in('telefono',batch)
+      if(data)mapeos=mapeos.concat(data)
+    }
+    const mByTel={}
+    for(const m of mapeos){if(!mByTel[m.telefono])mByTel[m.telefono]=m}
+    for(const item of items){
+      const m=mByTel[item.tel]
+      item.ad_id=m?.ad_id||null
+      if(!item.producto&&m?.producto)item.producto=m.producto
+    }
+    const fechaLote=today()
+    const{data:existing}=await sb.from('reclame_reportes').select('id').eq('fecha_lote',fechaLote).maybeSingle()
+    if(existing){
+      const{error:delErr}=await sb.from('reclame_reportes').delete().eq('id',existing.id)
+      if(delErr){msg.innerHTML=`<div class="alert alert-red">Error reemplazando: ${delErr.message}</div>`;return}
+    }
+    const{data:newRep,error:repErr}=await sb.from('reclame_reportes').insert({
+      fecha_lote:fechaLote,uploaded_by:me?.id||null,uploaded_by_name:me?.nombre||null,
+      filename,total_items:items.length
+    }).select().single()
+    if(repErr){msg.innerHTML=`<div class="alert alert-red">Error guardando: ${repErr.message}</div>`;return}
+    const itemsInsert=items.map(it=>({
+      reporte_id:newRep.id,fecha_lote:fechaLote,
+      telefono:it.tel,orden_id:it.ordenId||null,guia:it.guia||null,
+      cliente_nombre:it.nombre||null,carrier:it.carrier||null,
+      ciudad:it.ciudad||null,depto:it.depto||null,direccion:it.direccion||null,
+      producto:it.producto||null,cantidad:it.cantidad||null,
+      fecha_orden:it.fechaOrden||null,ad_id:it.ad_id||null
+    }))
+    for(let i=0;i<itemsInsert.length;i+=500){
+      const chunk=itemsInsert.slice(i,i+500)
+      const{error:insErr}=await sb.from('reclame_items').insert(chunk)
+      if(insErr){msg.innerHTML=`<div class="alert alert-red">Error guardando items: ${insErr.message}</div>`;return}
+    }
+    msg.innerHTML=`<div class="alert alert-green">✅ ${items.length} pedidos en reclame guardados${existing?' · ♻️ Reemplazó lote anterior':''}</div>`
+    document.getElementById('rec-fecha').value=fechaLote
+    cargarReclamePorFecha()
+    logAction('reclame_procesado',{total:items.length,fecha_lote:fechaLote,reemplazo:!!existing}).catch(()=>{})
+  }catch(e){
+    msg.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
+  }
+}
+
+window.enviarReclameUno=async(tel,guia)=>{
+  const cache=window._reclameCache||{}
+  const m=(cache.items||[]).find(i=>i.tel===tel&&(i.guia||'')===(guia||''))
+  if(!m){alert('No se encontró el pedido');return}
+  const nivel=getNivelMensajeReclame(m.envios)
+  const mensaje=armarMensajeReclame(m,nivel)
+  const telLimpio=String(m.tel||'').replace(/\D/g,'')
+  const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`
+  window.open(url,'_blank','noopener')
+  try{
+    await sb.from('reclame_envios').insert({
+      telefono:m.tel,guia:m.guia||null,nivel_mensaje:nivel,
+      usuario_id:me?.id||null,usuario_nombre:me?.nombre||null
+    })
+    logAction('reclame_enviado',{tel:m.tel,guia:m.guia,nivel}).catch(()=>{})
+  }catch(e){console.warn('No se pudo registrar envío:',e)}
+  setTimeout(()=>cargarReclamePorFecha(),800)
+}
+
+// ── COLA DE RECLAME (modo cola secuencial con timer) ────────
+window._recColaState={items:[],idx:0,inicio:null,fin:null,timerId:null,enviadosEnSesion:0,saltadas:0}
+
+function _recColaEscHtml(s){return(s||'').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+function _recColaFmtTime(ms){
+  if(!ms||ms<0)return'0s'
+  const s=Math.floor(ms/1000),m=Math.floor(s/60),sr=s%60
+  if(m>=60){const h=Math.floor(m/60),mr=m%60;return`${h}h ${mr}m`}
+  if(m>0)return`${m}m ${sr}s`
+  return`${sr}s`
+}
+
+window.abrirColaReclame=()=>{
+  const cache=window._reclameCache||{}
+  const items=(cache.items||[]).slice()
+  if(!items.length){alert('No hay pedidos para enviar.');return}
+  const sinEnvios=items.filter(m=>m.envios===0)
+  const conEnvios=items.filter(m=>m.envios>0)
+  const cola=[...sinEnvios,...conEnvios]
+  window._recColaState={items:cola,idx:0,inicio:Date.now(),fin:null,timerId:null,enviadosEnSesion:0,saltadas:0}
+  closeModal()
+  const div=document.createElement('div')
+  div.id='user-modal'
+  div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:680px;padding:0;overflow:hidden">
+    <div id="rec-cola-body"></div>
+  </div>`
+  div.onclick=(e)=>{if(e.target===div){_recColaConfirmarCerrar()}}
+  document.body.appendChild(div)
+  _recColaRender()
+  window._recColaState.timerId=setInterval(()=>{
+    const t=document.getElementById('rec-cola-timer')
+    if(t&&window._recColaState.inicio&&!window._recColaState.fin){
+      t.textContent=_recColaFmtTime(Date.now()-window._recColaState.inicio)
+    }
+  },1000)
+}
+
+function _recColaCerrar(){
+  if(window._recColaState.timerId){clearInterval(window._recColaState.timerId);window._recColaState.timerId=null}
+  closeModal()
+  cargarReclamePorFecha()
+}
+
+function _recColaRender(){
+  const st=window._recColaState
+  const body=document.getElementById('rec-cola-body')
+  if(!body)return
+  const total=st.items.length
+  if(st.idx>=total){
+    if(!st.fin)st.fin=Date.now()
+    const dur=st.fin-st.inicio
+    const prom=st.enviadosEnSesion>0?Math.round(dur/st.enviadosEnSesion/1000):0
+    body.innerHTML=`<div style="padding:32px;text-align:center">
+      <div style="font-size:42px;margin-bottom:8px">🎉</div>
+      <div style="font-size:20px;font-weight:700;margin-bottom:6px">¡Cola terminada!</div>
+      <div style="font-size:13px;color:var(--muted);margin-bottom:20px">Buen trabajo. Te quedó este resumen:</div>
+      <div class="cards-row c3" style="margin-bottom:16px">
+        <div class="card" style="border-left:3px solid var(--green)"><div class="card-label">📨 Enviados</div><div class="card-val" style="color:var(--green)">${st.enviadosEnSesion} / ${total}</div></div>
+        <div class="card" style="border-left:3px solid var(--blue)"><div class="card-label">⏱ Tiempo total</div><div class="card-val" style="color:var(--blue);font-size:20px">${_recColaFmtTime(dur)}</div></div>
+        <div class="card" style="border-left:3px solid #a78bfa"><div class="card-label">⚡ Promedio</div><div class="card-val" style="color:#a78bfa;font-size:20px">${st.enviadosEnSesion>0?prom+'s/msg':'—'}</div></div>
+      </div>
+      ${st.saltadas>0?`<div class="alert alert-yellow" style="margin-bottom:14px">⏩ Saltaste ${st.saltadas} pedido${st.saltadas>1?'s':''}. Los puedes enviar más tarde.</div>`:''}
+      <button class="btn-primary" style="padding:10px 18px" onclick="_recColaCerrarBtn()">Cerrar</button>
+    </div>`
+    if(st.timerId){clearInterval(st.timerId);st.timerId=null}
+    return
+  }
+  const m=st.items[st.idx]
+  const nivel=getNivelMensajeReclame(m.envios)
+  const mensaje=armarMensajeReclame(m,nivel)
+  const pct=Math.round((st.idx/total)*100)
+  const nivelColor=nivel===1?'var(--green)':nivel===2?'var(--amber)':'var(--red)'
+  const nivelTxt=nivel===1?'1er aviso':nivel===2?'2do aviso':'Último aviso'
+  body.innerHTML=`
+    <div style="padding:14px 18px;border-bottom:1px solid var(--border);background:var(--card2)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="font-size:13px;font-weight:600">📨 Cola de reclame — Pedido <strong style="color:var(--blue)">${st.idx+1}</strong> de <strong>${total}</strong></div>
+        <div style="font-size:12px;color:var(--muted)">⏱ <span id="rec-cola-timer">${_recColaFmtTime(Date.now()-st.inicio)}</span> · 📨 ${st.enviadosEnSesion} enviados${st.saltadas?` · ⏩ ${st.saltadas} saltados`:''}</div>
+      </div>
+      <div style="margin-top:8px;height:6px;background:var(--card);border-radius:3px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,#7c5cff,#5b8def);transition:width .25s"></div>
+      </div>
+    </div>
+    <div style="padding:16px 18px">
+      <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+        <div style="flex:1;min-width:220px">
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px">${nivelTxt}</div>
+          <div style="font-size:15px;font-weight:700">${_recColaEscHtml(m.nombre)||'—'}</div>
+          <div style="font-size:13px;color:var(--muted);font-family:monospace">${m.tel||'—'}</div>
+          <div style="font-size:12px;margin-top:6px"><span class="pill" style="background:${nivel===1?'rgba(34,197,94,.12)':nivel===2?'rgba(245,158,11,.12)':'rgba(239,68,68,.12)'};color:${nivelColor};border:1px solid ${nivelColor}">📋 ${nivelTxt}${m.envios>0?` · ${m.envios} envío${m.envios>1?'s':''} previo${m.envios>1?'s':''}`:''}</span></div>
+          <div style="font-size:11px;color:var(--muted);margin-top:6px">${_recColaEscHtml(m.producto)||'—'}${m.cantidad?` (${m.cantidad}u)`:''} · ${_recColaEscHtml(m.ciudad)||'—'} · ${_recColaEscHtml(m.carrier)||'—'}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">Guía: ${m.guia||'—'}</div>
+        </div>
+      </div>
+      <div style="font-size:11px;font-weight:600;color:var(--green);margin-bottom:6px;letter-spacing:.04em">📱 MENSAJE LISTO PARA ENVIAR</div>
+      <div style="background:var(--card2);padding:12px;border-radius:8px;font-size:13px;white-space:pre-line;line-height:1.5;border:1px solid var(--border);max-height:200px;overflow-y:auto">${_recColaEscHtml(mensaje)}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+        <button style="flex:1;min-width:160px;padding:12px;font-size:14px;font-weight:600;background:#25D366;border:none;color:#fff;border-radius:8px;cursor:pointer" onclick="_recColaAbrirWa()">💬 Abrir WhatsApp</button>
+        <button class="btn-outline" style="padding:12px 16px;font-size:13px;border-radius:8px;cursor:pointer" onclick="_recColaSaltar()">⏩ Saltar</button>
+        <button class="btn-outline" style="padding:12px 16px;font-size:13px;border-radius:8px;cursor:pointer" onclick="_recColaSiguiente()">⏭️ Siguiente</button>
+      </div>
+      <div style="margin-top:10px;font-size:11px;color:var(--muted);text-align:center">Al darle "Abrir WhatsApp" se cuenta el envío y avanza sola en 2s</div>
+      <div style="margin-top:14px;text-align:center"><button class="btn-sm btn-outline" onclick="_recColaConfirmarCerrar()">Pausar cola</button></div>
+    </div>`
+}
+
+window._recColaAbrirWa=async()=>{
+  const st=window._recColaState
+  const m=st.items[st.idx]
+  if(!m)return
+  const nivel=getNivelMensajeReclame(m.envios)
+  const mensaje=armarMensajeReclame(m,nivel)
+  const telLimpio=String(m.tel||'').replace(/\D/g,'')
+  const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`
+  window.open(url,'_blank','noopener')
+  try{
+    await sb.from('reclame_envios').insert({
+      telefono:m.tel,guia:m.guia||null,nivel_mensaje:nivel,
+      usuario_id:me?.id||null,usuario_nombre:me?.nombre||null
+    })
+    m.envios=(m.envios||0)+1
+    logAction('reclame_enviado_cola',{tel:m.tel,guia:m.guia,nivel}).catch(()=>{})
+  }catch(e){console.warn('No se pudo registrar envío:',e)}
+  st.enviadosEnSesion++
+  const body=document.getElementById('rec-cola-body')
+  if(body){
+    const overlay=document.createElement('div')
+    overlay.style.cssText='position:absolute;inset:0;background:rgba(34,197,94,.18);display:flex;align-items:center;justify-content:center;font-size:54px;pointer-events:none;border-radius:inherit;z-index:5'
+    overlay.textContent='✅'
+    body.style.position='relative'
+    body.appendChild(overlay)
+    setTimeout(()=>{st.idx++;_recColaRender()},2000)
+  }else{
+    st.idx++;_recColaRender()
+  }
+}
+
+window._recColaSiguiente=()=>{window._recColaState.idx++;_recColaRender()}
+window._recColaSaltar=()=>{window._recColaState.saltadas++;window._recColaState.idx++;_recColaRender()}
+window._recColaConfirmarCerrar=()=>{if(confirm('¿Pausar la cola? Tu progreso ya está guardado.'))_recColaCerrar()}
+window._recColaCerrarBtn=()=>{_recColaCerrar()}
 
 // ── AUXILIAR: CIERRE JORNADA ───────────────────────────────
 async function pageAuxCierre(c){

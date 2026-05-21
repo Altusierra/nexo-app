@@ -4304,7 +4304,11 @@ async function cargarNovedadesPorFecha(){
       if(r.accion==='contactada'){
         if(!contactByKey[k])contactByKey[k]=[]
         contactByKey[k].push(r)
+      }else if(r.accion==='envio_deshecho'){
+        // Legacy: ya no se usa en novedades. Ignorar para no romper el cálculo.
+        continue
       }else{
+        // resuelta o desmarcada
         if(!resolByKey[k])resolByKey[k]=[]
         resolByKey[k].push(r)
       }
@@ -4426,7 +4430,7 @@ function renderNovedadesContent(rep,items){
           <div style="font-size:14px;font-weight:600;font-family:monospace">${m.tel||'—'}</div>
           <div style="font-size:13px;margin-top:2px">${m.nombre||'—'} · <strong>${m.producto||'—'}</strong></div>
           <div style="font-size:11px;color:var(--muted);margin-top:2px">${m.ciudad||'—'}, ${m.depto||'—'} · ${m.carrier||'—'} · Guía: ${m.guia||'—'}</div>
-          <div style="font-size:12px;margin-top:4px"><span class="pill" style="background:${m.cat.bg};color:${m.cat.color};border:1px solid ${m.cat.border}">${m.cat.tipo}</span></div>
+          <div style="font-size:12px;margin-top:4px"><span class="pill" style="background:${m.cat.bg};color:${m.cat.color};border:1px solid ${m.cat.border}">${m.cat.tipo}</span>${(m.contactCount||0)>0?` <span class="pill" style="background:rgba(96,165,250,.12);color:var(--blue);border:1px solid rgba(96,165,250,.4);margin-left:4px">📨 ${m.contactCount} enviado${m.contactCount>1?'s':''}</span>`:''}</div>
           <div style="font-size:11px;color:var(--muted);margin-top:4px;font-style:italic">"${m.causal||''}"</div>
           ${m.aclaracion?`<div style="font-size:10px;color:var(--subtle);margin-top:2px">↳ ${m.aclaracion}</div>`:''}
           ${contactBadge}
@@ -4920,8 +4924,7 @@ function _colaRender(){
       <div id="cola-msg-paso2" style="background:var(--card2);padding:12px;border-radius:8px;font-size:13px;white-space:pre-line;line-height:1.5;border:1px solid var(--border);max-height:160px;overflow-y:auto">${_colaEscHtml(armado.resp)}</div>
       <div style="margin-top:6px"><button class="btn-sm btn-outline" onclick="_colaCopiarPaso(2,this)">📋 Copiar respuesta</button></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
-        <button style="flex:1;min-width:160px;padding:12px;font-size:14px;font-weight:600;background:#25D366;border:none;color:#fff;border-radius:8px;cursor:pointer" onclick="_colaAbrirWa()">💬 Abrir WhatsApp</button>
-        <button style="padding:12px 16px;font-size:13px;font-weight:600;background:var(--blue);border:none;color:#fff;border-radius:8px;cursor:pointer" onclick="_colaMarcarContactada()">📨 Marcar Contactada</button>
+        <button style="flex:1;min-width:200px;padding:12px;font-size:14px;font-weight:600;background:#25D366;border:none;color:#fff;border-radius:8px;cursor:pointer" onclick="_colaAbrirWa()">💬 Abrir WhatsApp${cuentaEnvios>0?` · 📨 ${cuentaEnvios} enviado${cuentaEnvios>1?'s':''}`:''}</button>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
         <button class="btn-outline" style="flex:1;min-width:120px;padding:10px;font-size:12px;border-radius:8px;cursor:pointer" onclick="_colaAnterior()" ${st.idx===0?'disabled style="flex:1;min-width:120px;padding:10px;font-size:12px;border-radius:8px;opacity:.4;cursor:not-allowed"':''}>⏮️ Anterior</button>
@@ -4930,14 +4933,14 @@ function _colaRender(){
         <button style="flex:1;min-width:140px;padding:10px;font-size:12px;font-weight:600;background:var(--green);border:none;color:#fff;border-radius:8px;cursor:pointer" onclick="_colaMarcarResuelta()">✅ Marcar resuelta</button>
       </div>
       <div style="margin-top:10px;font-size:11px;color:var(--muted);text-align:center;line-height:1.5">
-        1. Abre WhatsApp · 2. Marca Contactada · 3. Marca Resuelta si se resolvió la novedad · 4. Siguiente<br>
+        1. Abre WhatsApp (se marca contactada en automático) · 2. Marca Resuelta si se resolvió · 3. Siguiente<br>
         Saltar si no se resolvió · Atrás para volver a una anterior
       </div>
       <div style="margin-top:14px;text-align:center"><button class="btn-sm btn-outline" onclick="_colaConfirmarCerrar()">Pausar cola</button></div>
     </div>`
 }
 
-window._colaAbrirWa=()=>{
+window._colaAbrirWa=async()=>{
   const st=window._colaState
   const m=st.items[st.idx]
   if(!m)return
@@ -4946,24 +4949,23 @@ window._colaAbrirWa=()=>{
   const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
   const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(armado.msg)}`
   window.open(url,'_blank','noopener')
-}
-
-window._colaMarcarContactada=async()=>{
-  const st=window._colaState
-  const m=st.items[st.idx]
-  if(!m)return
+  // Auto-registrar como contactada (no bloquea la apertura de WhatsApp si falla)
   try{
-    await sb.from('novedades_resoluciones').insert({
+    const{error}=await sb.from('novedades_resoluciones').insert({
       telefono:m.tel,orden_id:m.orden_id||null,accion:'contactada',motivo:null,
       usuario_id:me?.id||null,usuario_nombre:me?.nombre||null
     })
+    if(error){console.error('No se pudo registrar contactada:',error);return}
     if(!m.contact)m.contact={cuando:new Date().toISOString(),usuario:me?.nombre||''}
     m.contactCount=(m.contactCount||0)+1
     st.contactadasEnSesion++
-    logAction('novedad_contactada_cola',{tel:m.tel,orden_id:m.orden_id}).catch(()=>{})
+    logAction('novedad_contactada_cola',{tel:m.tel,orden_id:m.orden_id,auto:true}).catch(()=>{})
     _colaRender()
-  }catch(e){alert('No se pudo marcar como contactada: '+e.message)}
+  }catch(e){console.error('No se pudo registrar contactada:',e)}
 }
+
+// Mantiene compatibilidad si alguna parte del UI antiguo aún la llama
+window._colaMarcarContactada=window._colaAbrirWa
 
 window._colaSiguiente=()=>{window._colaState.idx++;_colaRender()}
 window._colaSaltar=()=>{window._colaState.saltadas++;window._colaState.idx++;_colaRender()}
@@ -5586,8 +5588,8 @@ function _recColaRender(){
       <div style="font-size:11px;font-weight:600;color:var(--green);margin-bottom:6px;letter-spacing:.04em">📱 MENSAJE LISTO PARA ENVIAR</div>
       <div style="background:var(--card2);padding:12px;border-radius:8px;font-size:13px;white-space:pre-line;line-height:1.5;border:1px solid var(--border);max-height:200px;overflow-y:auto">${_recColaEscHtml(mensaje)}</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
-        <button style="flex:1;min-width:160px;padding:12px;font-size:14px;font-weight:600;background:#25D366;border:none;color:#fff;border-radius:8px;cursor:pointer" onclick="_recColaAbrirWa()">💬 Abrir WhatsApp</button>
-        <button style="padding:12px 16px;font-size:13px;font-weight:600;background:var(--blue);border:none;color:#fff;border-radius:8px;cursor:pointer" onclick="_recColaMarcarContactada()">📨 Marcar Contactada</button>
+        <button style="flex:1;min-width:200px;padding:12px;font-size:14px;font-weight:600;background:#25D366;border:none;color:#fff;border-radius:8px;cursor:pointer" onclick="_recColaAbrirWa()">💬 Abrir WhatsApp${m.envios>0?` · 📨 ${m.envios} enviado${m.envios>1?'s':''}`:''}</button>
+        ${m.envios>0?`<button style="padding:12px 14px;font-size:13px;font-weight:600;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;cursor:pointer" onclick="_recColaDeshacerEnvio()">↩️ Deshacer último envío</button>`:''}
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
         <button class="btn-outline" style="flex:1;min-width:120px;padding:10px;font-size:12px;border-radius:8px;cursor:pointer" onclick="_recColaAnterior()" ${st.idx===0?'disabled style="flex:1;min-width:120px;padding:10px;font-size:12px;border-radius:8px;opacity:.4;cursor:not-allowed"':''}>⏮️ Anterior</button>
@@ -5596,14 +5598,14 @@ function _recColaRender(){
         <button style="flex:1;min-width:140px;padding:10px;font-size:12px;font-weight:600;background:var(--green);border:none;color:#fff;border-radius:8px;cursor:pointer" onclick="_recColaMarcarResuelta()">✅ Marcar resuelta</button>
       </div>
       <div style="margin-top:10px;font-size:11px;color:var(--muted);text-align:center;line-height:1.5">
-        1. Abre WhatsApp · 2. Marca Contactada · 3. Marca Resuelta si reclamó el paquete · 4. Siguiente<br>
-        Saltar si no se resolvió · Atrás para volver a una anterior
+        1. Abre WhatsApp (registra envío y sube nivel) · 2. Marca Resuelta si reclamó el paquete · 3. Siguiente<br>
+        Saltar si no contactaste · Atrás para volver · Deshacer si fue clic accidental (vuelve al nivel anterior)
       </div>
       <div style="margin-top:14px;text-align:center"><button class="btn-sm btn-outline" onclick="_recColaConfirmarCerrar()">Pausar cola</button></div>
     </div>`
 }
 
-window._recColaAbrirWa=()=>{
+window._recColaAbrirWa=async()=>{
   const st=window._recColaState
   const m=st.items[st.idx]
   if(!m)return
@@ -5613,27 +5615,47 @@ window._recColaAbrirWa=()=>{
   const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
   const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`
   window.open(url,'_blank','noopener')
-}
-
-window._recColaMarcarContactada=async()=>{
-  const st=window._recColaState
-  const m=st.items[st.idx]
-  if(!m)return
-  const nivel=getNivelMensajeReclame(m.envios)
+  // Auto-registrar envío (no bloquea apertura si falla)
   try{
     const{error}=await sb.from('reclame_envios').insert({
       telefono:m.tel,guia:m.guia||null,nivel_mensaje:nivel,
       usuario_id:me?.id||null,usuario_nombre:me?.nombre||null
     })
-    if(error)throw error
+    if(error){console.error('No se pudo registrar envío:',error);return}
     m.envios=(m.envios||0)+1
     m.ultimoEnvio=new Date().toISOString()
     m.ultimoUsuario=me?.nombre||''
     st.enviadosEnSesion++
-    logAction('reclame_enviado_cola',{tel:m.tel,guia:m.guia,nivel}).catch(()=>{})
+    logAction('reclame_enviado_cola',{tel:m.tel,guia:m.guia,nivel,auto:true}).catch(()=>{})
     _recColaRender()
-  }catch(e){alert('No se pudo registrar el envío: '+e.message)}
+  }catch(e){console.error('No se pudo registrar envío:',e)}
 }
+
+window._recColaDeshacerEnvio=async()=>{
+  const st=window._recColaState
+  const m=st.items[st.idx]
+  if(!m)return
+  if((m.envios||0)<=0){alert('No hay envíos para deshacer');return}
+  try{
+    // Buscar el último envío real (excluir nivel_mensaje=99 que es marca de resuelta)
+    let q=sb.from('reclame_envios').select('id,nivel_mensaje,created_at').eq('telefono',m.tel).neq('nivel_mensaje',99)
+    if(m.guia)q=q.eq('guia',m.guia)
+    else q=q.is('guia',null)
+    const{data:ultimo,error:selErr}=await q.order('created_at',{ascending:false}).limit(1).maybeSingle()
+    if(selErr)throw selErr
+    if(!ultimo){alert('No se encontró envío para deshacer');return}
+    const{error:delErr}=await sb.from('reclame_envios').delete().eq('id',ultimo.id)
+    if(delErr)throw delErr
+    m.envios=Math.max(0,(m.envios||0)-1)
+    if(m.envios===0){m.ultimoEnvio=null;m.ultimoUsuario=null}
+    if(st.enviadosEnSesion>0)st.enviadosEnSesion--
+    logAction('reclame_envio_deshecho_cola',{tel:m.tel,guia:m.guia,nivel_borrado:ultimo.nivel_mensaje}).catch(()=>{})
+    _recColaRender()
+  }catch(e){alert('No se pudo deshacer: '+e.message)}
+}
+
+// Compatibilidad: si algún botón viejo en caché todavía llama a _recColaMarcarContactada
+window._recColaMarcarContactada=window._recColaAbrirWa
 
 window._recColaMarcarResuelta=async()=>{
   const st=window._recColaState

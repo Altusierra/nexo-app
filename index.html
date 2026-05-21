@@ -658,7 +658,8 @@ async function loadDash(){
   let conv=0
   const _convSeen={}
   for(const r of (reps||[])){
-    const k=(r.fecha||'')+'|'+(r.producto_nombre||'')
+    const resolved=resolveProdName(r.producto_nombre).nombre||(r.producto_nombre||'')
+    const k=(r.fecha||'')+'|'+_normProd(resolved)
     if(_convSeen[k])continue
     _convSeen[k]=true
     conv+=r.conversaciones||0
@@ -870,7 +871,8 @@ async function cargarResumenSemanal(){
   const convByWeek={}
   const _convSemSeen={}
   for(const r of (reportesConv||[])){
-    const k=(r.fecha||'')+'|'+(r.producto_nombre||'')
+    const resolved=resolveProdName(r.producto_nombre).nombre||(r.producto_nombre||'')
+    const k=(r.fecha||'')+'|'+_normProd(resolved)
     if(_convSemSeen[k])continue
     _convSemSeen[k]=true
     const wk=_weekKey(_weekMonday(r.fecha))
@@ -4341,9 +4343,14 @@ function renderNovedadesContent(rep,items){
   const el=document.getElementById('nov-content')
   if(!el)return
   const isResuelta=(m)=>m.resol?.accion==='resuelta'
-  const urgentes=items.filter(i=>i.cat.pri==='URGENTE'&&!isResuelta(i))
-  const medias=items.filter(i=>i.cat.pri==='MEDIA'&&!isResuelta(i))
-  const normales=items.filter(i=>i.cat.pri==='NORMAL'&&!isResuelta(i))
+  const isContactada=(m)=>!!m.contact&&!isResuelta(m)
+  // SIN CONTACTAR (por prioridad)
+  const urgentes=items.filter(i=>i.cat.pri==='URGENTE'&&!isResuelta(i)&&!isContactada(i))
+  const medias=items.filter(i=>i.cat.pri==='MEDIA'&&!isResuelta(i)&&!isContactada(i))
+  const normales=items.filter(i=>i.cat.pri==='NORMAL'&&!isResuelta(i)&&!isContactada(i))
+  // CONTACTADAS (en limbo: esperan resolución)
+  const contactadas=items.filter(isContactada)
+  // RESUELTAS
   const resueltas=items.filter(isResuelta)
 
   const esc=(s)=>(s||'').toString().replace(/'/g,"\\'").replace(/\n/g,' ')
@@ -4414,34 +4421,34 @@ function renderNovedadesContent(rep,items){
       ${arr.map(renderCard).join('')}
     </div>`
   }
-  const total=items.length, pendientes=urgentes.length+medias.length+normales.length, marcadas=resueltas.length
+  const total=items.length, sinContactarTotal=urgentes.length+medias.length+normales.length, marcadas=resueltas.length, contactadasTot=contactadas.length
   const pctMarcadas=total>0?Math.round(marcadas*100/total):0
   // Pendientes con protocolo asignado (cat.idx entre 1 y 8) y no resueltas
   const colaPendientes=[...urgentes,...medias,...normales].filter(m=>NOV_PROTO[m.cat.idx])
-  const colaContactadas=colaPendientes.filter(m=>m.contact).length
-  const colaSinContactar=colaPendientes.length-colaContactadas
-  const botonCola=colaPendientes.length>0?`
+  const colaSinContactar=colaPendientes.length
+  const botonCola=colaSinContactar>0?`
     <div style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <button class="btn-primary" style="padding:12px 18px;font-size:14px;font-weight:600;border-radius:10px;background:linear-gradient(135deg,#7c5cff,#5b8def);border:none;color:#fff;cursor:pointer;box-shadow:0 4px 14px rgba(124,92,255,.35)" onclick="abrirColaProtocolos()">
-        📨 Enviar protocolos (${colaSinContactar} sin contactar${colaContactadas>0?` · ${colaContactadas} ya contactadas`:''})
+        📨 Enviar protocolos (${colaSinContactar} sin contactar)
       </button>
       <span style="font-size:11px;color:var(--muted)">Modo cola — envía mensajes uno por uno sin perder tiempo</span>
     </div>`:''
   el.innerHTML=`
     <div class="alert alert-blue" style="margin-bottom:12px">
-      📅 Lote del <strong>${rep.fecha_lote}</strong> · ${total} novedades · ✅ ${marcadas} marcadas (${pctMarcadas}%) · ⏳ ${pendientes} pendientes
+      📅 Lote del <strong>${rep.fecha_lote}</strong> · ${total} novedades · ✅ ${marcadas} resueltas (${pctMarcadas}%) · 📨 ${contactadasTot} contactadas · ⏳ ${sinContactarTotal} sin contactar
       ${rep.uploaded_by_name?` · 👤 subido por ${rep.uploaded_by_name}`:''}
     </div>
     <div class="cards-row c3" style="margin-bottom:16px">
-      <div class="card" style="border-left:3px solid var(--red)"><div class="card-label">🔴 Urgentes</div><div class="card-val" style="color:var(--red)">${urgentes.length}</div></div>
-      <div class="card" style="border-left:3px solid var(--amber)"><div class="card-label">🟡 Media</div><div class="card-val" style="color:var(--amber)">${medias.length}</div></div>
-      <div class="card" style="border-left:3px solid var(--blue)"><div class="card-label">🔵 Normal</div><div class="card-val" style="color:var(--blue)">${normales.length}</div></div>
+      <div class="card" style="border-left:3px solid var(--red)"><div class="card-label">🔴 Urgentes (sin contactar)</div><div class="card-val" style="color:var(--red)">${urgentes.length}</div></div>
+      <div class="card" style="border-left:3px solid var(--amber)"><div class="card-label">🟡 Media (sin contactar)</div><div class="card-val" style="color:var(--amber)">${medias.length}</div></div>
+      <div class="card" style="border-left:3px solid var(--blue)"><div class="card-label">🔵 Normal (sin contactar)</div><div class="card-val" style="color:var(--blue)">${normales.length}</div></div>
     </div>
     <div class="alert alert-yellow" style="margin-bottom:16px">⏱️ Tiempo máximo de respuesta: <strong>1 HORA</strong> en horario laboral. Atender primero las 🔴 rojas.</div>
     ${botonCola}
     ${renderSection('Atender primero','URGENTE',urgentes,'var(--red)')}
     ${renderSection('Resolver hoy','MEDIA',medias,'var(--amber)')}
     ${renderSection('Más tiempo disponible','NORMAL',normales,'var(--blue)')}
+    ${contactadas.length?renderSection('Esperando respuesta del cliente','CONTACTADAS',contactadas,'#60a5fa'):''}
     ${resueltas.length?renderSection('Resueltas','RESUELTAS',resueltas,'var(--green)'):''}
   `
 }
@@ -4723,12 +4730,10 @@ function _colaFmtTime(ms){
 
 window.abrirColaProtocolos=()=>{
   const cache=window._novCache||{}
-  const items=(cache.items||[]).filter(m=>NOV_PROTO[m.cat.idx]&&!(m.resol?.accion==='resuelta'))
-  if(!items.length){alert('No hay novedades pendientes con protocolo.');return}
-  // Sin contactar primero, luego ya contactadas (por si necesita reenviar)
-  const sinContactar=items.filter(m=>!m.contact)
-  const yaContactadas=items.filter(m=>m.contact)
-  const cola=[...sinContactar,...yaContactadas]
+  // Solo SIN CONTACTAR (las ya contactadas no entran a la cola)
+  const items=(cache.items||[]).filter(m=>NOV_PROTO[m.cat.idx]&&!(m.resol?.accion==='resuelta')&&!m.contact)
+  if(!items.length){alert('No hay novedades pendientes por contactar.');return}
+  const cola=items
   window._colaState={items:cola,idx:0,inicio:Date.now(),fin:null,timerId:null,contactadasEnSesion:0,saltadas:0}
   closeModal()
   const div=document.createElement('div')
@@ -4809,12 +4814,20 @@ function _colaRender(){
         </div>
       </div>
       ${yaContactada?`<div style="margin-bottom:10px;padding:8px 10px;background:rgba(96,165,250,.12);border:1px solid rgba(96,165,250,.4);border-radius:6px;font-size:12px;color:var(--blue)">📨 Ya contactada por ${m.contact.usuario||'—'} el ${(m.contact.cuando||'').slice(0,16).replace('T',' ')}</div>`:''}
-      <div style="font-size:11px;font-weight:600;color:var(--green);margin-bottom:6px;letter-spacing:.04em">📱 MENSAJE LISTO PARA ENVIAR</div>
-      <div style="background:var(--card2);padding:12px;border-radius:8px;font-size:13px;white-space:pre-line;line-height:1.5;border:1px solid var(--border);max-height:200px;overflow-y:auto">${_colaEscHtml(armado.msg)}</div>
+      <div style="font-size:11px;font-weight:600;color:var(--green);margin-bottom:6px;letter-spacing:.04em">📱 PASO 1: MENSAJE AL CLIENTE (WhatsApp)</div>
+      <div id="cola-msg-paso1" style="background:var(--card2);padding:12px;border-radius:8px;font-size:13px;white-space:pre-line;line-height:1.5;border:1px solid var(--border);max-height:180px;overflow-y:auto">${_colaEscHtml(armado.msg)}</div>
+      <div style="margin-top:6px"><button class="btn-sm btn-outline" onclick="_colaCopiarPaso(1,this)">📋 Copiar mensaje</button></div>
+      <div style="font-size:11px;font-weight:600;color:var(--blue);margin-top:14px;margin-bottom:6px;letter-spacing:.04em">📝 PASO 2: RESPUESTA A LA TRANSPORTADORA</div>
+      <div id="cola-msg-paso2" style="background:var(--card2);padding:12px;border-radius:8px;font-size:13px;white-space:pre-line;line-height:1.5;border:1px solid var(--border);max-height:160px;overflow-y:auto">${_colaEscHtml(armado.resp)}</div>
+      <div style="margin-top:6px"><button class="btn-sm btn-outline" onclick="_colaCopiarPaso(2,this)">📋 Copiar respuesta</button></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
         <button style="flex:1;min-width:160px;padding:12px;font-size:14px;font-weight:600;background:#25D366;border:none;color:#fff;border-radius:8px;cursor:pointer" onclick="_colaAbrirWa()">💬 Abrir WhatsApp</button>
         <button class="btn-outline" style="padding:12px 16px;font-size:13px;border-radius:8px;cursor:pointer" onclick="_colaSaltar()">⏩ Saltar</button>
         <button class="btn-outline" style="padding:12px 16px;font-size:13px;border-radius:8px;cursor:pointer" onclick="_colaSiguiente()">⏭️ Siguiente</button>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+        <button class="btn-outline" style="flex:1;min-width:120px;padding:10px;font-size:12px;border-radius:8px;cursor:pointer" onclick="_colaAnterior()" ${st.idx===0?'disabled style="flex:1;min-width:120px;padding:10px;font-size:12px;border-radius:8px;opacity:.4;cursor:not-allowed"':''}>⏮️ Anterior</button>
+        <button style="flex:1;min-width:140px;padding:10px;font-size:12px;font-weight:600;background:var(--green);border:none;color:#fff;border-radius:8px;cursor:pointer" onclick="_colaMarcarResuelta()">✅ Marcar resuelta</button>
       </div>
       <div style="margin-top:10px;font-size:11px;color:var(--muted);text-align:center">Al darle "Abrir WhatsApp" se marca como contactada y avanza sola en 2s</div>
       <div style="margin-top:14px;text-align:center"><button class="btn-sm btn-outline" onclick="_colaConfirmarCerrar()">Pausar cola</button></div>
@@ -4856,6 +4869,36 @@ window._colaAbrirWa=async()=>{
 
 window._colaSiguiente=()=>{window._colaState.idx++;_colaRender()}
 window._colaSaltar=()=>{window._colaState.saltadas++;window._colaState.idx++;_colaRender()}
+window._colaAnterior=()=>{
+  const st=window._colaState
+  if(st.idx>0){st.idx--;_colaRender()}
+}
+window._colaCopiarPaso=(paso,btn)=>{
+  const id=paso===1?'cola-msg-paso1':'cola-msg-paso2'
+  const el=document.getElementById(id)
+  if(!el)return
+  const txt=el.textContent
+  const orig=btn?.textContent||'📋 Copiar'
+  navigator.clipboard.writeText(txt).then(()=>{
+    if(btn){btn.textContent='✅ Copiado';setTimeout(()=>{btn.textContent=orig},1500)}
+  }).catch(()=>{})
+}
+window._colaMarcarResuelta=async()=>{
+  const st=window._colaState
+  const m=st.items[st.idx]
+  if(!m)return
+  try{
+    const{error}=await sb.from('novedades_resoluciones').insert({
+      telefono:m.tel,orden_id:m.orden_id||null,accion:'resuelta',motivo:'desde_cola',
+      usuario_id:me?.id||null,usuario_nombre:me?.nombre||null
+    })
+    if(error)throw error
+    m.resol={accion:'resuelta',usuario:me?.nombre||'',cuando:new Date().toISOString(),motivo:'desde_cola'}
+    logAction('novedad_marcada',{tel:m.tel,orden_id:m.orden_id,desde:'cola'}).catch(()=>{})
+    st.idx++
+    _colaRender()
+  }catch(e){alert('No se pudo marcar como resuelta: '+e.message)}
+}
 window._colaConfirmarCerrar=()=>{if(confirm('¿Pausar la cola? Tu progreso ya está guardado.'))_colaCerrar()}
 window._colaCerrarBtn=()=>{_colaCerrar()}
 

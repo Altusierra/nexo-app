@@ -623,32 +623,46 @@ async function loadDash(){
   // 2. Órdenes desde mapeos (asignador + Dropi)
   const{data:mapeos}=await sb.from('mapeos').select('cantidad,producto,estado_final,fecha,ad_id').gte('fecha',desde).lte('fecha',hasta).limit(10000)
   let tot1=0,tot2=0,tot3=0,tot4=0,conf=0,canc=0,pend=0,conAd=0
+  let cConf1=0,cConf2=0,cConf3=0,cConf4=0
   const prodStats={}
+  const prodStatsConf={}
   for(const m of (mapeos||[])){
     const q=m.cantidad||2
     if(q===1)tot1++;else if(q===2)tot2++;else if(q===3)tot3++;else tot4++
     if(m.ad_id)conAd++
+    let esConf=false
     if(m.estado_final==='CANCELADO')canc++
     else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)pend++
-    else conf++
+    else{conf++;esConf=true}
     const pn=resolveProdName(m.producto).nombre||'Sin producto'
     if(!prodStats[pn])prodStats[pn]={o1:0,o2:0,o3:0,o4:0}
     if(q===1)prodStats[pn].o1++;else if(q===2)prodStats[pn].o2++;else if(q===3)prodStats[pn].o3++;else prodStats[pn].o4++
+    if(esConf){
+      if(!prodStatsConf[pn])prodStatsConf[pn]={o1:0,o2:0,o3:0,o4:0}
+      if(q===1){prodStatsConf[pn].o1++;cConf1++}else if(q===2){prodStatsConf[pn].o2++;cConf2++}else if(q===3){prodStatsConf[pn].o3++;cConf3++}else{prodStatsConf[pn].o4++;cConf4++}
+    }
   }
   const totalOrds=tot1+tot2+tot3+tot4
+  const totalOrdsConf=cConf1+cConf2+cConf3+cConf4
 
-  // 3. Venta por oferta cruzada con precios de producto
+  // 3. Venta por oferta cruzada con precios de producto (solo confirmados)
   let ventaTotal=0,costoProvTotal=0
-  for(const[pn,st]of Object.entries(prodStats)){
+  for(const[pn,st]of Object.entries(prodStatsConf)){
     const prod=productos.find(p=>p.nombre===pn)||productos[0]||{}
     ventaTotal+=(st.o1*(prod.precio_1u||0))+(st.o2*(prod.precio_2u||0))+(st.o3*(prod.precio_3u||0))+(st.o4*(prod.precio_4u||0))
     costoProvTotal+=(st.o1*(prod.costo_1u||0))+(st.o2*(prod.costo_2u||0))+(st.o3*(prod.costo_3u||0))+(st.o4*(prod.costo_4u||0))
   }
 
   // 4. Conversaciones desde reportes_diarios
-  const{data:reps}=await sb.from('reportes_diarios').select('conversaciones,fecha').gte('fecha',desde).lte('fecha',hasta)
+  const{data:reps}=await sb.from('reportes_diarios').select('conversaciones,fecha,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
   let conv=0
-  for(const r of (reps||[]))conv+=r.conversaciones||0
+  const _convSeen={}
+  for(const r of (reps||[])){
+    const k=(r.fecha||'')+'|'+(r.producto_nombre||'')
+    if(_convSeen[k])continue
+    _convSeen[k]=true
+    conv+=r.conversaciones||0
+  }
 
   // 5. Gastos fijos
   const{data:gfData}=await sb.from('gastos_fijos').select('monto')
@@ -659,16 +673,16 @@ async function loadDash(){
   // 6. Cálculos estilo tracker
   const prod0=productos[0]||{}
   const devPct=prod0.dev_pct||0.19
-  const costoFlete=totalOrds*(prod0.flete_outbound||21000)
-  const costoDevolucion=Math.round(totalOrds*devPct*(prod0.flete_devolucion||18000))
+  const costoFlete=totalOrdsConf*(prod0.flete_outbound||21000)
+  const costoDevolucion=Math.round(totalOrdsConf*devPct*(prod0.flete_devolucion||18000))
   const costoConv=conv*(prod0.costo_conversacion||100)
   const ventaEfectiva=Math.round(ventaTotal*(1-devPct))
   const ganNeta=ventaEfectiva-costoProvTotal-costoFlete-costoDevolucion-gastoTotal-costoConv-gastoFijoPeriodo
   const roas_bruto=gastoTotal>0?ventaTotal/gastoTotal:0
   const roas_neto=gastoTotal>0?(ganNeta+gastoTotal)/gastoTotal:0
-  const cpa=totalOrds>0?gastoTotal/totalOrds:0
-  const cpr=totalOrds>0?gastoTotal/totalOrds:0
-  const tasaCierre=conv>0?totalOrds/conv:0
+  const cpa=totalOrdsConf>0?gastoTotal/totalOrdsConf:0
+  const cpr=totalOrdsConf>0?gastoTotal/totalOrdsConf:0
+  const tasaCierre=conv>0?totalOrdsConf/conv:0
 
   // Break-even
   const p2=prod0.precio_2u||129900,c2=prod0.costo_2u||36000
@@ -851,10 +865,17 @@ async function cargarResumenSemanal(){
   const gastoByWeek={}
   for(const i of (insData||[])){const wk=_weekKey(_weekMonday(i.fecha));gastoByWeek[wk]=(gastoByWeek[wk]||0)+(i.spend||0)}
 
-  // Conversaciones desde reportes_diarios (por semana)
-  const{data:reportesConv}=await sb.from('reportes_diarios').select('fecha,conversaciones').gte('fecha',desde).lte('fecha',hasta)
+  // Conversaciones desde reportes_diarios (por semana, dedupe por fecha+producto, último gana)
+  const{data:reportesConv}=await sb.from('reportes_diarios').select('fecha,conversaciones,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
   const convByWeek={}
-  for(const r of (reportesConv||[])){const wk=_weekKey(_weekMonday(r.fecha));convByWeek[wk]=(convByWeek[wk]||0)+(r.conversaciones||0)}
+  const _convSemSeen={}
+  for(const r of (reportesConv||[])){
+    const k=(r.fecha||'')+'|'+(r.producto_nombre||'')
+    if(_convSemSeen[k])continue
+    _convSemSeen[k]=true
+    const wk=_weekKey(_weekMonday(r.fecha))
+    convByWeek[wk]=(convByWeek[wk]||0)+(r.conversaciones||0)
+  }
 
   // Gastos fijos (mensual total → prorrateo /30 × 7 por semana)
   const{data:gfData}=await sb.from('gastos_fijos').select('monto')
@@ -1059,8 +1080,8 @@ async function loadTracker(){
     // 4. Mapeos del rango (cruzar con campañas vía ad_id → campaign)
     const{data:mapeos}=await sb.from('mapeos').select('fecha,cantidad,producto,estado_final,ad_id').gte('fecha',desde).lte('fecha',hasta).limit(20000)
 
-    // 5. Conversaciones (reportes_diarios)
-    const{data:reps}=await sb.from('reportes_diarios').select('fecha,producto_id,conversaciones').gte('fecha',desde).lte('fecha',hasta)
+    // 5. Conversaciones (reportes_diarios) — último gana por fecha+producto
+    const{data:reps}=await sb.from('reportes_diarios').select('fecha,producto_id,conversaciones,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
 
     // 6. Sin atribuir: campañas con gasto pero sin matchear ningún producto
     const gastoCampSinAtrib={}
@@ -1122,9 +1143,13 @@ async function loadTracker(){
       if(cat==='entregado'||cat==='novedad_ok')d.ent++
       else if(cat==='devuelto')d.dev++
     }
-    // Conversaciones por producto + fecha
+    // Conversaciones por producto + fecha (último gana, dedupe por fecha+producto_id)
+    const _convTrkSeen={}
     for(const r of (reps||[])){
       if(!r.producto_id)continue
+      const k=(r.fecha||'')+'|'+r.producto_id
+      if(_convTrkSeen[k])continue
+      _convTrkSeen[k]=true
       if(!dataPorProd[r.producto_id])dataPorProd[r.producto_id]={}
       if(!dataPorProd[r.producto_id][r.fecha])dataPorProd[r.producto_id][r.fecha]={o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,ent:0,dev:0,conv:0}
       dataPorProd[r.producto_id][r.fecha].conv+=(r.conversaciones||0)
@@ -1159,7 +1184,7 @@ async function loadTracker(){
       const ventaProy=aVenta*(1-dp)
       const fleteOutProy=aConf*fo
       const fleteDevProy=aConf*dp*fdN
-      const ganProy=Math.round(ventaProy-aCosto*(1-dp)-fleteOutProy-fleteDevProy-aGasto-aConv*cc)
+      const ganProy=Math.round(ventaProy-aCosto-fleteOutProy-fleteDevProy-aGasto-aConv*cc)
       // Ganancia real (solo entregadas + restar fletes reales)
       const ventaReal=(aEnt/Math.max(aConf,1))*aVenta // proporción de entregadas
       // mejor: calcular directo por unidad — pero requiere desglose. Aproximación con promedio:
@@ -3142,6 +3167,14 @@ async function cargarReporteData(){
   const repByProd={}
   if(reportes)for(const r of reportes)repByProd[_normProd(r.producto_nombre)||'']=r
 
+  // 2b. Último valor de conversaciones por fecha+producto (de cualquier usuario, gana el más reciente)
+  const{data:convLatest}=await sb.from('reportes_diarios').select('producto_nombre,conversaciones,updated_at').eq('fecha',fecha).order('updated_at',{ascending:false})
+  const convByProdLatest={}
+  if(convLatest)for(const r of convLatest){
+    const k=_normProd(r.producto_nombre)||''
+    if(convByProdLatest[k]===undefined)convByProdLatest[k]=r.conversaciones||0
+  }
+
   const prods=Object.keys(porProd)
 
   // Auto section HTML
@@ -3191,7 +3224,7 @@ async function cargarReporteData(){
         </div>
         ${!usandoDropi?`<div class="form-grid g2" style="margin-top:8px">
           <div class="fld"><label>Conversaciones (manual)</label>
-            <input type="number" id="rc-${pid}" value="${rep?.conversaciones||0}" min="0" class="rep-conv" data-prod="${p}" ${!esHoy?'disabled style="'+_autoStyle+'"':''}></div>
+            <input type="number" id="rc-${pid}" value="${convByProdLatest[key]??(rep?.conversaciones||0)}" min="0" class="rep-conv" data-prod="${p}" ${!esHoy?'disabled style="'+_autoStyle+'"':''}></div>
         </div>`:''}
         ${fechaDropiHtml}
       </div>`

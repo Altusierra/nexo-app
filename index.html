@@ -4526,44 +4526,107 @@ window.procesarNovedadesXlsx=async()=>{
 
     const fechaLote=today()
 
-    // 1. Buscar si ya existe reporte para esta fecha (UNIQUE → reemplazar)
+    // 1. Buscar si ya existe reporte para esta fecha
     const{data:existing}=await sb.from('novedades_reportes').select('id').eq('fecha_lote',fechaLote).maybeSingle()
+
+    let reporteId, modo='nuevo', countUpdated=0, countInserted=0
+
     if(existing){
-      const{error:delErr}=await sb.from('novedades_reportes').delete().eq('id',existing.id)
-      if(delErr){msg.innerHTML=`<div class="alert alert-red">Error reemplazando: ${delErr.message}</div>`;return}
+      // ─── MERGE: reutilizar reporte y hacer upsert por (telefono+orden_id) ───
+      reporteId=existing.id
+      modo='merge'
+
+      // Traer items actuales del reporte
+      const{data:existingItems}=await sb.from('novedades_items').select('id,telefono,orden_id').eq('reporte_id',reporteId).limit(20000)
+      const existingByKey={}
+      for(const ei of (existingItems||[])){
+        const k=(ei.telefono||'')+'|'+(ei.orden_id||'')
+        existingByKey[k]=ei.id
+      }
+
+      // Separar items nuevos en updates vs inserts
+      const toUpdate=[], toInsert=[]
+      const seenKeys={}
+      for(const it of items){
+        const k=it.tel+'|'+(it.ordenId||'')
+        // Deduplicar dentro del mismo archivo
+        if(seenKeys[k])continue
+        seenKeys[k]=true
+        const row={
+          reporte_id:reporteId,fecha_lote:fechaLote,
+          telefono:it.tel,orden_id:it.ordenId||null,guia:it.guia||null,
+          cliente_nombre:it.nombre||null,carrier:it.carrier||null,
+          ciudad:it.ciudad||null,depto:it.depto||null,direccion:it.direccion||null,
+          producto:it.producto||null,causal:it.causal||null,
+          aclaracion:it.aclaracion||null,fecha_novedad:it.fechaNov||null,
+          hora_novedad:it.horaNov||null,prioridad:it.cat.pri,tipo:it.cat.tipo,
+          cat_idx:it.cat.idx,ad_id:it.ad_id||null,dias_desde_novedad:it.dias
+        }
+        if(existingByKey[k]){
+          toUpdate.push({id:existingByKey[k],row})
+        }else{
+          toInsert.push(row)
+        }
+      }
+
+      // Updates (uno por uno: Supabase no tiene bulk update)
+      for(const u of toUpdate){
+        const{error:upErr}=await sb.from('novedades_items').update(u.row).eq('id',u.id)
+        if(upErr){msg.innerHTML=`<div class="alert alert-red">Error actualizando item: ${upErr.message}</div>`;return}
+        countUpdated++
+      }
+
+      // Inserts en chunks
+      for(let i=0;i<toInsert.length;i+=500){
+        const chunk=toInsert.slice(i,i+500)
+        const{error:insErr}=await sb.from('novedades_items').insert(chunk)
+        if(insErr){msg.innerHTML=`<div class="alert alert-red">Error guardando nuevos: ${insErr.message}</div>`;return}
+        countInserted+=chunk.length
+      }
+
+      // Actualizar metadata del reporte (filename + total real)
+      const totalFinal=(existingItems?.length||0)+countInserted
+      await sb.from('novedades_reportes').update({
+        filename,total_items:totalFinal
+      }).eq('id',reporteId)
+
+    }else{
+      // ─── NUEVO: crear reporte e insertar todo ───
+      const{data:newRep,error:repErr}=await sb.from('novedades_reportes').insert({
+        fecha_lote:fechaLote,uploaded_by:me?.id||null,uploaded_by_name:me?.nombre||null,
+        filename,total_items:items.length
+      }).select().single()
+      if(repErr){msg.innerHTML=`<div class="alert alert-red">Error guardando reporte: ${repErr.message}</div>`;return}
+      reporteId=newRep.id
+
+      const itemsInsert=items.map(it=>({
+        reporte_id:reporteId,fecha_lote:fechaLote,
+        telefono:it.tel,orden_id:it.ordenId||null,guia:it.guia||null,
+        cliente_nombre:it.nombre||null,carrier:it.carrier||null,
+        ciudad:it.ciudad||null,depto:it.depto||null,direccion:it.direccion||null,
+        producto:it.producto||null,causal:it.causal||null,
+        aclaracion:it.aclaracion||null,fecha_novedad:it.fechaNov||null,
+        hora_novedad:it.horaNov||null,prioridad:it.cat.pri,tipo:it.cat.tipo,
+        cat_idx:it.cat.idx,ad_id:it.ad_id||null,dias_desde_novedad:it.dias
+      }))
+      for(let i=0;i<itemsInsert.length;i+=500){
+        const chunk=itemsInsert.slice(i,i+500)
+        const{error:insErr}=await sb.from('novedades_items').insert(chunk)
+        if(insErr){msg.innerHTML=`<div class="alert alert-red">Error guardando items: ${insErr.message}</div>`;return}
+      }
+      countInserted=items.length
     }
 
-    // 2. Insertar nuevo reporte
-    const{data:newRep,error:repErr}=await sb.from('novedades_reportes').insert({
-      fecha_lote:fechaLote,uploaded_by:me?.id||null,uploaded_by_name:me?.nombre||null,
-      filename,total_items:items.length
-    }).select().single()
-    if(repErr){msg.innerHTML=`<div class="alert alert-red">Error guardando reporte: ${repErr.message}</div>`;return}
-
-    // 3. Insertar items en chunks
-    const itemsInsert=items.map(it=>({
-      reporte_id:newRep.id,fecha_lote:fechaLote,
-      telefono:it.tel,orden_id:it.ordenId||null,guia:it.guia||null,
-      cliente_nombre:it.nombre||null,carrier:it.carrier||null,
-      ciudad:it.ciudad||null,depto:it.depto||null,direccion:it.direccion||null,
-      producto:it.producto||null,causal:it.causal||null,
-      aclaracion:it.aclaracion||null,fecha_novedad:it.fechaNov||null,
-      hora_novedad:it.horaNov||null,prioridad:it.cat.pri,tipo:it.cat.tipo,
-      cat_idx:it.cat.idx,ad_id:it.ad_id||null,dias_desde_novedad:it.dias
-    }))
-    for(let i=0;i<itemsInsert.length;i+=500){
-      const chunk=itemsInsert.slice(i,i+500)
-      const{error:insErr}=await sb.from('novedades_items').insert(chunk)
-      if(insErr){msg.innerHTML=`<div class="alert alert-red">Error guardando items: ${insErr.message}</div>`;return}
-    }
-
-    msg.innerHTML=`<div class="alert alert-green">✅ ${items.length} novedades guardadas en BD${novUpdated>0?` · 📅 ${novUpdated} fechas actualizadas en mapeos`:''}${existing?' · ♻️ Reemplazó el lote anterior de hoy':''}</div>`
+    const resumen=modo==='merge'
+      ? `✅ Merge en lote de hoy: ${countInserted} nuevas · ${countUpdated} actualizadas${novUpdated>0?` · 📅 ${novUpdated} fechas en mapeos`:''}`
+      : `✅ ${items.length} novedades guardadas en BD${novUpdated>0?` · 📅 ${novUpdated} fechas actualizadas en mapeos`:''}`
+    msg.innerHTML=`<div class="alert alert-green">${resumen}</div>`
 
     document.getElementById('nov-fecha').value=fechaLote
     cargarNovedadesPorFecha()
     cargarHistorialNovedades()
 
-    logAction('novedades_procesadas',{total:items.length,fecha_lote:fechaLote,reemplazo:!!existing}).catch(()=>{})
+    logAction('novedades_procesadas',{total:items.length,fecha_lote:fechaLote,modo,actualizadas:countUpdated,nuevas:countInserted}).catch(()=>{})
   }catch(e){
     msg.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
   }
@@ -5226,32 +5289,99 @@ window.procesarReclameXlsx=async()=>{
     }
     const fechaLote=today()
     const{data:existing}=await sb.from('reclame_reportes').select('id').eq('fecha_lote',fechaLote).maybeSingle()
+
+    let reporteId, modo='nuevo', countUpdated=0, countInserted=0
+
     if(existing){
-      const{error:delErr}=await sb.from('reclame_reportes').delete().eq('id',existing.id)
-      if(delErr){msg.innerHTML=`<div class="alert alert-red">Error reemplazando: ${delErr.message}</div>`;return}
+      // ─── MERGE: reutilizar reporte y hacer upsert por (telefono+guia) ───
+      reporteId=existing.id
+      modo='merge'
+
+      // Traer items actuales del reporte
+      const{data:existingItems}=await sb.from('reclame_items').select('id,telefono,guia').eq('reporte_id',reporteId).limit(20000)
+      const existingByKey={}
+      for(const ei of (existingItems||[])){
+        const k=(ei.telefono||'')+'|'+(ei.guia||'')
+        existingByKey[k]=ei.id
+      }
+
+      // Separar items nuevos en updates vs inserts
+      const toUpdate=[], toInsert=[]
+      const seenKeys={}
+      for(const it of items){
+        const k=it.tel+'|'+(it.guia||'')
+        // Deduplicar dentro del mismo archivo
+        if(seenKeys[k])continue
+        seenKeys[k]=true
+        const row={
+          reporte_id:reporteId,fecha_lote:fechaLote,
+          telefono:it.tel,orden_id:it.ordenId||null,guia:it.guia||null,
+          cliente_nombre:it.nombre||null,carrier:it.carrier||null,
+          ciudad:it.ciudad||null,depto:it.depto||null,direccion:it.direccion||null,
+          producto:it.producto||null,cantidad:it.cantidad||null,
+          fecha_orden:it.fechaOrden||null,ad_id:it.ad_id||null
+        }
+        if(existingByKey[k]){
+          toUpdate.push({id:existingByKey[k],row})
+        }else{
+          toInsert.push(row)
+        }
+      }
+
+      // Updates uno por uno
+      for(const u of toUpdate){
+        const{error:upErr}=await sb.from('reclame_items').update(u.row).eq('id',u.id)
+        if(upErr){msg.innerHTML=`<div class="alert alert-red">Error actualizando item: ${upErr.message}</div>`;return}
+        countUpdated++
+      }
+
+      // Inserts en chunks
+      for(let i=0;i<toInsert.length;i+=500){
+        const chunk=toInsert.slice(i,i+500)
+        const{error:insErr}=await sb.from('reclame_items').insert(chunk)
+        if(insErr){msg.innerHTML=`<div class="alert alert-red">Error guardando nuevos: ${insErr.message}</div>`;return}
+        countInserted+=chunk.length
+      }
+
+      // Actualizar metadata del reporte
+      const totalFinal=(existingItems?.length||0)+countInserted
+      await sb.from('reclame_reportes').update({
+        filename,total_items:totalFinal
+      }).eq('id',reporteId)
+
+    }else{
+      // ─── NUEVO: crear reporte e insertar todo ───
+      const{data:newRep,error:repErr}=await sb.from('reclame_reportes').insert({
+        fecha_lote:fechaLote,uploaded_by:me?.id||null,uploaded_by_name:me?.nombre||null,
+        filename,total_items:items.length
+      }).select().single()
+      if(repErr){msg.innerHTML=`<div class="alert alert-red">Error guardando: ${repErr.message}</div>`;return}
+      reporteId=newRep.id
+
+      const itemsInsert=items.map(it=>({
+        reporte_id:reporteId,fecha_lote:fechaLote,
+        telefono:it.tel,orden_id:it.ordenId||null,guia:it.guia||null,
+        cliente_nombre:it.nombre||null,carrier:it.carrier||null,
+        ciudad:it.ciudad||null,depto:it.depto||null,direccion:it.direccion||null,
+        producto:it.producto||null,cantidad:it.cantidad||null,
+        fecha_orden:it.fechaOrden||null,ad_id:it.ad_id||null
+      }))
+      for(let i=0;i<itemsInsert.length;i+=500){
+        const chunk=itemsInsert.slice(i,i+500)
+        const{error:insErr}=await sb.from('reclame_items').insert(chunk)
+        if(insErr){msg.innerHTML=`<div class="alert alert-red">Error guardando items: ${insErr.message}</div>`;return}
+      }
+      countInserted=items.length
     }
-    const{data:newRep,error:repErr}=await sb.from('reclame_reportes').insert({
-      fecha_lote:fechaLote,uploaded_by:me?.id||null,uploaded_by_name:me?.nombre||null,
-      filename,total_items:items.length
-    }).select().single()
-    if(repErr){msg.innerHTML=`<div class="alert alert-red">Error guardando: ${repErr.message}</div>`;return}
-    const itemsInsert=items.map(it=>({
-      reporte_id:newRep.id,fecha_lote:fechaLote,
-      telefono:it.tel,orden_id:it.ordenId||null,guia:it.guia||null,
-      cliente_nombre:it.nombre||null,carrier:it.carrier||null,
-      ciudad:it.ciudad||null,depto:it.depto||null,direccion:it.direccion||null,
-      producto:it.producto||null,cantidad:it.cantidad||null,
-      fecha_orden:it.fechaOrden||null,ad_id:it.ad_id||null
-    }))
-    for(let i=0;i<itemsInsert.length;i+=500){
-      const chunk=itemsInsert.slice(i,i+500)
-      const{error:insErr}=await sb.from('reclame_items').insert(chunk)
-      if(insErr){msg.innerHTML=`<div class="alert alert-red">Error guardando items: ${insErr.message}</div>`;return}
-    }
-    msg.innerHTML=`<div class="alert alert-green">✅ ${items.length} pedidos en reclame guardados${existing?' · ♻️ Reemplazó lote anterior':''}</div>`
+
+    const resumen=modo==='merge'
+      ? `✅ Merge en lote de hoy: ${countInserted} nuevos · ${countUpdated} actualizados`
+      : `✅ ${items.length} pedidos en reclame guardados`
+    msg.innerHTML=`<div class="alert alert-green">${resumen}</div>`
+
     document.getElementById('rec-fecha').value=fechaLote
     cargarReclamePorFecha()
-    logAction('reclame_procesado',{total:items.length,fecha_lote:fechaLote,reemplazo:!!existing}).catch(()=>{})
+    logAction('reclame_procesado',{total:items.length,fecha_lote:fechaLote,modo,actualizados:countUpdated,nuevos:countInserted}).catch(()=>{})
   }catch(e){
     msg.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
   }

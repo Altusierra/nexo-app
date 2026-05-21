@@ -3436,11 +3436,24 @@ async function pageAuxReservado(c){
         </div>
       </div>
       <div id="conf-content"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div></div>
+    </div>
+
+    <div style="margin-top:28px;padding-top:18px;border-top:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <span style="font-size:20px">⏳</span>
+        <div style="font-size:18px;font-weight:700">Pendientes sin fecha de envío</div>
+      </div>
+      <div class="page-sub" style="margin-bottom:14px">Pedidos en estado pendiente (desde el cruce Dropi) que aún no tienen fecha programada. Búscalos por teléfono arriba para asignarles una.</div>
+      <div id="psf-content"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div></div>
     </div>`
 
   // Cargar lista de pendientes de confirmación al entrar
   if(typeof cargarPendientesConfirmacion==='function'){
     setTimeout(()=>cargarPendientesConfirmacion(),50)
+  }
+  // Cargar lista de pendientes sin fecha al entrar
+  if(typeof cargarPendientesSinFecha==='function'){
+    setTimeout(()=>cargarPendientesSinFecha(),80)
   }
 
   // Estados reconocidos para clasificar la orden
@@ -3675,6 +3688,8 @@ async function pageAuxReservado(c){
       if(tel){buscarOrden()}
       // Refrescar lista de pendientes en la misma página
       if(typeof cargarPendientesConfirmacion==='function'){cargarPendientesConfirmacion()}
+      // Refrescar pendientes sin fecha — el pedido recién programado debe desaparecer de ahí
+      if(typeof cargarPendientesSinFecha==='function'){cargarPendientesSinFecha()}
       const toast=document.createElement('div')
       toast.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--green);color:#fff;padding:12px 18px;border-radius:8px;font-weight:600;z-index:9999;box-shadow:0 4px 14px rgba(0,0,0,.3)'
       toast.textContent='✅ Pedido programado para '+fecha
@@ -3926,6 +3941,120 @@ function renderPendientesConfirmacion(items,filtro){
     </div>`:''}
   `
 }
+
+// ── PENDIENTES SIN FECHA DE ENVÍO ────────────────────────────
+// Pedidos en estado pendiente (cruce Dropi) que aún no tienen programación activa
+window._psfCache={items:[],limit:20}
+
+async function cargarPendientesSinFecha(){
+  const el=document.getElementById('psf-content')
+  if(!el)return
+  el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando pendientes...</div>'
+  try{
+    // 1) Traer mapeos con estado pendiente
+    // Cualquiera de: estado_final IN ('PENDIENTE','PENDIENTE CONFIRMACION') OR estado_inicial='PENDIENTE CONFIRMACION'
+    // Limitamos a últimos 90 días para no traer historia infinita
+    const hace90=new Date(Date.now()-90*24*60*60*1000).toISOString().split('T')[0]
+    const{data:pendA,error:e1}=await sb.from('mapeos')
+      .select('id,telefono,nombre_cliente,producto,cantidad,ciudad,carrier,fecha,fecha_dropi,estado_inicial,estado_final,created_at')
+      .in('estado_final',['PENDIENTE','PENDIENTE CONFIRMACION'])
+      .gte('fecha',hace90)
+      .order('fecha',{ascending:false}).limit(1000)
+    if(e1)throw e1
+    const{data:pendB,error:e2}=await sb.from('mapeos')
+      .select('id,telefono,nombre_cliente,producto,cantidad,ciudad,carrier,fecha,fecha_dropi,estado_inicial,estado_final,created_at')
+      .eq('estado_inicial','PENDIENTE CONFIRMACION')
+      .is('estado_final',null)
+      .gte('fecha',hace90)
+      .order('fecha',{ascending:false}).limit(1000)
+    if(e2)throw e2
+    // Deduplicar por id
+    const byId={}
+    for(const m of (pendA||[]))byId[m.id]=m
+    for(const m of (pendB||[]))if(!byId[m.id])byId[m.id]=m
+    let pend=Object.values(byId)
+    if(!pend.length){
+      el.innerHTML='<div class="alert alert-blue">No hay pedidos pendientes sin fecha de envío.</div>'
+      window._psfCache={items:[],limit:20}
+      return
+    }
+    // 2) Excluir los que ya tengan programación activa
+    const ids=pend.map(p=>p.id)
+    let progs=[]
+    for(let i=0;i<ids.length;i+=100){
+      const batch=ids.slice(i,i+100)
+      const{data}=await sb.from('programaciones_envio')
+        .select('mapeo_id').in('mapeo_id',batch).eq('estado','programado')
+      if(data)progs=progs.concat(data)
+    }
+    const conProg=new Set(progs.map(p=>p.mapeo_id))
+    const sinFecha=pend.filter(m=>!conProg.has(m.id))
+    // Orden: más recientes primero
+    sinFecha.sort((a,b)=>{
+      const fa=a.fecha||a.created_at||''
+      const fb=b.fecha||b.created_at||''
+      return fb.localeCompare(fa)
+    })
+    window._psfCache={items:sinFecha,limit:window._psfCache?.limit||20}
+    renderPendientesSinFecha()
+  }catch(e){
+    el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
+  }
+}
+window.cargarPendientesSinFecha=cargarPendientesSinFecha
+
+function renderPendientesSinFecha(){
+  const el=document.getElementById('psf-content')
+  if(!el)return
+  const cache=window._psfCache||{items:[],limit:20}
+  const items=cache.items||[]
+  const limit=cache.limit||20
+  if(!items.length){
+    el.innerHTML='<div class="alert alert-blue">No hay pedidos pendientes sin fecha de envío.</div>'
+    return
+  }
+  const total=items.length
+  const visibles=items.slice(0,limit)
+  const renderCard=(m)=>{
+    const fechaCompra=m.fecha?new Date(m.fecha+'T00:00:00').toLocaleDateString('es-CO',{day:'numeric',month:'short',year:'numeric'}):'—'
+    const diasDesde=m.fecha?Math.floor((Date.now()-new Date(m.fecha+'T00:00:00').getTime())/(24*60*60*1000)):null
+    const diasBadge=diasDesde!=null?`<span class="pill" style="background:rgba(245,158,11,.12);color:var(--amber);border:1px solid var(--amber);font-size:11px">⏱ Hace ${diasDesde} día${diasDesde===1?'':'s'}</span>`:''
+    const telLimpio=(m.telefono||'').replace(/\D/g,'')
+    return`<div class="card" style="margin-bottom:8px;border-left:3px solid var(--amber)">
+      <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;flex-wrap:wrap">
+        <div style="flex:1;min-width:240px">
+          <div style="font-size:14px;font-weight:600;font-family:monospace">${m.telefono||'—'}</div>
+          <div style="font-size:13px;margin-top:2px">${m.nombre_cliente||'—'} · <strong>${m.producto||'—'}</strong> ${m.cantidad?`(${m.cantidad}u)`:''}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">${m.ciudad||'—'} · ${m.carrier||'sin carrier'} · Compra: ${fechaCompra}</div>
+          <div style="font-size:12px;margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            <span class="pill" style="background:rgba(245,158,11,.12);color:var(--amber);border:1px solid var(--amber);font-size:11px">⏳ Pendiente sin fecha</span>
+            ${diasBadge}
+          </div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <button class="btn-sm btn-primary" onclick="(function(){const i=document.getElementById('res-tel');if(i){i.value='${telLimpio}';if(typeof buscarOrden==='function')buscarOrden();window.scrollTo({top:0,behavior:'smooth'})}})()">🔍 Abrir y programar</button>
+        </div>
+      </div>
+    </div>`
+  }
+  let controles=''
+  const puedeVerMas=limit<total
+  const puedeVerMenos=limit>20
+  if(puedeVerMas||puedeVerMenos){
+    controles=`<div style="display:flex;gap:8px;justify-content:center;margin-top:14px">
+      ${puedeVerMenos?`<button class="btn-sm btn-outline" onclick="window._psfCache.limit=Math.max(20,(window._psfCache.limit||20)-20);renderPendientesSinFecha()">⬆ Ver menos 20</button>`:''}
+      ${puedeVerMas?`<button class="btn-sm btn-primary" onclick="window._psfCache.limit=(window._psfCache.limit||20)+20;renderPendientesSinFecha()">⬇ Ver más 20</button>`:''}
+    </div>`
+  }
+  el.innerHTML=`
+    <div class="alert alert-yellow" style="margin-bottom:12px;font-size:12px">
+      📋 ${total} pedido${total===1?'':'s'} pendiente${total===1?'':'s'} sin fecha de envío · Mostrando ${visibles.length} de ${total}
+    </div>
+    ${visibles.map(renderCard).join('')}
+    ${controles}
+  `
+}
+window.renderPendientesSinFecha=renderPendientesSinFecha
 
 window.enviarMensajeConfirmacion=async(progId)=>{
   const cache=window._confCache||{}
@@ -4802,8 +4931,14 @@ async function cargarReclamePorFecha(){
       }
     }
     const enviosMap={}
+    const resueltasMap={}
     for(const e of envios){
       const k=(e.telefono||'')+'|'+(e.guia||'')
+      // nivel_mensaje=99 → marca de "resuelta" (no cuenta como envío real)
+      if(e.nivel_mensaje===99){
+        if(!resueltasMap[k])resueltasMap[k]={fecha:e.created_at,usuario:e.usuario_nombre}
+        continue
+      }
       if(!enviosMap[k])enviosMap[k]={count:0,ultimo:null,usuario:null}
       enviosMap[k].count++
       if(!enviosMap[k].ultimo)enviosMap[k].ultimo=e.created_at
@@ -4814,11 +4949,13 @@ async function cargarReclamePorFecha(){
     const enriched=(items||[]).map(it=>{
       const k=(it.telefono||'')+'|'+(it.guia||'')
       const env=enviosMap[k]||{count:0,ultimo:null,usuario:null}
+      const res=resueltasMap[k]||null
       return{
         tel:it.telefono,guia:it.guia,nombre:it.cliente_nombre,
         carrier:it.carrier,ciudad:it.ciudad,depto:it.depto,direccion:it.direccion,
         producto:prodByTel[it.telefono]||it.producto,cantidad:it.cantidad,orden_id:it.orden_id,
-        envios:env.count,ultimoEnvio:env.ultimo,ultimoUsuario:env.usuario
+        envios:env.count,ultimoEnvio:env.ultimo,ultimoUsuario:env.usuario,
+        resuelta:!!res,resueltaFecha:res?.fecha||null,resueltaUsuario:res?.usuario||null
       }
     })
     enriched.sort((a,b)=>a.envios-b.envios||(a.nombre||'').localeCompare(b.nombre||''))
@@ -4833,10 +4970,13 @@ window.cargarReclamePorFecha=cargarReclamePorFecha
 function renderReclameContent(rep,items){
   const el=document.getElementById('rec-content')
   if(!el)return
-  const total=items.length
-  const sinEnviar=items.filter(i=>i.envios===0).length
+  // Separar resueltas del flujo normal
+  const itemsActivos=items.filter(i=>!i.resuelta)
+  const itemsResueltos=items.filter(i=>i.resuelta)
+  const total=itemsActivos.length
+  const sinEnviar=itemsActivos.filter(i=>i.envios===0).length
   const yaEnviados=total-sinEnviar
-  const totalMsgs=items.reduce((s,i)=>s+i.envios,0)
+  const totalMsgs=itemsActivos.reduce((s,i)=>s+i.envios,0)
   const esc=(s)=>(s||'').toString().replace(/'/g,"\\'").replace(/\n/g,' ')
   const fmtDelta=(ms)=>{
     if(!ms||ms<0)return'—'
@@ -4858,6 +4998,7 @@ function renderReclameContent(rep,items){
       ultimoEnvioBadge=`<div style="margin-top:6px;padding:6px 8px;background:rgba(96,165,250,.10);border:1px solid rgba(96,165,250,.3);border-radius:6px;font-size:11px;color:var(--blue)">📨 Último envío hace ${fmtDelta(deltaMs)}${m.ultimoUsuario?' · por '+m.ultimoUsuario:''}</div>`
     }
     const btnEnviar=`<button class="btn-sm btn-primary" onclick="enviarReclameUno('${m.tel}','${esc(m.guia)}')">📨 Enviar aviso ${nivel}</button>`
+    const btnResuelta=`<button class="btn-sm" style="background:var(--green);color:#fff;border:none" onclick="marcarReclameResuelta('${m.tel}','${esc(m.guia)}')">✅ Resuelta</button>`
     return`<div class="card" style="margin-bottom:8px;border-left:3px solid ${nivelColor}">
       <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;flex-wrap:wrap">
         <div style="flex:1;min-width:220px">
@@ -4873,14 +5014,33 @@ function renderReclameContent(rep,items){
         <div style="text-align:right;flex-shrink:0">
           <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
             ${btnEnviar}
+            ${btnResuelta}
           </div>
         </div>
       </div>
     </div>`
   }
-  const sinEnviarItems=items.filter(i=>i.envios===0)
-  const yaEnviadosItems=items.filter(i=>i.envios>0)
-  const botonCola=items.length>0?`
+  const renderCardResuelta=(m)=>{
+    const fechaFmt=m.resueltaFecha?new Date(m.resueltaFecha).toLocaleString('es-CO'):'—'
+    return`<div class="card" style="margin-bottom:8px;border-left:3px solid var(--green);opacity:.85">
+      <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;flex-wrap:wrap">
+        <div style="flex:1;min-width:220px">
+          <div style="font-size:14px;font-weight:600;font-family:monospace">${m.tel||'—'}</div>
+          <div style="font-size:13px;margin-top:2px">${m.nombre||'—'} · <strong>${m.producto||'—'}</strong> ${m.cantidad?`(${m.cantidad}u)`:''}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">${m.ciudad||'—'}, ${m.depto||'—'} · ${m.carrier||'—'} · Guía: ${m.guia||'—'}</div>
+          <div style="margin-top:6px;padding:6px 8px;background:rgba(34,197,94,.10);border:1px solid rgba(34,197,94,.3);border-radius:6px;font-size:11px;color:var(--green)">
+            ✅ Marcada como resuelta el ${fechaFmt}${m.resueltaUsuario?' · por '+m.resueltaUsuario:''}
+          </div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <button class="btn-sm btn-outline" onclick="desmarcarReclameResuelta('${m.tel}','${esc(m.guia)}')">↩️ Desmarcar</button>
+        </div>
+      </div>
+    </div>`
+  }
+  const sinEnviarItems=itemsActivos.filter(i=>i.envios===0)
+  const yaEnviadosItems=itemsActivos.filter(i=>i.envios>0)
+  const botonCola=itemsActivos.length>0?`
     <div style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <button class="btn-primary" style="padding:12px 18px;font-size:14px;font-weight:600;border-radius:10px;background:linear-gradient(135deg,#7c5cff,#5b8def);border:none;color:#fff;cursor:pointer;box-shadow:0 4px 14px rgba(124,92,255,.35)" onclick="abrirColaReclame()">
         📨 Enviar en cola (${sinEnviar} sin enviar${yaEnviados>0?` · ${yaEnviados} con seguimiento`:''})
@@ -4889,7 +5049,7 @@ function renderReclameContent(rep,items){
     </div>`:''
   el.innerHTML=`
     <div class="alert alert-blue" style="margin-bottom:12px">
-      📅 Lote del <strong>${rep.fecha_lote}</strong> · ${total} pedidos en reclame · 📨 ${totalMsgs} mensajes enviados en total · ⏳ ${sinEnviar} sin contactar
+      📅 Lote del <strong>${rep.fecha_lote}</strong> · ${total} pedidos en reclame · 📨 ${totalMsgs} mensajes enviados en total · ⏳ ${sinEnviar} sin contactar${itemsResueltos.length?` · ✅ ${itemsResueltos.length} resueltas`:''}
       ${rep.uploaded_by_name?` · 👤 subido por ${rep.uploaded_by_name}`:''}
     </div>
     <div class="cards-row c3" style="margin-bottom:16px">
@@ -4911,6 +5071,13 @@ function renderReclameContent(rep,items){
         <span style="font-size:13px;font-weight:600;color:var(--blue);text-transform:uppercase;letter-spacing:.06em">CON SEGUIMIENTO (${yaEnviadosItems.length})</span>
       </div>
       ${yaEnviadosItems.map(renderCard).join('')}
+    </div>`:''}
+    ${itemsResueltos.length?`<div style="margin-bottom:20px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--green)"></span>
+        <span style="font-size:13px;font-weight:600;color:var(--green);text-transform:uppercase;letter-spacing:.06em">✅ RESUELTAS (${itemsResueltos.length})</span>
+      </div>
+      ${itemsResueltos.map(renderCardResuelta).join('')}
     </div>`:''}
   `
 }
@@ -5015,7 +5182,55 @@ window.enviarReclameUno=async(tel,guia)=>{
   setTimeout(()=>cargarReclamePorFecha(),800)
 }
 
-// ── COLA DE RECLAME (modo cola secuencial con timer) ────────
+// ── MARCAR / DESMARCAR RESUELTA EN RECLAME ───────────────────
+// Usa nivel_mensaje=99 en reclame_envios como marca de "resuelta" (sin cambiar schema)
+window.marcarReclameResuelta=async(tel,guia)=>{
+  const cache=window._reclameCache||{}
+  const m=(cache.items||[]).find(i=>i.tel===tel&&(i.guia||'')===(guia||''))
+  if(!m){alert('No se encontró el pedido');return}
+  if(m.resuelta){alert('Este pedido ya está marcado como resuelta');return}
+  try{
+    const{error}=await sb.from('reclame_envios').insert({
+      telefono:m.tel,guia:m.guia||null,nivel_mensaje:99,
+      usuario_id:me?.id||null,usuario_nombre:me?.nombre||null
+    })
+    if(error)throw error
+    logAction('reclame_resuelta_marcada',{tel:m.tel,guia:m.guia}).catch(()=>{})
+    const toast=document.createElement('div')
+    toast.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--green);color:#fff;padding:12px 18px;border-radius:8px;font-weight:600;z-index:9999;box-shadow:0 4px 14px rgba(0,0,0,.3)'
+    toast.textContent='✅ Pedido marcado como resuelta'
+    document.body.appendChild(toast)
+    setTimeout(()=>toast.remove(),2200)
+  }catch(e){alert('Error: '+e.message);return}
+  setTimeout(()=>cargarReclamePorFecha(),400)
+}
+
+window.desmarcarReclameResuelta=async(tel,guia)=>{
+  const cache=window._reclameCache||{}
+  const m=(cache.items||[]).find(i=>i.tel===tel&&(i.guia||'')===(guia||''))
+  if(!m){alert('No se encontró el pedido');return}
+  const motivo=prompt('¿Por qué desmarcas esta resuelta? (obligatorio)')
+  if(motivo===null)return
+  const motivoTrim=(motivo||'').trim()
+  if(!motivoTrim){alert('Debes escribir un motivo');return}
+  try{
+    // Eliminar la marca (nivel_mensaje=99) más reciente para este telefono+guia
+    let q=sb.from('reclame_envios').delete().eq('telefono',m.tel).eq('nivel_mensaje',99)
+    if(m.guia)q=q.eq('guia',m.guia)
+    else q=q.is('guia',null)
+    const{error}=await q
+    if(error)throw error
+    logAction('reclame_resuelta_desmarcada',{tel:m.tel,guia:m.guia,motivo:motivoTrim}).catch(()=>{})
+    const toast=document.createElement('div')
+    toast.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--amber);color:#fff;padding:12px 18px;border-radius:8px;font-weight:600;z-index:9999;box-shadow:0 4px 14px rgba(0,0,0,.3)'
+    toast.textContent='↩️ Resuelta desmarcada'
+    document.body.appendChild(toast)
+    setTimeout(()=>toast.remove(),2200)
+  }catch(e){alert('Error: '+e.message);return}
+  setTimeout(()=>cargarReclamePorFecha(),400)
+}
+
+
 window._recColaState={items:[],idx:0,inicio:null,fin:null,timerId:null,enviadosEnSesion:0,saltadas:0}
 
 function _recColaEscHtml(s){return(s||'').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
@@ -5030,7 +5245,7 @@ function _recColaFmtTime(ms){
 
 window.abrirColaReclame=()=>{
   const cache=window._reclameCache||{}
-  const items=(cache.items||[]).slice()
+  const items=(cache.items||[]).slice().filter(m=>!m.resuelta)
   if(!items.length){alert('No hay pedidos para enviar.');return}
   const sinEnvios=items.filter(m=>m.envios===0)
   const conEnvios=items.filter(m=>m.envios>0)

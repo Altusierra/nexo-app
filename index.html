@@ -4329,11 +4329,15 @@ async function cargarReclamePorFecha(){
     const{data:items}=await sb.from('reclame_items').select('*').eq('reporte_id',rep.id).limit(5000)
     const tels=[...new Set((items||[]).map(i=>i.telefono))]
     let envios=[]
+    let mapeosProd=[]
     if(tels.length){
       for(let i=0;i<tels.length;i+=100){
         const batch=tels.slice(i,i+100)
         const{data:ed}=await sb.from('reclame_envios').select('telefono,guia,created_at,usuario_nombre,nivel_mensaje').in('telefono',batch).order('created_at',{ascending:false}).limit(20000)
         if(ed)envios=envios.concat(ed)
+        // Cargar producto del mapeo (asignador) para resolver al nombre canónico
+        const{data:md}=await sb.from('mapeos').select('telefono,producto').in('telefono',batch)
+        if(md)mapeosProd=mapeosProd.concat(md)
       }
     }
     const enviosMap={}
@@ -4344,13 +4348,15 @@ async function cargarReclamePorFecha(){
       if(!enviosMap[k].ultimo)enviosMap[k].ultimo=e.created_at
       if(!enviosMap[k].usuario)enviosMap[k].usuario=e.usuario_nombre
     }
+    const prodByTel={}
+    for(const mp of mapeosProd){if(!prodByTel[mp.telefono]&&mp.producto)prodByTel[mp.telefono]=mp.producto}
     const enriched=(items||[]).map(it=>{
       const k=(it.telefono||'')+'|'+(it.guia||'')
       const env=enviosMap[k]||{count:0,ultimo:null,usuario:null}
       return{
         tel:it.telefono,guia:it.guia,nombre:it.cliente_nombre,
         carrier:it.carrier,ciudad:it.ciudad,depto:it.depto,direccion:it.direccion,
-        producto:it.producto,cantidad:it.cantidad,orden_id:it.orden_id,
+        producto:prodByTel[it.telefono]||it.producto,cantidad:it.cantidad,orden_id:it.orden_id,
         envios:env.count,ultimoEnvio:env.ultimo,ultimoUsuario:env.usuario
       }
     })
@@ -4491,7 +4497,9 @@ window.procesarReclameXlsx=async()=>{
     for(const item of items){
       const m=mByTel[item.tel]
       item.ad_id=m?.ad_id||null
-      if(!item.producto&&m?.producto)item.producto=m.producto
+      // Preferir el producto del mapeo (asignador) sobre el del XLSX
+      // para que resolveProdName pueda mapearlo al nombre canónico
+      if(m?.producto)item.producto=m.producto
     }
     const fechaLote=today()
     const{data:existing}=await sb.from('reclame_reportes').select('id').eq('fecha_lote',fechaLote).maybeSingle()

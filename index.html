@@ -3412,7 +3412,36 @@ async function pageAuxReservado(c){
       </div>
       <button class="btn-full btn-primary" onclick="buscarOrden()">Buscar</button>
       <div id="res-result" style="margin-top:16px"></div>
+    </div>
+
+    <div style="margin-top:28px;padding-top:18px;border-top:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <span style="font-size:20px">📅</span>
+        <div style="font-size:18px;font-weight:700">Pedidos pendientes de confirmación</div>
+      </div>
+      <div class="page-sub" style="margin-bottom:14px">Pedidos programados que necesitan confirmación del cliente antes del envío</div>
+      <div class="card" style="margin-bottom:16px;padding:12px">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+          <div class="fld" style="margin:0;flex:1;min-width:180px">
+            <label style="font-size:11px">Filtrar por fecha de envío</label>
+            <select id="conf-filtro" style="font-size:12px;padding:6px 8px" onchange="cargarPendientesConfirmacion()">
+              <option value="proximos">Próximos 2 días (default)</option>
+              <option value="hoy">Solo hoy</option>
+              <option value="manana">Solo mañana</option>
+              <option value="todos">Todos los programados</option>
+              <option value="vencidos">Vencidos (fecha pasada sin confirmar)</option>
+            </select>
+          </div>
+          <button class="btn-sm btn-outline" onclick="cargarPendientesConfirmacion()">🔄 Recargar</button>
+        </div>
+      </div>
+      <div id="conf-content"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div></div>
     </div>`
+
+  // Cargar lista de pendientes de confirmación al entrar
+  if(typeof cargarPendientesConfirmacion==='function'){
+    setTimeout(()=>cargarPendientesConfirmacion(),50)
+  }
 
   // Estados reconocidos para clasificar la orden
   function _clasificarEstado(m){
@@ -3472,12 +3501,15 @@ async function pageAuxReservado(c){
 
     // Botones según el estado actual
     let botones=''
+    const btnProgramar=`<button class="btn-sm btn-outline" onclick="abrirModalProgramarEnvio()" style="flex:1;padding:10px;border-color:#a78bfa;color:#a78bfa">📅 Programar fecha de envío</button>`
     if(estado==='pendiente'){
       botones=`
         <button class="btn-sm btn-green" onclick="cambiarEstadoOrden('confirmar',false)" style="flex:1;padding:10px">✅ Confirmar</button>
-        <button class="btn-sm btn-red" onclick="cambiarEstadoOrden('cancelar',true)" style="flex:1;padding:10px">❌ Cancelar</button>`
+        <button class="btn-sm btn-red" onclick="cambiarEstadoOrden('cancelar',true)" style="flex:1;padding:10px">❌ Cancelar</button>
+        ${btnProgramar}`
     }else if(estado==='confirmado'){
-      botones=`<button class="btn-sm btn-red" onclick="cambiarEstadoOrden('cancelar',true)" style="flex:1;padding:10px">❌ Cancelar</button>`
+      botones=`<button class="btn-sm btn-red" onclick="cambiarEstadoOrden('cancelar',true)" style="flex:1;padding:10px">❌ Cancelar</button>
+        ${btnProgramar}`
     }else if(estado==='cancelado'){
       botones=`<button class="btn-sm btn-green" onclick="cambiarEstadoOrden('reactivar',true)" style="flex:1;padding:10px">✅ Reactivar (confirmar)</button>`
     }else{
@@ -3573,6 +3605,435 @@ async function pageAuxReservado(c){
       if(tel){buscarOrden()}
     },200)
   }
+
+  // ── PROGRAMAR FECHA DE ENVÍO (desde Reservados y Cancelados) ──
+  window.abrirModalProgramarEnvio=()=>{
+    const m=window._resOrden
+    if(!m){alert('Primero busca un pedido');return}
+    closeModal()
+    const hoy=new Date()
+    const manana=new Date(hoy.getTime()+24*60*60*1000)
+    const minDate=manana.toISOString().split('T')[0]
+    const sugerida=new Date(hoy.getTime()+3*24*60*60*1000).toISOString().split('T')[0]
+    const div=document.createElement('div')
+    div.id='user-modal';div.className='modal-bg'
+    div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:480px">
+      <div class="modal-title">📅 Programar fecha de envío</div>
+      <div class="modal-sub">${m.nombre_cliente||m.telefono} · ${m.producto||'—'}</div>
+      <div class="alert alert-blue" style="margin-top:12px;font-size:12px">
+        El pedido aparecerá en <strong>Pendiente de confirmación</strong> desde 2 días antes de la fecha programada.
+        Tendrás cupo de 2 mensajes por día para contactar al cliente.
+      </div>
+      <div class="fld" style="margin-top:14px">
+        <label>Fecha de envío programada</label>
+        <input type="date" id="prog-fecha" value="${sugerida}" min="${minDate}" style="font-size:14px;padding:10px">
+      </div>
+      <div class="fld" style="margin-top:10px">
+        <label>Nota (opcional)</label>
+        <textarea id="prog-nota" rows="2" placeholder="Ej: cliente cobra el viernes" style="resize:vertical"></textarea>
+      </div>
+      <div id="prog-modal-msg" style="margin-top:10px"></div>
+      <div class="modal-actions">
+        <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
+        <button class="btn-sm btn-primary" onclick="guardarFechaEnvio()">📅 Programar</button>
+      </div>
+    </div>`
+    div.onclick=closeModal
+    document.body.appendChild(div)
+  }
+
+  window.guardarFechaEnvio=async()=>{
+    const m=window._resOrden
+    if(!m)return
+    const fecha=document.getElementById('prog-fecha')?.value
+    const nota=document.getElementById('prog-nota')?.value?.trim()||''
+    const msgEl=document.getElementById('prog-modal-msg')
+    if(!fecha){msgEl.innerHTML='<div class="alert alert-red">Selecciona una fecha</div>';return}
+    const hoy=new Date();hoy.setHours(0,0,0,0)
+    const fSel=new Date(fecha+'T00:00:00')
+    if(fSel<=hoy){msgEl.innerHTML='<div class="alert alert-red">La fecha debe ser futura</div>';return}
+    msgEl.innerHTML='<div class="loading">Guardando...</div>'
+    // Cerrar cualquier programación activa anterior del mismo mapeo
+    try{
+      await sb.from('programaciones_envio').update({estado:'cancelado',motivo:'Reemplazada por nueva programación'})
+        .eq('mapeo_id',m.id).eq('estado','programado')
+    }catch(_){}
+    const{data,error}=await sb.from('programaciones_envio').insert({
+      mapeo_id:m.id,
+      telefono:m.telefono,
+      fecha_envio_programada:fecha,
+      estado:'programado',
+      motivo:nota||null,
+      usuario_id:me?.id||null,
+      usuario_nombre:me?.nombre||null
+    }).select().maybeSingle()
+    if(error){msgEl.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+    logAction('envio_programado',{mapeo_id:m.id,telefono:m.telefono,fecha_envio:fecha,programacion_id:data?.id,nota:nota||null}).catch(()=>{})
+    closeModal()
+    setTimeout(()=>{
+      const tel=document.getElementById('res-tel')
+      if(tel){buscarOrden()}
+      // Refrescar lista de pendientes en la misma página
+      if(typeof cargarPendientesConfirmacion==='function'){cargarPendientesConfirmacion()}
+      const toast=document.createElement('div')
+      toast.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--green);color:#fff;padding:12px 18px;border-radius:8px;font-weight:600;z-index:9999;box-shadow:0 4px 14px rgba(0,0,0,.3)'
+      toast.textContent='✅ Pedido programado para '+fecha
+      document.body.appendChild(toast)
+      setTimeout(()=>toast.remove(),3000)
+    },200)
+  }
+}
+
+
+// ── PENDIENTES DE CONFIRMACIÓN (queue diaria) ─────────────
+const CONF_MSGS=[
+  // NIVEL 1 — Día 2 antes, 1er mensaje (cordial / informativo)
+  `Hola [NOMBRE] ✨\n\nTe escribimos para avisarte que tu pedido de *[PRODUCTO]* ([CANTIDAD]) está apartado y listo.\n\n📦 Despacho programado: *[FECHA_ENVIO]* a [CIUDAD]\n💵 Pago contra entrega — recibes y pagas al transportador\n\n¿Confirmas que sigues interesado? Así alistamos todo para enviártelo 🙏`,
+  // NIVEL 2 — Día 2 antes, 2do mensaje (recordatorio amable)
+  `Hola [NOMBRE] 👋\n\nSolo quería asegurarme que viste mi mensaje anterior. Queremos despachar tu *[PRODUCTO]* el *[FECHA_ENVIO]* y necesito tu confirmación para alistar el paquete 📦\n\n💵 Recuerda: pago contra entrega — solo pagas al recibir.\n\nSi lo deseas, solo responde *SI* y lo dejamos listo ✨`,
+  // NIVEL 3 — Día 1 antes, 1er mensaje (directo, deadline hoy)
+  `Hola [NOMBRE] 👋\n\n*Mañana* sería el despacho de tu *[PRODUCTO]* ([CANTIDAD]) a [CIUDAD] 📦\n\nNecesito tu confirmación HOY para alistar el paquete. Solo responde:\n\n✅ *SI* — para despachar mañana\n❌ *NO* — si ya no lo deseas\n\n💵 Recuerda que pagas al recibir, no antes.`,
+  // NIVEL 4 — Día 1 antes, 2do mensaje (última llamada, liberar cupo)
+  `Hola [NOMBRE], última oportunidad antes del envío de mañana 🙏\n\nTu *[PRODUCTO]* ([CANTIDAD]) sigue apartado, pero si no recibimos tu confirmación *hoy*, debemos liberar el cupo para otro cliente que también lo está esperando.\n\n¿Lo despachamos mañana a [CIUDAD]?\n\n✅ *SI*  o  ❌ *NO*  — con eso basta.\n\n💵 Pago contra entrega (no pagas nada ahora).`,
+]
+
+function _confDiasFalta(fechaEnvio){
+  if(!fechaEnvio)return null
+  const hoy=new Date();hoy.setHours(0,0,0,0)
+  const f=new Date(fechaEnvio+'T00:00:00')
+  return Math.round((f-hoy)/(24*60*60*1000))
+}
+
+function getNivelMensajeConfirmacion(diasFalta,enviosHoy){
+  if(diasFalta===2){
+    if(enviosHoy===0)return{idxTpl:0,etiqueta:'1er mensaje (2 días antes)',nivel:1}
+    return{idxTpl:1,etiqueta:'2do mensaje (2 días antes)',nivel:2}
+  }
+  if(diasFalta===1){
+    if(enviosHoy===0)return{idxTpl:2,etiqueta:'1er mensaje (1 día antes)',nivel:1}
+    return{idxTpl:3,etiqueta:'2do mensaje (1 día antes)',nivel:2}
+  }
+  if(diasFalta<=0){
+    if(enviosHoy===0)return{idxTpl:3,etiqueta:'Día del envío — confirmar urgente',nivel:1}
+    return{idxTpl:3,etiqueta:'Día del envío — 2do mensaje',nivel:2}
+  }
+  return{idxTpl:0,etiqueta:'Recordatorio',nivel:1}
+}
+
+function armarMensajeConfirmacion(item,idxTpl){
+  const tpl=CONF_MSGS[idxTpl]||CONF_MSGS[0]
+  const prodNom=(typeof resolveProdName==='function'?(resolveProdName(item.producto)||{}).nombre:null)||item.producto||'[PRODUCTO]'
+  const cantTxt=item.cantidad?`${item.cantidad} unidad${item.cantidad>1?'es':''}`:'[CANTIDAD]'
+  const fechaFmt=item.fecha_envio_programada?new Date(item.fecha_envio_programada+'T00:00:00').toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long'}):'[FECHA_ENVIO]'
+  return tpl
+    .replace(/\[NOMBRE\]/g,item.nombre_cliente||'[NOMBRE]')
+    .replace(/\[PRODUCTO\]/g,prodNom)
+    .replace(/\[CANTIDAD\]/g,cantTxt)
+    .replace(/\[CIUDAD\]/g,item.ciudad||'[CIUDAD]')
+    .replace(/\[FECHA_ENVIO\]/g,fechaFmt)
+}
+
+window._confCache={items:[],fechaActiva:null}
+
+// La función original se movió DENTRO de pageAuxReservado (debajo del buscador).
+// Este stub se conserva por si algún código viejo intenta llamarla.
+async function pageAuxPendientesConfirmacion(c){
+  if(typeof navigate==='function'){navigate('aux-reservado');return}
+  c.innerHTML='<div class="alert alert-blue">Esta sección ahora está dentro de <strong>Reservados y Cancelados</strong>.</div>'
+}
+
+async function cargarPendientesConfirmacion(){
+  const el=document.getElementById('conf-content')
+  if(!el)return
+  const filtro=document.getElementById('conf-filtro')?.value||'proximos'
+  el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div>'
+  try{
+    const{data:progs,error}=await sb.from('programaciones_envio')
+      .select('*').eq('estado','programado')
+      .order('fecha_envio_programada',{ascending:true}).limit(500)
+    if(error)throw error
+    if(!progs||!progs.length){
+      el.innerHTML='<div class="alert alert-blue">No hay pedidos programados para confirmación. Programa fechas desde <strong>Reservados y Cancelados</strong>.</div>'
+      window._confCache={items:[],fechaActiva:null}
+      return
+    }
+    const mapeoIds=[...new Set(progs.map(p=>p.mapeo_id).filter(Boolean))]
+    let mapeos=[]
+    for(let i=0;i<mapeoIds.length;i+=100){
+      const batch=mapeoIds.slice(i,i+100)
+      const{data}=await sb.from('mapeos').select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,carrier').in('id',batch)
+      if(data)mapeos=mapeos.concat(data)
+    }
+    const mapById={}
+    for(const m of mapeos)mapById[m.id]=m
+    const progIds=progs.map(p=>p.id)
+    let envios=[]
+    for(let i=0;i<progIds.length;i+=100){
+      const batch=progIds.slice(i,i+100)
+      const{data}=await sb.from('confirmacion_envios').select('programacion_id,created_at,dia_relativo,nivel_mensaje,usuario_nombre').in('programacion_id',batch).order('created_at',{ascending:false}).limit(5000)
+      if(data)envios=envios.concat(data)
+    }
+    const enviosByProg={}
+    for(const e of envios){
+      if(!enviosByProg[e.programacion_id])enviosByProg[e.programacion_id]=[]
+      enviosByProg[e.programacion_id].push(e)
+    }
+    const hoyStr=today()
+    const enriched=progs.map(p=>{
+      const m=mapById[p.mapeo_id]||{}
+      const diasFalta=_confDiasFalta(p.fecha_envio_programada)
+      const todosEnvios=enviosByProg[p.id]||[]
+      const enviosHoy=todosEnvios.filter(e=>{
+        const fEnv=(e.created_at||'').split('T')[0]
+        return fEnv===hoyStr
+      }).length
+      const ultimoEnvio=todosEnvios[0]||null
+      return{
+        prog_id:p.id,
+        mapeo_id:p.mapeo_id,
+        telefono:p.telefono||m.telefono,
+        nombre_cliente:m.nombre_cliente,
+        producto:m.producto,
+        cantidad:m.cantidad,
+        ciudad:m.ciudad,
+        carrier:m.carrier,
+        fecha_compra:m.fecha,
+        fecha_envio_programada:p.fecha_envio_programada,
+        nota:p.motivo,
+        dias_falta:diasFalta,
+        envios_total:todosEnvios.length,
+        envios_hoy:enviosHoy,
+        ultimo_envio:ultimoEnvio
+      }
+    })
+    let filtrados=enriched
+    if(filtro==='proximos')filtrados=enriched.filter(i=>i.dias_falta!=null&&i.dias_falta>=0&&i.dias_falta<=2)
+    else if(filtro==='hoy')filtrados=enriched.filter(i=>i.dias_falta===0)
+    else if(filtro==='manana')filtrados=enriched.filter(i=>i.dias_falta===1)
+    else if(filtro==='vencidos')filtrados=enriched.filter(i=>i.dias_falta!=null&&i.dias_falta<0)
+    filtrados.sort((a,b)=>(a.dias_falta-b.dias_falta)||(a.envios_hoy-b.envios_hoy))
+    window._confCache={items:filtrados,fechaActiva:hoyStr}
+    renderPendientesConfirmacion(filtrados,filtro)
+  }catch(e){
+    el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
+  }
+}
+window.cargarPendientesConfirmacion=cargarPendientesConfirmacion
+
+function renderPendientesConfirmacion(items,filtro){
+  const el=document.getElementById('conf-content')
+  if(!el)return
+  if(!items.length){
+    const msg=filtro==='proximos'?'No hay pedidos para contactar en los próximos 2 días.':'Sin resultados para este filtro.'
+    el.innerHTML=`<div class="alert alert-blue">${msg}</div>`
+    return
+  }
+  const total=items.length
+  const sinContactarHoy=items.filter(i=>i.envios_hoy===0).length
+  const yaContactadosHoy=items.filter(i=>i.envios_hoy>0).length
+  const totalMsgs=items.reduce((s,i)=>s+i.envios_total,0)
+
+  const fmtDelta=(ms)=>{
+    if(!ms||ms<0)return'—'
+    const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor((s%3600)/60)
+    if(h>=24){const d=Math.floor(h/24),hr=h%24;return`${d}d ${hr}h`}
+    if(h>0)return`${h}h ${m}m`
+    return`${m}m`
+  }
+
+  const renderCard=(item)=>{
+    const diasFalta=item.dias_falta
+    let urgenciaColor='var(--blue)',urgenciaTxt=''
+    if(diasFalta<0){urgenciaColor='var(--red)';urgenciaTxt=`⚠️ Vencido hace ${-diasFalta} día${-diasFalta>1?'s':''}`}
+    else if(diasFalta===0){urgenciaColor='var(--red)';urgenciaTxt='🔥 HOY es el envío'}
+    else if(diasFalta===1){urgenciaColor='var(--amber)';urgenciaTxt='⏰ Mañana es el envío'}
+    else if(diasFalta===2){urgenciaColor='var(--green)';urgenciaTxt='📅 En 2 días'}
+    else{urgenciaColor='var(--muted)';urgenciaTxt=`En ${diasFalta} días`}
+
+    const nivelInfo=getNivelMensajeConfirmacion(diasFalta,item.envios_hoy)
+    const yaCompletoHoy=item.envios_hoy>=2
+    const cuotaTxt=`${item.envios_hoy}/2 mensajes hoy`
+    const cuotaColor=item.envios_hoy===0?'var(--muted)':(item.envios_hoy===1?'var(--amber)':'var(--green)')
+
+    const contadorBadge=item.envios_total>0
+      ?`<span class="pill" style="background:rgba(96,165,250,.15);color:var(--blue);border:1px solid rgba(96,165,250,.4);font-weight:700">📨 ${item.envios_total} mensaje${item.envios_total>1?'s':''} total</span>`
+      :`<span class="pill" style="background:var(--card2);color:var(--muted);border:1px solid var(--border)">⏳ Sin contactar</span>`
+
+    let ultimoEnvioBadge=''
+    if(item.ultimo_envio){
+      const deltaMs=new Date()-new Date(item.ultimo_envio.created_at)
+      ultimoEnvioBadge=`<div style="margin-top:6px;padding:6px 8px;background:rgba(96,165,250,.10);border:1px solid rgba(96,165,250,.3);border-radius:6px;font-size:11px;color:var(--blue)">📨 Último mensaje hace ${fmtDelta(deltaMs)}${item.ultimo_envio.usuario_nombre?' · por '+item.ultimo_envio.usuario_nombre:''}</div>`
+    }
+
+    const notaBadge=item.nota?`<div style="margin-top:6px;padding:6px 8px;background:rgba(167,139,250,.08);border-left:2px solid #a78bfa;border-radius:4px;font-size:11px"><strong>📝 Nota:</strong> ${item.nota}</div>`:''
+
+    const fechaEnvioFmt=item.fecha_envio_programada?new Date(item.fecha_envio_programada+'T00:00:00').toLocaleDateString('es-CO',{weekday:'short',day:'numeric',month:'short'}):'—'
+
+    const btnEnviar=yaCompletoHoy
+      ?`<button class="btn-sm btn-outline" disabled style="opacity:.5;cursor:not-allowed">✅ Cupo de hoy completo</button>`
+      :`<button class="btn-sm btn-primary" onclick="enviarMensajeConfirmacion(${item.prog_id})">📨 Enviar ${nivelInfo.etiqueta}</button>`
+
+    return`<div class="card" style="margin-bottom:8px;border-left:3px solid ${urgenciaColor}">
+      <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;flex-wrap:wrap">
+        <div style="flex:1;min-width:240px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">
+            <span class="pill" style="background:${urgenciaColor==='var(--red)'?'rgba(239,68,68,.15)':urgenciaColor==='var(--amber)'?'rgba(245,158,11,.15)':'rgba(34,197,94,.15)'};color:${urgenciaColor};border:1px solid ${urgenciaColor};font-weight:700;font-size:11px">${urgenciaTxt}</span>
+            <span style="font-size:11px;color:var(--muted)">Envío: <strong>${fechaEnvioFmt}</strong></span>
+          </div>
+          <div style="font-size:14px;font-weight:600;font-family:monospace">${item.telefono||'—'}</div>
+          <div style="font-size:13px;margin-top:2px">${item.nombre_cliente||'—'} · <strong>${item.producto||'—'}</strong> ${item.cantidad?`(${item.cantidad}u)`:''}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">${item.ciudad||'—'} · ${item.carrier||'sin carrier'}</div>
+          <div style="font-size:12px;margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            ${contadorBadge}
+            <span class="pill" style="background:rgba(167,139,250,.10);color:${cuotaColor};border:1px solid ${cuotaColor};font-size:11px">📊 ${cuotaTxt}</span>
+          </div>
+          ${ultimoEnvioBadge}
+          ${notaBadge}
+        </div>
+        <div style="text-align:right;flex-shrink:0;display:flex;flex-direction:column;gap:6px;min-width:160px">
+          ${btnEnviar}
+          <div style="display:flex;gap:4px">
+            <button class="btn-sm btn-green" onclick="confirmarPendiente(${item.prog_id})" style="flex:1;font-size:11px">✅ Confirmar</button>
+            <button class="btn-sm btn-red" onclick="cancelarPendiente(${item.prog_id})" style="flex:1;font-size:11px">❌ Cancelar</button>
+          </div>
+        </div>
+      </div>
+    </div>`
+  }
+
+  const sinContactarItems=items.filter(i=>i.envios_hoy===0)
+  const conContactoHoyItems=items.filter(i=>i.envios_hoy>0)
+
+  el.innerHTML=`
+    <div class="cards-row c3" style="margin-bottom:16px">
+      <div class="card" style="border-left:3px solid var(--green)"><div class="card-label">⏳ Sin contactar hoy</div><div class="card-val" style="color:var(--green)">${sinContactarHoy}</div></div>
+      <div class="card" style="border-left:3px solid var(--blue)"><div class="card-label">📨 Contactados hoy</div><div class="card-val" style="color:var(--blue)">${yaContactadosHoy}</div></div>
+      <div class="card" style="border-left:3px solid #a78bfa"><div class="card-label">📊 Total mensajes</div><div class="card-val" style="color:#a78bfa">${totalMsgs}</div></div>
+    </div>
+    ${sinContactarItems.length?`<div style="margin-bottom:20px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--green)"></span>
+        <span style="font-size:13px;font-weight:600;color:var(--green);text-transform:uppercase;letter-spacing:.06em">SIN CONTACTAR HOY (${sinContactarItems.length})</span>
+      </div>
+      ${sinContactarItems.map(renderCard).join('')}
+    </div>`:''}
+    ${conContactoHoyItems.length?`<div style="margin-bottom:20px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--blue)"></span>
+        <span style="font-size:13px;font-weight:600;color:var(--blue);text-transform:uppercase;letter-spacing:.06em">CONTACTADOS HOY (${conContactoHoyItems.length})</span>
+      </div>
+      ${conContactoHoyItems.map(renderCard).join('')}
+    </div>`:''}
+  `
+}
+
+window.enviarMensajeConfirmacion=async(progId)=>{
+  const cache=window._confCache||{}
+  const item=(cache.items||[]).find(i=>i.prog_id===progId)
+  if(!item){alert('No se encontró el pedido');return}
+  if(item.envios_hoy>=2){alert('Ya enviaste los 2 mensajes de hoy para este pedido.');return}
+  const nivelInfo=getNivelMensajeConfirmacion(item.dias_falta,item.envios_hoy)
+  const mensaje=armarMensajeConfirmacion(item,nivelInfo.idxTpl)
+  const telLimpio=String(item.telefono||'').replace(/\D/g,'')
+  if(telLimpio.length<7){alert('Teléfono inválido');return}
+  const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`
+  window.open(url,'_blank','noopener')
+  try{
+    await sb.from('confirmacion_envios').insert({
+      programacion_id:progId,
+      telefono:item.telefono,
+      dia_relativo:item.dias_falta,
+      nivel_mensaje:nivelInfo.nivel,
+      usuario_id:me?.id||null,
+      usuario_nombre:me?.nombre||null
+    })
+    logAction('confirmacion_mensaje_enviado',{prog_id:progId,telefono:item.telefono,dias_falta:item.dias_falta,nivel:nivelInfo.nivel}).catch(()=>{})
+  }catch(e){console.warn('No se pudo registrar envío de confirmación:',e)}
+  setTimeout(()=>cargarPendientesConfirmacion(),800)
+}
+
+window.confirmarPendiente=(progId)=>{
+  const cache=window._confCache||{}
+  const item=(cache.items||[]).find(i=>i.prog_id===progId)
+  if(!item)return
+  closeModal()
+  const div=document.createElement('div')
+  div.id='user-modal';div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:440px">
+    <div class="modal-title">✅ Confirmar pedido</div>
+    <div class="modal-sub">${item.nombre_cliente||item.telefono} · ${item.producto||'—'}</div>
+    <div class="alert alert-blue" style="margin-top:12px;font-size:12px">
+      El pedido pasará a estado <strong>CONFIRMADO</strong> y saldrá de esta lista. Listo para envío.
+    </div>
+    <div class="fld" style="margin-top:10px">
+      <label>Nota (opcional)</label>
+      <textarea id="conf-motivo" rows="2" placeholder="Ej: cliente confirmó por WhatsApp" style="resize:vertical"></textarea>
+    </div>
+    <div id="conf-modal-msg" style="margin-top:10px"></div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
+      <button class="btn-sm btn-green" onclick="aplicarResolucionPendiente(${progId},'confirmado')">✅ Confirmar</button>
+    </div>
+  </div>`
+  div.onclick=closeModal
+  document.body.appendChild(div)
+}
+
+window.cancelarPendiente=(progId)=>{
+  const cache=window._confCache||{}
+  const item=(cache.items||[]).find(i=>i.prog_id===progId)
+  if(!item)return
+  closeModal()
+  const sugerencias=['Cliente no responde','Cliente canceló','Cliente se arrepintió','Cliente no tiene plata aún']
+  const div=document.createElement('div')
+  div.id='user-modal';div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:480px">
+    <div class="modal-title">❌ Cancelar pedido</div>
+    <div class="modal-sub">${item.nombre_cliente||item.telefono} · ${item.producto||'—'}</div>
+    <div class="fld" style="margin-top:12px">
+      <label>Motivo (obligatorio)</label>
+      <textarea id="conf-motivo" rows="3" placeholder="Escribe el motivo de la cancelación..." style="resize:vertical"></textarea>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px">Sugerencias:</div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">
+        ${sugerencias.map(s=>`<button class="btn-sm btn-outline" onclick="document.getElementById('conf-motivo').value='${s.replace(/'/g,"\\'")}'" style="padding:3px 8px;font-size:11px">${s}</button>`).join('')}
+      </div>
+    </div>
+    <div id="conf-modal-msg" style="margin-top:10px"></div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
+      <button class="btn-sm btn-red" onclick="aplicarResolucionPendiente(${progId},'cancelado')">❌ Cancelar pedido</button>
+    </div>
+  </div>`
+  div.onclick=closeModal
+  document.body.appendChild(div)
+}
+
+window.aplicarResolucionPendiente=async(progId,nuevoEstado)=>{
+  const cache=window._confCache||{}
+  const item=(cache.items||[]).find(i=>i.prog_id===progId)
+  if(!item)return
+  const motivo=document.getElementById('conf-motivo')?.value?.trim()||''
+  const msgEl=document.getElementById('conf-modal-msg')
+  if(nuevoEstado==='cancelado'&&!motivo){
+    if(msgEl)msgEl.innerHTML='<div class="alert alert-red">El motivo es obligatorio para cancelar</div>'
+    return
+  }
+  if(msgEl)msgEl.innerHTML='<div class="loading">Aplicando...</div>'
+  const{error:e1}=await sb.from('programaciones_envio').update({
+    estado:nuevoEstado,
+    motivo:motivo||null,
+    updated_at:new Date().toISOString()
+  }).eq('id',progId)
+  if(e1){if(msgEl)msgEl.innerHTML=`<div class="alert alert-red">${e1.message}</div>`;return}
+  const estadoMapeo=nuevoEstado==='confirmado'?'CONFIRMADO':'CANCELADO'
+  try{
+    await sb.from('mapeos').update({estado_final:estadoMapeo}).eq('id',item.mapeo_id)
+  }catch(_){}
+  const accionLog=nuevoEstado==='confirmado'?'pendiente_confirmado':'pendiente_cancelado'
+  logAction(accionLog,{prog_id:progId,mapeo_id:item.mapeo_id,telefono:item.telefono,producto:item.producto,motivo:motivo||null}).catch(()=>{})
+  closeModal()
+  setTimeout(()=>cargarPendientesConfirmacion(),200)
 }
 
 

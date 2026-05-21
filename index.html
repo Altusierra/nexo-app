@@ -4297,20 +4297,52 @@ async function cargarNovedadesPorFecha(){
     }
     const{data:items}=await sb.from('novedades_items').select('*').eq('reporte_id',rep.id).limit(5000)
     const{data:resols}=await sb.from('novedades_resoluciones').select('*').order('created_at',{ascending:false}).limit(10000)
-    const resolByKey={}, contactByKey={}, contactCountByKey={}
+    // Indexar como ARRAYS (no objeto directo) para poder filtrar por timestamp
+    const resolByKey={}, contactByKey={}
     for(const r of (resols||[])){
       const k=(r.telefono||'')+'|'+(r.orden_id||'')
       if(r.accion==='contactada'){
-        if(!contactByKey[k])contactByKey[k]=r
-        contactCountByKey[k]=(contactCountByKey[k]||0)+1
+        if(!contactByKey[k])contactByKey[k]=[]
+        contactByKey[k].push(r)
       }else{
-        if(!resolByKey[k])resolByKey[k]=r
+        if(!resolByKey[k])resolByKey[k]=[]
+        resolByKey[k].push(r)
       }
+    }
+    // Helper: timestamp exacto de la novedad (fecha + hora si existe). Null si fecha mal.
+    function _novTs(it){
+      if(!it.fecha_novedad)return null
+      const p=it.fecha_novedad.split('-')
+      if(p.length!==3)return null
+      let h=0,m=0
+      if(it.hora_novedad){
+        const hm=String(it.hora_novedad).match(/(\d{1,2}):(\d{2})/)
+        if(hm){h=parseInt(hm[1])||0; m=parseInt(hm[2])||0}
+      }
+      const d=new Date(`${p[2]}-${p[1]}-${p[0]}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00`)
+      return isNaN(d)?null:d.getTime()
     }
     const enriched=(items||[]).map(it=>{
       const k=_novKey(it)
-      const r=resolByKey[k]
-      const ct=contactByKey[k]
+      const tsNov=_novTs(it)
+      // Resolución aplicable: la más reciente cuyo created_at >= timestamp de la novedad.
+      // Si no se conoce el timestamp de la novedad, se mantiene la lógica antigua (toma la más reciente).
+      let r=null
+      const resolList=resolByKey[k]||[]
+      for(const cand of resolList){
+        const tsRes=new Date(cand.created_at).getTime()
+        if(tsNov===null||tsRes>=tsNov){r=cand;break}
+      }
+      // Contactada: la más reciente posterior a la novedad + contador de las posteriores
+      let ct=null, contactCount=0
+      const contactList=contactByKey[k]||[]
+      for(const cand of contactList){
+        const tsRes=new Date(cand.created_at).getTime()
+        if(tsNov===null||tsRes>=tsNov){
+          if(!ct)ct=cand
+          contactCount++
+        }
+      }
       const cat=NOV_RULES[(it.cat_idx||1)-1]||{pri:'NORMAL',tipo:it.tipo||'Otra novedad',color:'var(--muted)',bg:'var(--card2)',border:'var(--border)',idx:99}
       let dias=it.dias_desde_novedad
       if(it.fecha_novedad){
@@ -4329,7 +4361,7 @@ async function cargarNovedadesPorFecha(){
         dias,ad_id:it.ad_id,
         resol:r?{accion:r.accion,usuario:r.usuario_nombre,cuando:r.created_at,motivo:r.motivo}:null,
         contact:ct?{cuando:ct.created_at,usuario:ct.usuario_nombre}:null,
-        contactCount:contactCountByKey[k]||0
+        contactCount:contactCount
       }
     })
     enriched.sort((a,b)=>a.cat.idx-b.cat.idx||(b.dias||0)-(a.dias||0))

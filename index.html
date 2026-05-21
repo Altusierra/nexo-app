@@ -3659,14 +3659,19 @@ async function cargarNovedadesPorFecha(){
     }
     const{data:items}=await sb.from('novedades_items').select('*').eq('reporte_id',rep.id).limit(5000)
     const{data:resols}=await sb.from('novedades_resoluciones').select('*').order('created_at',{ascending:false}).limit(10000)
-    const resolByKey={}
+    const resolByKey={}, contactByKey={}
     for(const r of (resols||[])){
       const k=(r.telefono||'')+'|'+(r.orden_id||'')
-      if(!resolByKey[k])resolByKey[k]=r
+      if(r.accion==='contactada'){
+        if(!contactByKey[k])contactByKey[k]=r
+      }else{
+        if(!resolByKey[k])resolByKey[k]=r
+      }
     }
     const enriched=(items||[]).map(it=>{
       const k=_novKey(it)
       const r=resolByKey[k]
+      const ct=contactByKey[k]
       const cat=NOV_RULES[(it.cat_idx||1)-1]||{pri:'NORMAL',tipo:it.tipo||'Otra novedad',color:'var(--muted)',bg:'var(--card2)',border:'var(--border)',idx:99}
       let dias=it.dias_desde_novedad
       if(it.fecha_novedad){
@@ -3683,7 +3688,8 @@ async function cargarNovedadesPorFecha(){
         fechaNov:it.fecha_novedad,horaNov:it.hora_novedad,
         cat:{...cat,idx:it.cat_idx||cat.idx,tipo:it.tipo||cat.tipo,pri:it.prioridad||cat.pri},
         dias,ad_id:it.ad_id,
-        resol:r?{accion:r.accion,usuario:r.usuario_nombre,cuando:r.created_at,motivo:r.motivo}:null
+        resol:r?{accion:r.accion,usuario:r.usuario_nombre,cuando:r.created_at,motivo:r.motivo}:null,
+        contact:ct?{cuando:ct.created_at,usuario:ct.usuario_nombre}:null
       }
     })
     enriched.sort((a,b)=>a.cat.idx-b.cat.idx||(b.dias||0)-(a.dias||0))
@@ -3705,6 +3711,13 @@ function renderNovedadesContent(rep,items){
   const resueltas=items.filter(isResuelta)
 
   const esc=(s)=>(s||'').toString().replace(/'/g,"\\'").replace(/\n/g,' ')
+  const fmtDelta=(ms)=>{
+    if(!ms||ms<0)return'—'
+    const s=Math.floor(ms/1000), h=Math.floor(s/3600), m=Math.floor((s%3600)/60)
+    if(h>=24){const d=Math.floor(h/24),hr=h%24;return`${d}d ${hr}h`}
+    if(h>0)return`${h}h ${m}m`
+    return`${m}m`
+  }
   const renderCard=(m)=>{
     const diasTxt=(m.dias!==null&&m.dias!==undefined)?`${m.dias}d`:'—'
     const diasColor=m.dias>5?'var(--red)':m.dias>3?'var(--amber)':'var(--green)'
@@ -3715,6 +3728,20 @@ function renderNovedadesContent(rep,items){
       ?`<button class="btn-sm btn-outline" onclick="desmarcarResuelta('${m.tel}','${esc(m.orden_id)}')">↩️ Desmarcar</button>`
       :`<button class="btn-sm btn-primary" onclick="marcarResuelta('${m.tel}','${esc(m.orden_id)}')">✅ Marcar resuelta</button>`
     const badge=marcada?`<div style="margin-top:6px;padding:6px 8px;background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.4);border-radius:6px;font-size:11px;color:var(--green)">✅ Marcada por ${m.resol.usuario||'—'} · ${(m.resol.cuando||'').slice(11,16)}</div>`:''
+    // Badge de contacto (solo si fue contactada y NO está aún resuelta)
+    let contactBadge=''
+    if(m.contact&&!marcada){
+      const deltaMs=new Date()-new Date(m.contact.cuando)
+      contactBadge=`<div style="margin-top:6px;padding:6px 8px;background:rgba(96,165,250,.12);border:1px solid rgba(96,165,250,.4);border-radius:6px;font-size:11px;color:var(--blue)">📨 Contactada hace ${fmtDelta(deltaMs)} · por ${m.contact.usuario||'—'} · ${(m.contact.cuando||'').slice(11,16)}</div>`
+    }
+    // Badge de tiempo de resolución (delta contacto → resuelta)
+    let resTimeBadge=''
+    if(m.contact&&marcada&&m.resol?.cuando){
+      const deltaMs=new Date(m.resol.cuando)-new Date(m.contact.cuando)
+      if(deltaMs>0){
+        resTimeBadge=`<div style="margin-top:4px;padding:5px 8px;background:rgba(139,92,246,.10);border:1px solid rgba(139,92,246,.35);border-radius:6px;font-size:11px;color:#a78bfa">⏱️ Resuelta en <strong>${fmtDelta(deltaMs)}</strong> desde contacto</div>`
+      }
+    }
     const bgCard=marcada?'background:rgba(34,197,94,.05)':''
     return`<div class="card" style="margin-bottom:8px;border-left:3px solid ${m.cat.color};${bgCard}">
       <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;flex-wrap:wrap">
@@ -3725,7 +3752,9 @@ function renderNovedadesContent(rep,items){
           <div style="font-size:12px;margin-top:4px"><span class="pill" style="background:${m.cat.bg};color:${m.cat.color};border:1px solid ${m.cat.border}">${m.cat.tipo}</span></div>
           <div style="font-size:11px;color:var(--muted);margin-top:4px;font-style:italic">"${m.causal||''}"</div>
           ${m.aclaracion?`<div style="font-size:10px;color:var(--subtle);margin-top:2px">↳ ${m.aclaracion}</div>`:''}
+          ${contactBadge}
           ${badge}
+          ${resTimeBadge}
         </div>
         <div style="text-align:right;flex-shrink:0">
           <div style="font-size:18px;font-weight:700;color:${diasColor}">${diasTxt}</div>
@@ -3751,6 +3780,17 @@ function renderNovedadesContent(rep,items){
   }
   const total=items.length, pendientes=urgentes.length+medias.length+normales.length, marcadas=resueltas.length
   const pctMarcadas=total>0?Math.round(marcadas*100/total):0
+  // Pendientes con protocolo asignado (cat.idx entre 1 y 8) y no resueltas
+  const colaPendientes=[...urgentes,...medias,...normales].filter(m=>NOV_PROTO[m.cat.idx])
+  const colaContactadas=colaPendientes.filter(m=>m.contact).length
+  const colaSinContactar=colaPendientes.length-colaContactadas
+  const botonCola=colaPendientes.length>0?`
+    <div style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <button class="btn-primary" style="padding:12px 18px;font-size:14px;font-weight:600;border-radius:10px;background:linear-gradient(135deg,#7c5cff,#5b8def);border:none;color:#fff;cursor:pointer;box-shadow:0 4px 14px rgba(124,92,255,.35)" onclick="abrirColaProtocolos()">
+        📨 Enviar protocolos (${colaSinContactar} sin contactar${colaContactadas>0?` · ${colaContactadas} ya contactadas`:''})
+      </button>
+      <span style="font-size:11px;color:var(--muted)">Modo cola — envía mensajes uno por uno sin perder tiempo</span>
+    </div>`:''
   el.innerHTML=`
     <div class="alert alert-blue" style="margin-bottom:12px">
       📅 Lote del <strong>${rep.fecha_lote}</strong> · ${total} novedades · ✅ ${marcadas} marcadas (${pctMarcadas}%) · ⏳ ${pendientes} pendientes
@@ -3762,6 +3802,7 @@ function renderNovedadesContent(rep,items){
       <div class="card" style="border-left:3px solid var(--blue)"><div class="card-label">🔵 Normal</div><div class="card-val" style="color:var(--blue)">${normales.length}</div></div>
     </div>
     <div class="alert alert-yellow" style="margin-bottom:16px">⏱️ Tiempo máximo de respuesta: <strong>1 HORA</strong> en horario laboral. Atender primero las 🔴 rojas.</div>
+    ${botonCola}
     ${renderSection('Atender primero','URGENTE',urgentes,'var(--red)')}
     ${renderSection('Resolver hoy','MEDIA',medias,'var(--amber)')}
     ${renderSection('Más tiempo disponible','NORMAL',normales,'var(--blue)')}
@@ -4019,6 +4060,164 @@ window.mostrarProtocolo=(idx,nombre,tel,producto,carrier,direccion)=>{
   div.onclick=closeModal
   document.body.appendChild(div)
 }
+
+// ── COLA DE PROTOCOLOS (modo cola secuencial) ──────────────
+window._colaState={items:[],idx:0,inicio:null,fin:null,timerId:null,contactadasEnSesion:0,saltadas:0}
+
+function _colaEscHtml(s){return(s||'').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function _colaArmarMensaje(m){
+  const proto=NOV_PROTO[m.cat.idx]
+  if(!proto)return{titulo:'—',msg:'',resp:''}
+  const carrierNom=m.carrier||'ENVÍA / INTERRAPIDÍSIMO'
+  const msgFinal=proto.msg.replace(/\[NOMBRE\]/g,m.nombre||'[NOMBRE]').replace(/\[PRODUCTO\]/g,m.producto||'[PRODUCTO]').replace(/\[CARRIER\]/g,carrierNom)
+  const respFinal=proto.resp.replace(/\[TELÉFONO\]|\[TELEFONO\]/g,m.tel||'[TELÉFONO]').replace(/\[DIRECCIÓN COMPLETA\]|\[DIRECCION COMPLETA\]/g,m.direccion||'[DIRECCIÓN COMPLETA]')
+  return{titulo:proto.titulo,msg:msgFinal,resp:respFinal}
+}
+function _colaFmtTime(ms){
+  if(!ms||ms<0)return'0s'
+  const s=Math.floor(ms/1000), m=Math.floor(s/60), sr=s%60
+  if(m>=60){const h=Math.floor(m/60), mr=m%60;return`${h}h ${mr}m`}
+  if(m>0)return`${m}m ${sr}s`
+  return`${sr}s`
+}
+
+window.abrirColaProtocolos=()=>{
+  const cache=window._novCache||{}
+  const items=(cache.items||[]).filter(m=>NOV_PROTO[m.cat.idx]&&!(m.resol?.accion==='resuelta'))
+  if(!items.length){alert('No hay novedades pendientes con protocolo.');return}
+  // Sin contactar primero, luego ya contactadas (por si necesita reenviar)
+  const sinContactar=items.filter(m=>!m.contact)
+  const yaContactadas=items.filter(m=>m.contact)
+  const cola=[...sinContactar,...yaContactadas]
+  window._colaState={items:cola,idx:0,inicio:Date.now(),fin:null,timerId:null,contactadasEnSesion:0,saltadas:0}
+  closeModal()
+  const div=document.createElement('div')
+  div.id='user-modal'
+  div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:680px;padding:0;overflow:hidden">
+    <div id="cola-body"></div>
+  </div>`
+  div.onclick=(e)=>{if(e.target===div){_colaConfirmarCerrar()}}
+  document.body.appendChild(div)
+  _colaRender()
+  window._colaState.timerId=setInterval(()=>{
+    const t=document.getElementById('cola-timer')
+    if(t&&window._colaState.inicio&&!window._colaState.fin){
+      t.textContent=_colaFmtTime(Date.now()-window._colaState.inicio)
+    }
+  },1000)
+}
+
+function _colaCerrar(){
+  if(window._colaState.timerId){clearInterval(window._colaState.timerId);window._colaState.timerId=null}
+  closeModal()
+  cargarNovedadesPorFecha()
+}
+
+function _colaRender(){
+  const st=window._colaState
+  const body=document.getElementById('cola-body')
+  if(!body)return
+  const total=st.items.length
+  if(st.idx>=total){
+    if(!st.fin)st.fin=Date.now()
+    const dur=st.fin-st.inicio
+    const prom=st.contactadasEnSesion>0?Math.round(dur/st.contactadasEnSesion/1000):0
+    body.innerHTML=`<div style="padding:32px;text-align:center">
+      <div style="font-size:42px;margin-bottom:8px">🎉</div>
+      <div style="font-size:20px;font-weight:700;margin-bottom:6px">¡Cola terminada!</div>
+      <div style="font-size:13px;color:var(--muted);margin-bottom:20px">Buen trabajo. Te quedó este resumen:</div>
+      <div class="cards-row c3" style="margin-bottom:16px">
+        <div class="card" style="border-left:3px solid var(--green)"><div class="card-label">✅ Contactadas</div><div class="card-val" style="color:var(--green)">${st.contactadasEnSesion} / ${total}</div></div>
+        <div class="card" style="border-left:3px solid var(--blue)"><div class="card-label">⏱ Tiempo total</div><div class="card-val" style="color:var(--blue);font-size:20px">${_colaFmtTime(dur)}</div></div>
+        <div class="card" style="border-left:3px solid #a78bfa"><div class="card-label">⚡ Promedio</div><div class="card-val" style="color:#a78bfa;font-size:20px">${st.contactadasEnSesion>0?prom+'s/nov':'—'}</div></div>
+      </div>
+      ${st.saltadas>0?`<div class="alert alert-yellow" style="margin-bottom:14px">⏩ Saltaste ${st.saltadas} novedad${st.saltadas>1?'es':''}. Las puedes contactar más tarde.</div>`:''}
+      <button class="btn-primary" style="padding:10px 18px" onclick="_colaCerrarBtn()">Cerrar</button>
+    </div>`
+    if(st.timerId){clearInterval(st.timerId);st.timerId=null}
+    return
+  }
+  const m=st.items[st.idx]
+  const armado=_colaArmarMensaje(m)
+  const pct=Math.round(((st.idx)/total)*100)
+  const yaContactada=!!m.contact
+  const diasTxt=(m.dias!==null&&m.dias!==undefined)?`${m.dias}d`:'—'
+  const diasColor=m.dias>5?'var(--red)':m.dias>3?'var(--amber)':'var(--green)'
+  body.innerHTML=`
+    <div style="padding:14px 18px;border-bottom:1px solid var(--border);background:var(--card2)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="font-size:13px;font-weight:600">📨 Cola de protocolos — Novedad <strong style="color:var(--blue)">${st.idx+1}</strong> de <strong>${total}</strong></div>
+        <div style="font-size:12px;color:var(--muted)">⏱ <span id="cola-timer">${_colaFmtTime(Date.now()-st.inicio)}</span> · ✅ ${st.contactadasEnSesion} contactadas${st.saltadas?` · ⏩ ${st.saltadas} saltadas`:''}</div>
+      </div>
+      <div style="margin-top:8px;height:6px;background:var(--card);border-radius:3px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,#7c5cff,#5b8def);transition:width .25s"></div>
+      </div>
+    </div>
+    <div style="padding:16px 18px">
+      <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+        <div style="flex:1;min-width:220px">
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px">${m.cat.pri}</div>
+          <div style="font-size:15px;font-weight:700">${_colaEscHtml(m.nombre)||'—'}</div>
+          <div style="font-size:13px;color:var(--muted);font-family:monospace">${m.tel||'—'}</div>
+          <div style="font-size:12px;margin-top:6px"><span class="pill" style="background:${m.cat.bg};color:${m.cat.color};border:1px solid ${m.cat.border}">${_colaEscHtml(m.cat.tipo)}</span></div>
+          <div style="font-size:11px;color:var(--muted);margin-top:6px">${_colaEscHtml(m.producto)||'—'} · ${_colaEscHtml(m.ciudad)||'—'}, ${_colaEscHtml(m.depto)||'—'} · ${_colaEscHtml(m.carrier)||'—'}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:22px;font-weight:700;color:${diasColor}">${diasTxt}</div>
+          <div style="font-size:10px;color:var(--muted)">días</div>
+        </div>
+      </div>
+      ${yaContactada?`<div style="margin-bottom:10px;padding:8px 10px;background:rgba(96,165,250,.12);border:1px solid rgba(96,165,250,.4);border-radius:6px;font-size:12px;color:var(--blue)">📨 Ya contactada por ${m.contact.usuario||'—'} el ${(m.contact.cuando||'').slice(0,16).replace('T',' ')}</div>`:''}
+      <div style="font-size:11px;font-weight:600;color:var(--green);margin-bottom:6px;letter-spacing:.04em">📱 MENSAJE LISTO PARA ENVIAR</div>
+      <div style="background:var(--card2);padding:12px;border-radius:8px;font-size:13px;white-space:pre-line;line-height:1.5;border:1px solid var(--border);max-height:200px;overflow-y:auto">${_colaEscHtml(armado.msg)}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+        <button style="flex:1;min-width:160px;padding:12px;font-size:14px;font-weight:600;background:#25D366;border:none;color:#fff;border-radius:8px;cursor:pointer" onclick="_colaAbrirWa()">💬 Abrir WhatsApp</button>
+        <button class="btn-outline" style="padding:12px 16px;font-size:13px;border-radius:8px;cursor:pointer" onclick="_colaSaltar()">⏩ Saltar</button>
+        <button class="btn-outline" style="padding:12px 16px;font-size:13px;border-radius:8px;cursor:pointer" onclick="_colaSiguiente()">⏭️ Siguiente</button>
+      </div>
+      <div style="margin-top:10px;font-size:11px;color:var(--muted);text-align:center">Al darle "Abrir WhatsApp" se marca como contactada y avanza sola en 2s</div>
+      <div style="margin-top:14px;text-align:center"><button class="btn-sm btn-outline" onclick="_colaConfirmarCerrar()">Pausar cola</button></div>
+    </div>`
+}
+
+window._colaAbrirWa=async()=>{
+  const st=window._colaState
+  const m=st.items[st.idx]
+  if(!m)return
+  const armado=_colaArmarMensaje(m)
+  const telLimpio=String(m.tel||'').replace(/\D/g,'')
+  const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(armado.msg)}`
+  window.open(url,'_blank','noopener')
+  if(!m.contact){
+    try{
+      await sb.from('novedades_resoluciones').insert({
+        telefono:m.tel,orden_id:m.orden_id||null,accion:'contactada',motivo:null,
+        usuario_id:me?.id||null,usuario_nombre:me?.nombre||null
+      })
+      m.contact={cuando:new Date().toISOString(),usuario:me?.nombre||''}
+      logAction('novedad_contactada_cola',{tel:m.tel,orden_id:m.orden_id}).catch(()=>{})
+    }catch(e){console.warn('No se pudo registrar contacto:',e)}
+  }
+  st.contactadasEnSesion++
+  const body=document.getElementById('cola-body')
+  if(body){
+    const overlay=document.createElement('div')
+    overlay.style.cssText='position:absolute;inset:0;background:rgba(34,197,94,.18);display:flex;align-items:center;justify-content:center;font-size:54px;pointer-events:none;border-radius:inherit;z-index:5'
+    overlay.textContent='✅'
+    body.style.position='relative'
+    body.appendChild(overlay)
+    setTimeout(()=>{st.idx++;_colaRender()},2000)
+  }else{
+    st.idx++;_colaRender()
+  }
+}
+
+window._colaSiguiente=()=>{window._colaState.idx++;_colaRender()}
+window._colaSaltar=()=>{window._colaState.saltadas++;window._colaState.idx++;_colaRender()}
+window._colaConfirmarCerrar=()=>{if(confirm('¿Pausar la cola? Tu progreso ya está guardado.'))_colaCerrar()}
+window._colaCerrarBtn=()=>{_colaCerrar()}
 
 // ── AUXILIAR: CIERRE JORNADA ───────────────────────────────
 async function pageAuxCierre(c){

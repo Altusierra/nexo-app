@@ -681,12 +681,12 @@ async function loadDash(){
   }
 
   // 4. Conversaciones desde reportes_diarios
-  const{data:reps}=await sb.from('reportes_diarios').select('conversaciones,fecha,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
+  const{data:reps}=await sb.from('reportes_diarios').select('conversaciones,fecha,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
   let conv=0
   const _convSeen={}
   for(const r of (reps||[])){
     const resolved=resolveProdName(r.producto_nombre).nombre||(r.producto_nombre||'')
-    const k=(r.fecha||'')+'|'+_normProd(resolved)
+    const k=(r.fecha||'')+'|'+(r.producto_id||_normProd(resolved))
     if(_convSeen[k])continue
     _convSeen[k]=true
     conv+=r.conversaciones||0
@@ -894,12 +894,12 @@ async function cargarResumenSemanal(){
   for(const i of (insData||[])){const wk=_weekKey(_weekMonday(i.fecha));gastoByWeek[wk]=(gastoByWeek[wk]||0)+(i.spend||0)}
 
   // Conversaciones desde reportes_diarios (por semana, dedupe por fecha+producto, último gana)
-  const{data:reportesConv}=await sb.from('reportes_diarios').select('fecha,conversaciones,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
+  const{data:reportesConv}=await sb.from('reportes_diarios').select('fecha,conversaciones,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
   const convByWeek={}
   const _convSemSeen={}
   for(const r of (reportesConv||[])){
     const resolved=resolveProdName(r.producto_nombre).nombre||(r.producto_nombre||'')
-    const k=(r.fecha||'')+'|'+_normProd(resolved)
+    const k=(r.fecha||'')+'|'+(r.producto_id||_normProd(resolved))
     if(_convSemSeen[k])continue
     _convSemSeen[k]=true
     const wk=_weekKey(_weekMonday(r.fecha))
@@ -1412,6 +1412,7 @@ async function pageAdminProductos(c){
       <input type="text" id="prod-search" placeholder="🔍 Buscar producto..." style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;flex:1;min-width:200px;outline:none" oninput="filterProductos()">
       <button class="btn-sm btn-primary" onclick="modalAddProducto()">➕ Agregar producto</button>
       <button class="btn-sm btn-outline" id="btn-toggle-archivados" onclick="toggleVerArchivados()" style="border-color:var(--amber);color:var(--amber)">👁️ Ver archivados</button>
+      <button class="btn-sm btn-outline" id="btn-rematch-nulls" onclick="rematcharProductosNulls()" style="border-color:var(--blue);color:var(--blue)" title="Reintenta resolver producto_id para reportes que quedaron sin matchear">🔗 Re-matchear NULLs</button>
     </div>
     <div id="prods-list">${productos.map(prod=>renderProdAccordion(prod,maestrosList)).join('')}</div>
     <div id="archivados-section" style="display:none;margin-top:20px;padding-top:16px;border-top:2px dashed var(--amber)">
@@ -1760,6 +1761,61 @@ async function pageAdminProductos(c){
     logAction('producto_desarchivado',{producto_id:id,nombre:nom}).catch(()=>{})
     await loadProductos()
     pageAdminProductos(document.getElementById('content'))
+  }
+
+  // Re-matchea reportes_diarios con producto_id NULL contra productos actuales
+  // (incluyendo aliases). Útil después de agregar un alias nuevo o renombrar un producto.
+  window.rematcharProductosNulls=async()=>{
+    const btn=document.getElementById('btn-rematch-nulls')
+    if(btn){btn.disabled=true;btn.innerHTML='⏳ Buscando...'}
+    try{
+      // 1. Traer todas las filas con producto_id NULL y producto_nombre no vacío
+      const{data:huerfanos,error}=await sb.from('reportes_diarios')
+        .select('id,producto_nombre,fecha')
+        .is('producto_id',null)
+        .not('producto_nombre','is',null)
+        .neq('producto_nombre','')
+      if(error)throw error
+      if(!huerfanos||!huerfanos.length){
+        alert('✅ No hay reportes con producto_id en NULL. Todo está matcheado.')
+        return
+      }
+      // 2. Resolver cada uno con resolveProdName (matchea nombre canónico + aliases + keywords)
+      const aActualizar=[]
+      const sinMatch=[]
+      for(const r of huerfanos){
+        const resolved=resolveProdName(r.producto_nombre)
+        if(resolved.id)aActualizar.push({id:r.id,producto_id:resolved.id,nombre:resolved.nombre})
+        else sinMatch.push({producto_nombre:r.producto_nombre,fecha:r.fecha})
+      }
+      // 3. Actualizar la BD uno por uno (los IDs no se pueden enviar en bulk con UPDATE simple)
+      let actualizados=0,errores=0
+      for(const u of aActualizar){
+        const{error:ue}=await sb.from('reportes_diarios').update({producto_id:u.producto_id}).eq('id',u.id)
+        if(ue)errores++;else actualizados++
+      }
+      // 4. Audit log
+      logAction('reportes_rematch_nulls',{
+        total_huerfanos:huerfanos.length,actualizados,errores,sin_match:sinMatch.length
+      }).catch(()=>{})
+      // 5. Reporte al usuario
+      let resumen=`🔗 Re-matcheo terminado\n\n`
+      resumen+=`📊 Encontrados con producto_id NULL: ${huerfanos.length}\n`
+      resumen+=`✅ Actualizados: ${actualizados}\n`
+      if(errores)resumen+=`⚠️ Errores al actualizar: ${errores}\n`
+      if(sinMatch.length){
+        resumen+=`❌ Sin match (no coinciden con ningún producto/alias): ${sinMatch.length}\n\n`
+        const muestra=sinMatch.slice(0,10).map(s=>`  · "${s.producto_nombre}" (${s.fecha})`).join('\n')
+        resumen+=`Ejemplos:\n${muestra}`
+        if(sinMatch.length>10)resumen+=`\n...y ${sinMatch.length-10} más`
+        resumen+=`\n\nSugerencia: agrega estos nombres como aliases del producto correcto y vuelve a correr.`
+      }
+      alert(resumen)
+    }catch(e){
+      alert('Error: '+(e.message||e))
+    }finally{
+      if(btn){btn.disabled=false;btn.innerHTML='🔗 Re-matchear NULLs'}
+    }
   }
 }
 
@@ -7329,12 +7385,12 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   }
 
   // ── También buscar ventas del reporte diario (ad_ids manuales del auxiliar) ──
-  const{data:reportes}=await sb.from('reportes_diarios').select('ad_ids,fecha,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false})
+  const{data:reportes}=await sb.from('reportes_diarios').select('ad_ids,fecha,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false})
   if(reportes?.length){
     const seen=new Set()
     const uniqueReportes=[]
     for(const rep of reportes){
-      const key=rep.fecha+'|'+rep.producto_nombre
+      const key=rep.fecha+'|'+(rep.producto_id||rep.producto_nombre)
       if(seen.has(key))continue
       seen.add(key)
       uniqueReportes.push(rep)
@@ -7733,11 +7789,11 @@ window.viewCampDetail=async(campId,customDesde,customHasta)=>{
   }
 
   // Reportes diarios (auxiliar)
-  const{data:reportes}=await sb.from('reportes_diarios').select('ad_ids,fecha,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false})
+  const{data:reportes}=await sb.from('reportes_diarios').select('ad_ids,fecha,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false})
   if(reportes?.length){
     const seen=new Set()
     for(const rep of reportes){
-      const key=rep.fecha+'|'+rep.producto_nombre
+      const key=rep.fecha+'|'+(rep.producto_id||rep.producto_nombre)
       if(seen.has(key))continue
       seen.add(key)
       if(!rep.ad_ids)continue

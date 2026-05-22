@@ -3390,7 +3390,7 @@ window.procesarAsignador=async()=>{
       nuevos.push(m)
     }
     if(nuevos.length>0){
-      const{error}=await sb.from('mapeos').insert(nuevos)
+      const{data:insertados,error}=await sb.from('mapeos').insert(nuevos).select('id,telefono,fecha,ad_id,producto,estado_inicial')
       if(error){msg.innerHTML=`<div class="alert alert-red">Error guardando: ${error.message}</div>`;return}
       guardadas=nuevos.length
       logAction('asignador_procesado',{guardadas,duplicadas,total:lineas.length,correcciones:correcciones.length}).catch(()=>{})
@@ -3398,6 +3398,28 @@ window.procesarAsignador=async()=>{
       if(correcciones.length>0){
         logAction('asignador_producto_corregido',{total:correcciones.length,items:correcciones.slice(0,50)}).catch(()=>{})
       }
+      // Fase 3 — event sourcing: registrar un evento 'creado' por cada mapeo recién insertado.
+      // Solo se ejecuta para los registros NUEVOS (no para duplicados).
+      // Si la inserción de eventos falla, NO aborta el flujo: el mapeo ya está guardado.
+      try{
+        const eventos=(insertados||[]).map(r=>({
+          mapeo_id:r.id,
+          evento:'creado',
+          fuente:'asignador',
+          usuario_id:me?.id||null,
+          detalle:{
+            telefono:r.telefono,
+            fecha:r.fecha,
+            ad_id:r.ad_id||null,
+            producto:r.producto,
+            estado_inicial:r.estado_inicial
+          }
+        }))
+        if(eventos.length>0){
+          const{error:evErr}=await sb.from('mapeo_eventos').insert(eventos)
+          if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+        }
+      }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
     }
   }
 

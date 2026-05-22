@@ -410,11 +410,11 @@ const NAV={
   auxiliar:[
     {id:'aux-asignador',icon:'📍',label:'Asignador'},
     {id:'aux-dropi',icon:'📊',label:'Cruce Dropi'},
+    {id:'aux-reservado',icon:'🔍',label:'Reservados y Cancelados'},
     {id:'aux-novedades',icon:'⚠️',label:'Novedades'},
     {id:'aux-reclame',icon:'📦',label:'Reclame en Oficina'},
     {id:'aux-seguimiento',icon:'🚚',label:'Seguimiento'},
     {id:'aux-reporte',icon:'📝',label:'Reporte del día'},
-    {id:'aux-reservado',icon:'🔍',label:'Reservados y Cancelados'},
     {id:'aux-cierre',icon:'✅',label:'Cerrar jornada'},
   ]
 }
@@ -2926,6 +2926,57 @@ window.limpiarAsignador=()=>{
 
 let _ultimosResultados=[]
 
+// Construye mapa adId → {producto_id, producto_nombre} usando la cadena:
+// ad_id → meta_campanas(nivel=ad).parent_id → meta_campanas(nivel=adset).parent_id → campaign_id → productos.campaign_ids
+// Solo se llama si hay al menos un adId en las líneas a procesar.
+async function buildAdProductMap(adIds){
+  const out={}
+  if(!Array.isArray(adIds)||!adIds.length)return out
+  const unique=[...new Set(adIds.filter(Boolean).map(String))]
+  if(!unique.length)return out
+  // 1. Traer los anuncios (nivel=ad) para conseguir parent_id (adset_id)
+  let ads=[]
+  for(let i=0;i<unique.length;i+=200){
+    const batch=unique.slice(i,i+200)
+    const{data}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','ad').in('meta_id',batch)
+    if(data)ads=ads.concat(data)
+  }
+  if(!ads.length)return out
+  const adsetIds=[...new Set(ads.map(a=>a.parent_id).filter(Boolean))]
+  if(!adsetIds.length)return out
+  // 2. Traer los adsets para conseguir campaign_id
+  let adsets=[]
+  for(let i=0;i<adsetIds.length;i+=200){
+    const batch=adsetIds.slice(i,i+200)
+    const{data}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','adset').in('meta_id',batch)
+    if(data)adsets=adsets.concat(data)
+  }
+  const adsetToCamp={}
+  for(const s of adsets)adsetToCamp[s.meta_id]=s.parent_id
+  // 3. Construir mapa adId → campaignId
+  const adToCamp={}
+  for(const a of ads){
+    const cid=adsetToCamp[a.parent_id]
+    if(cid)adToCamp[a.meta_id]=cid
+  }
+  // 4. Construir mapa campaignId → producto usando productos.campaign_ids
+  const campToProd={}
+  if(Array.isArray(productos)){
+    for(const p of productos){
+      const cids=Array.isArray(p.campaign_ids)?p.campaign_ids:[]
+      for(const cid of cids){
+        if(cid)campToProd[String(cid)]={producto_id:p.id,producto_nombre:p.nombre}
+      }
+    }
+  }
+  // 5. Unir todo: adId → producto
+  for(const[adId,cid] of Object.entries(adToCamp)){
+    const prod=campToProd[String(cid)]
+    if(prod)out[adId]={producto_id:prod.producto_id,producto_nombre:prod.producto_nombre}
+  }
+  return out
+}
+
 window.procesarAsignador=async()=>{
   const txt=document.getElementById('asign-input').value
   const lineas=txt.split('\n').map(l=>l.trim()).filter(Boolean)
@@ -2978,8 +3029,12 @@ window.procesarAsignador=async()=>{
   // PASO 2: procesar todas las líneas con el asignador
   msg.innerHTML='<div class="alert alert-blue">Procesando…</div>'
   const{D,M,kw,masterByCode}=await cargarAsignDataSiNecesario()
+  // Construir mapa ad_id → producto correcto (solo si hay adIds)
+  const adIdsEnLineas=parsed.filter(p=>p.tipo==='nuevo'&&p.adId).map(p=>p.adId)
+  const adProdMap=await buildAdProductMap(adIdsEnLineas)
   const filas=[]
   const mapeosAGuardar=[]
+  const correcciones=[] // log de correcciones para audit
   for(const p of parsed){
     if(p.tipo==='vacio')continue
     const q=_norm(p.ciudad)
@@ -3003,7 +3058,28 @@ window.procesarAsignador=async()=>{
       estado=r.state;carrier=r.carrier;alt=r.alt;match=df.match
       ciudadDropi=D[df.key].nombre;deptoDropi=D[df.key].dept
     }
-    filas.push({raw:p,ciudadDropi,deptoDropi,estado,carrier,alt,match,maestro:codeMaestro})
+
+    // Resolver producto_id + nombre canónico (cadena: ad_id → producto, fallback a alias/nombre)
+    let prodId=null,prodNombre=p.producto,prodCorregido=false,prodEscrito=p.producto
+    if(p.tipo==='nuevo'){
+      // 1. Intentar por ad_id
+      if(p.adId&&adProdMap[p.adId]){
+        prodId=adProdMap[p.adId].producto_id
+        prodNombre=adProdMap[p.adId].producto_nombre
+        // Comparar con lo que escribió el auxiliar (por alias/nombre)
+        const escritoResuelto=resolveProdName(p.producto)
+        if(escritoResuelto.id!==prodId){
+          prodCorregido=true
+          correcciones.push({telefono:p.tel,ad_id:p.adId,escrito:p.producto,corregido:prodNombre,producto_id:prodId})
+        }
+      }else{
+        // 2. Fallback: resolver por keyword/alias
+        const r=resolveProdName(p.producto)
+        if(r.id){prodId=r.id;prodNombre=r.nombre}
+      }
+    }
+
+    filas.push({raw:p,ciudadDropi,deptoDropi,estado,carrier,alt,match,maestro:codeMaestro,prodCorregido,prodEscrito,prodNombre})
 
     // Solo encolar para guardar si es formato nuevo válido
     if(p.tipo==='nuevo'&&p.tel&&p.fecha&&p.producto){
@@ -3011,7 +3087,8 @@ window.procesarAsignador=async()=>{
         fecha:p.fecha,
         telefono:p.tel,
         ad_id:p.adId||null,
-        producto:p.producto,
+        producto:prodNombre,
+        producto_id:prodId,
         ciudad:ciudadDropi!=='—'?ciudadDropi:p.ciudad,
         cantidad:p.qty||1,
         estado_inicial:estado
@@ -3039,14 +3116,19 @@ window.procesarAsignador=async()=>{
       const{error}=await sb.from('mapeos').insert(nuevos)
       if(error){msg.innerHTML=`<div class="alert alert-red">Error guardando: ${error.message}</div>`;return}
       guardadas=nuevos.length
-      logAction('asignador_procesado',{guardadas,duplicadas,total:lineas.length}).catch(()=>{})
+      logAction('asignador_procesado',{guardadas,duplicadas,total:lineas.length,correcciones:correcciones.length}).catch(()=>{})
+      // Log de correcciones automáticas por ad_id (solo si hubo)
+      if(correcciones.length>0){
+        logAction('asignador_producto_corregido',{total:correcciones.length,items:correcciones.slice(0,50)}).catch(()=>{})
+      }
     }
   }
 
   // PASO 4: render resultado
+  const correccionesHtml=correcciones.length>0?`<br>🔄 ${correcciones.length} producto(s) corregido(s) automáticamente por ad_id`:''
   msg.innerHTML=`<div class="alert alert-green">
     ✅ ${filas.length} línea(s) procesada(s) — CSV listo para copiar a Dropi<br>
-    💾 ${guardadas} venta(s) guardada(s) en sistema${duplicadas>0?` &nbsp;·&nbsp; ⚠️ ${duplicadas} ya estaban registradas`:''}
+    💾 ${guardadas} venta(s) guardada(s) en sistema${duplicadas>0?` &nbsp;·&nbsp; ⚠️ ${duplicadas} ya estaban registradas`:''}${correccionesHtml}
   </div>`
 
   // Resumen por estado
@@ -3063,7 +3145,7 @@ window.procesarAsignador=async()=>{
     <div class="table-wrap"><table>
       <tr><th>Ciudad ingresada</th><th>Dpto. ingresado</th><th>Uds.</th><th>DEPARTAMENTO</th><th>CIUDAD</th><th>Emoji</th><th>¿Enviar?</th><th>TRANSPORTADORA (OPCIONAL)</th><th>Match</th></tr>
       ${filas.map(f=>`<tr>
-        <td data-label="Ciudad ingresada">${f.raw.ciudad}${f.raw.tipo==='nuevo'&&f.raw.tel?`<br><span style="font-size:10px;color:var(--muted)">📞 ${f.raw.tel}${f.raw.adId?' · ad':' · ORG'}</span>`:''}</td>
+        <td data-label="Ciudad ingresada">${f.raw.ciudad}${f.raw.tipo==='nuevo'&&f.raw.tel?`<br><span style="font-size:10px;color:var(--muted)">📞 ${f.raw.tel}${f.raw.adId?' · ad':' · ORG'}</span>`:''}${f.prodCorregido?`<br><span style="font-size:10px;color:var(--amber)">🔄 Producto corregido: "${(f.prodEscrito||'').replace(/[<>]/g,'')}" → ${(f.prodNombre||'').replace(/[<>]/g,'')}</span>`:''}</td>
         <td data-label="Dpto. ingresado">${f.raw.dept||'—'}</td>
         <td data-label="Uds.">${f.raw.qty}u</td>
         <td data-label="DEPARTAMENTO">${f.deptoDropi}</td>

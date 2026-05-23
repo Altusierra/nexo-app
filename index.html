@@ -8336,7 +8336,7 @@ async function renderMetaPortafolio(el,isAdmin){
     tieneGastoRango[c.account_id]=tieneCampActiva&&tieneGasto
   }
 
-  // Break-even
+  // Break-even (global, fallback usado solo cuando una campaña no tiene producto asociado)
   const prod=productos[0]||{}
   const p2=prod.precio_2u||129900,c2=prod.costo_2u||36000
   const fo=prod.flete_outbound||21000,fd=prod.flete_devolucion||18000
@@ -8344,12 +8344,41 @@ async function renderMetaPortafolio(el,isAdmin){
   const margenBE=p2*(1-dp)-c2-fo-(fd*dp)
   const roasBE=margenBE>0?p2/margenBE:999
 
+  // ── BUG FIX: mapa campId → producto (cada campaña usa SU break-even) ──
+  // Antes se usaba productos[0] para TODAS las campañas (incorrecto).
+  // Ahora cruzamos productos.campaign_ids para que cada campaña tenga su propio margenBE.
+  const campToProd={}
+  for(const p of (productos||[])){
+    const cids=Array.isArray(p.campaign_ids)?p.campaign_ids:[]
+    for(const cid of cids){
+      if(cid&&!campToProd[cid])campToProd[cid]=p
+    }
+  }
+  // Función helper: dado un campId, devuelve {p2,c2,fo,fd,dp,margenBE,roasBE,nombre,esGlobal}
+  function _ctxProductoPorCamp(campId){
+    const p=campToProd[campId]
+    if(!p)return{p2,c2,fo,fd,dp,margenBE,roasBE,nombre:'(sin producto asignado)',esGlobal:true}
+    const _p2=p.precio_2u||129900
+    const _c2=p.costo_2u||36000
+    const _fo=p.flete_outbound||21000
+    const _fd=p.flete_devolucion||18000
+    const _dp=p.dev_pct||0.19
+    const _mBE=_p2*(1-_dp)-_c2-_fo-(_fd*_dp)
+    return{
+      p2:_p2,c2:_c2,fo:_fo,fd:_fd,dp:_dp,
+      margenBE:_mBE,
+      roasBE:_mBE>0?_p2/_mBE:999,
+      nombre:p.nombre||'(producto sin nombre)',
+      esGlobal:false
+    }
+  }
+
   // Default dates: last 30 days
   const defHasta=new Date().toISOString().slice(0,10)
   const defDesde=new Date(Date.now()-30*86400000).toISOString().slice(0,10)
 
   // Store portfolio context for expand/filter
-  window._metaPort={campanas,p2,c2,fo,fd,dp,margenBE,roasBE,isAdmin}
+  window._metaPort={campanas,p2,c2,fo,fd,dp,margenBE,roasBE,isAdmin,campToProd,_ctxProductoPorCamp}
 
   let html=`<div style="font-size:12px;color:var(--muted);margin-bottom:14px">Última sync: ${lastStr} · Break-even ROAS: <strong>${roasBE.toFixed(2)}x</strong></div>
     <div style="margin-bottom:14px"><button class="btn-sm btn-primary" onclick="analizarConIA('portafolio','all','Portafolio completo')">🤖 Analizar portafolio con IA</button></div>`
@@ -8575,23 +8604,25 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const cpa=m.conv>0?m.spend/m.conv:0
     const ventasReales=esSoloHoy?v.pendientes:v.ventas
     const cpaReal=ventasReales>0?m.spend/ventasReales:0
-    // ROAS Real = (Ventas confirmadas reales × Precio) / Gasto — reemplaza ROAS Meta inflado
-    const roasReal=m.spend>0&&ventasReales>0?(ventasReales*ctx.p2)/m.spend:0
+    // ── BUG FIX: contexto del producto específico de ESTA campaña ──
+    const ctxCamp=_ctxProductoPorCamp(camp.meta_id)
+    // ROAS Real = (Ventas reales × Precio del producto correcto) / Gasto
+    const roasReal=m.spend>0&&ventasReales>0?(ventasReales*ctxCamp.p2)/m.spend:0
     const avgCtr=m.ctrs.length?(m.ctrs.reduce((a,b)=>a+b,0)/m.ctrs.length):0
     const avgCpm=m.cpms.length?(m.cpms.reduce((a,b)=>a+b,0)/m.cpms.length):0
     const avgFreq=m.freqs.length?(m.freqs.reduce((a,b)=>a+b,0)/m.freqs.length):0
 
-    // Semáforo basado en CPA Real vs CPA Break-even (ctx.margenBE)
+    // Semáforo basado en CPA Real vs CPA Break-even DE LA CAMPAÑA (no global)
     let semCls='',semTxt='Sin actividad',semBorder='var(--border)'
     if(camp._hasData&&m.spend>0){
       if(cpaReal===0&&ventasReales===0){
         // Hay gasto pero no hay ventas reales aún
         semCls='pill-amber';semTxt='⏳ Sin ventas';semBorder='var(--amber)'
-      }else if(cpaReal>ctx.margenBE){
+      }else if(cpaReal>ctxCamp.margenBE){
         semCls='pill-red';semTxt='🔴 STOP';semBorder='var(--red)'
-      }else if(cpaReal>ctx.margenBE*0.7){
+      }else if(cpaReal>ctxCamp.margenBE*0.7){
         semCls='pill-amber';semTxt='🟡 Precaución';semBorder='var(--amber)'
-      }else if(cpaReal>ctx.margenBE*0.45){
+      }else if(cpaReal>ctxCamp.margenBE*0.45){
         semCls='pill-green';semTxt='🟢 Escalar';semBorder='var(--green)'
       }else{
         semCls='pill-blue';semTxt='🟣 Fuego';semBorder='var(--purple)'
@@ -8601,16 +8632,21 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const inactive=!camp._hasData
     const opacity=inactive?'opacity:.5':''
 
+    // Tooltip del producto de referencia (útil para debug visual)
+    const prodTooltip=ctxCamp.esGlobal
+      ?`title="⚠️ Sin producto asociado · usando break-even global $${fmt(ctxCamp.margenBE)}"`
+      :`title="Producto: ${ctxCamp.nombre} · Break-even: $${fmt(ctxCamp.margenBE)}"`
+
     return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" style="margin-bottom:8px;${opacity}">
       <div class="card" style="padding:12px;border-left:3px solid ${semBorder}">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
         <div style="flex:1;min-width:0;cursor:pointer" onclick="viewCampDetail('${camp.meta_id}')"><div style="font-weight:600;font-size:13px">${camp.nombre||camp.meta_id}</div>
-          <div style="font-size:11px;color:var(--muted)">${camp.objetivo||''} · ${camp.estado}</div></div>
+          <div style="font-size:11px;color:var(--muted)">${camp.objetivo||''} · ${camp.estado}${ctxCamp.esGlobal?' · <span style="color:var(--amber)">⚠️ sin producto</span>':''}</div></div>
         <div style="display:flex;gap:4px;align-items:center;flex-shrink:0">
           ${camp._hasData?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();toggleCampDesglose('${camp.meta_id}','${accountId}')" style="padding:4px 8px;font-size:10px" title="Ver conjuntos y anuncios">📊 Desglose</button>`:''}
           <button class="btn-sm btn-outline" onclick="event.stopPropagation();copyMetaId('${camp.meta_id}',this)" style="padding:4px 8px;font-size:10px" title="Copiar ID de campaña">📋 ID</button>
           <button class="btn-sm btn-outline" onclick="event.stopPropagation();analizarConIA('campana','${camp.meta_id}','${(camp.nombre||'').replace(/'/g,"\\'")}','${desde}','${hasta}')" style="padding:4px 8px;font-size:10px" title="Analizar con IA">🤖</button>
-          <span class="pill ${semCls}">${semTxt}</span>
+          <span class="pill ${semCls}" ${prodTooltip}>${semTxt}</span>
         </div>
       </div>
       ${camp._hasData?`<div class="cards-row" style="margin-top:10px;gap:6px;display:grid;grid-template-columns:repeat(6,1fr)">
@@ -8619,7 +8655,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
         <div style="font-size:11px"><span style="color:var(--muted)">CPA Meta</span><br><strong>${cpa>0?'$'+fmt(cpa):'—'}</strong></div>
         <div style="font-size:11px"><span style="color:var(--muted)">Conv.</span><br><strong>${m.conv}</strong></div>
         <div style="font-size:11px"><span style="color:var(--muted)">Ventas</span><br>${esSoloHoy?`<strong style="color:var(--amber)">${v.pendientes} ⏳</strong>`:`<strong style="color:var(--green)">${v.ventas} ✅</strong>`}</div>
-        <div style="font-size:11px"><span style="color:var(--muted)">CPA Real</span><br><strong${ctx.isAdmin&&cpaReal>0?` style="color:${cpaReal<=ctx.margenBE?'var(--green)':'var(--red)'}"`:''}>${cpaReal>0?'$'+fmt(cpaReal):'—'}</strong></div>
+        <div style="font-size:11px"><span style="color:var(--muted)">CPA Real</span><br><strong${ctx.isAdmin&&cpaReal>0?` style="color:${cpaReal<=ctxCamp.margenBE?'var(--green)':'var(--red)'}"`:''} title="Break-even: $${fmt(ctxCamp.margenBE)}">${cpaReal>0?'$'+fmt(cpaReal):'—'}</strong></div>
       </div>
       <div style="display:flex;gap:14px;margin-top:6px;font-size:11px;color:var(--muted)">
         <span>CTR: ${avgCtr.toFixed(2)}%</span><span>CPM: $${fmt(avgCpm)}</span><span>Freq: ${avgFreq.toFixed(1)}</span>
@@ -8742,7 +8778,11 @@ window.toggleCampDesglose=async(campId,accountId)=>{
   try{
     const desde=document.getElementById('meta-desde')?.value||_daysAgo(30)
     const hasta=document.getElementById('meta-hasta')?.value||today()
-    const ctx=window._metaPort||{}
+    const ctxGlobal=window._metaPort||{}
+    // ── BUG FIX: usar el ctx del producto específico de ESTA campaña ──
+    const ctx=(typeof ctxGlobal._ctxProductoPorCamp==='function')
+      ?{...ctxGlobal,...ctxGlobal._ctxProductoPorCamp(campId)}
+      :ctxGlobal
     let token=await getConfig('meta_access_token')
     let adsets=[]
     const agg={}
@@ -8857,7 +8897,16 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
   try{
     const desde=document.getElementById('meta-desde')?.value||_daysAgo(30)
     const hasta=document.getElementById('meta-hasta')?.value||today()
-    const ctx=window._metaPort||{}
+    const ctxGlobal=window._metaPort||{}
+    // ── BUG FIX: subir hasta la campaña padre y usar SU producto ──
+    let ctx=ctxGlobal
+    try{
+      const{data:adsetRow}=await sb.from('meta_campanas').select('parent_id').eq('meta_id',adsetId).eq('nivel','adset').maybeSingle()
+      const campIdPadre=adsetRow?.parent_id
+      if(campIdPadre&&typeof ctxGlobal._ctxProductoPorCamp==='function'){
+        ctx={...ctxGlobal,...ctxGlobal._ctxProductoPorCamp(campIdPadre)}
+      }
+    }catch(_){}
     let token=await getConfig('meta_access_token')
     let ads=[]
     const agg={}

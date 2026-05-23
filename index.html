@@ -8822,6 +8822,10 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
     const adIdsUnicos=[...new Set(adIds.filter(Boolean))]
     if(!adIdsUnicos.length){console.log('[SEM] salida: adIdsUnicos vacío');return}
     const hoy=new Date().toISOString().slice(0,10)
+    // Rango de 30 días (igual que el default del portafolio) para que el semáforo
+    // refleje el mismo dato que el auxiliar ve en la tarjeta de campaña.
+    const desde=new Date(Date.now()-30*86400000).toISOString().slice(0,10)
+    const hasta=hoy
 
     // 1. Subir jerarquía: ad → adset → campaign
     const{data:ads,error:errAds}=await sb.from('meta_campanas').select('meta_id,parent_id,account_id').eq('nivel','ad').in('meta_id',adIdsUnicos)
@@ -8880,12 +8884,12 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
 
     if(!items.length)return
 
-    // 3. Traer gasto del día por meta_id+nivel (desde meta_insights)
+    // 3. Traer gasto del rango por meta_id+nivel (desde meta_insights)
     const todosMetaIds=items.map(i=>i.meta_id)
     let insightsHoy=[]
     for(let i=0;i<todosMetaIds.length;i+=100){
       const batch=todosMetaIds.slice(i,i+100)
-      const{data}=await sb.from('meta_insights').select('meta_id,nivel,spend,conversions,actions').in('meta_id',batch).eq('fecha',hoy)
+      const{data}=await sb.from('meta_insights').select('meta_id,nivel,spend,conversions,actions').in('meta_id',batch).gte('fecha',desde).lte('fecha',hasta)
       if(data)insightsHoy=insightsHoy.concat(data)
     }
     const gastoBy={}
@@ -8899,13 +8903,13 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
       convBy[k]=(convBy[k]||0)+cv
     }
 
-    // 4. Traer todos los mapeos del día para los ads involucrados (una sola query)
+    // 4. Traer todos los mapeos del rango para los ads involucrados (una sola query)
     const todosAdHijos=[...new Set(items.flatMap(i=>i.adIds))]
     let mapeosHoy=[]
     if(todosAdHijos.length){
       for(let i=0;i<todosAdHijos.length;i+=100){
         const batch=todosAdHijos.slice(i,i+100)
-        const{data}=await sb.from('mapeos').select('ad_id,estado_final,fecha,fecha_dropi').in('ad_id',batch).eq('fecha',hoy)
+        const{data}=await sb.from('mapeos').select('ad_id,estado_final,fecha,fecha_dropi').in('ad_id',batch).gte('fecha',desde).lte('fecha',hasta)
         if(data)mapeosHoy=mapeosHoy.concat(data)
       }
     }
@@ -8930,12 +8934,12 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
       const k=`${it.meta_id}|${it.nivel}`
       const gasto=gastoBy[k]||0
       const conv=convBy[k]||0
-      // Ventas reales = pendientes del día (mapeos con fecha=hoy)
+      // Conteo de ventas en el rango (mismo patrón que renderCamp con esSoloHoy=false)
       let ventas=0,canceladas=0,pendientes=0
       for(const adId of it.adIds){
         const ms=mapeosByAd[adId]||[]
         for(const m of ms){
-          // En modo "solo hoy", todo mapeo con fecha=hoy cuenta como pendiente (venta del día)
+          // Si el mapeo es de HOY, cuenta como pendiente (aún no procesado por Dropi)
           if(m.fecha===hoy){pendientes++;continue}
           const cat=(typeof DROPI_STATUS!=='undefined'&&DROPI_STATUS[m.estado_final])?DROPI_STATUS[m.estado_final].cat:'otro'
           if(cat==='cancelado')canceladas++
@@ -8943,7 +8947,8 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
           else ventas++
         }
       }
-      const ventasReales=pendientes // esSoloHoy=true para los disparos del auxiliar
+      // Mismo cálculo de "ventas reales" que renderCamp: ventas confirmadas + pendientes del día
+      const ventasReales=ventas+pendientes
       const cpaReal=ventasReales>0&&gasto>0?gasto/ventasReales:0
 
       // Resolver margenBE: subir hasta campaign

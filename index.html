@@ -5038,13 +5038,37 @@ window.procesarNovedadesXlsx=async()=>{
       item.ad_id=m?.ad_id||null
       if(m?.id&&item.fechaNov){
         const p=item.fechaNov.split('-')
-        if(p.length===3)novUpdates.push({id:m.id,fiso:`${p[2]}-${p[1]}-${p[0]}`})
+        if(p.length===3)novUpdates.push({id:m.id,fiso:`${p[2]}-${p[1]}-${p[0]}`,item})
       }
     }
     let novUpdated=0
     for(const u of novUpdates){
       const{error}=await sb.from('mapeos').update({fecha_novedad:u.fiso}).eq('id',u.id)
-      if(!error)novUpdated++
+      if(!error){
+        novUpdated++
+        // ── Fase 3 paso 4: registrar evento en mapeo_eventos ──
+        try{
+          const{error:evErr}=await sb.from('mapeo_eventos').insert({
+            mapeo_id:u.id,
+            evento:'novedad_detectada',
+            fuente:'novedades_upload',
+            usuario_id:me?.id||null,
+            detalle:{
+              fecha_novedad:u.fiso,
+              causal:u.item?.causal||null,
+              prioridad:u.item?.cat?.pri||null,
+              tipo:u.item?.cat?.tipo||null,
+              cat_idx:u.item?.cat?.idx||null,
+              telefono:u.item?.tel||null,
+              orden_id:u.item?.ordenId||null,
+              guia:u.item?.guia||null,
+              carrier:u.item?.carrier||null,
+              desde_pagina:'novedades'
+            }
+          })
+          if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+        }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
+      }
     }
 
     const fechaLote=today()
@@ -5924,6 +5948,27 @@ window.enviarReclameUno=async(tel,guia)=>{
       usuario_id:me?.id||null,usuario_nombre:me?.nombre||null
     })
     logAction('reclame_enviado',{tel:m.tel,guia:m.guia,nivel}).catch(()=>{})
+    // ── Fase 3 paso 4: registrar evento en mapeo_eventos ──
+    try{
+      const{data:mapData}=await sb.from('mapeos').select('id').eq('telefono',m.tel).order('created_at',{ascending:false}).limit(1).maybeSingle()
+      if(mapData?.id){
+        const{error:evErr}=await sb.from('mapeo_eventos').insert({
+          mapeo_id:mapData.id,
+          evento:'reclame_enviado',
+          fuente:'reclame',
+          usuario_id:me?.id||null,
+          detalle:{
+            nivel_mensaje:nivel,
+            telefono:m.tel,
+            guia:m.guia||null,
+            producto:m.producto||null,
+            carrier:m.carrier||null,
+            desde_pagina:'reclame'
+          }
+        })
+        if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+      }
+    }catch(e2){console.warn('[mapeo_eventos] excepción:',e2.message)}
   }catch(e){console.warn('No se pudo registrar envío:',e)}
   setTimeout(()=>cargarReclamePorFecha(),800)
 }
@@ -5942,6 +5987,26 @@ window.marcarReclameResuelta=async(tel,guia)=>{
     })
     if(error)throw error
     logAction('reclame_resuelta_marcada',{tel:m.tel,guia:m.guia}).catch(()=>{})
+    // ── Fase 3 paso 4: registrar evento en mapeo_eventos ──
+    try{
+      const{data:mapData}=await sb.from('mapeos').select('id').eq('telefono',m.tel).order('created_at',{ascending:false}).limit(1).maybeSingle()
+      if(mapData?.id){
+        const{error:evErr}=await sb.from('mapeo_eventos').insert({
+          mapeo_id:mapData.id,
+          evento:'reclame_resuelta',
+          fuente:'reclame',
+          usuario_id:me?.id||null,
+          detalle:{
+            telefono:m.tel,
+            guia:m.guia||null,
+            producto:m.producto||null,
+            carrier:m.carrier||null,
+            desde_pagina:'reclame'
+          }
+        })
+        if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+      }
+    }catch(e2){console.warn('[mapeo_eventos] excepción:',e2.message)}
     const toast=document.createElement('div')
     toast.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--green);color:#fff;padding:12px 18px;border-radius:8px;font-weight:600;z-index:9999;box-shadow:0 4px 14px rgba(0,0,0,.3)'
     toast.textContent='✅ Pedido marcado como resuelta'
@@ -6114,6 +6179,28 @@ window._recColaAbrirWa=async()=>{
     m.ultimoUsuario=me?.nombre||''
     st.enviadosEnSesion++
     logAction('reclame_enviado_cola',{tel:m.tel,guia:m.guia,nivel,auto:true}).catch(()=>{})
+    // ── Fase 3 paso 4: registrar evento en mapeo_eventos ──
+    try{
+      const{data:mapData}=await sb.from('mapeos').select('id').eq('telefono',m.tel).order('created_at',{ascending:false}).limit(1).maybeSingle()
+      if(mapData?.id){
+        const{error:evErr}=await sb.from('mapeo_eventos').insert({
+          mapeo_id:mapData.id,
+          evento:'reclame_enviado',
+          fuente:'reclame_cola',
+          usuario_id:me?.id||null,
+          detalle:{
+            nivel_mensaje:nivel,
+            telefono:m.tel,
+            guia:m.guia||null,
+            producto:m.producto||null,
+            carrier:m.carrier||null,
+            via_cola:true,
+            desde_pagina:'reclame_cola'
+          }
+        })
+        if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+      }
+    }catch(e2){console.warn('[mapeo_eventos] excepción:',e2.message)}
     _recColaRender()
   }catch(e){console.error('No se pudo registrar envío:',e)}
 }
@@ -6159,6 +6246,27 @@ window._recColaMarcarResuelta=async()=>{
     m.resueltaFecha=new Date().toISOString()
     m.resueltaUsuario=me?.nombre||''
     logAction('reclame_resuelta_marcada',{tel:m.tel,guia:m.guia,desde:'cola'}).catch(()=>{})
+    // ── Fase 3 paso 4: registrar evento en mapeo_eventos ──
+    try{
+      const{data:mapData}=await sb.from('mapeos').select('id').eq('telefono',m.tel).order('created_at',{ascending:false}).limit(1).maybeSingle()
+      if(mapData?.id){
+        const{error:evErr}=await sb.from('mapeo_eventos').insert({
+          mapeo_id:mapData.id,
+          evento:'reclame_resuelta',
+          fuente:'reclame_cola',
+          usuario_id:me?.id||null,
+          detalle:{
+            telefono:m.tel,
+            guia:m.guia||null,
+            producto:m.producto||null,
+            carrier:m.carrier||null,
+            via_cola:true,
+            desde_pagina:'reclame_cola'
+          }
+        })
+        if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+      }
+    }catch(e2){console.warn('[mapeo_eventos] excepción:',e2.message)}
     st.idx++
     _recColaRender()
   }catch(e){alert('No se pudo marcar como resuelta: '+e.message)}
@@ -6505,7 +6613,34 @@ window.actualizarEstadosDropi=async()=>{
     // flete_dev solo se sobreescribe si Dropi lo tiene (devolución real); si no, preserva estimación
     if(r.flete_dev>0)updatePayload.flete_dev_snapshot=r.flete_dev
     const{error}=await sb.from('mapeos').update(updatePayload).eq('id',r.mapeo.id)
-    if(error)fail++;else ok++
+    if(error){fail++}
+    else{
+      ok++
+      // ── Fase 3 paso 3: registrar evento en mapeo_eventos si cambió el estado ──
+      const estadoAnterior=r.mapeo.estado_final||null
+      const estadoNuevo=r.estatus||null
+      if(estadoNuevo&&estadoAnterior!==estadoNuevo){
+        try{
+          const{error:evErr}=await sb.from('mapeo_eventos').insert({
+            mapeo_id:r.mapeo.id,
+            evento:r.si?.cat||'actualizado',
+            fuente:'dropi',
+            usuario_id:me?.id||null,
+            detalle:{
+              estado_anterior:estadoAnterior,
+              estado_nuevo:estadoNuevo,
+              estatus_dropi:r.estatus||null,
+              fecha_dropi:fd||null,
+              transportadora:r.transportadora||null,
+              novedad:r.novedad||null,
+              telefono:r.telefono||null,
+              desde_pagina:'cruce_dropi'
+            }
+          })
+          if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+        }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
+      }
+    }
   }
   msgEl.innerHTML=`<span style="color:var(--green)">✅ ${ok} actualizadas${fail?` · ${fail} errores`:''}</span>`
   logAction('dropi_estados_actualizados',{actualizadas:ok,errores:fail}).catch(()=>{})
@@ -6953,7 +7088,34 @@ window.procesarSeguimiento=async()=>{
         let fd=null
         if(r.fecha_dropi){const p=r.fecha_dropi.split('-');if(p.length===3)fd=`${p[2]}-${p[1]}-${p[0]}`}
         const{error}=await sb.from('mapeos').update({estado_final:r.estatus,fecha_dropi:fd||r.mapeo.fecha_dropi,nombre_cliente:r.ciudad||r.mapeo.nombre_cliente,novedad_texto:r.novedad||r.mapeo.novedad_texto||null,transportadora:r.transportadora||r.mapeo.transportadora||null}).eq('id',r.mapeo.id)
-        if(!error)updated++
+        if(!error){
+          updated++
+          // ── Fase 3 paso 3: registrar evento en mapeo_eventos si cambió el estado ──
+          const estadoAnterior=r.mapeo.estado_final||null
+          const estadoNuevo=r.estatus||null
+          if(estadoNuevo&&estadoAnterior!==estadoNuevo){
+            try{
+              const{error:evErr}=await sb.from('mapeo_eventos').insert({
+                mapeo_id:r.mapeo.id,
+                evento:r.si?.cat||'actualizado',
+                fuente:'dropi_seguimiento',
+                usuario_id:me?.id||null,
+                detalle:{
+                  estado_anterior:estadoAnterior,
+                  estado_nuevo:estadoNuevo,
+                  estatus_dropi:r.estatus||null,
+                  fecha_dropi:fd||null,
+                  transportadora:r.transportadora||null,
+                  novedad:r.novedad||null,
+                  telefono:r.telefono||null,
+                  fecha_lote:r.fecha_lote||null,
+                  desde_pagina:'seguimiento'
+                }
+              })
+              if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+            }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
+          }
+        }
       }
     }
     msg.innerHTML+=`<div class="alert alert-blue" style="margin-top:8px">💾 ${updated} estados actualizados automáticamente</div>`

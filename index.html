@@ -7915,6 +7915,314 @@ window.runMetaSyncAccount=async(accountId,accountName,days)=>{
   }
 }
 
+// Renderiza los badges de escaladas/reducciones del rango en cada tarjeta de campaña
+function _renderEscaladasBadges(escaladas,campId){
+  if(!escaladas||!escaladas.length)return ''
+  const hoy=new Date().toISOString().slice(0,10)
+  const items=escaladas.slice(0,3).map(e=>{
+    const esHoy=e.fecha===hoy
+    const tipoIcon=e.tipo==='escalada'?'📈':'📉'
+    const colorBorde=e.tipo==='escalada'?'var(--green)':'var(--amber)'
+    const colorFondo=e.tipo==='escalada'?'rgba(34,197,94,.08)':'rgba(245,158,11,.08)'
+    const cambioTxt=(e.cambio_pct>0?'+':'')+Math.round(e.cambio_pct)+'%'
+    const fechaTxt=esHoy?'HOY':new Date(e.fecha+'T00:00:00').toLocaleDateString('es-CO',{day:'numeric',month:'short'})
+    const horaTxt=e.hora_cambio?new Date(e.hora_cambio).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}):''
+    // Veredicto badge
+    let veredictoTxt=''
+    if(e.tipo==='escalada'){
+      if(!e.dia_cerrado){veredictoTxt='<span style="color:var(--muted);font-size:10px">⏳ Evaluando…</span>'}
+      else if(e.veredicto==='exitosa'){veredictoTxt=`<span style="color:var(--green);font-weight:600;font-size:10px">✅ EXITOSA${e.veredicto_pct?' ('+e.veredicto_pct+'%)':''}</span>`}
+      else if(e.veredicto==='neutral'){veredictoTxt='<span style="color:var(--amber);font-weight:600;font-size:10px">⚖️ NEUTRAL</span>'}
+      else if(e.veredicto==='perjudicial'){veredictoTxt='<span style="color:var(--red);font-weight:600;font-size:10px">❌ PERJUDICIAL</span>'}
+    }else{
+      veredictoTxt='<span style="color:var(--muted);font-size:10px">(reducción de cierre)</span>'
+    }
+    const ventasAntes=e.ventas_reportadas_al_cambio||0
+    const ventasCierre=e.ventas_reportadas_cierre||0
+    const ventasExtra=ventasCierre-ventasAntes
+    return`<div style="padding:6px 10px;border-left:3px solid ${colorBorde};background:${colorFondo};border-radius:4px;font-size:11px;margin-top:4px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <strong>${tipoIcon} ${e.tipo==='escalada'?'ESCALADA':'REDUCCIÓN'} ${fechaTxt}${horaTxt?' '+horaTxt:''} · ${cambioTxt}</strong>
+        ${veredictoTxt}
+      </div>
+      <div style="margin-top:3px;color:var(--muted);font-size:10px">
+        $${fmt(e.budget_anterior)} → $${fmt(e.budget_nuevo)} ·
+        Antes: ${ventasAntes} ventas · Cierre: ${ventasCierre} ventas${ventasExtra!==0?` (${ventasExtra>0?'+':''}${ventasExtra})`:''}
+      </div>
+    </div>`
+  }).join('')
+  const masTxt=escaladas.length>3?`<div style="margin-top:4px;font-size:10px"><a href="#" onclick="event.preventDefault();event.stopPropagation();verHistorialEscaladas('${campId}')" style="color:var(--blue)">+${escaladas.length-3} más · Ver historial completo</a></div>`:`<div style="margin-top:4px"><a href="#" onclick="event.preventDefault();event.stopPropagation();verHistorialEscaladas('${campId}')" style="color:var(--blue);font-size:10px">📋 Ver historial completo</a></div>`
+  return items+masTxt
+}
+
+// Modal: historial completo de escaladas (campaña + sus adsets)
+window.verHistorialEscaladas=async(campId)=>{
+  if(!campId)return
+  const existing=document.getElementById('escaladas-modal')
+  if(existing)existing.remove()
+  const overlay=document.createElement('div')
+  overlay.id='escaladas-modal'
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10000;display:flex;align-items:center;justify-content:center;padding:20px;overflow-y:auto'
+  overlay.onclick=(e)=>{if(e.target===overlay)overlay.remove()}
+  overlay.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;max-width:760px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 10px 40px rgba(0,0,0,.5)">
+    <div style="padding:18px 22px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;background:var(--card);z-index:2">
+      <div style="font-size:16px;font-weight:600">📈 Historial de escaladas y reducciones</div>
+      <button onclick="document.getElementById('escaladas-modal').remove()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;line-height:1">✕</button>
+    </div>
+    <div id="escaladas-body" style="padding:18px 22px"><div class="loading">Cargando historial...</div></div>
+  </div>`
+  document.body.appendChild(overlay)
+  const body=document.getElementById('escaladas-body')
+  try{
+    // Traer escaladas: las directas al campId + las de adsets cuyo parent_id sea campId
+    const{data:adsetsHijos}=await sb.from('meta_campanas').select('meta_id').eq('nivel','adset').eq('parent_id',campId)
+    const idsBuscar=[campId].concat((adsetsHijos||[]).map(a=>a.meta_id))
+    const{data:escaladas}=await sb.from('meta_escaladas').select('*').in('meta_id',idsBuscar).order('hora_cambio',{ascending:false}).limit(100)
+    if(!escaladas?.length){
+      body.innerHTML='<div class="alert alert-blue">Sin escaladas registradas para esta campaña.</div>'
+      return
+    }
+    const itemsHtml=escaladas.map(e=>{
+      const tipoIcon=e.tipo==='escalada'?'📈':'📉'
+      const colorBorde=e.tipo==='escalada'?'var(--green)':'var(--amber)'
+      const cambioTxt=(e.cambio_pct>0?'+':'')+Math.round(e.cambio_pct)+'%'
+      const fechaFmt=new Date(e.fecha+'T00:00:00').toLocaleDateString('es-CO',{day:'numeric',month:'short',year:'numeric'})
+      const horaTxt=e.hora_cambio?new Date(e.hora_cambio).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}):''
+      let veredictoBox=''
+      if(e.tipo==='escalada'){
+        if(!e.dia_cerrado){
+          veredictoBox=`<div style="margin-top:8px;padding:8px;background:rgba(160,160,160,.1);border-radius:6px;font-size:12px;color:var(--muted)">⏳ Evaluando — el día aún no se ha cerrado</div>`
+        }else if(e.veredicto==='exitosa'){
+          veredictoBox=`<div style="margin-top:8px;padding:8px;background:rgba(34,197,94,.10);border:1px solid var(--green);border-radius:6px;font-size:12px;color:var(--green)"><strong>✅ ESCALADA EXITOSA</strong>${e.veredicto_pct?` — ventas después del cambio fueron ${e.veredicto_pct}% de las previas`:''}</div>`
+        }else if(e.veredicto==='neutral'){
+          veredictoBox=`<div style="margin-top:8px;padding:8px;background:rgba(245,158,11,.10);border:1px solid var(--amber);border-radius:6px;font-size:12px;color:var(--amber)"><strong>⚖️ ESCALADA NEUTRAL</strong> — sin impacto claro en ventas</div>`
+        }else if(e.veredicto==='perjudicial'){
+          veredictoBox=`<div style="margin-top:8px;padding:8px;background:rgba(239,68,68,.10);border:1px solid var(--red);border-radius:6px;font-size:12px;color:var(--red)"><strong>❌ ESCALADA PERJUDICIAL</strong> — las ventas no justificaron la subida</div>`
+        }
+      }else{
+        veredictoBox=`<div style="margin-top:8px;padding:8px;background:rgba(160,160,160,.08);border-radius:6px;font-size:12px;color:var(--muted)">📉 Reducción de presupuesto · su efecto se ve al día siguiente, no se evalúa</div>`
+      }
+      const nivelLabel=e.nivel==='campaign'?'Campaña':e.nivel==='adset'?'Conjunto':'Anuncio'
+      return`<div style="border-left:4px solid ${colorBorde};padding:12px 14px;background:var(--card2);border-radius:6px;margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+          <div style="font-size:14px;font-weight:600">${tipoIcon} ${fechaFmt}${horaTxt?' · '+horaTxt:''} · ${cambioTxt}</div>
+          <span class="pill" style="background:var(--card);font-size:10px">${nivelLabel}</span>
+        </div>
+        <div style="margin-top:4px;font-size:12px"><strong>${e.nombre||'—'}</strong></div>
+        <div style="margin-top:6px;font-size:11px;color:var(--muted)">
+          Presupuesto: $${fmt(e.budget_anterior)} → $${fmt(e.budget_nuevo)}
+        </div>
+        <div style="margin-top:8px;display:grid;grid-template-columns:repeat(2,1fr);gap:8px">
+          <div style="padding:6px;background:var(--card);border-radius:4px">
+            <div style="font-size:10px;color:var(--muted)">Al momento del cambio</div>
+            <div style="font-size:13px;font-weight:600">${e.ventas_reportadas_al_cambio||0} ventas</div>
+            <div style="font-size:10px;color:var(--muted)">$${fmt(e.gasto_al_cambio||0)} gasto</div>
+          </div>
+          <div style="padding:6px;background:var(--card);border-radius:4px">
+            <div style="font-size:10px;color:var(--muted)">Al cierre del día</div>
+            <div style="font-size:13px;font-weight:600">${e.ventas_reportadas_cierre||0} ventas</div>
+            <div style="font-size:10px;color:var(--muted)">$${fmt(e.gasto_cierre||0)} gasto</div>
+          </div>
+        </div>
+        ${veredictoBox}
+      </div>`
+    }).join('')
+    body.innerHTML=itemsHtml
+  }catch(e){
+    body.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
+  }
+}
+
+// ── ESCALADAS / SNAPSHOTS HORARIOS ──────────────────────────────────────
+// Umbral mínimo de cambio para registrar una "escalada" (15%)
+const ESCALADA_UMBRAL_PCT=15
+
+// Detecta cambios de presupuesto comparando valores nuevos contra los que ya
+// están en BD. Inserta en meta_escaladas si el cambio supera el umbral.
+// Captura snapshot del momento (ventas reportadas, gasto del día hasta ahora).
+async function _detectarCambioPresupuesto(metaId,nivel,nombre,accountId,budgetNuevo,budgetAnterior){
+  if(!budgetNuevo||!budgetAnterior||budgetAnterior<=0)return
+  const cambioPct=((budgetNuevo-budgetAnterior)/budgetAnterior)*100
+  if(Math.abs(cambioPct)<ESCALADA_UMBRAL_PCT)return
+  const tipo=cambioPct>0?'escalada':'reduccion'
+  const hoy=new Date().toISOString().slice(0,10)
+  const ahora=new Date().toISOString()
+  // Verificar que no exista ya una escalada para este meta_id HOY con este budget_nuevo
+  // (evita duplicados si el sync corre varias veces sin que cambie nada)
+  const{data:exist}=await sb.from('meta_escaladas').select('id,budget_nuevo')
+    .eq('meta_id',metaId).eq('fecha',hoy)
+    .order('hora_cambio',{ascending:false}).limit(1).maybeSingle()
+  if(exist&&Math.abs((exist.budget_nuevo||0)-budgetNuevo)<1)return // ya registrado este cambio
+  // Snapshot AL MOMENTO del cambio
+  // Ventas reportadas hasta ahora del día (mapeos con fecha=hoy y ad_id pertenece a este meta_id)
+  let ventasMomento=0
+  let gastoMomento=0
+  let convMomento=0
+  try{
+    // Obtener ad_ids hijos según nivel
+    let adIds=[]
+    if(nivel==='ad'){adIds=[metaId]}
+    else if(nivel==='adset'){
+      const{data:ads}=await sb.from('meta_campanas').select('meta_id').eq('nivel','ad').eq('parent_id',metaId)
+      adIds=(ads||[]).map(a=>a.meta_id)
+    }else if(nivel==='campaign'){
+      const{data:adsets}=await sb.from('meta_campanas').select('meta_id').eq('nivel','adset').eq('parent_id',metaId)
+      const adsetIds=(adsets||[]).map(a=>a.meta_id)
+      if(adsetIds.length){
+        const{data:ads}=await sb.from('meta_campanas').select('meta_id').eq('nivel','ad').in('parent_id',adsetIds)
+        adIds=(ads||[]).map(a=>a.meta_id)
+      }
+    }
+    if(adIds.length){
+      let mapeos=[]
+      for(let i=0;i<adIds.length;i+=100){
+        const batch=adIds.slice(i,i+100)
+        const{data}=await sb.from('mapeos').select('id').in('ad_id',batch).eq('fecha',hoy)
+        if(data)mapeos=mapeos.concat(data)
+      }
+      ventasMomento=mapeos.length
+    }
+    // Gasto y conv del día desde meta_insights
+    const{data:insHoy}=await sb.from('meta_insights').select('spend,conversions')
+      .eq('meta_id',metaId).eq('nivel',nivel).eq('fecha',hoy).maybeSingle()
+    if(insHoy){
+      gastoMomento=insHoy.spend||0
+      convMomento=insHoy.conversions||0
+    }
+  }catch(e){console.warn('[escaladas] snapshot momento falló:',e.message)}
+  // Insertar
+  try{
+    const{error}=await sb.from('meta_escaladas').insert({
+      meta_id:metaId,nivel:nivel,account_id:accountId,nombre:nombre,
+      budget_anterior:budgetAnterior,budget_nuevo:budgetNuevo,
+      cambio_pct:Math.round(cambioPct*100)/100,
+      tipo:tipo,fecha:hoy,hora_cambio:ahora,detectado_por:'sync_auto',
+      ventas_reportadas_al_cambio:ventasMomento,
+      gasto_al_cambio:gastoMomento,
+      conv_meta_al_cambio:convMomento,
+      ventas_reportadas_cierre:ventasMomento,
+      gasto_cierre:gastoMomento,
+      conv_meta_cierre:convMomento,
+      dia_cerrado:false,
+      veredicto:tipo==='reduccion'?'sin_evaluar':'evaluando'
+    })
+    if(error){console.warn('[escaladas] insert falló:',error.message);return}
+    logAction(tipo==='escalada'?'escalada_detectada':'reduccion_detectada',{
+      meta_id:metaId,nivel,nombre,budget_anterior:budgetAnterior,budget_nuevo:budgetNuevo,cambio_pct:cambioPct
+    }).catch(()=>{})
+  }catch(e){console.warn('[escaladas] excepción:',e.message)}
+}
+
+// Captura un snapshot horario del estado actual de cada campaña/adset con gasto hoy
+async function _capturarSnapshotsHorarios(accountId){
+  try{
+    const hoy=new Date().toISOString().slice(0,10)
+    const ahora=new Date().toISOString()
+    // Traer insights de hoy para campaign y adset
+    const{data:insCamp}=await sb.from('meta_insights').select('meta_id,nivel,spend,conversions')
+      .eq('account_id',accountId).eq('fecha',hoy).in('nivel',['campaign','adset']).gt('spend',0)
+    if(!insCamp?.length)return
+    // Traer budgets actuales para snapshot
+    const ids=insCamp.map(i=>i.meta_id)
+    const{data:camps}=await sb.from('meta_campanas').select('meta_id,daily_budget').in('meta_id',ids)
+    const budgetById={}
+    for(const c of (camps||[])){if(c.daily_budget)budgetById[c.meta_id]=c.daily_budget}
+    // Para ventas reportadas/confirmadas por meta_id necesitamos ad_ids hijos
+    // (simplificación: contamos mapeos con fecha=hoy y ad_id que pertenezca)
+    // Insertar batch de snapshots
+    const rows=[]
+    for(const i of insCamp){
+      rows.push({
+        meta_id:i.meta_id,nivel:i.nivel,account_id:accountId,
+        fecha:hoy,hora:ahora,
+        budget_actual:budgetById[i.meta_id]||null,
+        gasto_acumulado_dia:i.spend||0,
+        conv_meta_acumulado_dia:i.conversions||0,
+        ventas_reportadas_dia:0, // se podría enriquecer pero sería costoso por cada sync
+        ventas_confirmadas_dia:0
+      })
+    }
+    if(rows.length){
+      const{error}=await sb.from('meta_snapshots_horarios').insert(rows)
+      if(error)console.warn('[snapshots] insert falló:',error.message)
+    }
+  }catch(e){console.warn('[snapshots] excepción:',e.message)}
+}
+
+// Actualiza ventas_reportadas_cierre/gasto_cierre/conv_meta_cierre de las
+// escaladas abiertas (dia_cerrado=false). Si la fecha ya pasó → cierra y
+// calcula veredicto. Se llama al final de cada sync de la cuenta.
+async function _actualizarEscaladasAbiertas(accountId){
+  try{
+    const hoy=new Date().toISOString().slice(0,10)
+    const{data:abiertas}=await sb.from('meta_escaladas')
+      .select('id,meta_id,nivel,fecha,tipo,ventas_reportadas_al_cambio')
+      .eq('account_id',accountId).eq('dia_cerrado',false)
+    if(!abiertas?.length)return
+    for(const esc of abiertas){
+      // Traer ventas y gasto del día completo
+      let adIds=[]
+      if(esc.nivel==='ad'){adIds=[esc.meta_id]}
+      else if(esc.nivel==='adset'){
+        const{data:ads}=await sb.from('meta_campanas').select('meta_id').eq('nivel','ad').eq('parent_id',esc.meta_id)
+        adIds=(ads||[]).map(a=>a.meta_id)
+      }else if(esc.nivel==='campaign'){
+        const{data:adsets}=await sb.from('meta_campanas').select('meta_id').eq('nivel','adset').eq('parent_id',esc.meta_id)
+        const adsetIds=(adsets||[]).map(a=>a.meta_id)
+        if(adsetIds.length){
+          const{data:ads}=await sb.from('meta_campanas').select('meta_id').eq('nivel','ad').in('parent_id',adsetIds)
+          adIds=(ads||[]).map(a=>a.meta_id)
+        }
+      }
+      let ventasDia=0
+      if(adIds.length){
+        let mapeos=[]
+        for(let i=0;i<adIds.length;i+=100){
+          const batch=adIds.slice(i,i+100)
+          const{data}=await sb.from('mapeos').select('id').in('ad_id',batch).eq('fecha',esc.fecha)
+          if(data)mapeos=mapeos.concat(data)
+        }
+        ventasDia=mapeos.length
+      }
+      // Gasto del día desde meta_insights
+      const{data:insDia}=await sb.from('meta_insights').select('spend,conversions')
+        .eq('meta_id',esc.meta_id).eq('nivel',esc.nivel).eq('fecha',esc.fecha).maybeSingle()
+      const gastoDia=insDia?.spend||0
+      const convDia=insDia?.conversions||0
+      // Si la fecha es < hoy → cerrar
+      const yaCerro=esc.fecha<hoy
+      let veredicto='evaluando'
+      let veredictoPct=null
+      if(esc.tipo==='reduccion'){
+        veredicto=yaCerro?'sin_evaluar':'evaluando'
+      }else if(yaCerro){
+        // Ventas extra después de la escalada vs antes
+        const ventasAntes=esc.ventas_reportadas_al_cambio||0
+        const ventasDespues=ventasDia-ventasAntes
+        if(ventasDespues<=0){
+          veredicto='perjudicial';veredictoPct=ventasAntes>0?-100:0
+        }else if(ventasAntes===0){
+          // No había ventas antes, cualquier venta después es positiva
+          veredicto=ventasDespues>=1?'exitosa':'neutral'
+          veredictoPct=null
+        }else{
+          const ratio=(ventasDespues/ventasAntes)*100
+          veredictoPct=Math.round(ratio)
+          if(ratio>=120)veredicto='exitosa'
+          else if(ratio>=80)veredicto='neutral'
+          else veredicto='perjudicial'
+        }
+      }
+      const upd={
+        ventas_reportadas_cierre:ventasDia,gasto_cierre:gastoDia,conv_meta_cierre:convDia,
+        dia_cerrado:yaCerro,veredicto,veredicto_pct:veredictoPct
+      }
+      const{error}=await sb.from('meta_escaladas').update(upd).eq('id',esc.id)
+      if(error)console.warn('[escaladas] update falló:',error.message)
+    }
+  }catch(e){console.warn('[escaladas] actualizar abiertas excepción:',e.message)}
+}
+
 async function _syncOneAccount(accountId,token,days,onProgress){
   const _p=onProgress||(()=>{})
   const actId='act_'+accountId
@@ -7923,13 +8231,41 @@ async function _syncOneAccount(accountId,token,days,onProgress){
   if(days==='all')sd.setFullYear(sd.getFullYear()-3);else sd.setDate(sd.getDate()-days)
   const since=sd.toISOString().slice(0,10)
 
+  // ── Snapshot de budgets anteriores ANTES del upsert (para detectar cambios) ──
+  const{data:prevBudgets}=await sb.from('meta_campanas')
+    .select('meta_id,nivel,daily_budget,nombre')
+    .eq('account_id',accountId).in('nivel',['campaign','adset'])
+  const prevBudgetMap={}
+  const prevNombreMap={}
+  for(const r of (prevBudgets||[])){
+    const key=r.meta_id+'|'+r.nivel
+    prevBudgetMap[key]=r.daily_budget||null
+    prevNombreMap[key]=r.nombre||''
+  }
+
   _p(10,'Campañas...')
   const camps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,effective_status,objective,daily_budget,lifetime_budget',limit:'500'})
+  // Detectar cambios de budget en campañas (CBO) ANTES de hacer upsert
+  for(const c of camps){
+    const newBudget=c.daily_budget?c.daily_budget/100:null
+    const prev=prevBudgetMap[c.id+'|campaign']
+    if(newBudget&&prev){
+      await _detectarCambioPresupuesto(c.id,'campaign',c.name||prevNombreMap[c.id+'|campaign']||'',accountId,newBudget,prev)
+    }
+  }
   for(const c of camps){
     await sb.from('meta_campanas').upsert({meta_id:c.id,account_id:accountId,nivel:'campaign',nombre:c.name||'',estado:c.effective_status||c.status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget/100:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget/100:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
   }
   _p(25,'Ad sets...')
   const adsets=await metaGet(`/${actId}/adsets`,token,{fields:'id,name,status,effective_status,campaign_id,daily_budget',limit:'500'})
+  // Detectar cambios de budget en adsets (ABO) ANTES de hacer upsert
+  for(const s of adsets){
+    const newBudget=s.daily_budget?s.daily_budget/100:null
+    const prev=prevBudgetMap[s.id+'|adset']
+    if(newBudget&&prev){
+      await _detectarCambioPresupuesto(s.id,'adset',s.name||prevNombreMap[s.id+'|adset']||'',accountId,newBudget,prev)
+    }
+  }
   for(const s of adsets){
     await sb.from('meta_campanas').upsert({meta_id:s.id,account_id:accountId,nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.effective_status||s.status||'',daily_budget:s.daily_budget?s.daily_budget/100:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
   }
@@ -7953,6 +8289,9 @@ async function _syncOneAccount(accountId,token,days,onProgress){
       await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
     }
   }
+  // ── Snapshot horario + actualizar escaladas abiertas ──
+  await _capturarSnapshotsHorarios(accountId)
+  await _actualizarEscaladasAbiertas(accountId)
   _p(100,'✅')
 }
 
@@ -8198,6 +8537,23 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     }
   }
 
+  // ── Cargar escaladas del rango por campaña (para badge) ──
+  const{data:escaladasRango}=await sb.from('meta_escaladas')
+    .select('id,meta_id,nivel,fecha,hora_cambio,budget_anterior,budget_nuevo,cambio_pct,tipo,ventas_reportadas_al_cambio,ventas_reportadas_cierre,dia_cerrado,veredicto,veredicto_pct')
+    .eq('account_id',accountId).gte('fecha',desde).lte('fecha',hasta)
+    .order('hora_cambio',{ascending:false})
+  const escaladasByCamp={}
+  for(const e of (escaladasRango||[])){
+    // Solo asociamos al meta_id directo (campaign o adset).
+    // Si es adset, busco el padre campaign para anclarla al header.
+    let campId=e.meta_id
+    if(e.nivel==='adset'){
+      campId=adsetToCamp[e.meta_id]||e.meta_id
+    }
+    if(!escaladasByCamp[campId])escaladasByCamp[campId]=[]
+    escaladasByCamp[campId].push(e)
+  }
+
   // ── Clasificar: con/sin actividad (gasto > 0 en el rango) ──
   const conActividad=[],sinActividad=[]
   for(const camp of camps){
@@ -8252,6 +8608,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
           <div style="font-size:11px;color:var(--muted)">${camp.objetivo||''} · ${camp.estado}</div></div>
         <div style="display:flex;gap:4px;align-items:center;flex-shrink:0">
           ${camp._hasData?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();toggleCampDesglose('${camp.meta_id}','${accountId}')" style="padding:4px 8px;font-size:10px" title="Ver conjuntos y anuncios">📊 Desglose</button>`:''}
+          <button class="btn-sm btn-outline" onclick="event.stopPropagation();copyMetaId('${camp.meta_id}',this)" style="padding:4px 8px;font-size:10px" title="Copiar ID de campaña">📋 ID</button>
           <button class="btn-sm btn-outline" onclick="event.stopPropagation();analizarConIA('campana','${camp.meta_id}','${(camp.nombre||'').replace(/'/g,"\\'")}','${desde}','${hasta}')" style="padding:4px 8px;font-size:10px" title="Analizar con IA">🤖</button>
           <span class="pill ${semCls}">${semTxt}</span>
         </div>
@@ -8266,7 +8623,8 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       </div>
       <div style="display:flex;gap:14px;margin-top:6px;font-size:11px;color:var(--muted)">
         <span>CTR: ${avgCtr.toFixed(2)}%</span><span>CPM: $${fmt(avgCpm)}</span><span>Freq: ${avgFreq.toFixed(1)}</span>
-      </div>`:''}</div>
+      </div>
+      ${_renderEscaladasBadges(escaladasByCamp[camp.meta_id]||[],camp.meta_id)}`:''}</div>
       <div id="desglose-${camp.meta_id}" style="display:none;padding:4px 0 4px 16px"></div>
     </div>`
   }
@@ -8309,6 +8667,71 @@ window.toggleExcluirGlobal=async(accountId,excluir)=>{
 }
 
 // ── Desglose campaña → adsets → ads (lazy loading) ──
+
+// Helper: dado un set de ad_ids + rango de fechas, devuelve métricas reales
+// (ventas, canceladas, pendientes) cruzando con la tabla mapeos.
+// También calcula CPA Real, ROAS Real y semáforo según ctx (break-even).
+async function _calcMetricasPorAdIds(adIds,desde,hasta,gasto,ctx){
+  const out={ventas:0,canceladas:0,pendientes:0,cpaReal:0,roasReal:0,tasaCancel:0,sem:{cls:'',txt:'Sin actividad',border:'var(--border)'}}
+  if(!adIds||!adIds.length)return out
+  const hoy=new Date().toISOString().slice(0,10)
+  const esSoloHoy=(desde===hoy&&hasta===hoy)
+  let mapeos=[]
+  for(let i=0;i<adIds.length;i+=100){
+    const batch=adIds.slice(i,i+100)
+    const{data}=await sb.from('mapeos').select('ad_id,estado_final,fecha,fecha_dropi').in('ad_id',batch).gte('fecha',desde).lte('fecha',hasta)
+    if(data)mapeos=mapeos.concat(data)
+  }
+  for(const m of mapeos){
+    if(m.fecha===hoy){
+      out.pendientes++
+    }else{
+      const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
+      if(cat==='cancelado')out.canceladas++
+      else if(cat==='pendiente'||!m.estado_final)out.pendientes++
+      else out.ventas++
+    }
+  }
+  const ventasReales=esSoloHoy?out.pendientes:out.ventas
+  out.cpaReal=ventasReales>0&&gasto>0?gasto/ventasReales:0
+  out.roasReal=ventasReales>0&&gasto>0?(ventasReales*(ctx?.p2||0))/gasto:0
+  const totalDecidido=out.ventas+out.canceladas
+  out.tasaCancel=totalDecidido>0?(out.canceladas/totalDecidido)*100:0
+  // Semáforo (mismas reglas que renderCamp)
+  if(gasto>0){
+    if(out.cpaReal===0&&ventasReales===0){
+      out.sem={cls:'pill-amber',txt:'⏳ Sin ventas',border:'var(--amber)'}
+    }else if(ctx?.margenBE&&out.cpaReal>ctx.margenBE){
+      out.sem={cls:'pill-red',txt:'🔴 STOP',border:'var(--red)'}
+    }else if(ctx?.margenBE&&out.cpaReal>ctx.margenBE*0.7){
+      out.sem={cls:'pill-amber',txt:'🟡 Precaución',border:'var(--amber)'}
+    }else if(ctx?.margenBE&&out.cpaReal>ctx.margenBE*0.45){
+      out.sem={cls:'pill-green',txt:'🟢 Escalar',border:'var(--green)'}
+    }else if(ctx?.margenBE){
+      out.sem={cls:'pill-blue',txt:'🟣 Fuego',border:'#a78bfa'}
+    }
+  }
+  out.esSoloHoy=esSoloHoy
+  return out
+}
+
+// Helper: copia texto al clipboard
+window.copyMetaId=(id,btn)=>{
+  if(!id)return
+  try{
+    navigator.clipboard.writeText(id)
+    if(btn){
+      const orig=btn.innerHTML
+      btn.innerHTML='✅'
+      setTimeout(()=>{btn.innerHTML=orig},1200)
+    }
+  }catch(e){
+    const ta=document.createElement('textarea')
+    ta.value=id;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta)
+    if(btn){const orig=btn.innerHTML;btn.innerHTML='✅';setTimeout(()=>{btn.innerHTML=orig},1200)}
+  }
+}
+
 window.toggleCampDesglose=async(campId,accountId)=>{
   const el=document.getElementById('desglose-'+campId)
   if(!el)return
@@ -8319,6 +8742,7 @@ window.toggleCampDesglose=async(campId,accountId)=>{
   try{
     const desde=document.getElementById('meta-desde')?.value||_daysAgo(30)
     const hasta=document.getElementById('meta-hasta')?.value||today()
+    const ctx=window._metaPort||{}
     let token=await getConfig('meta_access_token')
     let adsets=[]
     const agg={}
@@ -8327,42 +8751,94 @@ window.toggleCampDesglose=async(campId,accountId)=>{
         const timeRange=JSON.stringify({since:desde,until:hasta})
         const raw=await metaGet(`/${campId}/adsets`,token,{fields:'id,name,status,effective_status',limit:'200'})
         adsets=raw.map(a=>({meta_id:a.id,nombre:a.name||'',estado:a.effective_status||a.status||''}))
-        const ins=await metaGet(`/${campId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,actions',time_range:timeRange,level:'adset',time_increment:'all_days',limit:'200'})
+        const ins=await metaGet(`/${campId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,actions,ctr,cpm,frequency',time_range:timeRange,level:'adset',time_increment:'1',limit:'500'})
         for(const i of ins){
-          if(!agg[i.adset_id])agg[i.adset_id]={spend:0,conv:0,imp:0}
-          agg[i.adset_id].spend+=parseFloat(i.spend||0)
-          agg[i.adset_id].conv+=metaConv(i.actions)
-          agg[i.adset_id].imp+=parseInt(i.impressions||0)
+          if(!agg[i.adset_id])agg[i.adset_id]={spend:0,conv:0,imp:0,clicks:0,ctrs:[],cpms:[],freqs:[]}
+          const a=agg[i.adset_id]
+          a.spend+=parseFloat(i.spend||0)
+          a.conv+=metaConv(i.actions)
+          a.imp+=parseInt(i.impressions||0)
+          a.clicks+=parseInt(i.clicks||0)
+          if(i.ctr)a.ctrs.push(parseFloat(i.ctr))
+          if(i.cpm)a.cpms.push(parseFloat(i.cpm))
+          if(i.frequency)a.freqs.push(parseFloat(i.frequency))
         }
       }
     }catch(_){}
     if(!adsets.length){
       const{data:dbAs}=await sb.from('meta_campanas').select('meta_id,nombre,estado').eq('parent_id',campId).eq('nivel','adset').order('nombre')
       adsets=(dbAs||[]).map(a=>({meta_id:a.meta_id,nombre:a.nombre||'',estado:a.estado||''}))
-      const{data:ins}=await sb.from('meta_insights').select('meta_id,spend,impressions,conversions').eq('nivel','adset').gte('fecha',desde).lte('fecha',hasta).in('meta_id',adsets.map(a=>a.meta_id))
+      const{data:ins}=await sb.from('meta_insights').select('meta_id,spend,impressions,conversions,clicks,ctr,cpm,frequency').eq('nivel','adset').gte('fecha',desde).lte('fecha',hasta).in('meta_id',adsets.map(a=>a.meta_id))
       for(const i of (ins||[])){
-        if(!agg[i.meta_id])agg[i.meta_id]={spend:0,conv:0,imp:0}
-        agg[i.meta_id].spend+=i.spend||0;agg[i.meta_id].conv+=i.conversions||0;agg[i.meta_id].imp+=i.impressions||0
+        if(!agg[i.meta_id])agg[i.meta_id]={spend:0,conv:0,imp:0,clicks:0,ctrs:[],cpms:[],freqs:[]}
+        const a=agg[i.meta_id]
+        a.spend+=i.spend||0;a.conv+=i.conversions||0;a.imp+=i.impressions||0;a.clicks+=i.clicks||0
+        if(i.ctr)a.ctrs.push(parseFloat(i.ctr))
+        if(i.cpm)a.cpms.push(parseFloat(i.cpm))
+        if(i.frequency)a.freqs.push(parseFloat(i.frequency))
       }
     }
     if(!adsets.length){el.innerHTML='<div style="font-size:12px;color:var(--muted);padding:8px">Sin conjuntos de anuncios</div>';el.dataset.loaded='1';return}
+
+    // Cargar ad_ids hijos de cada adset (para cruzar con mapeos y calcular ventas reales)
+    const adsetIds=adsets.map(a=>a.meta_id)
+    const{data:adsRows}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','ad').in('parent_id',adsetIds)
+    const adsByAdset={}
+    for(const r of (adsRows||[])){
+      if(!adsByAdset[r.parent_id])adsByAdset[r.parent_id]=[]
+      adsByAdset[r.parent_id].push(r.meta_id)
+    }
+    // Calcular métricas reales por adset (en paralelo)
+    const metricasByAdset={}
+    await Promise.all(adsets.map(async(as)=>{
+      const adIds=adsByAdset[as.meta_id]||[]
+      const d=agg[as.meta_id]||{spend:0}
+      metricasByAdset[as.meta_id]=await _calcMetricasPorAdIds(adIds,desde,hasta,d.spend||0,ctx)
+    }))
+
     adsets.sort((a,b)=>(agg[b.meta_id]?.spend||0)-(agg[a.meta_id]?.spend||0))
     el.innerHTML=`<div class="section-title" style="font-size:12px;margin-top:8px">📋 Conjuntos de anuncios (${adsets.length})</div>
       ${adsets.map(as=>{
-        const d=agg[as.meta_id]||{spend:0,conv:0,imp:0}
+        const d=agg[as.meta_id]||{spend:0,conv:0,imp:0,clicks:0,ctrs:[],cpms:[],freqs:[]}
         const hasSpend=d.spend>0
+        const mr=metricasByAdset[as.meta_id]||{ventas:0,canceladas:0,pendientes:0,cpaReal:0,roasReal:0,tasaCancel:0,sem:{cls:'',txt:'',border:'var(--border)'},esSoloHoy:false}
+        const cpaMeta=d.conv>0?d.spend/d.conv:0
+        const avgCtr=d.ctrs.length?(d.ctrs.reduce((a,b)=>a+b,0)/d.ctrs.length):0
+        const avgCpm=d.cpms.length?(d.cpms.reduce((a,b)=>a+b,0)/d.cpms.length):0
+        const avgFreq=d.freqs.length?(d.freqs.reduce((a,b)=>a+b,0)/d.freqs.length):0
+        const ventasShow=mr.esSoloHoy?mr.pendientes:mr.ventas
+        const ventasColor=mr.esSoloHoy?'var(--amber)':'var(--green)'
+        const ventasIcon=mr.esSoloHoy?'⏳':'✅'
+        const semBorderUse=hasSpend?mr.sem.border:'var(--border)'
         return`<div style="margin-bottom:6px;${hasSpend?'':'opacity:0.4'}">
-          <div class="card" style="padding:8px 12px;border-left:2px solid ${hasSpend?'var(--blue)':'var(--border)'}">
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+          <div class="card" style="padding:10px 12px;border-left:3px solid ${semBorderUse}">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:${hasSpend?'8px':'0'}">
               <div style="flex:1;min-width:0">
                 <div style="font-weight:500;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${as.nombre}">${as.nombre}</div>
-                <div style="font-size:10px;color:var(--muted)">${as.estado} · $${fmt(d.spend)} · ${d.conv} conv · ${fmt(d.imp)} imp</div>
+                <div style="font-size:10px;color:var(--muted)">${as.estado}</div>
               </div>
-              <div style="display:flex;gap:4px">
-                ${hasSpend?`<button class="btn-sm btn-outline" onclick="toggleAdsetDesglose('${as.meta_id}','${accountId}')" style="padding:3px 6px;font-size:9px">📌 Ads</button>`:''}
+              <div style="display:flex;gap:4px;align-items:center">
+                ${hasSpend?`<button class="btn-sm btn-outline" onclick="toggleAdsetDesglose('${as.meta_id}','${accountId}')" style="padding:3px 6px;font-size:9px" title="Ver anuncios">📌 Ads</button>`:''}
+                <button class="btn-sm btn-outline" onclick="copyMetaId('${as.meta_id}',this)" style="padding:3px 6px;font-size:9px" title="Copiar ID adset">📋</button>
                 <button class="btn-sm btn-outline" onclick="analizarConIA('adset','${as.meta_id}','${(as.nombre||'').replace(/'/g,"\\'")}')" style="padding:3px 6px;font-size:9px">🤖</button>
+                ${hasSpend&&mr.sem.txt?`<span class="pill ${mr.sem.cls}" style="font-size:10px">${mr.sem.txt}</span>`:''}
               </div>
             </div>
+            ${hasSpend?`<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px;font-size:10px">
+              <div><span style="color:var(--muted)">Gasto</span><br><strong>$${fmt(d.spend)}</strong></div>
+              <div><span style="color:var(--muted)" title="(Ventas reales × Precio) / Gasto">ROAS Real</span><br><strong style="color:${mr.roasReal>=1?'var(--green)':mr.roasReal>0?'var(--red)':'var(--muted)'}">${mr.roasReal>0?mr.roasReal.toFixed(2)+'x':'—'}</strong></div>
+              <div><span style="color:var(--muted)">CPA Meta</span><br><strong>${cpaMeta>0?'$'+fmt(cpaMeta):'—'}</strong></div>
+              <div><span style="color:var(--muted)">Conv.</span><br><strong>${d.conv}</strong></div>
+              <div><span style="color:var(--muted)">Ventas</span><br><strong style="color:${ventasColor}">${ventasShow} ${ventasIcon}</strong></div>
+              <div><span style="color:var(--muted)">CPA Real</span><br><strong${ctx.isAdmin&&mr.cpaReal>0?` style="color:${mr.cpaReal<=ctx.margenBE?'var(--green)':'var(--red)'}"`:''}>${mr.cpaReal>0?'$'+fmt(mr.cpaReal):'—'}</strong></div>
+            </div>
+            <div style="display:flex;gap:12px;margin-top:6px;font-size:10px;color:var(--muted);flex-wrap:wrap">
+              <span>CTR: ${avgCtr.toFixed(2)}%</span>
+              <span>CPM: $${fmt(avgCpm)}</span>
+              <span>Freq: ${avgFreq.toFixed(1)}</span>
+              ${mr.canceladas>0?`<span style="color:var(--red)">Cancel: ${mr.canceladas} (${mr.tasaCancel.toFixed(0)}%)</span>`:''}
+              ${mr.pendientes>0&&!mr.esSoloHoy?`<span style="color:var(--amber)">Pendientes: ${mr.pendientes}</span>`:''}
+            </div>`:''}
           </div>
           <div id="desglose-as-${as.meta_id}" style="display:none;padding:2px 0 2px 20px"></div>
         </div>`
@@ -8381,6 +8857,7 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
   try{
     const desde=document.getElementById('meta-desde')?.value||_daysAgo(30)
     const hasta=document.getElementById('meta-hasta')?.value||today()
+    const ctx=window._metaPort||{}
     let token=await getConfig('meta_access_token')
     let ads=[]
     const agg={}
@@ -8389,37 +8866,82 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
         const raw=await metaGet(`/${adsetId}/ads`,token,{fields:'id,name,status,effective_status',limit:'200'})
         ads=raw.map(a=>({meta_id:a.id,nombre:a.name||'',estado:a.effective_status||a.status||''}))
         const timeRange=JSON.stringify({since:desde,until:hasta})
-        const ins=await metaGet(`/${adsetId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,actions',time_range:timeRange,level:'ad',time_increment:'all_days',limit:'200'})
+        const ins=await metaGet(`/${adsetId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,actions,ctr,cpm,frequency',time_range:timeRange,level:'ad',time_increment:'1',limit:'500'})
         for(const i of ins){
-          if(!agg[i.ad_id])agg[i.ad_id]={spend:0,conv:0,imp:0}
-          agg[i.ad_id].spend+=parseFloat(i.spend||0)
-          agg[i.ad_id].conv+=metaConv(i.actions)
-          agg[i.ad_id].imp+=parseInt(i.impressions||0)
+          if(!agg[i.ad_id])agg[i.ad_id]={spend:0,conv:0,imp:0,clicks:0,ctrs:[],cpms:[],freqs:[]}
+          const a=agg[i.ad_id]
+          a.spend+=parseFloat(i.spend||0)
+          a.conv+=metaConv(i.actions)
+          a.imp+=parseInt(i.impressions||0)
+          a.clicks+=parseInt(i.clicks||0)
+          if(i.ctr)a.ctrs.push(parseFloat(i.ctr))
+          if(i.cpm)a.cpms.push(parseFloat(i.cpm))
+          if(i.frequency)a.freqs.push(parseFloat(i.frequency))
         }
       }
     }catch(_){}
     if(!ads.length){
       const{data:dbAds}=await sb.from('meta_campanas').select('meta_id,nombre,estado').eq('parent_id',adsetId).eq('nivel','ad').order('nombre')
       ads=(dbAds||[]).map(a=>({meta_id:a.meta_id,nombre:a.nombre||'',estado:a.estado||''}))
-      const{data:ins}=await sb.from('meta_insights').select('meta_id,spend,impressions,conversions').eq('nivel','ad').gte('fecha',desde).lte('fecha',hasta).in('meta_id',ads.map(a=>a.meta_id))
+      const{data:ins}=await sb.from('meta_insights').select('meta_id,spend,impressions,conversions,clicks,ctr,cpm,frequency').eq('nivel','ad').gte('fecha',desde).lte('fecha',hasta).in('meta_id',ads.map(a=>a.meta_id))
       for(const i of (ins||[])){
-        if(!agg[i.meta_id])agg[i.meta_id]={spend:0,conv:0,imp:0}
-        agg[i.meta_id].spend+=i.spend||0;agg[i.meta_id].conv+=i.conversions||0;agg[i.meta_id].imp+=i.impressions||0
+        if(!agg[i.meta_id])agg[i.meta_id]={spend:0,conv:0,imp:0,clicks:0,ctrs:[],cpms:[],freqs:[]}
+        const a=agg[i.meta_id]
+        a.spend+=i.spend||0;a.conv+=i.conversions||0;a.imp+=i.impressions||0;a.clicks+=i.clicks||0
+        if(i.ctr)a.ctrs.push(parseFloat(i.ctr))
+        if(i.cpm)a.cpms.push(parseFloat(i.cpm))
+        if(i.frequency)a.freqs.push(parseFloat(i.frequency))
       }
     }
     if(!ads.length){el.innerHTML='<div style="font-size:11px;color:var(--muted);padding:6px">Sin anuncios</div>';el.dataset.loaded='1';return}
+
+    // Calcular métricas reales por ad (cada ad cruza con su propio ad_id directo)
+    const metricasByAd={}
+    await Promise.all(ads.map(async(ad)=>{
+      const d=agg[ad.meta_id]||{spend:0}
+      metricasByAd[ad.meta_id]=await _calcMetricasPorAdIds([ad.meta_id],desde,hasta,d.spend||0,ctx)
+    }))
+
     ads.sort((a,b)=>(agg[b.meta_id]?.spend||0)-(agg[a.meta_id]?.spend||0))
     el.innerHTML=ads.map(ad=>{
-      const d=agg[ad.meta_id]||{spend:0,conv:0,imp:0}
+      const d=agg[ad.meta_id]||{spend:0,conv:0,imp:0,clicks:0,ctrs:[],cpms:[],freqs:[]}
       const hasSpend=d.spend>0
-      return`<div style="padding:5px 10px;border-left:2px solid ${hasSpend?'var(--green)':'var(--border)'};margin-bottom:4px;background:var(--card2);border-radius:6px;${hasSpend?'':'opacity:0.4'}">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:6px">
+      const mr=metricasByAd[ad.meta_id]||{ventas:0,canceladas:0,pendientes:0,cpaReal:0,roasReal:0,tasaCancel:0,sem:{cls:'',txt:'',border:'var(--border)'},esSoloHoy:false}
+      const cpaMeta=d.conv>0?d.spend/d.conv:0
+      const avgCtr=d.ctrs.length?(d.ctrs.reduce((a,b)=>a+b,0)/d.ctrs.length):0
+      const avgCpm=d.cpms.length?(d.cpms.reduce((a,b)=>a+b,0)/d.cpms.length):0
+      const avgFreq=d.freqs.length?(d.freqs.reduce((a,b)=>a+b,0)/d.freqs.length):0
+      const ventasShow=mr.esSoloHoy?mr.pendientes:mr.ventas
+      const ventasColor=mr.esSoloHoy?'var(--amber)':'var(--green)'
+      const ventasIcon=mr.esSoloHoy?'⏳':'✅'
+      const semBorderUse=hasSpend?mr.sem.border:'var(--border)'
+      return`<div style="padding:8px 10px;border-left:3px solid ${semBorderUse};margin-bottom:4px;background:var(--card2);border-radius:6px;${hasSpend?'':'opacity:0.4'}">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:${hasSpend?'8px':'0'}">
           <div style="flex:1;min-width:0">
             <div style="font-size:11px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${ad.nombre}">${ad.nombre}</div>
-            <div style="font-size:10px;color:var(--muted)">${ad.estado} · $${fmt(d.spend)} · ${d.conv} conv</div>
+            <div style="font-size:10px;color:var(--muted)">${ad.estado}</div>
           </div>
-          <button class="btn-sm btn-outline" onclick="analizarConIA('anuncio','${ad.meta_id}','${(ad.nombre||'').replace(/'/g,"\\'")}')" style="padding:3px 6px;font-size:9px">🤖</button>
+          <div style="display:flex;gap:4px;align-items:center">
+            <button class="btn-sm btn-outline" onclick="copyMetaId('${ad.meta_id}',this)" style="padding:3px 6px;font-size:9px" title="Copiar ad_id">📋 ID</button>
+            <button class="btn-sm btn-outline" onclick="analizarConIA('anuncio','${ad.meta_id}','${(ad.nombre||'').replace(/'/g,"\\'")}')" style="padding:3px 6px;font-size:9px">🤖</button>
+            ${hasSpend&&mr.sem.txt?`<span class="pill ${mr.sem.cls}" style="font-size:10px">${mr.sem.txt}</span>`:''}
+          </div>
         </div>
+        ${hasSpend?`<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px;font-size:10px">
+          <div><span style="color:var(--muted)">Gasto</span><br><strong>$${fmt(d.spend)}</strong></div>
+          <div><span style="color:var(--muted)" title="(Ventas reales × Precio) / Gasto">ROAS Real</span><br><strong style="color:${mr.roasReal>=1?'var(--green)':mr.roasReal>0?'var(--red)':'var(--muted)'}">${mr.roasReal>0?mr.roasReal.toFixed(2)+'x':'—'}</strong></div>
+          <div><span style="color:var(--muted)">CPA Meta</span><br><strong>${cpaMeta>0?'$'+fmt(cpaMeta):'—'}</strong></div>
+          <div><span style="color:var(--muted)">Conv.</span><br><strong>${d.conv}</strong></div>
+          <div><span style="color:var(--muted)">Ventas</span><br><strong style="color:${ventasColor}">${ventasShow} ${ventasIcon}</strong></div>
+          <div><span style="color:var(--muted)">CPA Real</span><br><strong${ctx.isAdmin&&mr.cpaReal>0?` style="color:${mr.cpaReal<=ctx.margenBE?'var(--green)':'var(--red)'}"`:''}>${mr.cpaReal>0?'$'+fmt(mr.cpaReal):'—'}</strong></div>
+        </div>
+        <div style="display:flex;gap:12px;margin-top:6px;font-size:10px;color:var(--muted);flex-wrap:wrap">
+          <span>CTR: ${avgCtr.toFixed(2)}%</span>
+          <span>CPM: $${fmt(avgCpm)}</span>
+          <span>Freq: ${avgFreq.toFixed(1)}</span>
+          ${mr.canceladas>0?`<span style="color:var(--red)">Cancel: ${mr.canceladas} (${mr.tasaCancel.toFixed(0)}%)</span>`:''}
+          ${mr.pendientes>0&&!mr.esSoloHoy?`<span style="color:var(--amber)">Pendientes: ${mr.pendientes}</span>`:''}
+        </div>`:''}
       </div>`
     }).join('')
     el.dataset.loaded='1'

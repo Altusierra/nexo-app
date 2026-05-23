@@ -3964,7 +3964,10 @@ async function pageAuxReservado(c){
             <div style="font-size:11px;color:var(--muted);margin-bottom:2px">Orden encontrada</div>
             <div style="font-size:16px;font-weight:600;font-family:monospace">${m.telefono}</div>
           </div>
-          <span class="pill" style="background:${cfg.bg};color:${cfg.color};border:1px solid ${cfg.color}">${cfg.label}</span>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <span class="pill" style="background:${cfg.bg};color:${cfg.color};border:1px solid ${cfg.color}">${cfg.label}</span>
+            <button class="btn-sm btn-outline" onclick="verHistorialMapeo('${m.id}')" style="padding:6px 10px;font-size:12px">🕒 Ver historial</button>
+          </div>
         </div>
         <div style="font-size:13px;line-height:1.7;margin-bottom:10px">
           <div><strong>Cliente:</strong> ${m.nombre_cliente||'—'}</div>
@@ -3975,6 +3978,145 @@ async function pageAuxReservado(c){
         ${ultimaAccion}
         <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">${botones}</div>
       </div>`
+  }
+
+  // ── Fase 3 paso 5: Timeline visual de eventos por orden ──
+  window.verHistorialMapeo=async(mapeoId)=>{
+    if(!mapeoId)return
+    // Crear overlay del modal
+    const existing=document.getElementById('timeline-modal')
+    if(existing)existing.remove()
+    const overlay=document.createElement('div')
+    overlay.id='timeline-modal'
+    overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10000;display:flex;align-items:center;justify-content:center;padding:20px;overflow-y:auto'
+    overlay.onclick=(e)=>{if(e.target===overlay)window._cerrarTimelineModal()}
+    overlay.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;max-width:680px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 10px 40px rgba(0,0,0,.5)">
+      <div style="padding:18px 22px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;background:var(--card);z-index:2">
+        <div style="font-size:16px;font-weight:600">🕒 Historial de la orden</div>
+        <button onclick="_cerrarTimelineModal()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;line-height:1">✕</button>
+      </div>
+      <div id="timeline-body" style="padding:18px 22px"><div class="loading">Cargando historial...</div></div>
+    </div>`
+    document.body.appendChild(overlay)
+
+    // Traer mapeo + eventos en paralelo
+    const body=document.getElementById('timeline-body')
+    try{
+      const[mapRes,evRes]=await Promise.all([
+        sb.from('mapeos').select('*').eq('id',mapeoId).maybeSingle(),
+        sb.from('mapeo_eventos').select('id,evento,fuente,detalle,created_at,usuario_id,usuarios(nombre)').eq('mapeo_id',mapeoId).order('created_at',{ascending:true}).limit(500)
+      ])
+      const m=mapRes?.data
+      const eventos=evRes?.data||[]
+      if(!m){body.innerHTML='<div class="alert alert-red">No se encontró la orden</div>';return}
+
+      // Header con datos del mapeo
+      const headerHtml=`<div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:18px;font-size:13px;line-height:1.7">
+        <div><strong>📞 Teléfono:</strong> <span style="font-family:monospace">${m.telefono||'—'}</span></div>
+        <div><strong>👤 Cliente:</strong> ${m.nombre_cliente||'—'}</div>
+        <div><strong>📦 Producto:</strong> ${m.producto||'—'} · ${m.cantidad||1}u</div>
+        <div><strong>🏙️ Ciudad:</strong> ${m.ciudad||'—'}</div>
+        <div><strong>📅 Fecha compra:</strong> ${m.fecha||'—'}</div>
+        <div><strong>🆔 Mapeo ID:</strong> <span style="font-family:monospace;font-size:11px;color:var(--muted)">${m.id}</span></div>
+      </div>`
+
+      // Si no hay eventos, mostrar mensaje
+      if(!eventos.length){
+        body.innerHTML=headerHtml+`<div class="alert alert-amber">
+          📭 Esta orden no tiene eventos registrados todavía.
+          <div style="font-size:11px;margin-top:6px;color:var(--muted)">
+            Solo las órdenes creadas o modificadas después de activar event sourcing tienen historial completo.
+            Las acciones más antiguas pueden estar en el log de actividad general.
+          </div>
+        </div>`
+        return
+      }
+
+      // Catálogo de íconos y colores por evento/fuente
+      const fuenteIcon={
+        asignador:'📝',auxiliar_manual:'👤',dropi:'📦',dropi_seguimiento:'🚚',
+        novedades_upload:'⚠️',reclame:'📨',reclame_cola:'📨'
+      }
+      const eventoColor={
+        creado:'var(--blue)',
+        confirmado:'var(--green)',cancelado:'var(--red)',reactivado:'var(--amber)',
+        envio_programado:'var(--blue)',envio_reprogramado:'var(--amber)',
+        confirmacion_enviada:'var(--blue)',
+        entregado:'var(--green)','novedad_ok':'var(--green)',
+        devuelto:'var(--red)',
+        en_transito:'var(--blue)',en_proceso:'var(--blue)',en_bodega:'var(--amber)',
+        novedad:'var(--amber)',novedad_detectada:'var(--amber)',
+        reclame_enviado:'var(--blue)',reclame_resuelta:'var(--green)',
+        actualizado:'var(--muted)'
+      }
+      const eventoLabel={
+        creado:'Orden creada',
+        confirmado:'Confirmada',cancelado:'Cancelada',reactivado:'Reactivada',
+        envio_programado:'Envío programado',envio_reprogramado:'Envío reprogramado',
+        confirmacion_enviada:'Mensaje de confirmación enviado',
+        entregado:'Entregada',devuelto:'Devuelta',
+        en_transito:'En tránsito',en_proceso:'En proceso',en_bodega:'En bodega',
+        novedad:'Novedad reportada',novedad_ok:'Novedad resuelta (entregada)',
+        novedad_detectada:'Novedad detectada en reporte',
+        reclame_enviado:'Mensaje de reclame enviado',reclame_resuelta:'Reclame marcado como resuelto',
+        cancelado_dropi:'Cancelada (por Dropi)',actualizado:'Estado actualizado'
+      }
+
+      // Render del timeline
+      const eventosHtml=eventos.map((ev,i)=>{
+        const ts=new Date(ev.created_at)
+        const tsTxt=ts.toLocaleString('es-CO',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})
+        const ico=fuenteIcon[ev.fuente]||'•'
+        const color=eventoColor[ev.evento]||'var(--muted)'
+        const label=eventoLabel[ev.evento]||ev.evento
+        const usuario=ev.usuarios?.nombre||(ev.usuario_id?'—':'sistema')
+        // Detalle: pintar campos relevantes
+        const d=ev.detalle||{}
+        const partes=[]
+        if(d.estado_anterior&&d.estado_nuevo)partes.push(`<span style="color:var(--muted)">${d.estado_anterior||'—'}</span> → <strong>${d.estado_nuevo}</strong>`)
+        if(d.motivo)partes.push(`📝 <em>"${d.motivo}"</em>`)
+        if(d.fecha_envio)partes.push(`📅 Envío: ${d.fecha_envio}`)
+        if(d.fecha_anterior&&d.fecha_envio&&d.fecha_anterior!==d.fecha_envio)partes.push(`(antes: ${d.fecha_anterior})`)
+        if(d.nivel_mensaje&&d.nivel_mensaje!==99)partes.push(`Nivel ${d.nivel_mensaje}`)
+        if(d.dia_relativo)partes.push(`Día ${d.dia_relativo} antes`)
+        if(d.causal)partes.push(`Causal: ${d.causal}`)
+        if(d.tipo)partes.push(`Tipo: ${d.tipo}`)
+        if(d.prioridad)partes.push(`Prioridad: ${d.prioridad}`)
+        if(d.transportadora&&!d.estado_nuevo)partes.push(`Carrier: ${d.transportadora}`)
+        if(d.via_cola)partes.push(`<span style="color:var(--muted);font-size:10px">vía cola</span>`)
+        const detalleTxt=partes.length?`<div style="font-size:12px;color:var(--text);margin-top:4px;line-height:1.5">${partes.join(' · ')}</div>`:''
+        const isLast=i===eventos.length-1
+        return`<div style="display:flex;gap:12px;position:relative;padding-bottom:${isLast?'0':'18px'}">
+          <div style="display:flex;flex-direction:column;align-items:center;flex-shrink:0">
+            <div style="width:32px;height:32px;border-radius:50%;background:${color};color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;box-shadow:0 0 0 3px var(--card)">${ico}</div>
+            ${isLast?'':`<div style="width:2px;flex:1;background:var(--border);margin-top:4px"></div>`}
+          </div>
+          <div style="flex:1;padding-top:2px">
+            <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:baseline">
+              <div style="font-weight:600;font-size:13px;color:${color}">${label}</div>
+              <div style="font-size:11px;color:var(--muted);font-family:monospace">${tsTxt}</div>
+            </div>
+            ${detalleTxt}
+            <div style="font-size:11px;color:var(--muted);margin-top:4px">
+              <span style="opacity:.8">fuente:</span> <code style="font-size:10px">${ev.fuente||'—'}</code> ·
+              <span style="opacity:.8">por:</span> ${usuario}
+            </div>
+          </div>
+        </div>`
+      }).join('')
+
+      body.innerHTML=headerHtml+`<div style="position:relative">${eventosHtml}</div>
+        <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border);font-size:11px;color:var(--muted);text-align:center">
+          ${eventos.length} evento${eventos.length===1?'':'s'} registrado${eventos.length===1?'':'s'}
+        </div>`
+    }catch(e){
+      body.innerHTML=`<div class="alert alert-red">Error cargando historial: ${e.message}</div>`
+    }
+  }
+
+  window._cerrarTimelineModal=()=>{
+    const el=document.getElementById('timeline-modal')
+    if(el)el.remove()
   }
 
   // Pide motivo si pideMotivo=true, luego ejecuta el cambio

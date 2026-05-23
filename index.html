@@ -8993,92 +8993,230 @@ window._renderSemHistorialBlock=function(metaId,nivel){
   try{
     const sems=(window._metaPort?.semaforosByMeta||{})[metaId]||[]
     if(!sems.length)return ''
+    // Mapeo de estado del semáforo -> color del punto
+    const COLOR_MAP={
+      sin_ventas:{bg:'var(--subtle)',bd:'var(--muted)'},
+      pendiente_sync:{bg:'var(--subtle)',bd:'var(--muted)'},
+      reportado:{bg:'var(--blue-bg)',bd:'var(--blue)'},
+      stop:{bg:'var(--red)',bd:'#A32D2D'},
+      precaucion:{bg:'var(--amber)',bd:'#BA7517'},
+      escalar:{bg:'var(--green)',bd:'#3B6D11'},
+      fuego:{bg:'var(--purple)',bd:'#534AB7'}
+    }
+    // Mostrar solo: el primero del día + todos los cambios reales + el último siempre
+    let eventos=sems.filter((s,i)=>i===0||s.cambio_vs_anterior||i===sems.length-1)
+    const seen=new Set()
+    eventos=eventos.filter(s=>{if(seen.has(s.hora_calculo))return false;seen.add(s.hora_calculo);return true})
     const cambios=sems.filter(s=>s.cambio_vs_anterior).length
-    const rows=sems.map(s=>{
+    // Construir cada punto de la tira
+    const puntos=eventos.map((s,i)=>{
+      const c=COLOR_MAP[s.semaforo]||{bg:'var(--subtle)',bd:'var(--muted)'}
+      const isUltimo=i===eventos.length-1
+      const isDropi=s.triggered_by==='cruce_dropi'
       const hora=new Date(s.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
-      const opa=s.cambio_vs_anterior?'1':'.55'
-      const flag=s.cambio_vs_anterior?'<span style="color:var(--amber);font-weight:700">▲</span>':'&nbsp;&nbsp;'
-      return`<div class="sem-row" data-cambio="${s.cambio_vs_anterior?1:0}" style="opacity:${opa};padding:3px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-family:monospace;font-size:11px">
-        <span style="color:var(--muted);min-width:48px">${hora}</span>
-        <span>${s.semaforo_label||s.semaforo}</span>
-        <span style="color:var(--muted)">CPA $${fmt(s.cpa_real||0)}</span>
-        <span style="color:var(--muted)">${s.pendientes||0}v</span>
-        <span style="color:var(--muted)">$${fmt(s.gasto||0)}</span>
-        <span style="color:var(--muted);font-size:10px">[${s.triggered_by||'—'}]</span>
-        ${flag}
+      const size=isUltimo?'22':'16'
+      const borderW=isUltimo?'3':'2'
+      const tooltip=`${s.semaforo_label||s.semaforo} · CPA $${fmt(s.cpa_real||0)} · ${s.pendientes||0}v · gasto $${fmt(s.gasto||0)}`
+      const label=isDropi
+        ?`<div style="font-size:9px;color:var(--green);font-weight:700;margin-top:6px;line-height:1.1">Dropi</div><div style="font-size:9px;color:var(--muted);line-height:1.2">${hora}</div>`
+        :`<div style="font-size:9px;color:${isUltimo?'var(--text)':'var(--muted)'};margin-top:6px;font-weight:${isUltimo?'600':'400'}">${hora}</div>`
+      return`<div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0">
+        <div title="${tooltip}" style="width:${size}px;height:${size}px;border-radius:50%;background:${c.bg};border:${borderW}px solid ${c.bd};cursor:help;flex-shrink:0"></div>
+        ${label}
       </div>`
-    }).join('')
-    const triggers={}
-    for(const s of sems){triggers[s.triggered_by||'—']=(triggers[s.triggered_by||'—']||0)+1}
-    const trigStr=Object.entries(triggers).map(([k,v])=>`${k} (${v})`).join(' · ')
-    const semId='sem-'+metaId.replace(/[^a-zA-Z0-9]/g,'')
-    return`<details style="margin-top:8px;background:var(--card2);border-radius:6px;padding:6px 10px">
-      <summary style="cursor:pointer;font-size:11px;color:var(--muted)">🚦 Evolución del semáforo (HOY) — ${sems.length} cálculos${cambios>0?` · ${cambios} cambios`:''}</summary>
-      <div style="margin-top:8px">
-        <div style="display:flex;gap:4px;margin-bottom:6px">
-          <button class="btn-sm btn-primary" onclick="event.stopPropagation();document.getElementById('${semId}').querySelectorAll('.sem-row').forEach(r=>r.style.display='');this.parentElement.querySelectorAll('button').forEach(b=>b.className='btn-sm btn-outline');this.className='btn-sm btn-primary'" style="padding:2px 8px;font-size:10px">Todos</button>
-          <button class="btn-sm btn-outline" onclick="event.stopPropagation();document.getElementById('${semId}').querySelectorAll('.sem-row').forEach(r=>{r.style.display=r.dataset.cambio==='1'?'':'none'});this.parentElement.querySelectorAll('button').forEach(b=>b.className='btn-sm btn-outline');this.className='btn-sm btn-primary'" style="padding:2px 8px;font-size:10px">Solo cambios</button>
-          <button class="btn-sm btn-outline" onclick="event.stopPropagation();verHistorialSemaforos('${metaId}','${nivel}')" style="padding:2px 8px;font-size:10px">📊 Historial completo</button>
-        </div>
-        <div id="${semId}">${rows}</div>
-        <div style="margin-top:6px;font-size:10px;color:var(--muted)">Triggered: ${trigStr}</div>
+    })
+    // Insertar conectores entre puntos
+    let tiraHtml=''
+    puntos.forEach((p,i)=>{
+      tiraHtml+=p
+      if(i<puntos.length-1)tiraHtml+=`<div style="height:2px;background:var(--border);flex:0.5;margin-top:11px;align-self:flex-start"></div>`
+    })
+    // Footer: estado actual o final
+    const ultimo=eventos[eventos.length-1]
+    const esCruceDropi=ultimo&&ultimo.triggered_by==='cruce_dropi'
+    const footerTxt=esCruceDropi
+      ?`<span style="color:var(--green);font-weight:600">★ Estado final (post-Dropi):</span> ${ultimo.semaforo_label||ultimo.semaforo} · CPA Real $${fmt(ultimo.cpa_real||0)}`
+      :`Estado actual: ${ultimo?(ultimo.semaforo_label||ultimo.semaforo):'—'}${ultimo?' · aún sin cruce Dropi':''}`
+    return`<div style="margin-top:8px;background:var(--card2);border-radius:6px;padding:10px 12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+        <span style="font-size:11px;color:var(--muted)">🚦 <strong style="color:var(--text);font-weight:600">Hoy</strong>${cambios>0?` · ${cambios} cambio${cambios>1?'s':''} de estado`:' · sin cambios'}</span>
+        <button class="btn-sm btn-outline" onclick="event.stopPropagation();verHistorialSemaforos('${metaId}','${nivel}')" style="padding:3px 10px;font-size:10px">📊 Ver historial</button>
       </div>
-    </details>`
+      <div style="display:flex;align-items:flex-start;gap:0;padding:4px 0">${tiraHtml}</div>
+      <div style="font-size:10px;color:var(--muted);text-align:center;margin-top:8px;line-height:1.4">${footerTxt}</div>
+    </div>`
   }catch(e){console.warn('[SEM] render block failed:',e.message);return ''}
 }
 
-// Modal para ver todos los registros históricos de un meta_id
+// Modal de historial detallado del semáforo: timeline visual con lenguaje
+// natural + filtros rápidos (Antier/Ayer/Hoy) + rango personalizado.
 window.verHistorialSemaforos=async(metaId,nivel)=>{
   if(!metaId)return
+  const hoy=new Date().toISOString().slice(0,10)
+  const ayer=new Date(Date.now()-86400000).toISOString().slice(0,10)
+  const antier=new Date(Date.now()-2*86400000).toISOString().slice(0,10)
+  const fechaLeg=new Date(hoy+'T12:00').toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long',year:'numeric'})
   const div=document.createElement('div')
   div.id='user-modal';div.className='modal-bg'
-  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:720px;max-height:80vh;overflow-y:auto">
-    <div class="modal-title">📊 Historial de semáforos</div>
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:700px;max-height:85vh;overflow-y:auto">
+    <div style="font-size:11px;color:var(--muted);letter-spacing:.5px;margin-bottom:4px">📊 HISTORIAL DEL SEMÁFORO</div>
+    <div class="modal-title" style="text-transform:capitalize;font-size:17px">📅 ${fechaLeg}</div>
     <div class="modal-sub">${nivel||'—'} · ${metaId}</div>
-    <div id="sem-hist-body" style="margin-top:14px"><div class="loading">Cargando...</div></div>
+    <div id="sem-hist-chips" style="margin:14px 0 0;display:flex;gap:6px;flex-wrap:wrap;align-items:center"></div>
+    <div id="sem-hist-body" style="margin-top:16px"><div class="loading">Cargando...</div></div>
     <div class="modal-actions"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>
   </div>`
   div.onclick=closeModal
   document.body.appendChild(div)
+  // Estado del modal para que los chips puedan refrescar sin perder contexto
+  window._semHistCtx={metaId,nivel,activa:hoy,antier,ayer,hoy}
+  _semHistRenderChips()
+  await _semHistLoad([antier,ayer,hoy])
+}
+
+// Helper interno: pinta los chips de filtrado de fechas
+function _semHistRenderChips(){
+  const ctx=window._semHistCtx;if(!ctx)return
+  const chipsEl=document.getElementById('sem-hist-chips');if(!chipsEl)return
+  const mk=(f,lab,esActiva)=>`<button class="btn-sm ${esActiva?'btn-primary':'btn-outline'}" onclick="event.stopPropagation();_semHistFiltrar('${f}')" style="padding:5px 11px;font-size:11px">${lab}</button>`
+  chipsEl.innerHTML=
+    mk(ctx.antier,'Antier ('+ctx.antier.slice(5)+')',ctx.activa===ctx.antier)+
+    mk(ctx.ayer,'Ayer ('+ctx.ayer.slice(5)+')',ctx.activa===ctx.ayer)+
+    mk(ctx.hoy,'Hoy ('+ctx.hoy.slice(5)+')',ctx.activa===ctx.hoy)+
+    `<button class="btn-sm btn-outline" onclick="event.stopPropagation();_semHistRango()" style="padding:5px 11px;font-size:11px;margin-left:auto">📅 Elegir rango</button>`
+}
+
+// Helper interno: carga registros para una o varias fechas y pinta el timeline
+async function _semHistLoad(fechas){
+  const ctx=window._semHistCtx;if(!ctx)return
+  const body=document.getElementById('sem-hist-body');if(!body)return
+  body.innerHTML='<div class="loading">Cargando...</div>'
   try{
-    const{data,error}=await sb.from('semaforo_historial').select('*').eq('meta_id',metaId).order('hora_calculo',{ascending:false}).limit(500)
-    const body=document.getElementById('sem-hist-body')
-    if(!body)return
+    let q=sb.from('semaforo_historial').select('*').eq('meta_id',ctx.metaId)
+    if(Array.isArray(fechas))q=q.in('fecha',fechas)
+    else if(fechas&&fechas.desde&&fechas.hasta)q=q.gte('fecha',fechas.desde).lte('fecha',fechas.hasta)
+    const{data,error}=await q.order('hora_calculo',{ascending:true}).limit(1000)
     if(error){body.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
-    if(!data||!data.length){body.innerHTML='<div class="alert alert-blue">Sin registros</div>';return}
-    // Agrupar por día
-    const porDia={}
-    for(const r of data){if(!porDia[r.fecha])porDia[r.fecha]=[];porDia[r.fecha].push(r)}
-    const dias=Object.keys(porDia).sort((a,b)=>b.localeCompare(a))
-    const hoyStr=new Date().toISOString().slice(0,10)
-    body.innerHTML=dias.map(d=>{
-      const regs=porDia[d].sort((a,b)=>new Date(a.hora_calculo)-new Date(b.hora_calculo))
-      const cambios=regs.filter(r=>r.cambio_vs_anterior).length
-      const expandedDefault=d===hoyStr?'open':''
-      return`<details ${expandedDefault} style="margin-bottom:8px;background:var(--card2);border-radius:8px;padding:10px">
-        <summary style="cursor:pointer;font-weight:600;font-size:13px">📅 ${d} · ${regs.length} cálculos${cambios>0?` · ${cambios} cambios`:''}</summary>
-        <div style="margin-top:8px;font-size:11px;font-family:monospace">
-          ${regs.map(r=>{
-            const hora=new Date(r.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
-            const opa=r.cambio_vs_anterior?'1':'.55'
-            const flag=r.cambio_vs_anterior?'<span style="color:var(--amber);font-weight:700">▲</span>':'&nbsp;&nbsp;'
-            return`<div style="opacity:${opa};padding:3px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <span style="color:var(--muted);min-width:48px">${hora}</span>
-              <span>${r.semaforo_label||r.semaforo}</span>
-              <span style="color:var(--muted)">CPA $${fmt(r.cpa_real||0)}</span>
-              <span style="color:var(--muted)">${r.pendientes||0}v</span>
-              <span style="color:var(--muted)">$${fmt(r.gasto||0)}</span>
-              <span style="color:var(--muted);font-size:10px">[${r.triggered_by||'—'}]</span>
-              ${flag}
-            </div>`
-          }).join('')}
-        </div>
-      </details>`
-    }).join('')
-  }catch(e){
-    const body=document.getElementById('sem-hist-body')
-    if(body)body.innerHTML=`<div class="alert alert-red">${e.message}</div>`
+    if(!data||!data.length){body.innerHTML='<div class="alert alert-blue">Sin registros en este rango</div>';return}
+    body.innerHTML=_semRenderTimeline(data)
+  }catch(e){body.innerHTML=`<div class="alert alert-red">${e.message}</div>`}
+}
+
+// Filtrar el modal por una fecha específica (uno de los chips)
+window._semHistFiltrar=async(fecha)=>{
+  const ctx=window._semHistCtx;if(!ctx)return
+  ctx.activa=fecha
+  _semHistRenderChips()
+  await _semHistLoad([fecha])
+}
+
+// Prompt para elegir un rango personalizado (desde - hasta)
+window._semHistRango=async()=>{
+  const ctx=window._semHistCtx;if(!ctx)return
+  const desde=prompt('Fecha desde (YYYY-MM-DD):',new Date(Date.now()-7*86400000).toISOString().slice(0,10))
+  if(!desde)return
+  const hasta=prompt('Fecha hasta (YYYY-MM-DD):',new Date().toISOString().slice(0,10))
+  if(!hasta)return
+  ctx.activa=null
+  _semHistRenderChips()
+  await _semHistLoad({desde,hasta})
+}
+
+// Renderiza el timeline visual: agrupa por día, muestra eventos en lenguaje
+// natural, destaca el evento "cruce_dropi" como veredicto final del día.
+window._semRenderTimeline=(data)=>{
+  const COLOR_MAP={
+    sin_ventas:{bg:'var(--subtle)',bd:'var(--muted)',cls:'⏳ Sin ventas'},
+    pendiente_sync:{bg:'var(--subtle)',bd:'var(--muted)',cls:'⏳ Ventas sin sync de gasto'},
+    reportado:{bg:'var(--blue-bg)',bd:'var(--blue)',cls:'📝 Reportado sin datos'},
+    stop:{bg:'var(--red)',bd:'#A32D2D',cls:'🔴 STOP'},
+    precaucion:{bg:'var(--amber)',bd:'#BA7517',cls:'🟡 Precaución'},
+    escalar:{bg:'var(--green)',bd:'#3B6D11',cls:'🟢 Escalar'},
+    fuego:{bg:'var(--purple)',bd:'#534AB7',cls:'🟣 Fuego'}
   }
+  const FUENTE_LEG={
+    reporte_dia:'Auxiliar reportó ventas',
+    cruce_dropi:'Cruce con Dropi',
+    manual:'Disparado manualmente',
+    sync:'Sync automático',
+    meta_api:'Sync de Meta'
+  }
+  // Agrupar por fecha (descendente)
+  const porDia={}
+  for(const r of data){if(!porDia[r.fecha])porDia[r.fecha]=[];porDia[r.fecha].push(r)}
+  const dias=Object.keys(porDia).sort((a,b)=>b.localeCompare(a))
+  const hoyStr=new Date().toISOString().slice(0,10)
+  return dias.map(d=>{
+    const regs=porDia[d].sort((a,b)=>new Date(a.hora_calculo)-new Date(b.hora_calculo))
+    const fechaStr=new Date(d+'T12:00').toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long'})
+    // Mostrar solo: primero + todos los cambios + último (evita repetición)
+    let eventos=regs.filter((r,i)=>i===0||r.cambio_vs_anterior||i===regs.length-1)
+    const seen=new Set()
+    eventos=eventos.filter(r=>{if(seen.has(r.hora_calculo))return false;seen.add(r.hora_calculo);return true})
+    const itemsHtml=eventos.map((r,i)=>{
+      const c=COLOR_MAP[r.semaforo]||{bg:'var(--subtle)',bd:'var(--muted)',cls:r.semaforo_label||r.semaforo}
+      const hora=new Date(r.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
+      const esDropi=r.triggered_by==='cruce_dropi'
+      const esUltimo=i===eventos.length-1
+      // Descripción en lenguaje natural según contexto
+      let titulo=''
+      if(esDropi){
+        titulo='Cruce con Dropi completado'
+      }else if(i===0){
+        titulo='Primer registro del día'
+      }else if(r.cambio_vs_anterior){
+        titulo='Cambió a '+(r.semaforo_label||r.semaforo)
+      }else{
+        titulo=r.semaforo_label||r.semaforo
+      }
+      const fuenteLeg=FUENTE_LEG[r.triggered_by]||r.triggered_by||'—'
+      // Card especial para el cruce Dropi (veredicto final destacado)
+      if(esDropi){
+        return`<div style="position:relative;margin-bottom:14px">
+          <div style="position:absolute;left:-32px;top:0;width:24px;height:24px;border-radius:50%;background:${c.bg};border:3px solid ${c.bd};display:flex;align-items:center;justify-content:center">
+            <span style="color:#fff;font-size:13px;font-weight:700">✓</span>
+          </div>
+          <div style="background:var(--green-bg);border:1px solid var(--green);border-radius:8px;padding:12px 14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <span style="font-size:10px;color:var(--green);font-weight:700;letter-spacing:.6px">★ VEREDICTO FINAL DEL DÍA</span>
+              <span style="font-size:11px;color:var(--green);font-weight:600">Dropi · ${hora}</span>
+            </div>
+            <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:4px">${titulo}</div>
+            <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Estado final: <strong style="color:var(--text)">${r.semaforo_label||r.semaforo}</strong></div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <span style="background:var(--card);padding:4px 10px;border-radius:4px;font-size:10px;color:var(--muted)">Gasto $${fmt(r.gasto||0)}</span>
+              <span style="background:var(--card);padding:4px 10px;border-radius:4px;font-size:10px;color:var(--muted)">${r.ventas||0} entregadas · ${r.pendientes||0} pendientes</span>
+              <span style="background:var(--green);color:#0D2818;padding:4px 10px;border-radius:4px;font-size:11px;font-weight:600">CPA Real $${fmt(r.cpa_real||0)}</span>
+            </div>
+            <div style="font-size:11px;color:var(--green);margin-top:10px;padding-top:8px;border-top:1px solid var(--green);opacity:.85">🎯 Este es el CPA que vale para decidir si escalar mañana.</div>
+          </div>
+        </div>`
+      }
+      // Card normal para el resto de eventos
+      return`<div style="position:relative;margin-bottom:14px">
+        <div style="position:absolute;left:-32px;top:2px;width:${esUltimo?'22':'20'}px;height:${esUltimo?'22':'20'}px;border-radius:50%;background:${c.bg};border:${esUltimo?'3':'2'}px solid ${c.bd};flex-shrink:0"></div>
+        <div style="padding:2px 0 2px 4px">
+          <div style="font-size:11px;color:var(--muted);font-weight:500;margin-bottom:2px">${hora}</div>
+          <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:6px">${titulo}</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <span style="background:var(--card);padding:3px 9px;border-radius:4px;font-size:10px;color:var(--muted)">Gasto acumulado $${fmt(r.gasto||0)}</span>
+            <span style="background:var(--card);padding:3px 9px;border-radius:4px;font-size:10px;color:var(--muted)">${r.ventas||0} entregadas · ${r.pendientes||0} pendientes</span>
+            <span style="background:var(--card);padding:3px 9px;border-radius:4px;font-size:10px;color:var(--muted)">CPA $${fmt(r.cpa_real||0)}</span>
+            <span style="background:var(--card);padding:3px 9px;border-radius:4px;font-size:9px;color:var(--subtle)">${fuenteLeg}</span>
+          </div>
+        </div>
+      </div>`
+    }).join('')
+    const totalCalc=regs.length
+    const cambiosCount=regs.filter(r=>r.cambio_vs_anterior).length
+    return`<details ${d===hoyStr?'open':''} style="margin-bottom:14px;background:var(--card2);border-radius:8px;padding:12px 14px">
+      <summary style="cursor:pointer;font-weight:600;font-size:13px;color:var(--text);text-transform:capitalize">📅 ${fechaStr} · ${totalCalc} cálculo${totalCalc!==1?'s':''}${cambiosCount>0?` · ${cambiosCount} cambio${cambiosCount!==1?'s':''}`:''}</summary>
+      <div style="margin-top:14px;padding-left:32px;position:relative">
+        <div style="position:absolute;left:-21px;top:8px;bottom:8px;width:2px;background:var(--border)"></div>
+        ${itemsHtml}
+      </div>
+    </details>`
+  }).join('')
 }
 
 // Helper: dado un set de ad_ids + rango de fechas, devuelve métricas reales

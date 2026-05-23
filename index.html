@@ -3420,6 +3420,13 @@ window.procesarAsignador=async()=>{
           if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
         }
       }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
+      // ── ENTREGA 3B: disparar histórico de semáforos (async, no bloquea) ──
+      try{
+        const adIdsAfectados=[...new Set((insertados||[]).map(r=>r.ad_id).filter(Boolean))]
+        if(adIdsAfectados.length){
+          setTimeout(()=>{_calcularYGuardarSemaforos(adIdsAfectados,'asignador').catch(()=>{})},0)
+        }
+      }catch(_){}
     }
   }
 
@@ -3770,6 +3777,21 @@ window.saveReporteV2=async(fecha)=>{
   }
   msg.innerHTML=`<div class="alert alert-green">✅ ${saved} producto(s) guardado(s)</div>`
   logAction('reporte_guardado',{fecha,productos:saved}).catch(()=>{})
+  // ── ENTREGA 3B: disparar histórico de semáforos con los ad_ids reportados ──
+  try{
+    const adIdsAfectados=[]
+    for(const row of rows){
+      const idx=row.id.replace('vrow-','')
+      const adIdsStr=document.getElementById(`vi-${idx}`)?.value?.trim()||''
+      if(!adIdsStr)continue
+      const ids=adIdsStr.split(/[,;\s]+/).map(s=>s.trim()).filter(Boolean)
+      adIdsAfectados.push(...ids)
+    }
+    const adIdsUnicos=[...new Set(adIdsAfectados)]
+    if(adIdsUnicos.length){
+      setTimeout(()=>{_calcularYGuardarSemaforos(adIdsUnicos,'reporte_dia').catch(()=>{})},0)
+    }
+  }catch(_){}
 }
 
 // ── AUXILIAR: PEDIDOS ──────────────────────────────────────
@@ -4200,6 +4222,13 @@ async function pageAuxReservado(c){
       })
       if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
     }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
+
+    // ── ENTREGA 3B: disparar histórico de semáforos (async, no bloquea) ──
+    try{
+      if(m.ad_id){
+        setTimeout(()=>{_calcularYGuardarSemaforos([m.ad_id],'reservados').catch(()=>{})},0)
+      }
+    }catch(_){}
 
     closeModal()
     // Refrescar la búsqueda para mostrar el nuevo estado
@@ -4963,6 +4992,16 @@ window.aplicarResolucionPendiente=async(progId,nuevoEstado)=>{
       })
       if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
     }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
+  }
+
+  // ── ENTREGA 3B: disparar histórico de semáforos (fetch ad_id del mapeo) ──
+  if(item.mapeo_id){
+    try{
+      const{data:mDat}=await sb.from('mapeos').select('ad_id').eq('id',item.mapeo_id).maybeSingle()
+      if(mDat?.ad_id){
+        setTimeout(()=>{_calcularYGuardarSemaforos([mDat.ad_id],'reservados').catch(()=>{})},0)
+      }
+    }catch(_){}
   }
 
   closeModal()
@@ -7050,6 +7089,13 @@ window.actualizarEstadosDropi=async()=>{
   }
   msgEl.innerHTML=`<span style="color:var(--green)">✅ ${ok} actualizadas${fail?` · ${fail} errores`:''}</span>`
   logAction('dropi_estados_actualizados',{actualizadas:ok,errores:fail}).catch(()=>{})
+  // ── ENTREGA 3B: disparar histórico de semáforos (async, no bloquea) ──
+  try{
+    const adIdsAfectados=[...new Set(cruzados.map(r=>r.mapeo?.ad_id).filter(Boolean))]
+    if(adIdsAfectados.length){
+      setTimeout(()=>{_calcularYGuardarSemaforos(adIdsAfectados,'cruce_dropi').catch(()=>{})},0)
+    }
+  }catch(_){}
   // Recargar registros del día
   cargarRegistrosDia()
 }
@@ -7562,6 +7608,13 @@ window.procesarSeguimiento=async()=>{
     window._segResultados=resultados
     window._segLotes=lotes
     logAction('seguimiento_procesado',{ordenes:resultados.length,lotes:Object.keys(lotes).length}).catch(()=>{})
+    // ── ENTREGA 3B: disparar histórico de semáforos (async, no bloquea) ──
+    try{
+      const adIdsAfectados=[...new Set(resultados.map(r=>r.mapeo?.ad_id).filter(Boolean))]
+      if(adIdsAfectados.length){
+        setTimeout(()=>{_calcularYGuardarSemaforos(adIdsAfectados,'seguimiento').catch(()=>{})},0)
+      }
+    }catch(_){}
   }catch(e){
     msg.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
   }
@@ -8583,6 +8636,22 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     escaladasByCamp[campId].push(e)
   }
 
+  // ── ENTREGA 3B: cargar histórico de semáforos del día (de esta cuenta) ──
+  // Se indexa por meta_id (la tarjeta de campaña filtra solo nivel=campaign).
+  const semaforosByCamp={}
+  try{
+    const{data:semData}=await sb.from('semaforo_historial')
+      .select('meta_id,nivel,fecha,hora_calculo,semaforo,semaforo_label,cpa_real,ventas,pendientes,gasto,triggered_by,cambio_vs_anterior,semaforo_anterior')
+      .eq('account_id',accountId).gte('fecha',desde).lte('fecha',hasta)
+      .order('hora_calculo',{ascending:true})
+      .limit(5000)
+    for(const r of (semData||[])){
+      if(r.nivel!=='campaign')continue
+      if(!semaforosByCamp[r.meta_id])semaforosByCamp[r.meta_id]=[]
+      semaforosByCamp[r.meta_id].push(r)
+    }
+  }catch(_){}
+
   // ── Clasificar: con/sin actividad (gasto > 0 en el rango) ──
   const conActividad=[],sinActividad=[]
   for(const camp of camps){
@@ -8662,7 +8731,42 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       <div style="display:flex;gap:14px;margin-top:6px;font-size:11px;color:var(--muted)">
         <span>CTR: ${avgCtr.toFixed(2)}%</span><span>CPM: $${fmt(avgCpm)}</span><span>Freq: ${avgFreq.toFixed(1)}</span>
       </div>
-      ${_renderEscaladasBadges(escaladasByCamp[camp.meta_id]||[],camp.meta_id)}`:''}</div>
+      ${_renderEscaladasBadges(escaladasByCamp[camp.meta_id]||[],camp.meta_id)}
+      ${(() => {
+        const sems=semaforosByCamp[camp.meta_id]||[]
+        if(!sems.length)return ''
+        const cambios=sems.filter(s=>s.cambio_vs_anterior).length
+        const rows=sems.map(s=>{
+          const hora=new Date(s.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
+          const opa=s.cambio_vs_anterior?'1':'.55'
+          const flag=s.cambio_vs_anterior?'<span style="color:var(--amber);font-weight:700">▲</span>':'&nbsp;&nbsp;'
+          return`<div class="sem-row" data-cambio="${s.cambio_vs_anterior?1:0}" style="opacity:${opa};padding:3px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-family:monospace;font-size:11px">
+            <span style="color:var(--muted);min-width:48px">${hora}</span>
+            <span>${s.semaforo_label||s.semaforo}</span>
+            <span style="color:var(--muted)">CPA $${fmt(s.cpa_real||0)}</span>
+            <span style="color:var(--muted)">${s.pendientes||0}v</span>
+            <span style="color:var(--muted)">$${fmt(s.gasto||0)}</span>
+            <span style="color:var(--muted);font-size:10px">[${s.triggered_by||'—'}]</span>
+            ${flag}
+          </div>`
+        }).join('')
+        const triggers={}
+        for(const s of sems){triggers[s.triggered_by||'—']=(triggers[s.triggered_by||'—']||0)+1}
+        const trigStr=Object.entries(triggers).map(([k,v])=>`${k} (${v})`).join(' · ')
+        const semId='sem-'+camp.meta_id.replace(/[^a-zA-Z0-9]/g,'')
+        return`<details style="margin-top:8px;background:var(--card2);border-radius:6px;padding:6px 10px">
+          <summary style="cursor:pointer;font-size:11px;color:var(--muted)">🚦 Evolución del semáforo (HOY) — ${sems.length} cálculos${cambios>0?` · ${cambios} cambios`:''}</summary>
+          <div style="margin-top:8px">
+            <div style="display:flex;gap:4px;margin-bottom:6px">
+              <button class="btn-sm btn-primary" onclick="event.stopPropagation();document.getElementById('${semId}').querySelectorAll('.sem-row').forEach(r=>r.style.display='');this.parentElement.querySelectorAll('button').forEach(b=>b.className='btn-sm btn-outline');this.className='btn-sm btn-primary'" style="padding:2px 8px;font-size:10px">Todos</button>
+              <button class="btn-sm btn-outline" onclick="event.stopPropagation();document.getElementById('${semId}').querySelectorAll('.sem-row').forEach(r=>{r.style.display=r.dataset.cambio==='1'?'':'none'});this.parentElement.querySelectorAll('button').forEach(b=>b.className='btn-sm btn-outline');this.className='btn-sm btn-primary'" style="padding:2px 8px;font-size:10px">Solo cambios</button>
+              <button class="btn-sm btn-outline" onclick="event.stopPropagation();verHistorialSemaforos('${camp.meta_id}','campaign')" style="padding:2px 8px;font-size:10px">📊 Historial completo</button>
+            </div>
+            <div id="${semId}">${rows}</div>
+            <div style="margin-top:6px;font-size:10px;color:var(--muted)">Triggered: ${trigStr}</div>
+          </div>
+        </details>`
+      })()}`:''}</div>
       <div id="desglose-${camp.meta_id}" style="display:none;padding:4px 0 4px 16px"></div>
     </div>`
   }
@@ -8705,6 +8809,244 @@ window.toggleExcluirGlobal=async(accountId,excluir)=>{
 }
 
 // ── Desglose campaña → adsets → ads (lazy loading) ──
+
+// ═══════════════════════════════════════════════════════════════════════
+// ENTREGA 3B — HISTÓRICO DE SEMÁFOROS
+// Cada vez que el auxiliar actualiza ventas, recalcula y guarda el
+// semáforo de las campañas/adsets/ads afectados en `semaforo_historial`.
+// ═══════════════════════════════════════════════════════════════════════
+async function _calcularYGuardarSemaforos(adIds,triggeredBy){
+  try{
+    if(!adIds||!adIds.length)return
+    const adIdsUnicos=[...new Set(adIds.filter(Boolean))]
+    if(!adIdsUnicos.length)return
+    const hoy=new Date().toISOString().slice(0,10)
+
+    // 1. Subir jerarquía: ad → adset → campaign
+    const{data:ads}=await sb.from('meta_campanas').select('meta_id,parent_id,account_id').eq('nivel','ad').in('meta_id',adIdsUnicos)
+    if(!ads||!ads.length)return
+    const adsetIds=[...new Set(ads.map(a=>a.parent_id).filter(Boolean))]
+    const{data:adsets}=await sb.from('meta_campanas').select('meta_id,parent_id,account_id').eq('nivel','adset').in('meta_id',adsetIds)
+    const campIds=[...new Set((adsets||[]).map(a=>a.parent_id).filter(Boolean))]
+    const{data:camps}=await sb.from('meta_campanas').select('meta_id,account_id,nombre').eq('nivel','campaign').in('meta_id',campIds)
+
+    // Mapas para resolver padres y account_id
+    const adsetParent={},adsetAcc={}
+    for(const as of (adsets||[])){adsetParent[as.meta_id]=as.parent_id;adsetAcc[as.meta_id]=as.account_id}
+    const campAcc={},campNombre={}
+    for(const cp of (camps||[])){campAcc[cp.meta_id]=cp.account_id;campNombre[cp.meta_id]=cp.nombre}
+    const adAcc={}
+    for(const ad of ads){adAcc[ad.meta_id]=ad.account_id}
+
+    // Mapa de productos por campaign_id (para resolver margenBE específico)
+    const{data:prods}=await sb.from('productos').select('*').eq('archivado',false)
+    const campToProd={}
+    for(const p of (prods||[])){
+      const cids=Array.isArray(p.campaign_ids)?p.campaign_ids:[]
+      for(const cid of cids){if(cid&&!campToProd[cid])campToProd[cid]=p}
+    }
+    const _prodFallback=(prods||[])[0]||{}
+    function _resolverCtxCamp(campId){
+      const p=campToProd[campId]||_prodFallback
+      const _p2=p.precio_2u||129900
+      const _c2=p.costo_2u||36000
+      const _fo=p.flete_outbound||21000
+      const _fd=p.flete_devolucion||18000
+      const _dp=p.dev_pct||0.19
+      const _mBE=_p2*(1-_dp)-_c2-_fo-(_fd*_dp)
+      return{margenBE:_mBE,nombre:p.nombre||null,p2:_p2,esFallback:!campToProd[campId]}
+    }
+
+    // 2. Reunir cálculos a hacer (nivel ad, adset, campaign)
+    const items=[]
+    // Ads
+    for(const ad of ads){
+      items.push({meta_id:ad.meta_id,nivel:'ad',account_id:ad.account_id,adIds:[ad.meta_id],campId:adsetParent[ad.parent_id]||null})
+    }
+    // Adsets
+    for(const asId of adsetIds){
+      const adIdsHijos=ads.filter(a=>a.parent_id===asId).map(a=>a.meta_id)
+      items.push({meta_id:asId,nivel:'adset',account_id:adsetAcc[asId]||null,adIds:adIdsHijos,campId:adsetParent[asId]||null})
+    }
+    // Campaigns
+    for(const cpId of campIds){
+      const adsetsHijos=(adsets||[]).filter(a=>a.parent_id===cpId).map(a=>a.meta_id)
+      const adIdsHijos=ads.filter(a=>adsetsHijos.includes(a.parent_id)).map(a=>a.meta_id)
+      items.push({meta_id:cpId,nivel:'campaign',account_id:campAcc[cpId]||null,adIds:adIdsHijos,campId:cpId})
+    }
+
+    if(!items.length)return
+
+    // 3. Traer gasto del día por meta_id+nivel (desde meta_insights)
+    const todosMetaIds=items.map(i=>i.meta_id)
+    let insightsHoy=[]
+    for(let i=0;i<todosMetaIds.length;i+=100){
+      const batch=todosMetaIds.slice(i,i+100)
+      const{data}=await sb.from('meta_insights').select('meta_id,nivel,spend,conversions,actions').in('meta_id',batch).eq('fecha',hoy)
+      if(data)insightsHoy=insightsHoy.concat(data)
+    }
+    const gastoBy={}
+    const convBy={}
+    for(const ins of insightsHoy){
+      const k=`${ins.meta_id}|${ins.nivel}`
+      gastoBy[k]=(gastoBy[k]||0)+(parseFloat(ins.spend)||0)
+      let cv=parseInt(ins.conversions)||0
+      // metaConv extra de actions (usar el mismo patrón que el portafolio)
+      try{if(typeof metaConv==='function'&&ins.actions)cv+=metaConv(ins.actions)}catch(_){}
+      convBy[k]=(convBy[k]||0)+cv
+    }
+
+    // 4. Traer todos los mapeos del día para los ads involucrados (una sola query)
+    const todosAdHijos=[...new Set(items.flatMap(i=>i.adIds))]
+    let mapeosHoy=[]
+    if(todosAdHijos.length){
+      for(let i=0;i<todosAdHijos.length;i+=100){
+        const batch=todosAdHijos.slice(i,i+100)
+        const{data}=await sb.from('mapeos').select('ad_id,estado_final,fecha,fecha_dropi').in('ad_id',batch).eq('fecha',hoy)
+        if(data)mapeosHoy=mapeosHoy.concat(data)
+      }
+    }
+    const mapeosByAd={}
+    for(const m of mapeosHoy){if(!mapeosByAd[m.ad_id])mapeosByAd[m.ad_id]=[];mapeosByAd[m.ad_id].push(m)}
+
+    // 5. Traer último registro de hoy por meta_id (para detectar cambios)
+    let ultimosByMeta={}
+    if(todosMetaIds.length){
+      for(let i=0;i<todosMetaIds.length;i+=100){
+        const batch=todosMetaIds.slice(i,i+100)
+        const{data}=await sb.from('semaforo_historial').select('meta_id,semaforo,hora_calculo').in('meta_id',batch).eq('fecha',hoy).order('hora_calculo',{ascending:false})
+        if(data){
+          for(const r of data){if(!ultimosByMeta[r.meta_id])ultimosByMeta[r.meta_id]=r}
+        }
+      }
+    }
+
+    // 6. Construir registros a insertar
+    const registros=[]
+    for(const it of items){
+      const k=`${it.meta_id}|${it.nivel}`
+      const gasto=gastoBy[k]||0
+      const conv=convBy[k]||0
+      // Ventas reales = pendientes del día (mapeos con fecha=hoy)
+      let ventas=0,canceladas=0,pendientes=0
+      for(const adId of it.adIds){
+        const ms=mapeosByAd[adId]||[]
+        for(const m of ms){
+          // En modo "solo hoy", todo mapeo con fecha=hoy cuenta como pendiente (venta del día)
+          if(m.fecha===hoy){pendientes++;continue}
+          const cat=(typeof DROPI_STATUS!=='undefined'&&DROPI_STATUS[m.estado_final])?DROPI_STATUS[m.estado_final].cat:'otro'
+          if(cat==='cancelado')canceladas++
+          else if(cat==='pendiente'||!m.estado_final)pendientes++
+          else ventas++
+        }
+      }
+      const ventasReales=pendientes // esSoloHoy=true para los disparos del auxiliar
+      const cpaReal=ventasReales>0&&gasto>0?gasto/ventasReales:0
+
+      // Resolver margenBE: subir hasta campaign
+      const ctxCamp=_resolverCtxCamp(it.campId||it.meta_id)
+      const margenBE=ctxCamp.margenBE
+      const prodRef=ctxCamp.esFallback?null:ctxCamp.nombre
+
+      // Semáforo (mismas 5 reglas que renderCamp)
+      let sem='sin_ventas',semLabel='⏳ Sin ventas'
+      if(gasto>0){
+        if(cpaReal===0&&ventasReales===0){sem='sin_ventas';semLabel='⏳ Sin ventas'}
+        else if(margenBE&&cpaReal>margenBE){sem='stop';semLabel='🔴 STOP'}
+        else if(margenBE&&cpaReal>margenBE*0.7){sem='precaucion';semLabel='🟡 Precaución'}
+        else if(margenBE&&cpaReal>margenBE*0.45){sem='escalar';semLabel='🟢 Escalar'}
+        else if(margenBE){sem='fuego';semLabel='🟣 Fuego'}
+      }else{
+        // sin gasto, no insertamos (no aporta info)
+        continue
+      }
+
+      const ultimo=ultimosByMeta[it.meta_id]
+      const cambio=ultimo?(ultimo.semaforo!==sem):false
+      const semAnterior=ultimo?ultimo.semaforo:null
+
+      registros.push({
+        meta_id:it.meta_id,
+        nivel:it.nivel,
+        account_id:it.account_id,
+        fecha:hoy,
+        semaforo:sem,
+        semaforo_label:semLabel,
+        cpa_real:cpaReal,
+        ventas,
+        canceladas,
+        pendientes,
+        gasto,
+        conv_meta:conv,
+        "margenBE_referencia":margenBE,
+        producto_referencia:prodRef,
+        triggered_by:triggeredBy||'manual',
+        cambio_vs_anterior:cambio,
+        semaforo_anterior:semAnterior
+      })
+    }
+
+    if(!registros.length)return
+    const{error}=await sb.from('semaforo_historial').insert(registros)
+    if(error)console.warn('[semaforo_historial] inserción falló:',error.message)
+  }catch(e){
+    console.warn('[semaforo_historial] excepción:',e.message)
+  }
+}
+
+// Modal para ver todos los registros históricos de un meta_id
+window.verHistorialSemaforos=async(metaId,nivel)=>{
+  if(!metaId)return
+  const div=document.createElement('div')
+  div.id='user-modal';div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:720px;max-height:80vh;overflow-y:auto">
+    <div class="modal-title">📊 Historial de semáforos</div>
+    <div class="modal-sub">${nivel||'—'} · ${metaId}</div>
+    <div id="sem-hist-body" style="margin-top:14px"><div class="loading">Cargando...</div></div>
+    <div class="modal-actions"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>
+  </div>`
+  div.onclick=closeModal
+  document.body.appendChild(div)
+  try{
+    const{data,error}=await sb.from('semaforo_historial').select('*').eq('meta_id',metaId).order('hora_calculo',{ascending:false}).limit(500)
+    const body=document.getElementById('sem-hist-body')
+    if(!body)return
+    if(error){body.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+    if(!data||!data.length){body.innerHTML='<div class="alert alert-blue">Sin registros</div>';return}
+    // Agrupar por día
+    const porDia={}
+    for(const r of data){if(!porDia[r.fecha])porDia[r.fecha]=[];porDia[r.fecha].push(r)}
+    const dias=Object.keys(porDia).sort((a,b)=>b.localeCompare(a))
+    const hoyStr=new Date().toISOString().slice(0,10)
+    body.innerHTML=dias.map(d=>{
+      const regs=porDia[d].sort((a,b)=>new Date(a.hora_calculo)-new Date(b.hora_calculo))
+      const cambios=regs.filter(r=>r.cambio_vs_anterior).length
+      const expandedDefault=d===hoyStr?'open':''
+      return`<details ${expandedDefault} style="margin-bottom:8px;background:var(--card2);border-radius:8px;padding:10px">
+        <summary style="cursor:pointer;font-weight:600;font-size:13px">📅 ${d} · ${regs.length} cálculos${cambios>0?` · ${cambios} cambios`:''}</summary>
+        <div style="margin-top:8px;font-size:11px;font-family:monospace">
+          ${regs.map(r=>{
+            const hora=new Date(r.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
+            const opa=r.cambio_vs_anterior?'1':'.55'
+            const flag=r.cambio_vs_anterior?'<span style="color:var(--amber);font-weight:700">▲</span>':'&nbsp;&nbsp;'
+            return`<div style="opacity:${opa};padding:3px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span style="color:var(--muted);min-width:48px">${hora}</span>
+              <span>${r.semaforo_label||r.semaforo}</span>
+              <span style="color:var(--muted)">CPA $${fmt(r.cpa_real||0)}</span>
+              <span style="color:var(--muted)">${r.pendientes||0}v</span>
+              <span style="color:var(--muted)">$${fmt(r.gasto||0)}</span>
+              <span style="color:var(--muted);font-size:10px">[${r.triggered_by||'—'}]</span>
+              ${flag}
+            </div>`
+          }).join('')}
+        </div>
+      </details>`
+    }).join('')
+  }catch(e){
+    const body=document.getElementById('sem-hist-body')
+    if(body)body.innerHTML=`<div class="alert alert-red">${e.message}</div>`
+  }
+}
 
 // Helper: dado un set de ad_ids + rango de fechas, devuelve métricas reales
 // (ventas, canceladas, pendientes) cruzando con la tabla mapeos.

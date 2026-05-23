@@ -4039,6 +4039,26 @@ async function pageAuxReservado(c){
     const accionLog={confirmar:'orden_confirmada',cancelar:'orden_cancelada',reactivar:'orden_reactivada'}[accion]
     logAction(accionLog,{mapeo_id:m.id,telefono:m.telefono,producto:m.producto,estado_anterior:estadoAnterior,estado_nuevo:nuevoEstado,motivo:motivo||null}).catch(()=>{})
 
+    // Fase 3 — event sourcing: registrar el cambio manual en mapeo_eventos.
+    // Si falla, NO aborta el flujo (el cambio principal ya está guardado).
+    try{
+      const eventoMap={confirmar:'confirmado',cancelar:'cancelado',reactivar:'reactivado'}
+      const{error:evErr}=await sb.from('mapeo_eventos').insert({
+        mapeo_id:m.id,
+        evento:eventoMap[accion]||accion,
+        fuente:'auxiliar_manual',
+        usuario_id:me?.id||null,
+        detalle:{
+          estado_anterior:estadoAnterior,
+          estado_nuevo:nuevoEstado,
+          motivo:motivo||null,
+          telefono:m.telefono,
+          desde_pagina:'reservados_buscador'
+        }
+      })
+      if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+    }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
+
     closeModal()
     // Refrescar la búsqueda para mostrar el nuevo estado
     setTimeout(()=>{
@@ -4110,6 +4130,25 @@ async function pageAuxReservado(c){
     }).select().maybeSingle()
     if(error){msgEl.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
     logAction('envio_programado',{mapeo_id:m.id,telefono:m.telefono,fecha_envio:fecha,programacion_id:data?.id,nota:nota||null}).catch(()=>{})
+
+    // Fase 3 — event sourcing: registrar la programación en mapeo_eventos.
+    // Si falla, NO aborta el flujo (la programación ya está guardada).
+    try{
+      const{error:evErr}=await sb.from('mapeo_eventos').insert({
+        mapeo_id:m.id,
+        evento:'envio_programado',
+        fuente:'auxiliar_manual',
+        usuario_id:me?.id||null,
+        detalle:{
+          programacion_id:data?.id||null,
+          fecha_envio:fecha,
+          telefono:m.telefono,
+          nota:nota||null
+        }
+      })
+      if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+    }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
+
     closeModal()
     setTimeout(()=>{
       const tel=document.getElementById('res-tel')
@@ -4506,6 +4545,26 @@ window.enviarMensajeConfirmacion=async(progId)=>{
       usuario_nombre:me?.nombre||null
     })
     logAction('confirmacion_mensaje_enviado',{prog_id:progId,telefono:item.telefono,dias_falta:item.dias_falta,nivel:nivelInfo.nivel}).catch(()=>{})
+
+    // Fase 3 — event sourcing: registrar el envío del mensaje en mapeo_eventos.
+    // Si falla, NO aborta el flujo (el envío ya quedó registrado en confirmacion_envios).
+    if(item.mapeo_id){
+      try{
+        const{error:evErr}=await sb.from('mapeo_eventos').insert({
+          mapeo_id:item.mapeo_id,
+          evento:'confirmacion_enviada',
+          fuente:'auxiliar_manual',
+          usuario_id:me?.id||null,
+          detalle:{
+            programacion_id:progId,
+            dia_relativo:item.dias_falta,
+            nivel_mensaje:nivelInfo.nivel,
+            telefono:item.telefono
+          }
+        })
+        if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+      }catch(e2){console.warn('[mapeo_eventos] excepción:',e2.message)}
+    }
   }catch(e){console.warn('No se pudo registrar envío de confirmación:',e)}
   setTimeout(()=>cargarPendientesConfirmacion(),800)
 }

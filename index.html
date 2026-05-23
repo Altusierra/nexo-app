@@ -8637,8 +8637,8 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   }
 
   // ── ENTREGA 3B: cargar histórico de semáforos del día (de esta cuenta) ──
-  // Se indexa por meta_id (la tarjeta de campaña filtra solo nivel=campaign).
-  const semaforosByCamp={}
+  // Se indexa por meta_id (incluye todos los niveles: campaign + adsets + ads).
+  const semaforosByMeta={}
   try{
     const{data:semData}=await sb.from('semaforo_historial')
       .select('meta_id,nivel,fecha,hora_calculo,semaforo,semaforo_label,cpa_real,ventas,pendientes,gasto,triggered_by,cambio_vs_anterior,semaforo_anterior')
@@ -8646,11 +8646,15 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       .order('hora_calculo',{ascending:true})
       .limit(5000)
     for(const r of (semData||[])){
-      if(r.nivel!=='campaign')continue
-      if(!semaforosByCamp[r.meta_id])semaforosByCamp[r.meta_id]=[]
-      semaforosByCamp[r.meta_id].push(r)
+      if(!semaforosByMeta[r.meta_id])semaforosByMeta[r.meta_id]=[]
+      semaforosByMeta[r.meta_id].push(r)
     }
   }catch(_){}
+  // Mantener alias por compatibilidad con código existente
+  const semaforosByCamp=semaforosByMeta
+  // Exponer al window para que toggleCampDesglose y toggleAdsetDesglose puedan usarlo
+  if(!window._metaPort)window._metaPort={}
+  window._metaPort.semaforosByMeta=semaforosByMeta
 
   // ── Clasificar: con/sin actividad (gasto > 0 en el rango) ──
   const conActividad=[],sinActividad=[]
@@ -8732,41 +8736,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
         <span>CTR: ${avgCtr.toFixed(2)}%</span><span>CPM: $${fmt(avgCpm)}</span><span>Freq: ${avgFreq.toFixed(1)}</span>
       </div>
       ${_renderEscaladasBadges(escaladasByCamp[camp.meta_id]||[],camp.meta_id)}
-      ${(() => {
-        const sems=semaforosByCamp[camp.meta_id]||[]
-        if(!sems.length)return ''
-        const cambios=sems.filter(s=>s.cambio_vs_anterior).length
-        const rows=sems.map(s=>{
-          const hora=new Date(s.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
-          const opa=s.cambio_vs_anterior?'1':'.55'
-          const flag=s.cambio_vs_anterior?'<span style="color:var(--amber);font-weight:700">▲</span>':'&nbsp;&nbsp;'
-          return`<div class="sem-row" data-cambio="${s.cambio_vs_anterior?1:0}" style="opacity:${opa};padding:3px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-family:monospace;font-size:11px">
-            <span style="color:var(--muted);min-width:48px">${hora}</span>
-            <span>${s.semaforo_label||s.semaforo}</span>
-            <span style="color:var(--muted)">CPA $${fmt(s.cpa_real||0)}</span>
-            <span style="color:var(--muted)">${s.pendientes||0}v</span>
-            <span style="color:var(--muted)">$${fmt(s.gasto||0)}</span>
-            <span style="color:var(--muted);font-size:10px">[${s.triggered_by||'—'}]</span>
-            ${flag}
-          </div>`
-        }).join('')
-        const triggers={}
-        for(const s of sems){triggers[s.triggered_by||'—']=(triggers[s.triggered_by||'—']||0)+1}
-        const trigStr=Object.entries(triggers).map(([k,v])=>`${k} (${v})`).join(' · ')
-        const semId='sem-'+camp.meta_id.replace(/[^a-zA-Z0-9]/g,'')
-        return`<details style="margin-top:8px;background:var(--card2);border-radius:6px;padding:6px 10px">
-          <summary style="cursor:pointer;font-size:11px;color:var(--muted)">🚦 Evolución del semáforo (HOY) — ${sems.length} cálculos${cambios>0?` · ${cambios} cambios`:''}</summary>
-          <div style="margin-top:8px">
-            <div style="display:flex;gap:4px;margin-bottom:6px">
-              <button class="btn-sm btn-primary" onclick="event.stopPropagation();document.getElementById('${semId}').querySelectorAll('.sem-row').forEach(r=>r.style.display='');this.parentElement.querySelectorAll('button').forEach(b=>b.className='btn-sm btn-outline');this.className='btn-sm btn-primary'" style="padding:2px 8px;font-size:10px">Todos</button>
-              <button class="btn-sm btn-outline" onclick="event.stopPropagation();document.getElementById('${semId}').querySelectorAll('.sem-row').forEach(r=>{r.style.display=r.dataset.cambio==='1'?'':'none'});this.parentElement.querySelectorAll('button').forEach(b=>b.className='btn-sm btn-outline');this.className='btn-sm btn-primary'" style="padding:2px 8px;font-size:10px">Solo cambios</button>
-              <button class="btn-sm btn-outline" onclick="event.stopPropagation();verHistorialSemaforos('${camp.meta_id}','campaign')" style="padding:2px 8px;font-size:10px">📊 Historial completo</button>
-            </div>
-            <div id="${semId}">${rows}</div>
-            <div style="margin-top:6px;font-size:10px;color:var(--muted)">Triggered: ${trigStr}</div>
-          </div>
-        </details>`
-      })()}`:''}</div>
+      ${window._renderSemHistorialBlock(camp.meta_id,'campaign')}`:''}</div>
       <div id="desglose-${camp.meta_id}" style="display:none;padding:4px 0 4px 16px"></div>
     </div>`
   }
@@ -8889,9 +8859,11 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
     let insightsHoy=[]
     for(let i=0;i<todosMetaIds.length;i+=100){
       const batch=todosMetaIds.slice(i,i+100)
-      const{data}=await sb.from('meta_insights').select('meta_id,nivel,spend,conversions,actions').in('meta_id',batch).gte('fecha',desde).lte('fecha',hasta)
+      const{data,error:errIns}=await sb.from('meta_insights').select('meta_id,nivel,spend,conversions,actions').in('meta_id',batch).gte('fecha',desde).lte('fecha',hasta)
+      if(errIns)console.warn('[SEM] error insights:',errIns.message)
       if(data)insightsHoy=insightsHoy.concat(data)
     }
+    console.log('[SEM] insights traídos:',insightsHoy.length,'desde',desde,'hasta',hasta)
     const gastoBy={}
     const convBy={}
     for(const ins of insightsHoy){
@@ -8902,6 +8874,7 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
       try{if(typeof metaConv==='function'&&ins.actions)cv+=metaConv(ins.actions)}catch(_){}
       convBy[k]=(convBy[k]||0)+cv
     }
+    console.log('[SEM] gastoBy keys:',Object.keys(gastoBy).length,'sample:',Object.entries(gastoBy).slice(0,5))
 
     // 4. Traer todos los mapeos del rango para los ads involucrados (una sola query)
     const todosAdHijos=[...new Set(items.flatMap(i=>i.adIds))]
@@ -9014,6 +8987,47 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
     console.warn('[SEM] excepción:',e.message,e)
     console.warn('[semaforo_historial] excepción:',e.message)
   }
+}
+
+// Helper global: genera el HTML de la sección "Evolución del semáforo" para
+// cualquier nivel (campaign/adset/ad). Se usa en renderCamp + toggleCampDesglose
+// + toggleAdsetDesglose para mostrar el mismo timeline en las 3 tarjetas.
+window._renderSemHistorialBlock=function(metaId,nivel){
+  try{
+    const sems=(window._metaPort?.semaforosByMeta||{})[metaId]||[]
+    if(!sems.length)return ''
+    const cambios=sems.filter(s=>s.cambio_vs_anterior).length
+    const rows=sems.map(s=>{
+      const hora=new Date(s.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
+      const opa=s.cambio_vs_anterior?'1':'.55'
+      const flag=s.cambio_vs_anterior?'<span style="color:var(--amber);font-weight:700">▲</span>':'&nbsp;&nbsp;'
+      return`<div class="sem-row" data-cambio="${s.cambio_vs_anterior?1:0}" style="opacity:${opa};padding:3px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-family:monospace;font-size:11px">
+        <span style="color:var(--muted);min-width:48px">${hora}</span>
+        <span>${s.semaforo_label||s.semaforo}</span>
+        <span style="color:var(--muted)">CPA $${fmt(s.cpa_real||0)}</span>
+        <span style="color:var(--muted)">${s.pendientes||0}v</span>
+        <span style="color:var(--muted)">$${fmt(s.gasto||0)}</span>
+        <span style="color:var(--muted);font-size:10px">[${s.triggered_by||'—'}]</span>
+        ${flag}
+      </div>`
+    }).join('')
+    const triggers={}
+    for(const s of sems){triggers[s.triggered_by||'—']=(triggers[s.triggered_by||'—']||0)+1}
+    const trigStr=Object.entries(triggers).map(([k,v])=>`${k} (${v})`).join(' · ')
+    const semId='sem-'+metaId.replace(/[^a-zA-Z0-9]/g,'')
+    return`<details style="margin-top:8px;background:var(--card2);border-radius:6px;padding:6px 10px">
+      <summary style="cursor:pointer;font-size:11px;color:var(--muted)">🚦 Evolución del semáforo (HOY) — ${sems.length} cálculos${cambios>0?` · ${cambios} cambios`:''}</summary>
+      <div style="margin-top:8px">
+        <div style="display:flex;gap:4px;margin-bottom:6px">
+          <button class="btn-sm btn-primary" onclick="event.stopPropagation();document.getElementById('${semId}').querySelectorAll('.sem-row').forEach(r=>r.style.display='');this.parentElement.querySelectorAll('button').forEach(b=>b.className='btn-sm btn-outline');this.className='btn-sm btn-primary'" style="padding:2px 8px;font-size:10px">Todos</button>
+          <button class="btn-sm btn-outline" onclick="event.stopPropagation();document.getElementById('${semId}').querySelectorAll('.sem-row').forEach(r=>{r.style.display=r.dataset.cambio==='1'?'':'none'});this.parentElement.querySelectorAll('button').forEach(b=>b.className='btn-sm btn-outline');this.className='btn-sm btn-primary'" style="padding:2px 8px;font-size:10px">Solo cambios</button>
+          <button class="btn-sm btn-outline" onclick="event.stopPropagation();verHistorialSemaforos('${metaId}','${nivel}')" style="padding:2px 8px;font-size:10px">📊 Historial completo</button>
+        </div>
+        <div id="${semId}">${rows}</div>
+        <div style="margin-top:6px;font-size:10px;color:var(--muted)">Triggered: ${trigStr}</div>
+      </div>
+    </details>`
+  }catch(e){console.warn('[SEM] render block failed:',e.message);return ''}
 }
 
 // Modal para ver todos los registros históricos de un meta_id
@@ -9244,7 +9258,8 @@ window.toggleCampDesglose=async(campId,accountId)=>{
               <span>Freq: ${avgFreq.toFixed(1)}</span>
               ${mr.canceladas>0?`<span style="color:var(--red)">Cancel: ${mr.canceladas} (${mr.tasaCancel.toFixed(0)}%)</span>`:''}
               ${mr.pendientes>0&&!mr.esSoloHoy?`<span style="color:var(--amber)">Pendientes: ${mr.pendientes}</span>`:''}
-            </div>`:''}
+            </div>
+            ${window._renderSemHistorialBlock(as.meta_id,'adset')}`:''}
           </div>
           <div id="desglose-as-${as.meta_id}" style="display:none;padding:2px 0 2px 20px"></div>
         </div>`
@@ -9356,7 +9371,8 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
           <span>Freq: ${avgFreq.toFixed(1)}</span>
           ${mr.canceladas>0?`<span style="color:var(--red)">Cancel: ${mr.canceladas} (${mr.tasaCancel.toFixed(0)}%)</span>`:''}
           ${mr.pendientes>0&&!mr.esSoloHoy?`<span style="color:var(--amber)">Pendientes: ${mr.pendientes}</span>`:''}
-        </div>`:''}
+        </div>
+        ${window._renderSemHistorialBlock(ad.meta_id,'ad')}`:''}
       </div>`
     }).join('')
     el.dataset.loaded='1'

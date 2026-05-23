@@ -4370,6 +4370,43 @@ function armarMensajeConfirmacion(item,idxTpl){
     .replace(/\[FECHA_ENVIO\]/g,fechaFmt)
 }
 
+// ── PROTOCOLO DE MENSAJES PARA PENDIENTES SIN FECHA DE ENVÍO ────────────
+// 4 niveles de persuasión progresiva. Sin placeholder [FECHA_ENVIO] porque
+// estos pedidos aún no tienen fecha programada. Nivel sube automático con
+// envíos previos. Cuota: 2 mensajes por día por pedido.
+const PSF_MSGS=[
+  // NIVEL 1 — Cordial + valor + facilidad COD
+  `Hola [NOMBRE] ✨\n\nTe escribimos porque hiciste tu pedido de *[PRODUCTO]* ([CANTIDAD]) y aún no hemos podido coordinar el despacho contigo.\n\n📦 Recuerda que tu pedido está apartado a tu nombre\n💵 Pago contra entrega — no pagas absolutamente nada hasta que el transportador te lo entregue en la puerta de tu casa\n\n¿Confirmas que aún lo quieres? Solo responde *SI* y coordinamos juntos la fecha que más te sirva para recibirlo en [CIUDAD] 🙏`,
+  // NIVEL 2 — Escasez moderada + compromiso "te apartamos"
+  `Hola [NOMBRE] 👋\n\nSolo para recordarte que tu *[PRODUCTO]* ([CANTIDAD]) sigue apartado a tu nombre 📦\n\nTe cuento con sinceridad: estamos con demanda alta esta semana y tu cupo lo estoy sosteniendo personalmente para no soltarlo. Pero necesito que confirmes para poder organizar tu despacho a [CIUDAD] 🙏\n\n✅ Responde *SI* y lo dejamos andando\n❓ Si tienes alguna duda, dímela y la resolvemos\n\n💵 Recuerda: pago contra entrega, sin ningún anticipo.`,
+  // NIVEL 3 — Urgencia + aversión a la pérdida
+  `Hola [NOMBRE], necesito tu ayuda con algo importante 🙏\n\nHoy debo decidir si seguir reservando tu *[PRODUCTO]* ([CANTIDAD]) o liberarlo. Tengo otros clientes preguntando por el mismo cupo y no puedo dejarlo apartado indefinidamente.\n\n📦 Tu pedido en [CIUDAD] sigue en pie, pero necesito una respuesta tuya HOY\n\nSolo dime:\n✅ *SI* — y te lo despacho esta misma semana\n❌ *NO* — y libero el cupo sin problema\n\n💵 Te recuerdo: NO pagas nada ahora, solo cuando el transportador te lo entregue en la puerta.`,
+  // NIVEL 4 — Última llamada + cierre binario
+  `[NOMBRE], última oportunidad 🙏\n\nDespués de hoy tengo que liberar tu cupo de *[PRODUCTO]* ([CANTIDAD]) porque hay lista de espera y no es justo seguir sosteniéndolo.\n\nEntiendo perfecto si decidiste no llevarlo — solo dime *NO* y todo bien, sin compromiso. Pero si lo quieres, necesito tu *SI* hoy mismo para garantizarte el despacho a [CIUDAD] esta semana.\n\n✅ *SI* — despacho garantizado\n❌ *NO* — libero el cupo\n\n💵 Sin ningún pago anticipado. Solo pagas al recibir en tu puerta.`
+]
+
+// Devuelve { idxTpl, etiqueta, nivel } según envíos previos. Cuota 2/día.
+function getNivelMensajePsf(envios,enviosHoy){
+  if(enviosHoy>=2)return{idxTpl:-1,etiqueta:'Cupo diario alcanzado',nivel:0,bloqueado:true}
+  const e=envios||0
+  if(e===0)return{idxTpl:0,etiqueta:'1er mensaje',nivel:1}
+  if(e===1)return{idxTpl:1,etiqueta:'2do mensaje',nivel:2}
+  if(e===2)return{idxTpl:2,etiqueta:'3er mensaje',nivel:3}
+  return{idxTpl:3,etiqueta:'4to mensaje (última llamada)',nivel:4}
+}
+
+// Reemplaza placeholders en mensaje PSF. No usa [FECHA_ENVIO].
+function armarMensajePsf(m,idxTpl){
+  const tpl=PSF_MSGS[idxTpl]||PSF_MSGS[0]
+  const prodNom=(typeof resolveProdName==='function'?(resolveProdName(m.producto)||{}).nombre:null)||m.producto||'[PRODUCTO]'
+  const cantTxt=m.cantidad?`${m.cantidad} unidad${m.cantidad>1?'es':''}`:'[CANTIDAD]'
+  return tpl
+    .replace(/\[NOMBRE\]/g,m.nombre_cliente||'[NOMBRE]')
+    .replace(/\[PRODUCTO\]/g,prodNom)
+    .replace(/\[CANTIDAD\]/g,cantTxt)
+    .replace(/\[CIUDAD\]/g,m.ciudad||'[CIUDAD]')
+}
+
 window._confCache={items:[],fechaActiva:null}
 
 // La función original se movió DENTRO de pageAuxReservado (debajo del buscador).
@@ -4617,6 +4654,40 @@ async function cargarPendientesSinFecha(){
       const fb=b.fecha||b.created_at||''
       return fb.localeCompare(fa)
     })
+    // 3) Traer envíos PSF por mapeo_id para mostrar contador y envíos de hoy
+    const sfIds=sinFecha.map(m=>m.id)
+    let psfEnvios=[]
+    for(let i=0;i<sfIds.length;i+=100){
+      const batch=sfIds.slice(i,i+100)
+      const{data:ed}=await sb.from('pendientes_sin_fecha_envios')
+        .select('mapeo_id,nivel_mensaje,created_at,usuario_nombre')
+        .in('mapeo_id',batch).order('created_at',{ascending:false}).limit(20000)
+      if(ed)psfEnvios=psfEnvios.concat(ed)
+    }
+    // Agrupar por mapeo_id: count total, envios_hoy, ultimo envío, último usuario, último nivel
+    const hoyStr=new Date().toISOString().slice(0,10)
+    const enviosByMap={}
+    for(const e of psfEnvios){
+      const mid=e.mapeo_id
+      if(!enviosByMap[mid])enviosByMap[mid]={count:0,enviosHoy:0,ultimo:null,ultimoUsuario:null,ultimoNivel:null}
+      enviosByMap[mid].count++
+      const diaEnv=String(e.created_at||'').slice(0,10)
+      if(diaEnv===hoyStr)enviosByMap[mid].enviosHoy++
+      if(!enviosByMap[mid].ultimo){
+        enviosByMap[mid].ultimo=e.created_at
+        enviosByMap[mid].ultimoUsuario=e.usuario_nombre
+        enviosByMap[mid].ultimoNivel=e.nivel_mensaje
+      }
+    }
+    // Enriquecer cada item con info de envíos
+    for(const m of sinFecha){
+      const info=enviosByMap[m.id]||{count:0,enviosHoy:0,ultimo:null,ultimoUsuario:null,ultimoNivel:null}
+      m.psf_envios=info.count
+      m.psf_envios_hoy=info.enviosHoy
+      m.psf_ultimo=info.ultimo
+      m.psf_ultimo_usuario=info.ultimoUsuario
+      m.psf_ultimo_nivel=info.ultimoNivel
+    }
     window._psfCache={items:sinFecha,limit:window._psfCache?.limit||20}
     renderPendientesSinFecha()
   }catch(e){
@@ -4642,6 +4713,21 @@ function renderPendientesSinFecha(){
     const diasDesde=m.fecha?Math.floor((Date.now()-new Date(m.fecha+'T00:00:00').getTime())/(24*60*60*1000)):null
     const diasBadge=diasDesde!=null?`<span class="pill" style="background:rgba(245,158,11,.12);color:var(--amber);border:1px solid var(--amber);font-size:11px">⏱ Hace ${diasDesde} día${diasDesde===1?'':'s'}</span>`:''
     const telLimpio=(m.telefono||'').replace(/\D/g,'')
+    // Calcular nivel siguiente y estado de envío
+    const envios=m.psf_envios||0
+    const enviosHoy=m.psf_envios_hoy||0
+    const nivelInfo=getNivelMensajePsf(envios,enviosHoy)
+    const bloqueadoHoy=nivelInfo.bloqueado
+    // Badge de envíos previos
+    let enviosBadge=''
+    if(envios>0){
+      const ultFmt=m.psf_ultimo?new Date(m.psf_ultimo).toLocaleDateString('es-CO',{day:'numeric',month:'short'}):'—'
+      enviosBadge=`<span class="pill" style="background:rgba(59,130,246,.12);color:var(--blue);border:1px solid var(--blue);font-size:11px">📨 ${envios} mensaje${envios===1?'':'s'} · último: ${ultFmt}${m.psf_ultimo_usuario?` · ${m.psf_ultimo_usuario}`:''}</span>`
+    }
+    // Botón de envío: deshabilitado si ya envió 2 hoy
+    const btnEnviar=bloqueadoHoy
+      ? `<button class="btn-sm" disabled style="background:var(--card2);color:var(--muted);border:1px solid var(--border);cursor:not-allowed;padding:8px 12px">⛔ Cupo diario (2/2)</button>`
+      : `<button class="btn-sm" onclick="enviarMensajePsf('${m.id}')" style="background:#25D366;color:#fff;border:none;padding:8px 12px;font-weight:600">📨 Enviar ${nivelInfo.etiqueta}</button>`
     return`<div class="card" style="margin-bottom:8px;border-left:3px solid var(--amber)">
       <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;flex-wrap:wrap">
         <div style="flex:1;min-width:240px">
@@ -4651,9 +4737,11 @@ function renderPendientesSinFecha(){
           <div style="font-size:12px;margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
             <span class="pill" style="background:rgba(245,158,11,.12);color:var(--amber);border:1px solid var(--amber);font-size:11px">⏳ Pendiente sin fecha</span>
             ${diasBadge}
+            ${enviosBadge}
           </div>
         </div>
-        <div style="text-align:right;flex-shrink:0">
+        <div style="text-align:right;flex-shrink:0;display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+          ${btnEnviar}
           <button class="btn-sm btn-primary" onclick="(function(){const i=document.getElementById('res-tel');if(i){i.value='${telLimpio}';if(typeof buscarOrden==='function')buscarOrden();window.scrollTo({top:0,behavior:'smooth'})}})()">🔍 Abrir y programar</button>
         </div>
       </div>
@@ -4677,6 +4765,58 @@ function renderPendientesSinFecha(){
   `
 }
 window.renderPendientesSinFecha=renderPendientesSinFecha
+
+// ── ENVIAR MENSAJE A PENDIENTE SIN FECHA ─────────────────────────────────
+window.enviarMensajePsf=async(mapeoId)=>{
+  if(!mapeoId){alert('ID de pedido inválido');return}
+  const cache=window._psfCache||{}
+  const m=(cache.items||[]).find(i=>i.id===mapeoId)
+  if(!m){alert('No se encontró el pedido');return}
+  const envios=m.psf_envios||0
+  const enviosHoy=m.psf_envios_hoy||0
+  if(enviosHoy>=2){alert('Ya enviaste los 2 mensajes permitidos hoy para este pedido.');return}
+  const nivelInfo=getNivelMensajePsf(envios,enviosHoy)
+  if(nivelInfo.bloqueado){alert('Cupo diario alcanzado.');return}
+  const mensaje=armarMensajePsf(m,nivelInfo.idxTpl)
+  const telLimpio=String(m.telefono||'').replace(/\D/g,'')
+  if(telLimpio.length<7){alert('Teléfono inválido');return}
+  const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`
+  window.open(url,'_blank','noopener')
+  try{
+    const{error}=await sb.from('pendientes_sin_fecha_envios').insert({
+      mapeo_id:m.id,
+      telefono:m.telefono||null,
+      nivel_mensaje:nivelInfo.nivel,
+      usuario_id:me?.id||null,
+      usuario_nombre:me?.nombre||null
+    })
+    if(error){console.warn('No se pudo registrar envío PSF:',error.message);alert('El mensaje se abrió pero no se pudo registrar: '+error.message);return}
+    logAction('psf_mensaje_enviado',{mapeo_id:m.id,tel:m.telefono,nivel:nivelInfo.nivel}).catch(()=>{})
+    // ── Registrar evento en mapeo_eventos ──
+    try{
+      const{error:evErr}=await sb.from('mapeo_eventos').insert({
+        mapeo_id:m.id,
+        evento:'psf_mensaje_enviado',
+        fuente:'reservados',
+        usuario_id:me?.id||null,
+        detalle:{
+          nivel_mensaje:nivelInfo.nivel,
+          etiqueta:nivelInfo.etiqueta,
+          telefono:m.telefono||null,
+          producto:m.producto||null,
+          ciudad:m.ciudad||null,
+          envios_previos:envios,
+          envios_hoy_antes:enviosHoy,
+          desde_pagina:'pendientes_sin_fecha'
+        }
+      })
+      if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+    }catch(e2){console.warn('[mapeo_eventos] excepción:',e2.message)}
+  }catch(e){console.warn('Error registrando envío PSF:',e);alert('Error: '+e.message);return}
+  // Refrescar lista para actualizar contadores
+  setTimeout(()=>cargarPendientesSinFecha(),500)
+}
 
 window.enviarMensajeConfirmacion=async(progId)=>{
   const cache=window._confCache||{}
@@ -5804,17 +5944,111 @@ async function cargarReclamePorFecha(){
       }
     })
     enriched.sort((a,b)=>a.envios-b.envios||(a.nombre||'').localeCompare(b.nombre||''))
-    window._reclameCache={fechaActiva:fecha,items:enriched,reporteId:rep.id}
-    renderReclameContent(rep,enriched)
+
+    // ─── ARRASTRE: traer pedidos no resueltos de los últimos 14 días ───
+    // Excluye: lote de hoy (ya cargado), duplicados (mismo tel|guia), resueltos,
+    // y mapeos con estado_final cerrado (ENTREGADO/DEVOLUCION/CANCELADO).
+    let arrastrados=[]
+    try{
+      const hace14=new Date(Date.now()-14*24*60*60*1000).toISOString().slice(0,10)
+      const{data:repsViejos}=await sb.from('reclame_reportes')
+        .select('id,fecha_lote,uploaded_by_name')
+        .gte('fecha_lote',hace14)
+        .neq('fecha_lote',fecha)
+        .order('fecha_lote',{ascending:false})
+      if(repsViejos?.length){
+        const repsViejosIds=repsViejos.map(r=>r.id)
+        const repsViejosMap={}
+        for(const r of repsViejos)repsViejosMap[r.id]=r
+        const{data:itemsViejos}=await sb.from('reclame_items')
+          .select('*').in('reporte_id',repsViejosIds).limit(20000)
+        if(itemsViejos?.length){
+          // Telefonos únicos de los arrastrados
+          const telsViejos=[...new Set(itemsViejos.map(i=>i.telefono))]
+          // Traer envíos y estados de mapeos en batches
+          let enviosViejos=[]
+          const estadosByTel={}
+          const prodByTelV={...prodByTel}
+          for(let i=0;i<telsViejos.length;i+=100){
+            const batch=telsViejos.slice(i,i+100)
+            const{data:ed}=await sb.from('reclame_envios')
+              .select('telefono,guia,created_at,usuario_nombre,nivel_mensaje')
+              .in('telefono',batch).order('created_at',{ascending:false}).limit(20000)
+            if(ed)enviosViejos=enviosViejos.concat(ed)
+            const{data:mp}=await sb.from('mapeos')
+              .select('telefono,producto,estado_final')
+              .in('telefono',batch)
+            if(mp)for(const m of mp){
+              if(m.telefono&&estadosByTel[m.telefono]===undefined){
+                estadosByTel[m.telefono]=m.estado_final||null
+              }
+              if(m.telefono&&!prodByTelV[m.telefono]&&m.producto)prodByTelV[m.telefono]=m.producto
+            }
+          }
+          // Combinar envíos (los del lote actual + los nuevos) para tener conteo correcto
+          const todosEnvios=envios.concat(enviosViejos)
+          const enviosMapV={},resueltasMapV={}
+          for(const e of todosEnvios){
+            const k=(e.telefono||'')+'|'+(e.guia||'')
+            if(e.nivel_mensaje===99){
+              if(!resueltasMapV[k])resueltasMapV[k]={fecha:e.created_at,usuario:e.usuario_nombre}
+              continue
+            }
+            if(!enviosMapV[k])enviosMapV[k]={count:0,ultimo:null,usuario:null}
+            enviosMapV[k].count++
+            if(!enviosMapV[k].ultimo)enviosMapV[k].ultimo=e.created_at
+            if(!enviosMapV[k].usuario)enviosMapV[k].usuario=e.usuario_nombre
+          }
+          // Set de items del lote de hoy para deduplicar
+          const yaEnHoy=new Set(enriched.map(i=>(i.tel||'')+'|'+(i.guia||'')))
+          // Estados cerrados (mapeo ya no está vivo)
+          const estadosCerrados=new Set(['ENTREGADO','DEVOLUCION','DEVOLUCION_INICIADA','DEVOLUCION INICIADA','EN DEVOLUCION','EN_DEVOLUCION','CANCELADO','DEVUELTA'])
+          // Procesar y deduplicar (si está en 2 lotes viejos, queda el más reciente)
+          const arrastradosTmp={}
+          for(const it of itemsViejos){
+            const k=(it.telefono||'')+'|'+(it.guia||'')
+            if(yaEnHoy.has(k))continue
+            if(resueltasMapV[k])continue
+            const estadoMapeo=String(estadosByTel[it.telefono]||'').toUpperCase().trim()
+            if(estadoMapeo&&estadosCerrados.has(estadoMapeo))continue
+            const itReporte=repsViejosMap[it.reporte_id]
+            const itFechaLote=itReporte?.fecha_lote||''
+            const prev=arrastradosTmp[k]
+            if(prev&&(prev.fecha_lote||'')>=itFechaLote)continue
+            const env=enviosMapV[k]||{count:0,ultimo:null,usuario:null}
+            arrastradosTmp[k]={
+              tel:it.telefono,guia:it.guia,nombre:it.cliente_nombre,
+              carrier:it.carrier,ciudad:it.ciudad,depto:it.depto,direccion:it.direccion,
+              producto:prodByTelV[it.telefono]||it.producto,cantidad:it.cantidad,orden_id:it.orden_id,
+              envios:env.count,ultimoEnvio:env.ultimo,ultimoUsuario:env.usuario,
+              resuelta:false,resueltaFecha:null,resueltaUsuario:null,
+              arrastrado:true,fecha_lote:itFechaLote,
+              uploaded_by_name:itReporte?.uploaded_by_name||null
+            }
+          }
+          arrastrados=Object.values(arrastradosTmp)
+          // Ordenar: primero los más viejos (fecha_lote ascendente) para priorizar lo urgente
+          arrastrados.sort((a,b)=>{
+            const fa=a.fecha_lote||'',fb=b.fecha_lote||''
+            if(fa!==fb)return fa.localeCompare(fb)
+            return a.envios-b.envios
+          })
+        }
+      }
+    }catch(e){console.warn('No se pudieron cargar arrastrados:',e.message)}
+
+    window._reclameCache={fechaActiva:fecha,items:enriched,reporteId:rep.id,arrastrados}
+    renderReclameContent(rep,enriched,arrastrados)
   }catch(e){
     el.innerHTML=`<div class="alert alert-red">Error cargando: ${e.message}</div>`
   }
 }
 window.cargarReclamePorFecha=cargarReclamePorFecha
 
-function renderReclameContent(rep,items){
+function renderReclameContent(rep,items,arrastrados){
   const el=document.getElementById('rec-content')
   if(!el)return
+  arrastrados=arrastrados||[]
   // Separar resueltas del flujo normal
   const itemsActivos=items.filter(i=>!i.resuelta)
   const itemsResueltos=items.filter(i=>i.resuelta)
@@ -5822,6 +6056,10 @@ function renderReclameContent(rep,items){
   const sinEnviar=itemsActivos.filter(i=>i.envios===0).length
   const yaEnviados=total-sinEnviar
   const totalMsgs=itemsActivos.reduce((s,i)=>s+i.envios,0)
+  // Stats de arrastrados
+  const arrSinEnviar=arrastrados.filter(i=>i.envios===0).length
+  const arrConEnvios=arrastrados.length-arrSinEnviar
+  const arrTotalMsgs=arrastrados.reduce((s,i)=>s+i.envios,0)
   const esc=(s)=>(s||'').toString().replace(/'/g,"\\'").replace(/\n/g,' ')
   const fmtDelta=(ms)=>{
     if(!ms||ms<0)return'—'
@@ -5837,6 +6075,10 @@ function renderReclameContent(rep,items){
     const contadorBadge=m.envios>0
       ?`<span class="pill" style="background:rgba(96,165,250,.15);color:var(--blue);border:1px solid rgba(96,165,250,.4);font-weight:700">📨 ${m.envios} ${m.envios===1?'vez enviado':'veces enviado'}</span>`
       :`<span class="pill" style="background:var(--card2);color:var(--muted);border:1px solid var(--border)">⏳ Sin enviar</span>`
+    // Badge especial si es arrastrado
+    const arrastradoBadge=m.arrastrado&&m.fecha_lote
+      ?`<span class="pill" style="background:rgba(245,158,11,.15);color:var(--amber);border:1px solid var(--amber);font-size:11px;font-weight:600">📅 Lote del ${new Date(m.fecha_lote+'T00:00:00').toLocaleDateString('es-CO',{day:'numeric',month:'short'})}</span>`
+      :''
     let ultimoEnvioBadge=''
     if(m.ultimoEnvio){
       const deltaMs=new Date()-new Date(m.ultimoEnvio)
@@ -5844,13 +6086,17 @@ function renderReclameContent(rep,items){
     }
     const btnEnviar=`<button class="btn-sm btn-primary" onclick="enviarReclameUno('${m.tel}','${esc(m.guia)}')">📨 Enviar aviso ${nivel}</button>`
     const btnResuelta=`<button class="btn-sm" style="background:var(--green);color:#fff;border:none" onclick="marcarReclameResuelta('${m.tel}','${esc(m.guia)}')">✅ Resuelta</button>`
-    return`<div class="card" style="margin-bottom:8px;border-left:3px solid ${nivelColor}">
+    // Borde naranja si arrastrado, sino color por nivel
+    const bordeColor=m.arrastrado?'var(--amber)':nivelColor
+    const bordeWidth=m.arrastrado?'4px':'3px'
+    return`<div class="card" style="margin-bottom:8px;border-left:${bordeWidth} solid ${bordeColor}">
       <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;flex-wrap:wrap">
         <div style="flex:1;min-width:220px">
           <div style="font-size:14px;font-weight:600;font-family:monospace">${m.tel||'—'}</div>
           <div style="font-size:13px;margin-top:2px">${m.nombre||'—'} · <strong>${m.producto||'—'}</strong> ${m.cantidad?`(${m.cantidad}u)`:''}</div>
           <div style="font-size:11px;color:var(--muted);margin-top:2px">${m.ciudad||'—'}, ${m.depto||'—'} · ${m.carrier||'—'} · Guía: ${m.guia||'—'}</div>
           <div style="font-size:12px;margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            ${arrastradoBadge}
             ${contadorBadge}
             <span class="pill" style="background:${nivel===1?'rgba(34,197,94,.12)':nivel===2?'rgba(245,158,11,.12)':'rgba(239,68,68,.12)'};color:${nivelColor};border:1px solid ${nivelColor}">📋 ${nivelTxt}</span>
           </div>
@@ -5892,7 +6138,25 @@ function renderReclameContent(rep,items){
       </button>
       <span style="font-size:11px;color:var(--muted)">Modo cola — envía mensajes uno por uno con timer</span>
     </div>`:''
+  // Cartelito de arrastrados (arriba del header del lote)
+  const cartelitoArrastrados=arrastrados.length>0?`
+    <div class="alert" style="margin-bottom:12px;background:rgba(245,158,11,.10);border:1px solid var(--amber);color:var(--amber);font-size:13px;font-weight:600">
+      ⚠️ ${arrastrados.length} pedido${arrastrados.length===1?'':'s'} arrastrado${arrastrados.length===1?'':'s'} de días anteriores sin resolver
+      <span style="font-weight:400;font-size:11px;color:var(--muted);margin-left:6px">· ${arrSinEnviar} sin contactar · ${arrConEnvios} con seguimiento · ${arrTotalMsgs} mensajes enviados en total</span>
+    </div>`:''
+  // Sección de arrastrados (debajo del cartelito, antes del lote del día)
+  const seccionArrastrados=arrastrados.length>0?`
+    <div style="margin-bottom:24px;padding:14px;background:rgba(245,158,11,.05);border:1px dashed var(--amber);border-radius:10px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--amber)"></span>
+        <span style="font-size:13px;font-weight:600;color:var(--amber);text-transform:uppercase;letter-spacing:.06em">📅 ARRASTRADOS DE DÍAS ANTERIORES (${arrastrados.length})</span>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Pedidos de los últimos 14 días sin marcar resueltos y que siguen vivos en el sistema. Priorízalos: están más cerca de devolverse.</div>
+      ${arrastrados.map(renderCard).join('')}
+    </div>`:''
   el.innerHTML=`
+    ${cartelitoArrastrados}
+    ${seccionArrastrados}
     <div class="alert alert-blue" style="margin-bottom:12px">
       📅 Lote del <strong>${rep.fecha_lote}</strong> · ${total} pedidos en reclame · 📨 ${totalMsgs} mensajes enviados en total · ⏳ ${sinEnviar} sin contactar${itemsResueltos.length?` · ✅ ${itemsResueltos.length} resueltas`:''}
       ${rep.uploaded_by_name?` · 👤 subido por ${rep.uploaded_by_name}`:''}

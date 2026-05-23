@@ -4114,6 +4114,14 @@ async function pageAuxReservado(c){
     const fSel=new Date(fecha+'T00:00:00')
     if(fSel<=hoy){msgEl.innerHTML='<div class="alert alert-red">La fecha debe ser futura</div>';return}
     msgEl.innerHTML='<div class="loading">Guardando...</div>'
+    // Detectar si había una programación activa previa (para diferenciar entre programar vs reprogramar)
+    let progAnterior=null
+    try{
+      const{data:prev}=await sb.from('programaciones_envio')
+        .select('id,fecha_envio_programada')
+        .eq('mapeo_id',m.id).eq('estado','programado').limit(1).maybeSingle()
+      if(prev)progAnterior=prev
+    }catch(_){}
     // Cerrar cualquier programación activa anterior del mismo mapeo
     try{
       await sb.from('programaciones_envio').update({estado:'cancelado',motivo:'Reemplazada por nueva programación'})
@@ -4129,21 +4137,26 @@ async function pageAuxReservado(c){
       usuario_nombre:me?.nombre||null
     }).select().maybeSingle()
     if(error){msgEl.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
-    logAction('envio_programado',{mapeo_id:m.id,telefono:m.telefono,fecha_envio:fecha,programacion_id:data?.id,nota:nota||null}).catch(()=>{})
+    const accionLogProg=progAnterior?'envio_reprogramado':'envio_programado'
+    logAction(accionLogProg,{mapeo_id:m.id,telefono:m.telefono,fecha_envio:fecha,programacion_id:data?.id,nota:nota||null,fecha_anterior:progAnterior?.fecha_envio_programada||null}).catch(()=>{})
 
-    // Fase 3 — event sourcing: registrar la programación en mapeo_eventos.
+    // Fase 3 — event sourcing: registrar la programación (o reprogramación) en mapeo_eventos.
     // Si falla, NO aborta el flujo (la programación ya está guardada).
     try{
       const{error:evErr}=await sb.from('mapeo_eventos').insert({
         mapeo_id:m.id,
-        evento:'envio_programado',
+        evento:progAnterior?'envio_reprogramado':'envio_programado',
         fuente:'auxiliar_manual',
         usuario_id:me?.id||null,
         detalle:{
           programacion_id:data?.id||null,
           fecha_envio:fecha,
           telefono:m.telefono,
-          nota:nota||null
+          nota:nota||null,
+          ...(progAnterior?{
+            fecha_anterior:progAnterior.fecha_envio_programada,
+            programacion_anterior_id:progAnterior.id
+          }:{})
         }
       })
       if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
@@ -4648,6 +4661,28 @@ window.aplicarResolucionPendiente=async(progId,nuevoEstado)=>{
   }catch(_){}
   const accionLog=nuevoEstado==='confirmado'?'pendiente_confirmado':'pendiente_cancelado'
   logAction(accionLog,{prog_id:progId,mapeo_id:item.mapeo_id,telefono:item.telefono,producto:item.producto,motivo:motivo||null}).catch(()=>{})
+
+  // Fase 3 — event sourcing: registrar la resolución en mapeo_eventos.
+  // Si falla, NO aborta el flujo (la resolución ya está aplicada).
+  if(item.mapeo_id){
+    try{
+      const{error:evErr}=await sb.from('mapeo_eventos').insert({
+        mapeo_id:item.mapeo_id,
+        evento:nuevoEstado,
+        fuente:'auxiliar_manual',
+        usuario_id:me?.id||null,
+        detalle:{
+          programacion_id:progId,
+          estado_nuevo:estadoMapeo,
+          motivo:motivo||null,
+          telefono:item.telefono,
+          desde_pagina:'pendientes_confirmacion'
+        }
+      })
+      if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+    }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
+  }
+
   closeModal()
   setTimeout(()=>cargarPendientesConfirmacion(),200)
 }

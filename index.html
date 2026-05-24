@@ -1584,6 +1584,21 @@ async function pageAdminProductos(c){
       }
     }
 
+    // Feature A — Validación bloqueante: si producto NO archivado, debe tener al menos 1 agente autorizado
+    try{
+      const prodMem=productos.find(p=>p.id===id)
+      const estaArchivado=!!(prodMem&&prodMem.archivado)
+      if(!estaArchivado){
+        const{count,error:eA}=await sb.from('producto_agentes')
+          .select('agente_id',{count:'exact',head:true})
+          .eq('producto_id',id)
+        if(!eA&&(count||0)===0){
+          document.getElementById('pmsg-'+id).innerHTML='<div class="alert alert-red">⚠️ Debes asignar al menos un agente al producto antes de guardar (sección "🤖 Agentes autorizados" abajo). Si el producto ya no se usa, archívalo.</div>'
+          return
+        }
+      }
+    }catch(_){}
+
     const updateData={
       flete_outbound:g('fo'),flete_devolucion:g('fd'),dev_pct:gf('dp')/100,
       costo_conversacion:g('cc'),campaign_ids:cids,maestro_codigo:mc
@@ -1976,6 +1991,116 @@ function renderProdAccordion(prod,maestrosList){
 }
 
 // Render del body desplegado (formulario completo)
+// ============================================================
+// Feature A — Agentes autorizados por producto (bots)
+// Tablas: agentes (global), producto_agentes (pivote)
+// ============================================================
+async function renderAgentesProd(id){
+  const cont=document.getElementById('agentes-prod-'+id)
+  if(!cont)return
+  // Cargar en paralelo: lista global de agentes activos + autorizados de este producto
+  const[gRes,pRes]=await Promise.all([
+    sb.from('agentes').select('id,nombre,activo').order('nombre'),
+    sb.from('producto_agentes').select('agente_id').eq('producto_id',id)
+  ])
+  if(gRes.error){
+    cont.innerHTML=`<div class="alert alert-red">Error cargando agentes: ${gRes.error.message}</div>`
+    return
+  }
+  if(pRes.error){
+    cont.innerHTML=`<div class="alert alert-red">Error cargando autorizados: ${pRes.error.message}</div>`
+    return
+  }
+  const agentes=gRes.data||[]
+  const autorizadosIds=new Set((pRes.data||[]).map(r=>r.agente_id))
+  const activos=agentes.filter(a=>a.activo)
+  const total=activos.length
+  const autorizadosCount=activos.filter(a=>autorizadosIds.has(a.id)).length
+  if(!total){
+    cont.innerHTML=`<div class="alert alert-amber" style="margin-bottom:10px">⚠️ No hay agentes creados todavía. Crea el primero para poder asignarlo a este producto.</div>
+      <div style="display:flex;gap:8px"><button class="btn-sm btn-primary" onclick="modalCrearAgente('${id}')">➕ Crear nuevo agente</button></div>`
+    return
+  }
+  cont.innerHTML=`
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+      <div style="font-size:12px;color:var(--muted)">${autorizadosCount}/${total} agentes autorizados</div>
+      <button class="btn-sm btn-primary" onclick="modalCrearAgente('${id}')" style="margin-left:auto">➕ Crear nuevo agente</button>
+    </div>
+    <div id="agentes-chips-${id}" style="display:flex;flex-wrap:wrap;gap:6px">
+      ${activos.map(a=>{
+        const isOn=autorizadosIds.has(a.id)
+        return`<button class="btn-sm ${isOn?'btn-primary':'btn-outline'}" onclick="toggleAgenteProd('${id}','${a.id}',${isOn?'true':'false'})" title="Click para ${isOn?'quitar':'autorizar'}" style="font-family:monospace;font-size:11px">${isOn?'✅ ':''}${a.nombre}</button>`
+      }).join('')}
+    </div>
+    <div id="agentes-msg-${id}" style="margin-top:8px"></div>`
+}
+
+window.toggleAgenteProd=async(prodId,agenteId,isOn)=>{
+  const msg=document.getElementById('agentes-msg-'+prodId)
+  if(msg)msg.innerHTML=''
+  try{
+    if(isOn===true||isOn==='true'){
+      // Quitar autorización
+      const{error}=await sb.from('producto_agentes').delete()
+        .eq('producto_id',prodId).eq('agente_id',agenteId)
+      if(error)throw error
+      logAction('producto_agente_quitado',{producto_id:prodId,agente_id:agenteId}).catch(()=>{})
+    }else{
+      // Agregar autorización
+      const{error}=await sb.from('producto_agentes').insert({producto_id:prodId,agente_id:agenteId})
+      if(error)throw error
+      logAction('producto_agente_autorizado',{producto_id:prodId,agente_id:agenteId}).catch(()=>{})
+    }
+    await renderAgentesProd(prodId)
+  }catch(e){
+    if(msg)msg.innerHTML=`<div class="alert alert-red">${e.message||e}</div>`
+  }
+}
+
+window.modalCrearAgente=(prodId)=>{
+  const area=document.getElementById('prod-modal-area')
+  if(!area)return
+  area.innerHTML=`<div class="card" style="border:2px solid var(--primary);margin-bottom:16px">
+    <div style="font-weight:600;margin-bottom:14px;font-size:15px">➕ Crear nuevo agente (bot)</div>
+    <div class="fld">
+      <label>Nombre del agente <span style="color:var(--red)">*</span></label>
+      <input type="text" id="na-nombre" placeholder="Ej: Neocell_X3_A1" style="font-family:monospace">
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">Debe coincidir EXACTAMENTE con el nombre que aparece en la columna AGENTE del asignador. Único en todo el sistema.</div>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:8px">
+      <button class="btn-sm btn-primary" onclick="saveNuevoAgente('${prodId||''}')">Crear agente</button>
+      <button class="btn-sm btn-outline" onclick="document.getElementById('prod-modal-area').innerHTML=''">Cancelar</button>
+    </div>
+    <div id="na-msg" style="margin-top:8px"></div>
+  </div>`
+  area.scrollIntoView({behavior:'smooth'})
+  setTimeout(()=>document.getElementById('na-nombre')?.focus(),50)
+}
+
+window.saveNuevoAgente=async(prodId)=>{
+  const nombre=(document.getElementById('na-nombre')?.value||'').trim()
+  const msg=document.getElementById('na-msg')
+  if(!nombre){msg.innerHTML='<div class="alert alert-red">El nombre es obligatorio</div>';return}
+  try{
+    const{data,error}=await sb.from('agentes').insert({nombre,activo:true}).select().single()
+    if(error){
+      const dup=/duplicate|unique/i.test(error.message||'')
+      msg.innerHTML=`<div class="alert alert-red">${dup?'⚠️ Ya existe un agente con ese nombre. Los nombres son únicos en todo el sistema.':error.message}</div>`
+      return
+    }
+    logAction('agente_creado',{agente_id:data.id,nombre}).catch(()=>{})
+    // Si vino de un producto, auto-autorizar
+    if(prodId){
+      const{error:e2}=await sb.from('producto_agentes').insert({producto_id:prodId,agente_id:data.id})
+      if(!e2)logAction('producto_agente_autorizado',{producto_id:prodId,agente_id:data.id}).catch(()=>{})
+    }
+    document.getElementById('prod-modal-area').innerHTML=''
+    if(prodId)await renderAgentesProd(prodId)
+  }catch(e){
+    msg.innerHTML=`<div class="alert alert-red">${e.message||e}</div>`
+  }
+}
+
 async function renderProdBody(id,maestrosList){
   const prod=productos.find(p=>p.id===id);if(!prod)return
   const body=document.getElementById('prod-body-'+id)
@@ -2072,10 +2197,14 @@ async function renderProdBody(id,maestrosList){
     </div>
     <div id="pmsg-${id}" style="margin-top:8px"></div>
     <div class="divider"></div>
+    <div class="section-title">🤖 Agentes autorizados (bots) <span style="color:var(--muted);font-size:11px;font-weight:400">— sólo estos agentes pueden vender este producto en el asignador</span></div>
+    <div id="agentes-prod-${id}"><div class="loading">Cargando agentes...</div></div>
+    <div class="divider"></div>
     <div class="section-title">🎯 Campañas enlazadas a este producto</div>
     <div id="camps-enlazadas-${id}"><div class="loading">Cargando...</div></div>
   </div>`
   renderCampanasEnlazadas(id)
+  renderAgentesProd(id)
   // Inyectar listeners a inputs de ofertas para recalcular en vivo
   document.querySelectorAll('.of-precio-'+id+', .of-costo-'+id).forEach(inp=>{
     inp.addEventListener('input',()=>recalcProdAuto(id))

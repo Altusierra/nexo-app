@@ -9295,6 +9295,32 @@ async function _calcMetricasPorAdIds(adIds,desde,hasta,gasto,ctx){
       else out.ventas++
     }
   }
+  // ── BUGFIX: si no hay mapeos en este nivel, también leer reportes_diarios ──
+  // Replica la misma lógica que usa renderCamp con ventasByCamp para evitar que
+  // adsets/ads digan "0 ventas" cuando el auxiliar reportó ad_ids manualmente
+  // pero todavía no se conciliaron con Dropi.
+  if(!mapeos.length){
+    try{
+      const adIdSet=new Set(adIds)
+      const{data:reportes}=await sb.from('reportes_diarios')
+        .select('ad_ids,fecha')
+        .gte('fecha',desde).lte('fecha',hasta)
+        .not('ad_ids','is',null).neq('ad_ids','')
+      const seenRep=new Set()
+      for(const rep of (reportes||[])){
+        if(!rep.ad_ids)continue
+        const ids=rep.ad_ids.split(/[\n,]+/).map(s=>s.trim()).filter(s=>s.length>5)
+        for(const aId of ids){
+          if(!adIdSet.has(aId))continue
+          const k=rep.fecha+'|'+aId
+          if(seenRep.has(k))continue
+          seenRep.add(k)
+          if(rep.fecha===hoy)out.pendientes++
+          else out.ventas++
+        }
+      }
+    }catch(e){console.warn('[_calcMetricasPorAdIds] reportes_diarios:',e.message)}
+  }
   const ventasReales=esSoloHoy?out.pendientes:out.ventas
   out.cpaReal=ventasReales>0&&gasto>0?gasto/ventasReales:0
   out.roasReal=ventasReales>0&&gasto>0?(ventasReales*(ctx?.p2||0))/gasto:0

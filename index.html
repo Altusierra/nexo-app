@@ -8196,6 +8196,14 @@ async function _detectarCambioPresupuesto(metaId,nivel,nombre,accountId,budgetNu
     logAction(tipo==='escalada'?'escalada_detectada':'reduccion_detectada',{
       meta_id:metaId,nivel,nombre,budget_anterior:budgetAnterior,budget_nuevo:budgetNuevo,cambio_pct:cambioPct
     }).catch(()=>{})
+    // ── FASE 2: registrar también en semaforo_historial para timeline ──
+    // (no bloquea el flujo de meta_escaladas; corre async)
+    setTimeout(()=>{
+      _insertarEventosCambioPresupuesto([{
+        meta_id:metaId,nivel,account_id:accountId,
+        anterior:budgetAnterior,nuevo:budgetNuevo,pct:cambioPct
+      }]).catch(()=>{})
+    },0)
   }catch(e){console.warn('[escaladas] excepción:',e.message)}
 }
 
@@ -8914,6 +8922,80 @@ window.toggleExcluirGlobal=async(accountId,excluir)=>{
 // ── Desglose campaña → adsets → ads (lazy loading) ──
 
 // ═══════════════════════════════════════════════════════════════════════
+// FASE 2 — EVENTO cambio_presupuesto EN EL SEMÁFORO
+// Inserta eventos cambio_presupuesto en semaforo_historial.
+// NO recalcula el semáforo (mantiene el último estado conocido).
+// Solo registra el cambio como un evento auditable en el timeline.
+// ═══════════════════════════════════════════════════════════════════════
+async function _insertarEventosCambioPresupuesto(cambios){
+  try{
+    if(!cambios||!cambios.length)return
+    const hoy=new Date().toISOString().slice(0,10)
+    // Para cada cambio, traer el último semáforo conocido del día para mantener
+    // continuidad visual (no romper la cadena de estados de la tira).
+    const metaIds=[...new Set(cambios.map(c=>c.meta_id))]
+    const ultimosByMeta={}
+    for(let i=0;i<metaIds.length;i+=100){
+      const batch=metaIds.slice(i,i+100)
+      const{data}=await sb.from('semaforo_historial')
+        .select('meta_id,semaforo,semaforo_label,cpa_real,ventas,canceladas,pendientes,gasto,conv_meta,margenbe_referencia,producto_referencia')
+        .in('meta_id',batch).eq('fecha',hoy)
+        .order('hora_calculo',{ascending:false})
+      if(data){
+        for(const r of data){
+          if(!ultimosByMeta[r.meta_id])ultimosByMeta[r.meta_id]=r
+        }
+      }
+    }
+    // Anti-duplicado: si en los últimos 5 min ya hay un evento cambio_presupuesto
+    // con los mismos valores, no insertar de nuevo (evita duplicados en re-sync).
+    const hace5min=new Date(Date.now()-5*60000).toISOString()
+    const{data:recientes}=await sb.from('semaforo_historial')
+      .select('meta_id,presupuesto_anterior,presupuesto_nuevo,hora_calculo')
+      .in('meta_id',metaIds).eq('triggered_by','cambio_presupuesto')
+      .gte('hora_calculo',hace5min)
+    const yaRegistrado=new Set()
+    for(const r of (recientes||[])){
+      yaRegistrado.add(`${r.meta_id}|${Math.round(r.presupuesto_anterior||0)}|${Math.round(r.presupuesto_nuevo||0)}`)
+    }
+    const registros=[]
+    for(const c of cambios){
+      const k=`${c.meta_id}|${Math.round(c.anterior||0)}|${Math.round(c.nuevo||0)}`
+      if(yaRegistrado.has(k))continue
+      const ult=ultimosByMeta[c.meta_id]||{}
+      registros.push({
+        meta_id:c.meta_id,
+        nivel:c.nivel,
+        account_id:c.account_id,
+        fecha:hoy,
+        semaforo:ult.semaforo||'sin_ventas',
+        semaforo_label:ult.semaforo_label||'⚙️ Cambio de presupuesto',
+        cpa_real:ult.cpa_real||0,
+        ventas:ult.ventas||0,
+        canceladas:ult.canceladas||0,
+        pendientes:ult.pendientes||0,
+        gasto:ult.gasto||0,
+        conv_meta:ult.conv_meta||0,
+        margenbe_referencia:ult.margenbe_referencia||null,
+        producto_referencia:ult.producto_referencia||null,
+        triggered_by:'cambio_presupuesto',
+        cambio_vs_anterior:false,
+        semaforo_anterior:ult.semaforo||null,
+        presupuesto_anterior:c.anterior,
+        presupuesto_nuevo:c.nuevo,
+        presupuesto_pct_cambio:c.pct
+      })
+    }
+    if(!registros.length){console.log('[FASE2] sin eventos nuevos (todos duplicados)');return}
+    const{error}=await sb.from('semaforo_historial').insert(registros)
+    if(error)console.warn('[FASE2] insertar cambio_presupuesto falló:',error.message)
+    else console.log('[FASE2] ✅',registros.length,'eventos cambio_presupuesto insertados')
+  }catch(e){
+    console.warn('[FASE2] excepción cambio_presupuesto:',e.message)
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // ENTREGA 3B — HISTÓRICO DE SEMÁFOROS
 // Cada vez que el auxiliar actualiza ventas, recalcula y guarda el
 // semáforo de las campañas/adsets/ads afectados en `semaforo_historial`.
@@ -9142,7 +9224,8 @@ window._semColorMap={
   stop:{bg:'var(--red)',bd:'var(--red)',cssVar:'var(--red)'},
   precaucion:{bg:'var(--amber)',bd:'var(--amber)',cssVar:'var(--amber)'},
   escalar:{bg:'var(--green)',bd:'var(--green)',cssVar:'var(--green)'},
-  fuego:{bg:'var(--purple)',bd:'var(--purple)',cssVar:'var(--purple)'}
+  fuego:{bg:'var(--purple)',bd:'var(--purple)',cssVar:'var(--purple)'},
+  cambio_presupuesto:{bg:'var(--amber)',bd:'var(--amber)',cssVar:'var(--amber)'}
 }
 // ── HELPERS DE UI: badge MEGA + orden por urgencia + color CPA ──
 // nexoBadgeMega(code, size): devuelve HTML del badge cuadrado grande con emoji + ESTADO + ACCION.
@@ -9190,8 +9273,8 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
     const sems=(window._metaPort?.semaforosByMeta||{})[metaId]||[]
     if(!sems.length&&!vivoData)return ''
     const COLOR_MAP=window._semColorMap
-    // Mostrar solo: el primero del día + todos los cambios reales + el último siempre
-    let eventos=sems.filter((s,i)=>i===0||s.cambio_vs_anterior||i===sems.length-1)
+    // Mostrar solo: el primero del día + todos los cambios reales + cambio_presupuesto + el último siempre
+    let eventos=sems.filter((s,i)=>i===0||s.cambio_vs_anterior||s.triggered_by==='cambio_presupuesto'||i===sems.length-1)
     const seen=new Set()
     eventos=eventos.filter(s=>{if(seen.has(s.hora_calculo))return false;seen.add(s.hora_calculo);return true})
     // SINCRONIZACIÓN BADGE ↔ TIRA: si tenemos vivoData y el último estado de la
@@ -9235,15 +9318,25 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
       const c=COLOR_MAP[s.semaforo]||COLOR_MAP.sin_ventas
       const isUltimo=i===eventos.length-1
       const isDropi=s.triggered_by==='cruce_dropi'
+      const isPresupuesto=s.triggered_by==='cambio_presupuesto'
       const hora=new Date(s.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
       const size=isUltimo?'16':'12'
       const borderW=isUltimo?'2':'2'
-      const tooltip=`${s.semaforo_label||s.semaforo} · CPA $${fmt(s.cpa_real||0)} · ${s.pendientes||0}v · gasto $${fmt(s.gasto||0)}`
+      // Si es cambio_presupuesto, usar color ámbar fijo + icono ⚙️ adentro
+      const cFinal=isPresupuesto
+        ?{bg:'var(--amber)',bd:'var(--amber)',cssVar:'var(--amber)'}
+        :c
+      const tooltip=isPresupuesto
+        ?`Cambio de presupuesto: $${fmt(s.presupuesto_anterior||0)} → $${fmt(s.presupuesto_nuevo||0)} (${(s.presupuesto_pct_cambio||0)>0?'+':''}${(s.presupuesto_pct_cambio||0).toFixed(0)}%)`
+        :`${s.semaforo_label||s.semaforo} · CPA $${fmt(s.cpa_real||0)} · ${s.pendientes||0}v · gasto $${fmt(s.gasto||0)}`
       const label=isDropi
-        ?`<div style="font-size:8px;color:${c.cssVar};font-weight:700;margin-top:3px;line-height:1.1">Dropi</div><div style="font-size:8px;color:var(--muted);line-height:1.1">${hora}</div>`
+        ?`<div style="font-size:8px;color:${cFinal.cssVar};font-weight:700;margin-top:3px;line-height:1.1">Dropi</div><div style="font-size:8px;color:var(--muted);line-height:1.1">${hora}</div>`
+        :isPresupuesto
+        ?`<div style="font-size:8px;color:${cFinal.cssVar};font-weight:700;margin-top:3px;line-height:1.1">Budget</div><div style="font-size:8px;color:var(--muted);line-height:1.1">${hora}</div>`
         :`<div style="font-size:8px;color:${isUltimo?'var(--text)':'var(--muted)'};margin-top:3px;font-weight:${isUltimo?'600':'400'}">${hora}</div>`
+      const innerIcon=isPresupuesto?'<span style="font-size:9px;color:#412402;line-height:1">⚙️</span>':''
       return`<div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0">
-        <div title="${tooltip}" style="width:${size}px;height:${size}px;border-radius:50%;background:${c.bg};border:${borderW}px solid ${c.bd};cursor:help;flex-shrink:0;box-shadow:0 0 0 1px rgba(0,0,0,.2)"></div>
+        <div title="${tooltip}" style="width:${size}px;height:${size}px;border-radius:50%;background:${cFinal.bg};border:${borderW}px solid ${cFinal.bd};cursor:help;flex-shrink:0;box-shadow:0 0 0 1px rgba(0,0,0,.2);display:flex;align-items:center;justify-content:center">${innerIcon}</div>
         ${label}
       </div>`
     })
@@ -9362,7 +9455,8 @@ window._semRenderTimeline=(data)=>{
     cruce_dropi:'Cruce con Dropi',
     manual:'Disparado manualmente',
     sync:'Sync automático',
-    meta_api:'Sync de Meta'
+    meta_api:'Sync de Meta',
+    cambio_presupuesto:'Cambio de presupuesto'
   }
   // Agrupar por fecha (descendente)
   const porDia={}
@@ -9372,8 +9466,8 @@ window._semRenderTimeline=(data)=>{
   return dias.map(d=>{
     const regs=porDia[d].sort((a,b)=>new Date(a.hora_calculo)-new Date(b.hora_calculo))
     const fechaStr=new Date(d+'T12:00').toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long'})
-    // Mostrar solo: primero + todos los cambios + último (evita repetición)
-    let eventos=regs.filter((r,i)=>i===0||r.cambio_vs_anterior||i===regs.length-1)
+    // Mostrar solo: primero + todos los cambios + cambio_presupuesto + último (evita repetición)
+    let eventos=regs.filter((r,i)=>i===0||r.cambio_vs_anterior||r.triggered_by==='cambio_presupuesto'||i===regs.length-1)
     const seen=new Set()
     eventos=eventos.filter(r=>{if(seen.has(r.hora_calculo))return false;seen.add(r.hora_calculo);return true})
     const itemsHtml=eventos.map((r,i)=>{
@@ -9393,6 +9487,34 @@ window._semRenderTimeline=(data)=>{
         titulo=r.semaforo_label||r.semaforo
       }
       const fuenteLeg=FUENTE_LEG[r.triggered_by]||r.triggered_by||'—'
+      // Card especial: cambio de presupuesto (no afecta el semáforo, solo registra el cambio)
+      const esPresupuesto=r.triggered_by==='cambio_presupuesto'
+      if(esPresupuesto){
+        const ant=r.presupuesto_anterior||0
+        const nue=r.presupuesto_nuevo||0
+        const pct=r.presupuesto_pct_cambio||0
+        const sube=nue>ant
+        return`<div style="position:relative;margin-bottom:14px">
+          <div style="position:absolute;left:-32px;top:0;width:24px;height:24px;border-radius:50%;background:var(--amber);border:3px solid var(--amber);display:flex;align-items:center;justify-content:center">
+            <span style="font-size:13px;color:#412402">⚙️</span>
+          </div>
+          <div style="background:var(--amber-bg);border:1px solid var(--amber);border-radius:8px;padding:12px 14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <span style="font-size:10px;color:var(--amber);font-weight:700;letter-spacing:.6px">⚙️ CAMBIO DE PRESUPUESTO</span>
+              <span style="font-size:11px;color:var(--amber);font-weight:600">${hora}</span>
+            </div>
+            <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px">
+              ${sube?'Subió':'Bajó'} el presupuesto diario
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+              <span style="background:var(--card);padding:4px 10px;border-radius:4px;font-size:11px;color:var(--muted)">Antes: $${fmt(ant)}</span>
+              <span style="color:var(--amber);font-weight:700">→</span>
+              <span style="background:var(--card);padding:4px 10px;border-radius:4px;font-size:11px;color:var(--text);font-weight:600">Ahora: $${fmt(nue)}</span>
+              <span style="background:var(--amber);color:#412402;padding:4px 10px;border-radius:4px;font-size:11px;font-weight:600">${sube?'+':''}${pct.toFixed(0)}%</span>
+            </div>
+          </div>
+        </div>`
+      }
       // Card especial para el cruce Dropi (veredicto final destacado)
       if(esDropi){
         return`<div style="position:relative;margin-bottom:14px">

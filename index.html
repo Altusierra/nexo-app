@@ -9663,9 +9663,9 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
     const adIdsUnicos=[...new Set(adIds.filter(Boolean))]
     if(!adIdsUnicos.length){console.log('[SEM] salida: adIdsUnicos vacío');return}
     const hoy=new Date().toISOString().slice(0,10)
-    // Rango de 30 días (igual que el default del portafolio) para que el semáforo
-    // refleje el mismo dato que el auxiliar ve en la tarjeta de campaña.
-    const desde=new Date(Date.now()-30*86400000).toISOString().slice(0,10)
+    // Rango = SOLO HOY: cada snapshot del semáforo refleja qué pasó hoy hasta este momento.
+    // Así el "Plata del día" del historial coincide con la realidad del día.
+    const desde=hoy
     const hasta=hoy
 
     // 1. Subir jerarquía: ad → adset → campaign
@@ -9926,7 +9926,12 @@ window.nexoCpaColor=function(cpaReal,margenBE){
 // para que la tira coincida visualmente con el badge.
 window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
   try{
-    const sems=(window._metaPort?.semaforosByMeta||{})[metaId]||[]
+    const semsRaw=(window._metaPort?.semaforosByMeta||{})[metaId]||[]
+    // FIX timezone: filtrar por día LOCAL usando hora_calculo (no por columna 'fecha' que es UTC).
+    // Esto evita que un registro creado a las 8:36 pm hora local del 23 (= 1:36 am UTC del 24) aparezca como "Hoy".
+    const _localDay=(ts)=>{const d=new Date(ts);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
+    const _hoyLocal=_localDay(new Date().toISOString())
+    const sems=semsRaw.filter(s=>s.hora_calculo&&_localDay(s.hora_calculo)===_hoyLocal)
     if(!sems.length&&!vivoData)return ''
     const COLOR_MAP=window._semColorMap
     // Mostrar solo: el primero del día + todos los cambios reales + cambio_presupuesto + el último siempre
@@ -10145,10 +10150,14 @@ window._semRenderTimeline=(data)=>{
       }
     }
     const ultimo=regs[regs.length-1]
-    if(ultimo&&!horasMostradas.has(ultimo.hora_calculo)){eventos.push(ultimo);horasMostradas.add(ultimo.hora_calculo)}
+    const cambiosRealesPre=regs.filter(r=>r.cambio_vs_anterior||r.triggered_by==='cambio_presupuesto')
+    // Solo incluir el último si hubo cambios reales o si es el único registro del día
+    if(ultimo&&!horasMostradas.has(ultimo.hora_calculo)&&(cambiosRealesPre.length>0||regs.length===1)){
+      eventos.push(ultimo);horasMostradas.add(ultimo.hora_calculo)
+    }
     eventos.sort((a,b)=>new Date(a.hora_calculo)-new Date(b.hora_calculo))
 
-    const cambiosReales=regs.filter(r=>r.cambio_vs_anterior||r.triggered_by==='cambio_presupuesto')
+    const cambiosReales=cambiosRealesPre
     const cambiosCount=cambiosReales.length
     const sinCambioRegs=regs.filter(r=>!horasMostradas.has(r.hora_calculo))
     const dropiReg=regs.find(r=>r.triggered_by==='cruce_dropi')
@@ -10159,13 +10168,25 @@ window._semRenderTimeline=(data)=>{
     // ── Resumen del día en 1 línea ──
     let resumenLinea=''
     if(eventos.length>=1){
-      const tags=eventos.filter(r=>r.triggered_by!=='cruce_dropi').map(r=>{
+      const eventosNoDropi=eventos.filter(r=>r.triggered_by!=='cruce_dropi')
+      // Deduplicar estados consecutivos iguales (evita "EN FUEGO → luego EN FUEGO")
+      const estadosUnicos=[]
+      for(const r of eventosNoDropi){
+        if(!estadosUnicos.length||estadosUnicos[estadosUnicos.length-1].semaforo!==r.semaforo){
+          estadosUnicos.push(r)
+        }
+      }
+      const tags=estadosUnicos.map(r=>{
         const s=SEM[r.semaforo]||{label:r.semaforo,color:'var(--muted)',emoji:'•'}
         return `<span style="display:inline-flex;align-items:center;gap:3px;font-weight:600;color:${s.color}">${s.emoji} ${s.label}</span>`
       })
-      if(tags.length){
-        const verbos=['Empezó','luego','luego','luego','luego','luego','luego','luego']
-        const partes=tags.map((t,i)=>`${i===0?verbos[0]:'<span style="color:var(--subtle);margin:0 4px">→</span> luego'} ${t}`).join(' ')
+      if(tags.length===1){
+        // Sin cambios: "Mantuvo X todo el día"
+        resumenLinea=`<div style="background:var(--card);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px">
+          <span style="color:var(--muted);font-weight:600;margin-right:6px">RESUMEN:</span>Mantuvo ${tags[0]} todo el día (sin cambios)
+        </div>`
+      }else if(tags.length>1){
+        const partes=tags.map((t,i)=>`${i===0?'Empezó':'<span style="color:var(--subtle);margin:0 4px">→</span> luego'} ${t}`).join(' ')
         resumenLinea=`<div style="background:var(--card);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px">
           <span style="color:var(--muted);font-weight:600;margin-right:6px">RESUMEN:</span>${partes}
         </div>`

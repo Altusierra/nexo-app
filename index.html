@@ -4242,7 +4242,7 @@ async function cargarReporteData(){
   }
 
   // 2. Manual: reportes_diarios existentes (indexados por nombre normalizado)
-  const{data:reportes}=await sb.from('reportes_diarios').select('*').eq('fecha',fecha).eq('usuario_id',me?.id)
+  const{data:reportes}=await sb.from('reportes_diarios').select('*').eq('fecha',fecha).eq('usuario_id',currentMe()?.id)
   const repByProd={}
   if(reportes)for(const r of reportes)repByProd[_normProd(r.producto_nombre)||'']=r
 
@@ -4353,8 +4353,13 @@ async function cargarReporteData(){
   // Cargar ventas existentes o crear primera fila
   if(esHoy){
     const ventasExist=reportes?.filter(r=>r.ad_ids)||[]
-    if(ventasExist.length>0)for(const v of ventasExist)addVentaRow(v.producto_nombre||'',v.ad_ids||'',v.conversaciones_aprox||0)
-    else addVentaRow()
+    if(impersonating&&ventasExist.length>0){
+      // Admin viendo como aux: muestra los IDs guardados (read-only visual con badge)
+      for(const v of ventasExist)addVentaRow(v.producto_nombre||'',v.ad_ids||'',v.conversaciones_aprox||0)
+    }else{
+      // Aux normal: día nuevo siempre arranca vacío (no hereda IDs)
+      addVentaRow()
+    }
   }
   }catch(e){el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`}
 }
@@ -4429,11 +4434,17 @@ window.saveReporteV2=async(fecha)=>{
     // Also get conversaciones from auto section if exists
     const pid=_normProd(prodNom).replace(/\s+/g,'_')
     const convReal=parseInt(document.getElementById(`rc-${pid}`)?.value)||0
+    // Acumular ad_ids: leer existente y combinar (deduplicado) para no sobrescribir
+    const{data:existente}=await sb.from('reportes_diarios')
+      .select('ad_ids').eq('fecha',fecha).eq('producto_id',prodObj.id).eq('usuario_id',currentMe().id).maybeSingle()
+    const idsViejos=(existente?.ad_ids||'').split(/[\n,;\s]+/).map(s=>s.trim()).filter(Boolean)
+    const idsNuevos=adIds.split(/[\n,;\s]+/).map(s=>s.trim()).filter(Boolean)
+    const adIdsMerged=[...new Set([...idsViejos,...idsNuevos])].join('\n')
     const{error}=await sb.from('reportes_diarios').upsert({
       fecha,producto_id:prodObj.id,producto_nombre:prodObj.nombre,
-      conversaciones:convReal,conversaciones_aprox:convAp,ad_ids:adIds,
+      conversaciones:convReal,conversaciones_aprox:convAp,ad_ids:adIdsMerged,
       nota:document.getElementById('rep-nota')?.value||'',
-      usuario_id:me.id,updated_at:new Date().toISOString()
+      usuario_id:currentMe().id,updated_at:new Date().toISOString()
     },{onConflict:'fecha,producto_id,usuario_id'})
     if(error){msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
     saved++
@@ -4449,7 +4460,7 @@ window.saveReporteV2=async(fecha)=>{
     if(!prodObj)continue
     await sb.from('reportes_diarios').upsert({
       fecha,producto_id:prodObj.id,producto_nombre:prodObj.nombre,
-      conversaciones:conv,usuario_id:me.id,updated_at:new Date().toISOString()
+      conversaciones:conv,usuario_id:currentMe().id,updated_at:new Date().toISOString()
     },{onConflict:'fecha,producto_id,usuario_id'}).catch(()=>{})
   }
   msg.innerHTML=`<div class="alert alert-green">✅ ${saved} producto(s) guardado(s)</div>`
@@ -10086,14 +10097,15 @@ window._semHistRango=async()=>{
 // Renderiza el timeline visual: agrupa por día, muestra eventos en lenguaje
 // natural, destaca el evento "cruce_dropi" como veredicto final del día.
 window._semRenderTimeline=(data)=>{
-  const COLOR_MAP={
-    sin_ventas:{bg:'var(--muted)',bd:'var(--muted)',cls:'⏳ Sin ventas'},
-    pendiente_sync:{bg:'var(--muted)',bd:'var(--muted)',cls:'⏳ Ventas sin sync de gasto'},
-    reportado:{bg:'var(--blue)',bd:'var(--blue)',cls:'📝 Reportado sin datos'},
-    stop:{bg:'var(--red)',bd:'var(--red)',cls:'🔴 STOP'},
-    precaucion:{bg:'var(--amber)',bd:'var(--amber)',cls:'🟡 Precaución'},
-    escalar:{bg:'var(--green)',bd:'var(--green)',cls:'🟢 Escalar'},
-    fuego:{bg:'var(--purple)',bd:'var(--purple)',cls:'🟣 Fuego'}
+  // Mapa de semáforos con info visual completa
+  const SEM={
+    sin_ventas:{bg:'#1f1f1f',color:'#a3a3a3',label:'Sin ventas',accion:'Esperar',emoji:'⏳'},
+    pendiente_sync:{bg:'#1f1f1f',color:'#a3a3a3',label:'Sin sync',accion:'Esperar',emoji:'⏳'},
+    reportado:{bg:'var(--blue-bg)',color:'var(--blue)',label:'Reportado',accion:'Esperar',emoji:'📝'},
+    stop:{bg:'var(--red-bg)',color:'var(--red)',label:'PAUSAR',accion:'Pausar ya',emoji:'🔴'},
+    precaucion:{bg:'var(--amber-bg)',color:'var(--amber)',label:'CUIDADO',accion:'Ojo pues',emoji:'🟡'},
+    escalar:{bg:'var(--green-bg)',color:'var(--green)',label:'ESCALAR',accion:'Subir presupuesto',emoji:'🟢'},
+    fuego:{bg:'var(--purple-bg)',color:'var(--purple)',label:'EN FUEGO',accion:'Doblar presupuesto',emoji:'🟣'}
   }
   const FUENTE_LEG={
     reporte_dia:'Auxiliar reportó ventas',
@@ -10103,108 +10115,226 @@ window._semRenderTimeline=(data)=>{
     meta_api:'Sync de Meta',
     cambio_presupuesto:'Cambio de presupuesto'
   }
-  // Agrupar por fecha (descendente)
+  // Agrupar por día LOCAL (corrige bug de timezone: hora_calculo en local)
+  const localDay=(ts)=>{
+    const d=new Date(ts)
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+  }
   const porDia={}
-  for(const r of data){if(!porDia[r.fecha])porDia[r.fecha]=[];porDia[r.fecha].push(r)}
+  for(const r of data){
+    const day=r.hora_calculo?localDay(r.hora_calculo):r.fecha
+    if(!porDia[day])porDia[day]=[]
+    porDia[day].push(r)
+  }
   const dias=Object.keys(porDia).sort((a,b)=>b.localeCompare(a))
-  const hoyStr=new Date().toISOString().slice(0,10)
+  const hoyLocal=localDay(new Date().toISOString())
+
   return dias.map(d=>{
     const regs=porDia[d].sort((a,b)=>new Date(a.hora_calculo)-new Date(b.hora_calculo))
     const fechaStr=new Date(d+'T12:00').toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long'})
-    // Mostrar solo: primero + todos los cambios + cambio_presupuesto + último (evita repetición)
-    let eventos=regs.filter((r,i)=>i===0||r.cambio_vs_anterior||r.triggered_by==='cambio_presupuesto'||i===regs.length-1)
-    const seen=new Set()
-    eventos=eventos.filter(r=>{if(seen.has(r.hora_calculo))return false;seen.add(r.hora_calculo);return true})
-    const itemsHtml=eventos.map((r,i)=>{
-      const c=COLOR_MAP[r.semaforo]||{bg:'var(--subtle)',bd:'var(--muted)',cls:r.semaforo_label||r.semaforo}
-      const hora=new Date(r.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
-      const esDropi=r.triggered_by==='cruce_dropi'
-      const esUltimo=i===eventos.length-1
-      // Descripción en lenguaje natural según contexto
-      let titulo=''
-      if(esDropi){
-        titulo='Cruce con Dropi completado'
-      }else if(i===0){
-        titulo='Primer registro del día'
-      }else if(r.cambio_vs_anterior){
-        titulo='Cambió a '+(r.semaforo_label||r.semaforo)
-      }else{
-        titulo=r.semaforo_label||r.semaforo
+    const totalCalc=regs.length
+
+    // Eventos importantes: primer + cambios reales + cambio_presupuesto + cruce_dropi + último
+    const horasMostradas=new Set()
+    const eventos=[]
+    if(regs.length>0){eventos.push(regs[0]);horasMostradas.add(regs[0].hora_calculo)}
+    for(const r of regs){
+      if(horasMostradas.has(r.hora_calculo))continue
+      if(r.cambio_vs_anterior||r.triggered_by==='cambio_presupuesto'||r.triggered_by==='cruce_dropi'){
+        eventos.push(r);horasMostradas.add(r.hora_calculo)
       }
+    }
+    const ultimo=regs[regs.length-1]
+    if(ultimo&&!horasMostradas.has(ultimo.hora_calculo)){eventos.push(ultimo);horasMostradas.add(ultimo.hora_calculo)}
+    eventos.sort((a,b)=>new Date(a.hora_calculo)-new Date(b.hora_calculo))
+
+    const cambiosReales=regs.filter(r=>r.cambio_vs_anterior||r.triggered_by==='cambio_presupuesto')
+    const cambiosCount=cambiosReales.length
+    const sinCambioRegs=regs.filter(r=>!horasMostradas.has(r.hora_calculo))
+    const dropiReg=regs.find(r=>r.triggered_by==='cruce_dropi')
+
+    // Estado actual = último (espejo del historial)
+    const estadoActual=ultimo?(SEM[ultimo.semaforo]||{label:ultimo.semaforo,color:'var(--muted)',emoji:'•'}):null
+
+    // ── Resumen del día en 1 línea ──
+    let resumenLinea=''
+    if(eventos.length>=1){
+      const tags=eventos.filter(r=>r.triggered_by!=='cruce_dropi').map(r=>{
+        const s=SEM[r.semaforo]||{label:r.semaforo,color:'var(--muted)',emoji:'•'}
+        return `<span style="display:inline-flex;align-items:center;gap:3px;font-weight:600;color:${s.color}">${s.emoji} ${s.label}</span>`
+      })
+      if(tags.length){
+        const verbos=['Empezó','luego','luego','luego','luego','luego','luego','luego']
+        const partes=tags.map((t,i)=>`${i===0?verbos[0]:'<span style="color:var(--subtle);margin:0 4px">→</span> luego'} ${t}`).join(' ')
+        resumenLinea=`<div style="background:var(--card);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px">
+          <span style="color:var(--muted);font-weight:600;margin-right:6px">RESUMEN:</span>${partes}
+        </div>`
+      }
+    }
+
+    // ── Timeline horizontal con dots + horas ──
+    let timelineHtml=''
+    if(regs.length>0){
+      const dots=regs.map((r,i)=>{
+        const s=SEM[r.semaforo]||{label:r.semaforo,color:'var(--muted)',emoji:'•'}
+        const hora=new Date(r.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
+        const esCambio=r.cambio_vs_anterior||i===0||r.triggered_by==='cambio_presupuesto'||r.triggered_by==='cruce_dropi'
+        const size=esCambio?20:13
+        return `<div style="position:relative;z-index:1;text-align:center;flex:1;min-width:0">
+          <div style="width:${size}px;height:${size}px;border-radius:50%;background:${s.color};margin:${esCambio?'0':'3.5px'} auto 0;border:3px solid var(--card2);box-sizing:content-box${!esCambio?';opacity:.55':''}"></div>
+          <div style="font-size:10px;margin:4px 0 0;font-family:monospace;color:var(--muted);white-space:nowrap">${hora}</div>
+          <div style="font-size:9px;margin:1px 0 0;color:${esCambio?s.color:'var(--subtle)'};font-weight:${esCambio?'600':'400'}">${esCambio?s.label:'sin cambio'}</div>
+        </div>`
+      }).join('')
+      timelineHtml=`<div style="background:var(--card);border-radius:8px;padding:14px 8px;margin-bottom:14px">
+        <div style="position:relative;display:flex;justify-content:space-between;align-items:flex-start;padding:0 4px">
+          <div style="position:absolute;left:18px;right:18px;top:11px;height:2px;background:var(--border);z-index:0"></div>
+          ${dots}
+        </div>
+        ${estadoActual?`<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border);text-align:center;font-size:12px;color:var(--muted)">Estado actual: <span style="color:${estadoActual.color};font-weight:600;font-size:13px">${estadoActual.emoji} ${estadoActual.label}</span></div>`:''}
+      </div>`
+    }
+
+    // ── Cards de cada evento ──
+    const itemsHtml=eventos.map((r,i)=>{
+      const s=SEM[r.semaforo]||{bg:'var(--card2)',color:'var(--muted)',label:r.semaforo,accion:'—',emoji:'•'}
+      const hora=new Date(r.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
       const fuenteLeg=FUENTE_LEG[r.triggered_by]||r.triggered_by||'—'
-      // Card especial: cambio de presupuesto (no afecta el semáforo, solo registra el cambio)
-      const esPresupuesto=r.triggered_by==='cambio_presupuesto'
-      if(esPresupuesto){
+      const prevR=i>0?eventos[i-1]:null
+      const cpaPrev=prevR?(prevR.cpa_real||0):0
+      const cpaCurr=r.cpa_real||0
+
+      // === Card especial: Cambio de presupuesto ===
+      if(r.triggered_by==='cambio_presupuesto'){
         const ant=r.presupuesto_anterior||0
         const nue=r.presupuesto_nuevo||0
         const pct=r.presupuesto_pct_cambio||0
         const sube=nue>ant
-        return`<div style="position:relative;margin-bottom:14px">
-          <div style="position:absolute;left:-32px;top:0;width:24px;height:24px;border-radius:50%;background:var(--amber);border:3px solid var(--amber);display:flex;align-items:center;justify-content:center">
-            <span style="font-size:13px;color:#412402">⚙️</span>
+        return `<div style="background:var(--amber-bg);border-left:4px solid var(--amber);border-radius:8px;padding:12px 14px;margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <span style="font-size:11px;color:var(--amber);font-weight:700;letter-spacing:.5px">⚙️ CAMBIO DE PRESUPUESTO</span>
+            <span style="font-size:11px;color:var(--amber);font-family:monospace">${hora}</span>
           </div>
-          <div style="background:var(--amber-bg);border:1px solid var(--amber);border-radius:8px;padding:12px 14px">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-              <span style="font-size:10px;color:var(--amber);font-weight:700;letter-spacing:.6px">⚙️ CAMBIO DE PRESUPUESTO</span>
-              <span style="font-size:11px;color:var(--amber);font-weight:600">${hora}</span>
-            </div>
-            <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px">
-              ${sube?'Subió':'Bajó'} el presupuesto diario
-            </div>
-            <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-              <span style="background:var(--card);padding:4px 10px;border-radius:4px;font-size:11px;color:var(--muted)">Antes: $${fmt(ant)}</span>
-              <span style="color:var(--amber);font-weight:700">→</span>
-              <span style="background:var(--card);padding:4px 10px;border-radius:4px;font-size:11px;color:var(--text);font-weight:600">Ahora: $${fmt(nue)}</span>
-              <span style="background:var(--amber);color:#412402;padding:4px 10px;border-radius:4px;font-size:11px;font-weight:600">${sube?'+':''}${pct.toFixed(0)}%</span>
-            </div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:8px">${sube?'Subiste':'Bajaste'} el presupuesto diario</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:11px">
+            <span style="background:var(--card);padding:4px 9px;border-radius:4px;color:var(--muted)">Antes: $${fmt(ant)}</span>
+            <span style="color:var(--amber);font-weight:700">→</span>
+            <span style="background:var(--card);padding:4px 9px;border-radius:4px;font-weight:600">Ahora: $${fmt(nue)}</span>
+            <span style="background:var(--amber);color:#412402;padding:4px 9px;border-radius:4px;font-weight:600">${sube?'+':''}${pct.toFixed(0)}%</span>
           </div>
         </div>`
       }
-      // Card especial para el cruce Dropi (veredicto final destacado)
-      if(esDropi){
-        return`<div style="position:relative;margin-bottom:14px">
-          <div style="position:absolute;left:-32px;top:0;width:24px;height:24px;border-radius:50%;background:${c.bg};border:3px solid ${c.bd};display:flex;align-items:center;justify-content:center">
-            <span style="color:#fff;font-size:13px;font-weight:700">✓</span>
+
+      // === Card especial: Cruce con Dropi (veredicto final) ===
+      if(r.triggered_by==='cruce_dropi'){
+        return `<div style="background:var(--green-bg);border-left:4px solid var(--green);border-radius:8px;padding:12px 14px;margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <span style="font-size:11px;color:var(--green);font-weight:700;letter-spacing:.5px">★ VEREDICTO FINAL · DROPI</span>
+            <span style="font-size:11px;color:var(--green);font-family:monospace">${hora}</span>
           </div>
-          <div style="background:var(--green-bg);border:1px solid var(--green);border-radius:8px;padding:12px 14px">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-              <span style="font-size:10px;color:var(--green);font-weight:700;letter-spacing:.6px">★ VEREDICTO FINAL DEL DÍA</span>
-              <span style="font-size:11px;color:var(--green);font-weight:600">Dropi · ${hora}</span>
+          <div style="font-size:14px;font-weight:600;margin-bottom:6px">Cruce con Dropi completado · estado final: <span style="color:${s.color}">${s.emoji} ${s.label}</span></div>
+          <div style="background:var(--card);border-radius:6px;padding:10px 12px;margin-top:8px">
+            <div style="font-size:10px;color:var(--subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Costo por venta REAL</div>
+            <div style="font-size:22px;font-weight:700;font-family:monospace;color:${s.color}">$${fmt(r.cpa_real||0)}</div>
+            <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);font-size:11px;color:var(--muted)">
+              <span>Ventas <strong style="color:var(--text);font-family:monospace">${r.ventas||0}</strong></span>
+              <span>Gasto <strong style="color:var(--text);font-family:monospace">$${fmt(r.gasto||0)}</strong></span>
+              <span>Pendientes <strong style="color:var(--text);font-family:monospace">${r.pendientes||0}</strong></span>
             </div>
-            <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:4px">${titulo}</div>
-            <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Estado final: <strong style="color:var(--text)">${r.semaforo_label||r.semaforo}</strong></div>
-            <div style="display:flex;gap:6px;flex-wrap:wrap">
-              <span style="background:var(--card);padding:4px 10px;border-radius:4px;font-size:10px;color:var(--muted)">Gasto $${fmt(r.gasto||0)}</span>
-              <span style="background:var(--card);padding:4px 10px;border-radius:4px;font-size:10px;color:var(--muted)">${r.ventas||0} entregadas · ${r.pendientes||0} pendientes</span>
-              <span style="background:var(--green);color:#0D2818;padding:4px 10px;border-radius:4px;font-size:11px;font-weight:600">CPA Real $${fmt(r.cpa_real||0)}</span>
-            </div>
-            <div style="font-size:11px;color:var(--green);margin-top:10px;padding-top:8px;border-top:1px solid var(--green);opacity:.85">🎯 Este es el CPA que vale para decidir si escalar mañana.</div>
           </div>
+          <div style="font-size:11px;color:var(--green);margin-top:8px;opacity:.85">🎯 Este es el CPA que vale para decidir si escalar mañana.</div>
         </div>`
       }
-      // Card normal para el resto de eventos
-      return`<div style="position:relative;margin-bottom:14px">
-        <div style="position:absolute;left:-32px;top:2px;width:${esUltimo?'22':'20'}px;height:${esUltimo?'22':'20'}px;border-radius:50%;background:${c.bg};border:${esUltimo?'3':'2'}px solid ${c.bd};flex-shrink:0"></div>
-        <div style="padding:2px 0 2px 4px">
-          <div style="font-size:11px;color:var(--muted);font-weight:500;margin-bottom:2px">${hora}</div>
-          <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:6px">${titulo}</div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap">
-            <span style="background:var(--card);padding:3px 9px;border-radius:4px;font-size:10px;color:var(--muted)">Gasto acumulado $${fmt(r.gasto||0)}</span>
-            <span style="background:var(--card);padding:3px 9px;border-radius:4px;font-size:10px;color:var(--muted)">${r.ventas||0} entregadas · ${r.pendientes||0} pendientes</span>
-            <span style="background:var(--card);padding:3px 9px;border-radius:4px;font-size:10px;color:var(--muted)">CPA $${fmt(r.cpa_real||0)}</span>
-            <span style="background:var(--card);padding:3px 9px;border-radius:4px;font-size:9px;color:var(--subtle)">${fuenteLeg}</span>
+
+      // === Card normal: primer registro o cambio ===
+      const esPrimer=i===0
+      let titulo='',porque='',queHago=s.accion
+      if(esPrimer){
+        titulo=`Arrancaste ${s.emoji} ${s.label}`
+        if(r.semaforo==='fuego')porque='Costo por venta súper bajo'
+        else if(r.semaforo==='escalar')porque='Buen rendimiento desde el arranque'
+        else if(r.semaforo==='stop')porque='Costo por venta arriba del meta'
+        else if(r.semaforo==='precaucion')porque='Cerca del meta · vigilar'
+        else if(r.semaforo==='sin_ventas'||r.semaforo==='pendiente_sync')porque='Aún sin datos suficientes'
+        else porque='Primer cálculo del día'
+      }else{
+        const prevS=prevR?(SEM[prevR.semaforo]||{label:prevR.semaforo,emoji:'•'}):null
+        titulo=prevS?`Pasó de ${prevS.emoji} ${prevS.label} → ${s.emoji} ${s.label}`:`Cambió a ${s.emoji} ${s.label}`
+        if(cpaPrev>0&&cpaCurr>0){
+          if(cpaCurr>cpaPrev*1.5)porque=`Costo por venta subió a $${fmt(cpaCurr)} (era $${fmt(cpaPrev)})`
+          else if(cpaCurr<cpaPrev*0.7)porque=`Costo por venta bajó a $${fmt(cpaCurr)} (era $${fmt(cpaPrev)})`
+          else porque=`Costo por venta ahora $${fmt(cpaCurr)}`
+        }else{
+          porque=`Costo por venta ahora $${fmt(cpaCurr)}`
+        }
+      }
+
+      // CPA hero con antes→después
+      const pct=(cpaPrev>0&&cpaCurr>0)?Math.round(((cpaCurr-cpaPrev)/cpaPrev)*100):null
+      const pctTxt=pct!==null?(pct>0?`+${pct}%`:`${pct}%`):''
+      const pctColor=pct===null?'var(--muted)':(pct>0?'var(--red)':(pct<0?'var(--green)':'var(--muted)'))
+      const pctBg=pct===null?'var(--card2)':(pct>0?'var(--red-bg)':(pct<0?'var(--green-bg)':'var(--card2)'))
+      let cpaHeroHtml=''
+      if(esPrimer||cpaPrev<=0){
+        cpaHeroHtml=`<div style="font-size:24px;font-weight:700;font-family:monospace;color:${s.color}">$${fmt(cpaCurr)}</div>`
+      }else{
+        cpaHeroHtml=`<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">
+          <span style="font-size:13px;font-family:monospace;color:var(--subtle);text-decoration:line-through">$${fmt(cpaPrev)}</span>
+          <span style="font-size:12px;color:var(--subtle)">→</span>
+          <span style="font-size:24px;font-weight:700;font-family:monospace;color:${s.color}">$${fmt(cpaCurr)}</span>
+          ${pctTxt?`<span style="font-size:11px;padding:2px 7px;background:${pctBg};color:${pctColor};border-radius:4px;font-weight:600">${pctTxt}</span>`:''}
+        </div>`
+      }
+
+      return `<div style="background:${s.bg};border-left:4px solid ${s.color};border-radius:8px;padding:12px 14px;margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:6px">
+          <span style="display:flex;align-items:center;gap:8px;font-size:15px;font-weight:700;color:${s.color}">${s.emoji} ${s.label}</span>
+          <div style="text-align:right">
+            <div style="font-size:11px;color:${s.color};font-family:monospace">${hora}</div>
+            <div style="font-size:9px;padding:2px 7px;background:var(--card);color:${s.color};border-radius:4px;font-weight:600;display:inline-block;margin-top:2px">${s.accion.toUpperCase()}</div>
+          </div>
+        </div>
+        <div style="background:var(--card);border-radius:6px;padding:9px 12px;margin-bottom:10px;font-size:12px;line-height:1.6">
+          <div><span style="color:var(--muted);font-weight:600">¿Qué pasó?</span> ${titulo}</div>
+          <div><span style="color:var(--muted);font-weight:600">¿Por qué?</span> ${porque}</div>
+          <div><span style="color:var(--muted);font-weight:600">¿Qué hago?</span> ${queHago}</div>
+        </div>
+        <div style="background:var(--card);border-radius:6px;padding:10px 12px">
+          <div style="font-size:10px;color:var(--subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Costo por venta</div>
+          ${cpaHeroHtml}
+          <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);font-size:11px;color:var(--muted)">
+            <span>Ventas <strong style="color:var(--text);font-family:monospace">${r.ventas||0}</strong></span>
+            <span>Gasto <strong style="color:var(--text);font-family:monospace">$${fmt(r.gasto||0)}</strong></span>
+            <span>Pendientes <strong style="color:var(--text);font-family:monospace">${r.pendientes||0}</strong></span>
+            <span style="opacity:.7">${fuenteLeg}</span>
           </div>
         </div>
       </div>`
     }).join('')
-    const totalCalc=regs.length
-    const cambiosCount=regs.filter(r=>r.cambio_vs_anterior).length
-    return`<details ${d===hoyStr?'open':''} style="margin-bottom:14px;background:var(--card2);border-radius:8px;padding:12px 14px">
-      <summary style="cursor:pointer;font-weight:600;font-size:13px;color:var(--text);text-transform:capitalize">📅 ${fechaStr} · ${totalCalc} cálculo${totalCalc!==1?'s':''}${cambiosCount>0?` · ${cambiosCount} cambio${cambiosCount!==1?'s':''}`:''}</summary>
-      <div style="margin-top:14px;padding-left:32px;position:relative">
-        <div style="position:absolute;left:-21px;top:8px;bottom:8px;width:2px;background:var(--border)"></div>
-        ${itemsHtml}
-      </div>
+
+    // Línea colapsada para registros sin cambio
+    let sinCambioHtml=''
+    if(sinCambioRegs.length){
+      const horas=sinCambioRegs.map(r=>new Date(r.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})).join(' · ')
+      sinCambioHtml=`<div style="background:var(--card);border-radius:6px;padding:8px 12px;margin-top:6px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;font-size:11px;color:var(--muted)">
+        <span>+ ${sinCambioRegs.length} revisi${sinCambioRegs.length===1?'ón':'ones'} sin cambio</span>
+        <span style="font-family:monospace">${horas}</span>
+      </div>`
+    }
+
+    // Plata del día (basada en último registro)
+    const plataHtml=ultimo?`<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;font-size:11px;color:var(--muted)">
+      <span><span style="color:var(--text);font-weight:600">Plata del día:</span> gastaste <strong style="font-family:monospace;color:var(--text)">$${fmt(ultimo.gasto||0)}</strong> · vendiste <strong style="font-family:monospace;color:var(--text)">${ultimo.ventas||0}</strong></span>
+      <span style="color:var(--subtle)">${totalCalc} cálculo${totalCalc!==1?'s':''} · ${cambiosCount} cambio${cambiosCount!==1?'s':''}${dropiReg?' · cruce Dropi ✓':''}</span>
+    </div>`:''
+
+    return`<details ${d===hoyLocal?'open':''} style="margin-bottom:14px;background:var(--card2);border-radius:8px;padding:12px 14px">
+      <summary style="cursor:pointer;font-weight:600;font-size:13px;color:var(--text);text-transform:capitalize;margin-bottom:10px">📅 ${fechaStr} · ${totalCalc} cálculo${totalCalc!==1?'s':''}${cambiosCount>0?` · ${cambiosCount} cambio${cambiosCount!==1?'s':''}`:''}</summary>
+      ${resumenLinea}
+      ${timelineHtml}
+      ${itemsHtml}
+      ${sinCambioHtml}
+      ${plataHtml}
     </details>`
   }).join('')
 }

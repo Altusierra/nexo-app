@@ -2123,6 +2123,283 @@ window.saveNuevoAgente=async(prodId)=>{
   }
 }
 
+// ============================================================
+// Feature B + D — Tab Resultados en tarjeta de producto
+// Por anuncio (entregada vs devuelta) + Por ciudad
+// ============================================================
+window.switchProdTab=(prodId,tab)=>{
+  const tConfig=document.getElementById('prod-tab-config-'+prodId)
+  const tResults=document.getElementById('prod-tab-results-'+prodId)
+  const bConfig=document.getElementById('prod-tab-config-btn-'+prodId)
+  const bResults=document.getElementById('prod-tab-results-btn-'+prodId)
+  if(!tConfig||!tResults||!bConfig||!bResults)return
+  if(tab==='results'){
+    tConfig.style.display='none';tResults.style.display=''
+    bConfig.style.color='var(--muted)';bConfig.style.borderBottomColor='transparent'
+    bResults.style.color='var(--text)';bResults.style.borderBottomColor='var(--primary)'
+    // Lazy load la primera vez
+    if(!tResults.dataset.loaded){
+      const rango=parseInt(localStorage.getItem('prod_res_rango_'+prodId))||30
+      renderProdResultados(prodId,rango)
+      tResults.dataset.loaded='1'
+    }
+  }else{
+    tConfig.style.display='';tResults.style.display='none'
+    bResults.style.color='var(--muted)';bResults.style.borderBottomColor='transparent'
+    bConfig.style.color='var(--text)';bConfig.style.borderBottomColor='var(--primary)'
+  }
+}
+
+window.copiarTextoBtn=(text,btn)=>{
+  const original=btn.innerHTML
+  navigator.clipboard.writeText(text).then(()=>{
+    btn.innerHTML='✅ Copiado'
+    setTimeout(()=>{btn.innerHTML=original},1200)
+  }).catch(()=>{
+    const ta=document.createElement('textarea')
+    ta.value=text;ta.style.position='fixed';ta.style.opacity='0'
+    document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta)
+    btn.innerHTML='✅ Copiado'
+    setTimeout(()=>{btn.innerHTML=original},1200)
+  })
+}
+
+window.cambiarRangoResultados=(prodId,dias)=>{
+  try{localStorage.setItem('prod_res_rango_'+prodId,dias)}catch(_){}
+  renderProdResultados(prodId,parseInt(dias)||30)
+}
+
+async function renderProdResultados(prodId,dias){
+  const cont=document.getElementById('prod-tab-results-'+prodId)
+  if(!cont)return
+  const _dias=parseInt(dias)||30
+  cont.innerHTML='<div class="loading">Cargando resultados...</div>'
+
+  // Calcular rango de fechas
+  const hoy=new Date(),desde=new Date(Date.now()-_dias*86400000)
+  const desdeStr=desde.toISOString().slice(0,10),hastaStr=hoy.toISOString().slice(0,10)
+
+  // 1. Traer mapeos del producto en el rango
+  const{data:mapeos,error}=await sb.from('mapeos')
+    .select('id,ad_id,ciudad,estado_final,cantidad')
+    .eq('producto_id',prodId)
+    .gte('fecha',desdeStr).lte('fecha',hastaStr)
+    .limit(20000)
+  if(error){
+    cont.innerHTML=`<div class="alert alert-red">Error: ${error.message}</div>`;return
+  }
+  const filas=mapeos||[]
+  const totalVentas=filas.length
+
+  // Clasificador: entregada / devuelta / otro (pendiente, en proceso, cancelada)
+  const _cat=(estado)=>{
+    if(!estado)return 'otro'
+    const s=(window.DROPI_STATUS||{})[estado]
+    if(!s)return 'otro'
+    if(s.cat==='entregado')return 'entregada'
+    if(s.cat==='devuelto')return 'devuelta'
+    return 'otro'
+  }
+
+  // 2. Agrupar por ad_id (excluyendo orgánicos sin ad_id)
+  const porAnuncio={} // ad_id → {entregadas, devueltas}
+  const porCiudad={}  // ciudad → {entregadas, devueltas}
+  let totEntregadas=0,totDevueltas=0
+  for(const m of filas){
+    const c=_cat(m.estado_final)
+    if(c==='entregada')totEntregadas++
+    else if(c==='devuelta')totDevueltas++
+    if(m.ad_id){
+      if(!porAnuncio[m.ad_id])porAnuncio[m.ad_id]={entregadas:0,devueltas:0}
+      if(c==='entregada')porAnuncio[m.ad_id].entregadas++
+      else if(c==='devuelta')porAnuncio[m.ad_id].devueltas++
+    }
+    const ciu=(m.ciudad||'').trim()||'(sin ciudad)'
+    if(!porCiudad[ciu])porCiudad[ciu]={entregadas:0,devueltas:0}
+    if(c==='entregada')porCiudad[ciu].entregadas++
+    else if(c==='devuelta')porCiudad[ciu].devueltas++
+  }
+
+  // 3. Cargar info Meta para los ad_ids (nombre del ad + parent_id → adset → campaña)
+  const adIds=Object.keys(porAnuncio)
+  const adInfo={} // ad_id → {nombre, campId, campNombre}
+  if(adIds.length){
+    const{data:ads}=await sb.from('meta_campanas')
+      .select('meta_id,parent_id,nombre').in('meta_id',adIds).eq('nivel','ad')
+    const adsetIdsSet=new Set()
+    for(const a of (ads||[])){
+      adInfo[a.meta_id]={nombre:a.nombre||'(sin nombre)',parentId:a.parent_id||null,campId:null,campNombre:''}
+      if(a.parent_id)adsetIdsSet.add(a.parent_id)
+    }
+    const adsetIds=[...adsetIdsSet]
+    let adsetToCamp={}
+    if(adsetIds.length){
+      const{data:adsets}=await sb.from('meta_campanas')
+        .select('meta_id,parent_id').in('meta_id',adsetIds).eq('nivel','adset')
+      for(const s of (adsets||[]))adsetToCamp[s.meta_id]=s.parent_id||null
+    }
+    const campIdsSet=new Set(Object.values(adsetToCamp).filter(Boolean))
+    const campIds=[...campIdsSet]
+    let campInfo={}
+    if(campIds.length){
+      const{data:camps}=await sb.from('meta_campanas')
+        .select('meta_id,nombre').in('meta_id',campIds).eq('nivel','campaign')
+      for(const c of (camps||[]))campInfo[c.meta_id]=c.nombre||'(sin nombre)'
+    }
+    // Encadenar ad → adset → campaña
+    for(const adId of Object.keys(adInfo)){
+      const adsetId=adInfo[adId].parentId
+      const campId=adsetId?adsetToCamp[adsetId]:null
+      if(campId){
+        adInfo[adId].campId=campId
+        adInfo[adId].campNombre=campInfo[campId]||''
+      }
+    }
+  }
+
+  // 4. Calcular % y clasificar semáforos
+  const _pct=(o)=>{
+    const tot=o.entregadas+o.devueltas
+    if(tot===0)return null
+    return Math.round(o.entregadas*100/tot)
+  }
+  const _semaforo=(pct)=>{
+    if(pct===null)return{emoji:'⚪',color:'var(--muted)',label:'SIN DATOS',accion:'Sin entregas ni devoluciones aún'}
+    if(pct>=70)return{emoji:'🟢',color:'var(--green)',label:'VA BIEN',accion:'Déjalo'}
+    if(pct>=60)return{emoji:'🟡',color:'var(--amber)',label:'OJO',accion:'Revisa'}
+    return{emoji:'🔴',color:'var(--red)',label:'PAUSA YA',accion:'Pausa o cambia creativo'}
+  }
+  const _semCiudad=(pct)=>{
+    if(pct===null)return{emoji:'⚪',color:'var(--muted)',label:'SIN DATOS'}
+    if(pct>=70)return{emoji:'🟢',color:'var(--green)',label:'CIUDAD BUENA'}
+    if(pct>=60)return{emoji:'🟡',color:'var(--amber)',label:'OJO'}
+    return{emoji:'🔴',color:'var(--red)',label:'CIUDAD MALA'}
+  }
+
+  // 5. Métricas globales
+  const totConResultado=totEntregadas+totDevueltas
+  const pctGlobal=totConResultado>0?Math.round(totEntregadas*100/totConResultado):null
+  const semGlobal=_semaforo(pctGlobal)
+
+  // Lista de anuncios ordenados peor primero
+  const adsList=Object.keys(porAnuncio).map(adId=>{
+    const o=porAnuncio[adId],pct=_pct(o)
+    const info=adInfo[adId]||{nombre:'(no encontrado en Meta)',campNombre:'',campId:null}
+    return{adId,...o,pct,sem:_semaforo(pct),...info}
+  }).sort((a,b)=>{
+    if(a.pct===null&&b.pct===null)return 0
+    if(a.pct===null)return 1
+    if(b.pct===null)return -1
+    return a.pct-b.pct
+  })
+
+  const ciudadesList=Object.keys(porCiudad).map(ciu=>{
+    const o=porCiudad[ciu],pct=_pct(o)
+    return{ciudad:ciu,...o,pct,sem:_semCiudad(pct)}
+  }).sort((a,b)=>{
+    if(a.pct===null&&b.pct===null)return 0
+    if(a.pct===null)return 1
+    if(b.pct===null)return -1
+    return a.pct-b.pct
+  })
+
+  const aPausarAnuncios=adsList.filter(a=>a.pct!==null&&a.pct<60).length
+  const aPausarCiudades=ciudadesList.filter(c=>c.pct!==null&&c.pct<60).length
+
+  // 6. Render
+  const esc=(s)=>String(s||'').replace(/[<>"']/g,c=>({'<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+
+  const cardEntrega=`<div class="card" style="padding:12px">
+    <div style="font-size:11px;color:var(--muted)">Entrega</div>
+    <div style="font-size:22px;font-weight:600;color:${semGlobal.color}">${pctGlobal===null?'—':pctGlobal+'%'}</div>
+    <div style="font-size:11px;color:var(--muted)">${totEntregadas} cobradas de ${totConResultado}</div>
+  </div>`
+  const cardPerdida=`<div class="card" style="padding:12px">
+    <div style="font-size:11px;color:var(--muted)">Plata perdida 🔥</div>
+    <div style="font-size:22px;font-weight:600;color:var(--red)">${totDevueltas}</div>
+    <div style="font-size:11px;color:var(--muted)">devueltas${totalVentas>0?` (${Math.round(totDevueltas*100/totalVentas)}% del total)`:''}</div>
+  </div>`
+  const cardPausar=`<div class="card" style="padding:12px">
+    <div style="font-size:11px;color:var(--muted)">A pausar</div>
+    <div style="font-size:22px;font-weight:600;color:${aPausarAnuncios+aPausarCiudades>0?'var(--red)':'var(--text)'}">${aPausarAnuncios+aPausarCiudades}</div>
+    <div style="font-size:11px;color:var(--muted)">${aPausarAnuncios} anuncio${aPausarAnuncios===1?'':'s'} + ${aPausarCiudades} ciudad${aPausarCiudades===1?'':'es'}</div>
+  </div>`
+
+  const leyenda=`<div class="card" style="padding:10px 14px;margin-bottom:14px;font-size:13px">
+    <div style="font-weight:500;margin-bottom:6px">¿Cómo leer esta sección?</div>
+    <div style="display:flex;gap:18px;flex-wrap:wrap">
+      <span>🟢 Va bien — déjalo</span>
+      <span>🟡 Ojo — revisa</span>
+      <span>🔴 <strong style="color:var(--red)">Pausa YA</strong></span>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-top:6px">💰 = ventas que llegaron al cliente · 🔥 = plata perdida (cliente rechazó la entrega)</div>
+  </div>`
+
+  const selectorRango=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+    <span style="font-size:12px;color:var(--muted)">Rango:</span>
+    <button class="btn-sm ${_dias===7?'btn-primary':'btn-outline'}" onclick="cambiarRangoResultados('${prodId}',7)">7d</button>
+    <button class="btn-sm ${_dias===30?'btn-primary':'btn-outline'}" onclick="cambiarRangoResultados('${prodId}',30)">30d</button>
+    <button class="btn-sm ${_dias===90?'btn-primary':'btn-outline'}" onclick="cambiarRangoResultados('${prodId}',90)">90d</button>
+    <span style="font-size:11px;color:var(--muted);margin-left:auto">${desdeStr} → ${hastaStr}</span>
+  </div>`
+
+  const renderAnuncioCard=(a)=>`<div class="card" style="padding:14px;margin-bottom:8px">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+      <span style="font-size:26px">${a.sem.emoji}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:600;color:${a.sem.color};letter-spacing:0.5px">${a.sem.label}</div>
+        <div style="font-size:15px;font-weight:500">${esc(a.nombre)}</div>
+      </div>
+      <div style="font-size:24px;font-weight:600;color:${a.sem.color}">${a.pct===null?'—':a.pct+'%'}</div>
+    </div>
+    <div style="display:flex;gap:16px;padding:8px 0;border-top:1px solid var(--border);margin-bottom:8px;font-size:14px">
+      <span>💰 <strong style="color:var(--green)">${a.entregadas}</strong> entregadas</span>
+      <span>🔥 <strong style="color:var(--red)">${a.devueltas}</strong> devueltas</span>
+    </div>
+    <div style="font-size:11px;color:var(--muted)">
+      ${a.campId?`<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px"><span style="min-width:64px">Campaña:</span><span style="font-family:monospace;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.campNombre)}">${esc(a.campNombre||a.campId)}</span><button class="btn-sm btn-outline" style="padding:1px 6px;font-size:10px" onclick="copiarTextoBtn('${a.campId}',this)">📋 ${a.campId}</button></div>`:''}
+      <div style="display:flex;align-items:center;gap:6px">
+        <span style="min-width:64px">Anuncio:</span>
+        <span style="font-family:monospace;flex:1">${a.adId}</span>
+        <button class="btn-sm btn-outline" style="padding:1px 6px;font-size:10px" onclick="copiarTextoBtn('${a.adId}',this)">📋 Copiar</button>
+      </div>
+    </div>
+  </div>`
+
+  const renderCiudadCard=(c)=>`<div class="card" style="padding:14px;margin-bottom:8px">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+      <span style="font-size:26px">${c.sem.emoji}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:600;color:${c.sem.color};letter-spacing:0.5px">${c.sem.label}</div>
+        <div style="font-size:15px;font-weight:500">${esc(c.ciudad)}</div>
+      </div>
+      <div style="font-size:24px;font-weight:600;color:${c.sem.color}">${c.pct===null?'—':c.pct+'%'}</div>
+    </div>
+    <div style="display:flex;gap:16px;padding-top:8px;border-top:1px solid var(--border);font-size:14px">
+      <span>💰 <strong style="color:var(--green)">${c.entregadas}</strong> entregadas</span>
+      <span>🔥 <strong style="color:var(--red)">${c.devueltas}</strong> devueltas</span>
+    </div>
+  </div>`
+
+  cont.innerHTML=`
+    ${selectorRango}
+    ${leyenda}
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:20px">
+      ${cardEntrega}${cardPerdida}${cardPausar}
+    </div>
+    <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:10px">
+      <span style="font-size:15px;font-weight:600">🚦 Por anuncio</span>
+      <span style="font-size:12px;color:var(--muted)">— ${adsList.length} anuncio${adsList.length===1?'':'s'}${aPausarAnuncios>0?` · ${aPausarAnuncios} a pausar`:''}</span>
+    </div>
+    ${adsList.length?adsList.map(renderAnuncioCard).join(''):'<div class="card" style="padding:14px;color:var(--muted);font-size:13px">Sin ventas con anuncio atribuido en este rango.</div>'}
+    <div style="margin-top:20px;display:flex;align-items:baseline;gap:8px;margin-bottom:10px">
+      <span style="font-size:15px;font-weight:600">🗺️ Por ciudad</span>
+      <span style="font-size:12px;color:var(--muted)">— ${ciudadesList.length} ciudad${ciudadesList.length===1?'':'es'}${aPausarCiudades>0?` · ${aPausarCiudades} con problemas`:''}</span>
+    </div>
+    ${ciudadesList.length?ciudadesList.map(renderCiudadCard).join(''):'<div class="card" style="padding:14px;color:var(--muted);font-size:13px">Sin datos de ciudad en este rango.</div>'}
+  `
+}
+
 async function renderProdBody(id,maestrosList){
   const prod=productos.find(p=>p.id===id);if(!prod)return
   const body=document.getElementById('prod-body-'+id)
@@ -2148,6 +2425,11 @@ async function renderProdBody(id,maestrosList){
   }
 
   body.innerHTML=`<div style="padding-top:14px">
+    <div style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:14px">
+      <button id="prod-tab-config-btn-${id}" onclick="switchProdTab('${id}','config')" style="background:transparent;border:none;color:var(--text);padding:10px 16px;cursor:pointer;font-size:14px;font-weight:500;border-bottom:2px solid var(--primary);outline:none">⚙️ Configuración</button>
+      <button id="prod-tab-results-btn-${id}" onclick="switchProdTab('${id}','results')" style="background:transparent;border:none;color:var(--muted);padding:10px 16px;cursor:pointer;font-size:14px;font-weight:500;border-bottom:2px solid transparent;outline:none">📊 Resultados</button>
+    </div>
+    <div id="prod-tab-config-${id}">
     <div class="form-grid g2">
       <div class="fld"><label>📝 Nombre actual <span style="color:var(--muted);font-size:10px">(se usa en TODO: reportes, dashboard, mensajes, IA)</span></label>
         <input type="text" id="pname-${id}" value="${prod.nombre||''}"></div>
@@ -2224,6 +2506,10 @@ async function renderProdBody(id,maestrosList){
     <div class="divider"></div>
     <div class="section-title">🎯 Campañas enlazadas a este producto</div>
     <div id="camps-enlazadas-${id}"><div class="loading">Cargando...</div></div>
+    </div>
+    <div id="prod-tab-results-${id}" style="display:none">
+      <div class="loading">Cargando resultados...</div>
+    </div>
   </div>`
   renderCampanasEnlazadas(id)
   renderAgentesProd(id)
@@ -7102,6 +7388,7 @@ const DROPI_STATUS={
   'SIN MOVIMIENTOS':{cat:'novedad',emoji:'⚠️',pill:'pill-amber',label:'Sin movimiento'},
   'NOVEDAD SOLUCIONADA':{cat:'novedad_ok',emoji:'✅',pill:'pill-green',label:'Novedad resuelta'},
 }
+window.DROPI_STATUS=DROPI_STATUS
 
 async function pageAuxDropi(c){
   c.innerHTML=`<div class="page-title">📊 Cruce Dropi</div>

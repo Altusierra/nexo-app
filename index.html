@@ -9296,27 +9296,36 @@ async function _calcMetricasPorAdIds(adIds,desde,hasta,gasto,ctx){
     }
   }
   // ── BUGFIX: si no hay mapeos en este nivel, también leer reportes_diarios ──
-  // Replica la misma lógica que usa renderCamp con ventasByCamp para evitar que
+  // Usa la MISMA lógica exacta que renderCamp con ventasByCamp para evitar que
   // adsets/ads digan "0 ventas" cuando el auxiliar reportó ad_ids manualmente
   // pero todavía no se conciliaron con Dropi.
+  // Regla: dedup REPORTES por (fecha+producto) quedándose con el más reciente,
+  // luego CADA aparición de un ad_id dentro de ese reporte = 1 venta.
   if(!mapeos.length){
     try{
       const adIdSet=new Set(adIds)
       const{data:reportes}=await sb.from('reportes_diarios')
-        .select('ad_ids,fecha')
+        .select('ad_ids,fecha,producto_id,producto_nombre,updated_at')
         .gte('fecha',desde).lte('fecha',hasta)
         .not('ad_ids','is',null).neq('ad_ids','')
-      const seenRep=new Set()
-      for(const rep of (reportes||[])){
-        if(!rep.ad_ids)continue
-        const ids=rep.ad_ids.split(/[\n,]+/).map(s=>s.trim()).filter(s=>s.length>5)
-        for(const aId of ids){
-          if(!adIdSet.has(aId))continue
-          const k=rep.fecha+'|'+aId
-          if(seenRep.has(k))continue
-          seenRep.add(k)
-          if(rep.fecha===hoy)out.pendientes++
-          else out.ventas++
+        .order('updated_at',{ascending:false})
+      if(reportes?.length){
+        const seen=new Set()
+        const uniqueReportes=[]
+        for(const rep of reportes){
+          const key=rep.fecha+'|'+(rep.producto_id||rep.producto_nombre)
+          if(seen.has(key))continue
+          seen.add(key)
+          uniqueReportes.push(rep)
+        }
+        for(const rep of uniqueReportes){
+          if(!rep.ad_ids)continue
+          const ids=rep.ad_ids.split(/[\n,]+/).map(s=>s.trim()).filter(s=>s.length>5)
+          for(const aId of ids){
+            if(!adIdSet.has(aId))continue
+            if(rep.fecha===hoy)out.pendientes++
+            else out.ventas++
+          }
         }
       }
     }catch(e){console.warn('[_calcMetricasPorAdIds] reportes_diarios:',e.message)}

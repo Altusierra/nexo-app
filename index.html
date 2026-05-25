@@ -1584,6 +1584,21 @@ async function pageAdminProductos(c){
       }
     }
 
+    // Feature A — Validación bloqueante: si producto NO archivado, debe tener al menos 1 agente autorizado
+    try{
+      const prodMem=productos.find(p=>p.id===id)
+      const estaArchivado=!!(prodMem&&prodMem.archivado)
+      if(!estaArchivado){
+        const{count,error:eA}=await sb.from('producto_agentes')
+          .select('agente_id',{count:'exact',head:true})
+          .eq('producto_id',id)
+        if(!eA&&(count||0)===0){
+          document.getElementById('pmsg-'+id).innerHTML='<div class="alert alert-red">⚠️ Debes asignar al menos un agente al producto antes de guardar (sección "🤖 Agentes autorizados" abajo). Si el producto ya no se usa, archívalo.</div>'
+          return
+        }
+      }
+    }catch(_){}
+
     const updateData={
       flete_outbound:g('fo'),flete_devolucion:g('fd'),dev_pct:gf('dp')/100,
       costo_conversacion:g('cc'),campaign_ids:cids,maestro_codigo:mc
@@ -1976,6 +1991,546 @@ function renderProdAccordion(prod,maestrosList){
 }
 
 // Render del body desplegado (formulario completo)
+// ============================================================
+// Feature A — Agentes autorizados por producto (bots)
+// Modelo: 1 agente → 1 producto · 1 producto → N agentes · nombre único global
+// Tablas: agentes (global, UNIQUE nombre), producto_agentes (pivote, UNIQUE agente_id)
+// ============================================================
+async function renderAgentesProd(id){
+  const cont=document.getElementById('agentes-prod-'+id)
+  if(!cont)return
+  // Solo agentes asignados a ESTE producto y activos
+  const{data:rels,error:eR}=await sb.from('producto_agentes')
+    .select('agente_id').eq('producto_id',id)
+  if(eR){
+    cont.innerHTML=`<div class="alert alert-red">Error cargando relación: ${eR.message}</div>`;return
+  }
+  const ids=(rels||[]).map(r=>r.agente_id)
+  let agentes=[]
+  if(ids.length){
+    const{data,error}=await sb.from('agentes')
+      .select('id,nombre,activo').in('id',ids).eq('activo',true).order('nombre')
+    if(error){
+      cont.innerHTML=`<div class="alert alert-red">Error cargando agentes: ${error.message}</div>`;return
+    }
+    agentes=data||[]
+  }
+  if(!agentes.length){
+    cont.innerHTML=`<div class="alert alert-amber" style="margin-bottom:10px">⚠️ Este producto no tiene agentes asignados. Crea el primero para poder vender este producto desde el asignador.</div>
+      <div style="display:flex;gap:8px"><button class="btn-sm btn-primary" onclick="modalCrearAgente('${id}')">➕ Crear nuevo agente</button></div>
+      <div id="agentes-msg-${id}" style="margin-top:8px"></div>`
+    return
+  }
+  cont.innerHTML=`
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+      <div style="font-size:12px;color:var(--muted)">${agentes.length} agente${agentes.length===1?'':'s'} asignado${agentes.length===1?'':'s'} a este producto</div>
+      <button class="btn-sm btn-primary" onclick="modalCrearAgente('${id}')" style="margin-left:auto">➕ Crear nuevo agente</button>
+    </div>
+    <div id="agentes-chips-${id}" style="display:flex;flex-wrap:wrap;gap:8px">
+      ${agentes.map(a=>`
+        <div class="card" style="padding:6px 10px;display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border)">
+          <span style="font-family:monospace;font-size:12px;color:var(--text)">🤖 ${a.nombre}</span>
+          <button class="btn-sm btn-outline" onclick="renombrarAgente('${a.id}','${id}',this)" title="Renombrar" style="padding:2px 6px;font-size:11px;border-color:var(--blue);color:var(--blue)">✏️</button>
+          <button class="btn-sm btn-outline" onclick="desactivarAgente('${a.id}','${id}','${a.nombre.replace(/'/g,"\\'")}')" title="Desactivar (queda en histórico pero no aparece)" style="padding:2px 6px;font-size:11px;border-color:var(--red);color:var(--red)">🗑️</button>
+        </div>
+      `).join('')}
+    </div>
+    <div id="agentes-msg-${id}" style="margin-top:8px"></div>`
+}
+
+window.desactivarAgente=async(agenteId,prodId,nombre)=>{
+  if(!confirm(`¿Desactivar el agente "${nombre}"?\n\nQuedará registrado en el histórico de ventas pero ya no aparecerá ni podrá vender en el asignador.\n\nEsta acción se puede revertir desde la BD si es necesario.`))return
+  const msg=document.getElementById('agentes-msg-'+prodId)
+  if(msg)msg.innerHTML=''
+  try{
+    const{error}=await sb.from('agentes').update({activo:false}).eq('id',agenteId)
+    if(error)throw error
+    logAction('agente_desactivado',{agente_id:agenteId,producto_id:prodId,nombre}).catch(()=>{})
+    await renderAgentesProd(prodId)
+  }catch(e){
+    if(msg)msg.innerHTML=`<div class="alert alert-red">${e.message||e}</div>`
+  }
+}
+
+window.renombrarAgente=async(agenteId,prodId,btn)=>{
+  // Buscar el nombre actual leyendo el span hermano
+  const card=btn?.closest('.card')
+  const span=card?.querySelector('span')
+  const nombreActual=(span?.textContent||'').replace(/^🤖\s*/,'').trim()
+  const nuevo=(prompt(`Renombrar agente:\n\nNombre actual: ${nombreActual}\n\nNuevo nombre (debe ser único en todo el sistema):`,nombreActual)||'').trim()
+  if(!nuevo||nuevo===nombreActual)return
+  const msg=document.getElementById('agentes-msg-'+prodId)
+  if(msg)msg.innerHTML=''
+  try{
+    const{error}=await sb.from('agentes').update({nombre:nuevo}).eq('id',agenteId)
+    if(error){
+      const dup=/duplicate|unique/i.test(error.message||'')
+      if(msg)msg.innerHTML=`<div class="alert alert-red">${dup?'⚠️ Ya existe un agente con ese nombre. Los nombres son únicos en todo el sistema.':error.message}</div>`
+      return
+    }
+    logAction('agente_renombrado',{agente_id:agenteId,producto_id:prodId,nombre_anterior:nombreActual,nombre_nuevo:nuevo}).catch(()=>{})
+    await renderAgentesProd(prodId)
+  }catch(e){
+    if(msg)msg.innerHTML=`<div class="alert alert-red">${e.message||e}</div>`
+  }
+}
+
+window.modalCrearAgente=(prodId)=>{
+  const area=document.getElementById('prod-modal-area')
+  if(!area)return
+  area.innerHTML=`<div class="card" style="border:2px solid var(--primary);margin-bottom:16px">
+    <div style="font-weight:600;margin-bottom:14px;font-size:15px">➕ Crear nuevo agente (bot)</div>
+    <div class="fld">
+      <label>Nombre del agente <span style="color:var(--red)">*</span></label>
+      <input type="text" id="na-nombre" placeholder="Ej: Neocell_X3_A1" style="font-family:monospace">
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">Debe coincidir EXACTAMENTE con el nombre que aparece en la columna AGENTE del asignador. Único en todo el sistema. Quedará asignado solo a este producto.</div>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:8px">
+      <button class="btn-sm btn-primary" onclick="saveNuevoAgente('${prodId||''}')">Crear agente</button>
+      <button class="btn-sm btn-outline" onclick="document.getElementById('prod-modal-area').innerHTML=''">Cancelar</button>
+    </div>
+    <div id="na-msg" style="margin-top:8px"></div>
+  </div>`
+  area.scrollIntoView({behavior:'smooth'})
+  setTimeout(()=>document.getElementById('na-nombre')?.focus(),50)
+}
+
+window.saveNuevoAgente=async(prodId)=>{
+  const nombre=(document.getElementById('na-nombre')?.value||'').trim()
+  const msg=document.getElementById('na-msg')
+  if(!nombre){msg.innerHTML='<div class="alert alert-red">El nombre es obligatorio</div>';return}
+  try{
+    const{data,error}=await sb.from('agentes').insert({nombre,activo:true}).select().single()
+    if(error){
+      const dup=/duplicate|unique/i.test(error.message||'')
+      msg.innerHTML=`<div class="alert alert-red">${dup?'⚠️ Ya existe un agente con ese nombre. Los nombres son únicos en todo el sistema.':error.message}</div>`
+      return
+    }
+    logAction('agente_creado',{agente_id:data.id,nombre}).catch(()=>{})
+    // Si vino de un producto, asignar al producto (UNIQUE en agente_id garantiza 1 agente = 1 producto)
+    if(prodId){
+      const{error:e2}=await sb.from('producto_agentes').insert({producto_id:prodId,agente_id:data.id})
+      if(e2){
+        msg.innerHTML=`<div class="alert alert-red">Agente creado pero falló asignación al producto: ${e2.message}</div>`
+        return
+      }
+      logAction('producto_agente_asignado',{producto_id:prodId,agente_id:data.id}).catch(()=>{})
+    }
+    document.getElementById('prod-modal-area').innerHTML=''
+    if(prodId)await renderAgentesProd(prodId)
+  }catch(e){
+    msg.innerHTML=`<div class="alert alert-red">${e.message||e}</div>`
+  }
+}
+
+// ============================================================
+// Feature B + D — Tab Resultados en tarjeta de producto
+// Por anuncio (entregada vs devuelta) + Por ciudad
+// ============================================================
+window.switchProdTab=(prodId,tab)=>{
+  const tConfig=document.getElementById('prod-tab-config-'+prodId)
+  const tResults=document.getElementById('prod-tab-results-'+prodId)
+  const bConfig=document.getElementById('prod-tab-config-btn-'+prodId)
+  const bResults=document.getElementById('prod-tab-results-btn-'+prodId)
+  if(!tConfig||!tResults||!bConfig||!bResults)return
+  if(tab==='results'){
+    tConfig.style.display='none';tResults.style.display=''
+    bConfig.style.color='var(--muted)';bConfig.style.borderBottomColor='transparent'
+    bResults.style.color='var(--text)';bResults.style.borderBottomColor='var(--primary)'
+    // Lazy load la primera vez (respeta fechas custom guardadas si existen)
+    if(!tResults.dataset.loaded){
+      let _lsD=null,_lsH=null
+      try{_lsD=localStorage.getItem('prod_res_desde_'+prodId);_lsH=localStorage.getItem('prod_res_hasta_'+prodId)}catch(_){}
+      if(_lsD&&_lsH){
+        renderProdResultados(prodId,null,{desde:_lsD,hasta:_lsH})
+      }else{
+        const rango=parseInt(localStorage.getItem('prod_res_rango_'+prodId))||30
+        renderProdResultados(prodId,rango)
+      }
+      tResults.dataset.loaded='1'
+    }
+  }else{
+    tConfig.style.display='';tResults.style.display='none'
+    bResults.style.color='var(--muted)';bResults.style.borderBottomColor='transparent'
+    bConfig.style.color='var(--text)';bConfig.style.borderBottomColor='var(--primary)'
+  }
+}
+
+window.copiarTextoBtn=(text,btn)=>{
+  const original=btn.innerHTML
+  navigator.clipboard.writeText(text).then(()=>{
+    btn.innerHTML='✅ Copiado'
+    setTimeout(()=>{btn.innerHTML=original},1200)
+  }).catch(()=>{
+    const ta=document.createElement('textarea')
+    ta.value=text;ta.style.position='fixed';ta.style.opacity='0'
+    document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta)
+    btn.innerHTML='✅ Copiado'
+    setTimeout(()=>{btn.innerHTML=original},1200)
+  })
+}
+
+window.cambiarRangoResultados=(prodId,dias)=>{
+  try{
+    localStorage.setItem('prod_res_rango_'+prodId,dias)
+    localStorage.removeItem('prod_res_desde_'+prodId)
+    localStorage.removeItem('prod_res_hasta_'+prodId)
+  }catch(_){}
+  renderProdResultados(prodId,parseInt(dias)||30)
+}
+
+window.cambiarFechasCustom=(prodId)=>{
+  const inpDesde=document.getElementById('prod-res-desde-'+prodId)
+  const inpHasta=document.getElementById('prod-res-hasta-'+prodId)
+  if(!inpDesde||!inpHasta)return
+  const desde=inpDesde.value,hasta=inpHasta.value
+  if(!desde||!hasta){alert('Selecciona ambas fechas (desde y hasta).');return}
+  if(desde>hasta){alert('La fecha "Desde" no puede ser posterior a "Hasta".');return}
+  const diffDias=Math.round((new Date(hasta)-new Date(desde))/86400000)+1
+  if(diffDias>180){alert('El rango máximo permitido es 180 días. Has seleccionado '+diffDias+' días.');return}
+  try{
+    localStorage.setItem('prod_res_desde_'+prodId,desde)
+    localStorage.setItem('prod_res_hasta_'+prodId,hasta)
+    localStorage.removeItem('prod_res_rango_'+prodId)
+  }catch(_){}
+  renderProdResultados(prodId,null,{desde,hasta})
+}
+
+async function renderProdResultados(prodId,dias,opts){
+  const cont=document.getElementById('prod-tab-results-'+prodId)
+  if(!cont)return
+  cont.innerHTML='<div class="loading">Cargando resultados...</div>'
+
+  // Resolver rango: opts custom > localStorage custom (si dias==null) > dias preset > 30 por defecto
+  let desdeStr,hastaStr,_dias=null,modoCustom=false
+  if(opts&&opts.desde&&opts.hasta){
+    desdeStr=opts.desde;hastaStr=opts.hasta;modoCustom=true
+  }else{
+    let lsDesde=null,lsHasta=null
+    try{
+      lsDesde=localStorage.getItem('prod_res_desde_'+prodId)
+      lsHasta=localStorage.getItem('prod_res_hasta_'+prodId)
+    }catch(_){}
+    if(lsDesde&&lsHasta&&(dias==null||dias===undefined)){
+      desdeStr=lsDesde;hastaStr=lsHasta;modoCustom=true
+    }else{
+      _dias=parseInt(dias)||30
+      const hoy=new Date(),desde=new Date(Date.now()-_dias*86400000)
+      desdeStr=desde.toISOString().slice(0,10);hastaStr=hoy.toISOString().slice(0,10)
+    }
+  }
+  const diasEnRango=Math.round((new Date(hastaStr)-new Date(desdeStr))/86400000)+1
+
+  // 1. Traer mapeos del producto en el rango
+  const{data:mapeos,error}=await sb.from('mapeos')
+    .select('id,ad_id,ciudad,estado_final,cantidad')
+    .eq('producto_id',prodId)
+    .gte('fecha',desdeStr).lte('fecha',hastaStr)
+    .limit(20000)
+  if(error){
+    cont.innerHTML=`<div class="alert alert-red">Error: ${error.message}</div>`;return
+  }
+  const filas=mapeos||[]
+  const totalVentas=filas.length
+
+  // Clasificador extendido: entregada / devuelta / en_camino / cancelada / otro
+  const _cat=(estado)=>{
+    if(!estado)return 'otro'
+    const s=(window.DROPI_STATUS||{})[estado]
+    if(!s)return 'otro'
+    if(s.cat==='entregado')return 'entregada'
+    if(s.cat==='devuelto')return 'devuelta'
+    if(s.cat==='cancelado')return 'cancelada'
+    if(s.cat==='en_transito'||s.cat==='en_proceso'||s.cat==='en_bodega'||s.cat==='pendiente'||s.cat==='novedad')return 'en_camino'
+    return 'otro'
+  }
+
+  // Contadores: confirmadas = bot cerró (entregada+devuelta+en_camino); en_camino = aún sin resolver
+  const newCounter=()=>({entregadas:0,devueltas:0,enCamino:0,confirmadas:0})
+
+  // 2. Agrupar por ad_id (excluyendo orgánicos sin ad_id)
+  const porAnuncio={},porCiudad={}
+  let totEntregadas=0,totDevueltas=0,totEnCamino=0,totConfirmadas=0
+  for(const m of filas){
+    const c=_cat(m.estado_final)
+    const esConfirmada=(c==='entregada'||c==='devuelta'||c==='en_camino')
+    if(c==='entregada')totEntregadas++
+    else if(c==='devuelta')totDevueltas++
+    else if(c==='en_camino')totEnCamino++
+    if(esConfirmada)totConfirmadas++
+    if(m.ad_id){
+      if(!porAnuncio[m.ad_id])porAnuncio[m.ad_id]=newCounter()
+      if(c==='entregada')porAnuncio[m.ad_id].entregadas++
+      else if(c==='devuelta')porAnuncio[m.ad_id].devueltas++
+      else if(c==='en_camino')porAnuncio[m.ad_id].enCamino++
+      if(esConfirmada)porAnuncio[m.ad_id].confirmadas++
+    }
+    const ciu=(m.ciudad||'').trim()||'(sin ciudad)'
+    if(!porCiudad[ciu])porCiudad[ciu]=newCounter()
+    if(c==='entregada')porCiudad[ciu].entregadas++
+    else if(c==='devuelta')porCiudad[ciu].devueltas++
+    else if(c==='en_camino')porCiudad[ciu].enCamino++
+    if(esConfirmada)porCiudad[ciu].confirmadas++
+  }
+
+  // 3. Cargar info Meta para los ad_ids (nombre del ad + parent_id → adset → campaña)
+  const adIds=Object.keys(porAnuncio)
+  const adInfo={}
+  if(adIds.length){
+    const{data:ads}=await sb.from('meta_campanas')
+      .select('meta_id,parent_id,nombre').in('meta_id',adIds).eq('nivel','ad')
+    const adsetIdsSet=new Set()
+    for(const a of (ads||[])){
+      adInfo[a.meta_id]={nombre:a.nombre||'(sin nombre)',parentId:a.parent_id||null,campId:null,campNombre:''}
+      if(a.parent_id)adsetIdsSet.add(a.parent_id)
+    }
+    const adsetIds=[...adsetIdsSet]
+    let adsetToCamp={}
+    if(adsetIds.length){
+      const{data:adsets}=await sb.from('meta_campanas')
+        .select('meta_id,parent_id').in('meta_id',adsetIds).eq('nivel','adset')
+      for(const s of (adsets||[]))adsetToCamp[s.meta_id]=s.parent_id||null
+    }
+    const campIdsSet=new Set(Object.values(adsetToCamp).filter(Boolean))
+    const campIds=[...campIdsSet]
+    let campInfo={}
+    if(campIds.length){
+      const{data:camps}=await sb.from('meta_campanas')
+        .select('meta_id,nombre').in('meta_id',campIds).eq('nivel','campaign')
+      for(const c of (camps||[]))campInfo[c.meta_id]=c.nombre||'(sin nombre)'
+    }
+    // Encadenar ad → adset → campaña
+    for(const adId of Object.keys(adInfo)){
+      const adsetId=adInfo[adId].parentId
+      const campId=adsetId?adsetToCamp[adsetId]:null
+      if(campId){
+        adInfo[adId].campId=campId
+        adInfo[adId].campNombre=campInfo[campId]||''
+      }
+    }
+  }
+
+  // 4. % y semáforos (NUEVO: con <4 resueltas → ESPERA MÁS DATOS)
+  const MIN_RESUELTAS=4
+  const _pct=(o)=>{
+    const tot=o.entregadas+o.devueltas
+    if(tot===0)return null
+    return Math.round(o.entregadas*100/tot)
+  }
+  const _semaforoAd=(o)=>{
+    const resueltas=o.entregadas+o.devueltas
+    if(resueltas<MIN_RESUELTAS)return{emoji:'⚪',color:'var(--muted)',label:'ESPERA MÁS DATOS',accion:'Necesita más ventas resueltas',espera:true}
+    const pct=_pct(o)
+    if(pct===null)return{emoji:'⚪',color:'var(--muted)',label:'ESPERA MÁS DATOS',accion:'Necesita más ventas resueltas',espera:true}
+    if(pct>=70)return{emoji:'🟢',color:'var(--green)',label:'VA BIEN',accion:'Déjalo',espera:false}
+    if(pct>=60)return{emoji:'🟡',color:'var(--amber)',label:'OJO',accion:'Revisa',espera:false}
+    return{emoji:'🔴',color:'var(--red)',label:'PAUSA YA',accion:'Pausa o cambia creativo',espera:false}
+  }
+  const _semCiudad=(o)=>{
+    const resueltas=o.entregadas+o.devueltas
+    if(resueltas<MIN_RESUELTAS)return{emoji:'⚪',color:'var(--muted)',label:'ESPERA MÁS DATOS',espera:true}
+    const pct=_pct(o)
+    if(pct===null)return{emoji:'⚪',color:'var(--muted)',label:'ESPERA MÁS DATOS',espera:true}
+    if(pct>=70)return{emoji:'🟢',color:'var(--green)',label:'CIUDAD BUENA',espera:false}
+    if(pct>=60)return{emoji:'🟡',color:'var(--amber)',label:'OJO',espera:false}
+    return{emoji:'🔴',color:'var(--red)',label:'CIUDAD MALA',espera:false}
+  }
+
+  // 5. Métricas globales
+  const totConResultado=totEntregadas+totDevueltas
+  const pctGlobal=totConResultado>0?Math.round(totEntregadas*100/totConResultado):null
+  const colorEntrega=pctGlobal===null?'var(--text)':(pctGlobal>=70?'var(--green)':pctGlobal>=60?'var(--amber)':'var(--red)')
+
+  // Lista de anuncios: peor primero, ESPERA DATOS al final
+  const adsList=Object.keys(porAnuncio).map(adId=>{
+    const o=porAnuncio[adId],pct=_pct(o),sem=_semaforoAd(o)
+    const info=adInfo[adId]||{nombre:'(no encontrado en Meta)',campNombre:'',campId:null}
+    return{adId,...o,pct,sem,...info}
+  }).sort((a,b)=>{
+    if(a.sem.espera&&!b.sem.espera)return 1
+    if(!a.sem.espera&&b.sem.espera)return -1
+    if(a.pct===null&&b.pct===null)return 0
+    if(a.pct===null)return 1
+    if(b.pct===null)return -1
+    return a.pct-b.pct
+  })
+
+  const ciudadesList=Object.keys(porCiudad).map(ciu=>{
+    const o=porCiudad[ciu],pct=_pct(o),sem=_semCiudad(o)
+    return{ciudad:ciu,...o,pct,sem}
+  }).sort((a,b)=>{
+    if(a.sem.espera&&!b.sem.espera)return 1
+    if(!a.sem.espera&&b.sem.espera)return -1
+    if(a.pct===null&&b.pct===null)return 0
+    if(a.pct===null)return 1
+    if(b.pct===null)return -1
+    return a.pct-b.pct
+  })
+
+  const aPausarAnuncios=adsList.filter(a=>!a.sem.espera&&a.pct!==null&&a.pct<60).length
+  const aPausarCiudades=ciudadesList.filter(c=>!c.sem.espera&&c.pct!==null&&c.pct<60).length
+
+  // 6. Render
+  const esc=(s)=>String(s||'').replace(/[<>"']/g,c=>({'<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+
+  // --- SELECTOR DE RANGO (presets + custom desde/hasta) ---
+  const selectorRango=`<div class="card" style="padding:10px 12px;margin-bottom:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <span style="font-size:12px;color:var(--muted)">Rango:</span>
+    <button class="btn-sm ${!modoCustom&&_dias===7?'btn-primary':'btn-outline'}" onclick="cambiarRangoResultados('${prodId}',7)">7d</button>
+    <button class="btn-sm ${!modoCustom&&_dias===30?'btn-primary':'btn-outline'}" onclick="cambiarRangoResultados('${prodId}',30)">30d</button>
+    <button class="btn-sm ${!modoCustom&&_dias===90?'btn-primary':'btn-outline'}" onclick="cambiarRangoResultados('${prodId}',90)">90d</button>
+    <span style="width:1px;height:20px;background:var(--border);margin:0 4px"></span>
+    <span style="font-size:12px;color:var(--muted)">Desde</span>
+    <input type="date" id="prod-res-desde-${prodId}" value="${desdeStr}" style="font-size:12px;padding:3px 6px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:4px;color-scheme:dark">
+    <span style="font-size:12px;color:var(--muted)">Hasta</span>
+    <input type="date" id="prod-res-hasta-${prodId}" value="${hastaStr}" style="font-size:12px;padding:3px 6px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:4px;color-scheme:dark">
+    <button class="btn-sm ${modoCustom?'btn-primary':'btn-outline'}" onclick="cambiarFechasCustom('${prodId}')">Aplicar</button>
+    <span style="font-size:11px;color:var(--muted);margin-left:auto">${desdeStr} → ${hastaStr} · ${diasEnRango} día${diasEnRango===1?'':'s'}${modoCustom?' (custom)':''}</span>
+  </div>`
+
+  // --- LEYENDA (semáforo + glosario) ---
+  const leyenda=`<div class="card" style="padding:10px 14px;margin-bottom:12px;font-size:13px">
+    <div style="font-weight:500;margin-bottom:6px">¿Cómo leer esta sección?</div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:6px">
+      <span>🟢 Va bien — déjalo</span>
+      <span>🟡 Ojo — revisa</span>
+      <span>🔴 <strong style="color:var(--red)">Pausa YA</strong></span>
+      <span>⚪ Espera datos</span>
+    </div>
+    <div style="font-size:12px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap">
+      <span>✅ confirmada = bot cerró venta</span>
+      <span>💰 entregada = cliente recibió</span>
+      <span>🔥 devuelta = cliente rechazó</span>
+      <span>⏳ en camino = pendiente</span>
+    </div>
+  </div>`
+
+  // --- MINI-EMBUDO (flujo del negocio) ---
+  const embudo=`<div class="card" style="padding:12px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <span style="display:inline-flex;align-items:center;gap:6px;background:var(--green-bg);color:var(--green);padding:6px 12px;border-radius:6px;font-size:14px;font-weight:500">✅ ${totConfirmadas} confirmadas</span>
+    <span style="color:var(--muted);font-size:16px">→</span>
+    <span style="display:inline-flex;align-items:center;gap:6px;background:var(--blue-bg);color:var(--blue);padding:6px 12px;border-radius:6px;font-size:14px;font-weight:500">💰 ${totEntregadas} entregadas</span>
+    <span style="color:var(--muted);font-size:16px">→</span>
+    <span style="display:inline-flex;align-items:center;gap:6px;background:var(--red-bg);color:var(--red);padding:6px 12px;border-radius:6px;font-size:14px;font-weight:500">🔥 ${totDevueltas} devueltas</span>
+    <span style="color:var(--muted);font-size:16px">→</span>
+    <span style="display:inline-flex;align-items:center;gap:6px;background:var(--card2);color:var(--muted);padding:6px 12px;border-radius:6px;font-size:14px;font-weight:500">⏳ ${totEnCamino} en camino</span>
+  </div>`
+
+  // --- 4 CARDS GLOBALES (Confirmadas + Entrega + Perdida + A pausar) ---
+  const cardConfirmadas=`<div class="card" style="padding:12px">
+    <div style="font-size:11px;color:var(--muted)">Confirmadas ✅</div>
+    <div style="font-size:22px;font-weight:600">${totConfirmadas}</div>
+    <div style="font-size:11px;color:var(--muted)">el bot cerró ${totConfirmadas} venta${totConfirmadas===1?'':'s'}</div>
+  </div>`
+  const cardEntrega=`<div class="card" style="padding:12px">
+    <div style="font-size:11px;color:var(--muted)">Entrega 💰</div>
+    <div style="font-size:22px;font-weight:600;color:${colorEntrega}">${pctGlobal===null?'—':pctGlobal+'%'}</div>
+    <div style="font-size:11px;color:var(--muted)">${totEntregadas} de ${totConResultado} llegaron</div>
+  </div>`
+  const cardPerdida=`<div class="card" style="padding:12px">
+    <div style="font-size:11px;color:var(--muted)">Perdida 🔥</div>
+    <div style="font-size:22px;font-weight:600;color:var(--red)">${totDevueltas}</div>
+    <div style="font-size:11px;color:var(--muted)">${totalVentas>0?Math.round(totDevueltas*100/totalVentas)+'% del total':'—'}</div>
+  </div>`
+  const cardPausar=`<div class="card" style="padding:12px">
+    <div style="font-size:11px;color:var(--muted)">A pausar ⚠️</div>
+    <div style="font-size:22px;font-weight:600;color:${aPausarAnuncios+aPausarCiudades>0?'var(--red)':'var(--text)'}">${aPausarAnuncios+aPausarCiudades}</div>
+    <div style="font-size:11px;color:var(--muted)">${aPausarAnuncios} anuncio${aPausarAnuncios===1?'':'s'} + ${aPausarCiudades} ciudad${aPausarCiudades===1?'':'es'}</div>
+  </div>`
+
+  // --- CARD DE ANUNCIO: 4 datos + badge provisional + estado ESPERA DATOS ---
+  const renderAnuncioCard=(a)=>{
+    const esEspera=a.sem.espera
+    const resueltas=a.entregadas+a.devueltas
+    const badgeProv=(a.enCamino>0&&!esEspera)?`<div style="font-size:10px;color:var(--amber);background:var(--amber-bg);padding:2px 6px;border-radius:4px;display:inline-block;margin-top:2px">⏳ provisional · ${a.enCamino} en camino</div>`:''
+    const subEspera=esEspera?`<div style="font-size:10px;color:var(--muted);margin-top:2px">${resueltas} resueltas (mín. ${MIN_RESUELTAS})</div>`:''
+    return `<div class="card" style="padding:14px;margin-bottom:8px">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+        <span style="font-size:26px">${a.sem.emoji}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:600;color:${a.sem.color};letter-spacing:0.5px">${a.sem.label}</div>
+          <div style="font-size:15px;font-weight:500">${esc(a.nombre)}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:24px;font-weight:600;color:${a.sem.color}">${esEspera?'—':(a.pct===null?'—':a.pct+'%')}</div>
+          ${badgeProv}${subEspera}
+        </div>
+      </div>
+      <div style="display:flex;gap:14px;padding:8px 0;border-top:1px solid var(--border);margin-bottom:8px;font-size:13px;flex-wrap:wrap">
+        <span>✅ <strong style="color:var(--green)">${a.confirmadas}</strong> <span style="color:var(--muted)">confirmadas</span></span>
+        <span>💰 <strong style="color:var(--blue)">${a.entregadas}</strong> <span style="color:var(--muted)">entregadas</span></span>
+        <span>🔥 <strong style="color:var(--red)">${a.devueltas}</strong> <span style="color:var(--muted)">devueltas</span></span>
+        <span>⏳ <strong style="color:var(--muted)">${a.enCamino}</strong> <span style="color:var(--muted)">en camino</span></span>
+      </div>
+      <div style="font-size:11px;color:var(--muted)">
+        ${a.campId?`<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px"><span style="min-width:64px">Campaña:</span><span style="font-family:monospace;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.campNombre)}">${esc(a.campNombre||a.campId)}</span><button class="btn-sm btn-outline" style="padding:1px 6px;font-size:10px" onclick="copiarTextoBtn('${a.campId}',this)">📋 ${a.campId}</button></div>`:''}
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="min-width:64px">Anuncio:</span>
+          <span style="font-family:monospace;flex:1">${a.adId}</span>
+          <button class="btn-sm btn-outline" style="padding:1px 6px;font-size:10px" onclick="copiarTextoBtn('${a.adId}',this)">📋 Copiar</button>
+        </div>
+      </div>
+    </div>`
+  }
+
+  // --- CARD DE CIUDAD: 4 datos + estado ESPERA DATOS ---
+  const renderCiudadCard=(c)=>{
+    const esEspera=c.sem.espera
+    const resueltas=c.entregadas+c.devueltas
+    const subEspera=esEspera?`<div style="font-size:10px;color:var(--muted);margin-top:2px">${resueltas} resueltas (mín. ${MIN_RESUELTAS})</div>`:''
+    return `<div class="card" style="padding:14px;margin-bottom:8px">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+        <span style="font-size:26px">${c.sem.emoji}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:600;color:${c.sem.color};letter-spacing:0.5px">${c.sem.label}</div>
+          <div style="font-size:15px;font-weight:500">${esc(c.ciudad)}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:24px;font-weight:600;color:${c.sem.color}">${esEspera?'—':(c.pct===null?'—':c.pct+'%')}</div>
+          ${subEspera}
+        </div>
+      </div>
+      <div style="display:flex;gap:14px;padding-top:8px;border-top:1px solid var(--border);font-size:13px;flex-wrap:wrap">
+        <span>✅ <strong style="color:var(--green)">${c.confirmadas}</strong> <span style="color:var(--muted)">confirmadas</span></span>
+        <span>💰 <strong style="color:var(--blue)">${c.entregadas}</strong> <span style="color:var(--muted)">entregadas</span></span>
+        <span>🔥 <strong style="color:var(--red)">${c.devueltas}</strong> <span style="color:var(--muted)">devueltas</span></span>
+        <span>⏳ <strong style="color:var(--muted)">${c.enCamino}</strong> <span style="color:var(--muted)">en camino</span></span>
+      </div>
+    </div>`
+  }
+
+  // --- TABLA DIAGNÓSTICA (siempre visible al final) ---
+  const tablaDiag=`<div class="card" style="padding:14px;margin-top:20px">
+    <div style="font-size:14px;font-weight:600;margin-bottom:10px">¿Cómo interpreto esto?</div>
+    <table style="width:100%;font-size:13px;border-collapse:collapse">
+      <tr><td style="padding:8px 0;color:var(--muted);border-bottom:1px solid var(--border);width:45%">Pocas confirmadas</td><td style="padding:8px 0;border-bottom:1px solid var(--border)">El bot no cierra → revisa guion</td></tr>
+      <tr><td style="padding:8px 0;color:var(--muted);border-bottom:1px solid var(--border)">Muchas confirmadas, muchas devueltas</td><td style="padding:8px 0;border-bottom:1px solid var(--border)">Audiencia mala → pausa el anuncio</td></tr>
+      <tr><td style="padding:8px 0;color:var(--muted);border-bottom:1px solid var(--border)">Muchas confirmadas, muchas entregadas</td><td style="padding:8px 0;border-bottom:1px solid var(--border)">Anuncio ganador → escala presupuesto</td></tr>
+      <tr><td style="padding:8px 0;color:var(--muted)">Mayoría en camino</td><td style="padding:8px 0">No juzgues todavía → espera</td></tr>
+    </table>
+  </div>`
+
+  cont.innerHTML=`
+    ${selectorRango}
+    ${leyenda}
+    ${embudo}
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:20px">
+      ${cardConfirmadas}${cardEntrega}${cardPerdida}${cardPausar}
+    </div>
+    <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:10px">
+      <span style="font-size:15px;font-weight:600">🚦 Por anuncio</span>
+      <span style="font-size:12px;color:var(--muted)">— ${adsList.length} anuncio${adsList.length===1?'':'s'}${aPausarAnuncios>0?` · ${aPausarAnuncios} a pausar`:''}</span>
+    </div>
+    ${adsList.length?adsList.map(renderAnuncioCard).join(''):'<div class="card" style="padding:14px;color:var(--muted);font-size:13px">Sin ventas con anuncio atribuido en este rango.</div>'}
+    <div style="margin-top:20px;display:flex;align-items:baseline;gap:8px;margin-bottom:10px">
+      <span style="font-size:15px;font-weight:600">🗺️ Por ciudad</span>
+      <span style="font-size:12px;color:var(--muted)">— ${ciudadesList.length} ciudad${ciudadesList.length===1?'':'es'}${aPausarCiudades>0?` · ${aPausarCiudades} con problemas`:''}</span>
+    </div>
+    ${ciudadesList.length?ciudadesList.map(renderCiudadCard).join(''):'<div class="card" style="padding:14px;color:var(--muted);font-size:13px">Sin datos de ciudad en este rango.</div>'}
+    ${tablaDiag}
+  `
+}
+
 async function renderProdBody(id,maestrosList){
   const prod=productos.find(p=>p.id===id);if(!prod)return
   const body=document.getElementById('prod-body-'+id)
@@ -2001,6 +2556,11 @@ async function renderProdBody(id,maestrosList){
   }
 
   body.innerHTML=`<div style="padding-top:14px">
+    <div style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:14px">
+      <button id="prod-tab-config-btn-${id}" onclick="switchProdTab('${id}','config')" style="background:transparent;border:none;color:var(--text);padding:10px 16px;cursor:pointer;font-size:14px;font-weight:500;border-bottom:2px solid var(--primary);outline:none">⚙️ Configuración</button>
+      <button id="prod-tab-results-btn-${id}" onclick="switchProdTab('${id}','results')" style="background:transparent;border:none;color:var(--muted);padding:10px 16px;cursor:pointer;font-size:14px;font-weight:500;border-bottom:2px solid transparent;outline:none">📊 Resultados</button>
+    </div>
+    <div id="prod-tab-config-${id}">
     <div class="form-grid g2">
       <div class="fld"><label>📝 Nombre actual <span style="color:var(--muted);font-size:10px">(se usa en TODO: reportes, dashboard, mensajes, IA)</span></label>
         <input type="text" id="pname-${id}" value="${prod.nombre||''}"></div>
@@ -2072,10 +2632,18 @@ async function renderProdBody(id,maestrosList){
     </div>
     <div id="pmsg-${id}" style="margin-top:8px"></div>
     <div class="divider"></div>
+    <div class="section-title">🤖 Agentes autorizados (bots) <span style="color:var(--muted);font-size:11px;font-weight:400">— sólo estos agentes pueden vender este producto en el asignador</span></div>
+    <div id="agentes-prod-${id}"><div class="loading">Cargando agentes...</div></div>
+    <div class="divider"></div>
     <div class="section-title">🎯 Campañas enlazadas a este producto</div>
     <div id="camps-enlazadas-${id}"><div class="loading">Cargando...</div></div>
+    </div>
+    <div id="prod-tab-results-${id}" style="display:none">
+      <div class="loading">Cargando resultados...</div>
+    </div>
   </div>`
   renderCampanasEnlazadas(id)
+  renderAgentesProd(id)
   // Inyectar listeners a inputs de ofertas para recalcular en vivo
   document.querySelectorAll('.of-precio-'+id+', .of-costo-'+id).forEach(inp=>{
     inp.addEventListener('input',()=>recalcProdAuto(id))
@@ -3121,23 +3689,24 @@ function _parseFecha(s){
 }
 
 function _parseLineaAsignador(linea){
-  // Formato obligatorio: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, ID_ANUNCIO, [carrier]
+  // Formato obligatorio: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_ANUNCIO, [carrier]
   const partes=linea.split(/[,;\t]/).map(p=>p.trim())
-  // Quitar partes vacías al final: para formato nuevo (7+) no bajar de 7, para viejo no bajar de 3
-  while(partes.length>7&&partes[partes.length-1]==='')partes.pop()
-  if(partes.length<=6)while(partes.length>3&&partes[partes.length-1]==='')partes.pop()
+  // Quitar partes vacías al final: para formato nuevo (8+) no bajar de 8, para viejo no bajar de 3
+  while(partes.length>8&&partes[partes.length-1]==='')partes.pop()
+  if(partes.length<=7)while(partes.length>3&&partes[partes.length-1]==='')partes.pop()
   const n=partes.length
   if(n===0)return{tipo:'vacio'}
-  if(n>=3&&n<=6){
+  if(n>=3&&n<=7){
     // Formato viejo o incompleto: faltan campos obligatorios
-    return{tipo:'invalido',campos:n,raw:linea,msg:'Faltan campos. Formato: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, ID_ANUNCIO, [carrier]'}
+    return{tipo:'invalido',campos:n,raw:linea,msg:'Faltan campos. Formato: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_ANUNCIO, [carrier]'}
   }
-  if(n>=7&&n<=8){
-    // Formato nuevo: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, ID_ANUNCIO, [carrier]
+  if(n>=8&&n<=9){
+    // Formato nuevo: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_ANUNCIO, [carrier]
     const ciudad=partes[0],qty=parseInt(partes[1])||1,dept=partes[2]
     const tel=partes[3].replace(/\D/g,''),fechaRaw=partes[4],producto=partes[5]
-    const adId=partes[6]||''
-    const carrier=(n===8&&partes[7])?partes[7]:''
+    const agente=partes[6]||''
+    const adId=partes[7]||''
+    const carrier=(n===9&&partes[8])?partes[8]:''
     const isI=carrier.toUpperCase().includes('INTERRAP')
     const errores=[]
     if(!ciudad)errores.push('CIUDAD')
@@ -3145,9 +3714,10 @@ function _parseLineaAsignador(linea){
     if(!dept)errores.push('DPTO')
     if(!tel||tel.length<7)errores.push('TELEFONO')
     if(!producto)errores.push('PRODUCTO')
+    if(!agente)errores.push('AGENTE')
     const fechaIso=_parseFecha(fechaRaw)
     if(!fechaIso)errores.push('FECHA (use M/D/YYYY)')
-    return{tipo:'nuevo',ciudad,qty,dept,tel,fecha:fechaIso,fechaRaw,producto,adId,isI,carrier,errores,raw:linea}
+    return{tipo:'nuevo',ciudad,qty,dept,tel,fecha:fechaIso,fechaRaw,producto,agente,adId,isI,carrier,errores,raw:linea}
   }
   return{tipo:'invalido',campos:n,raw:linea}
 }
@@ -3198,12 +3768,12 @@ async function pageAuxAsignador(c){
 
       <div class="card">
         <div style="font-size:12px;color:var(--muted);margin-bottom:8px">
-          <strong>Formato (1 línea por orden):</strong> <code>CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, ID_ANUNCIO, [carrier]</code><br>
-          ID_ANUNCIO vacío = orgánico · carrier opcional · fecha en formato M/D/YYYY${modoHistorico?'':'<br>📅 Fecha permitida: <strong>de hoy hasta 4 días atrás</strong>'}
+          <strong>Formato (1 línea por orden):</strong> <code>CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_ANUNCIO, [carrier]</code><br>
+          AGENTE = bot que generó la venta · ID_ANUNCIO vacío = orgánico · carrier opcional · fecha en formato M/D/YYYY${modoHistorico?'':'<br>📅 Fecha permitida: <strong>de hoy hasta 4 días atrás</strong>'}
         </div>
-        <textarea id="asign-input" placeholder="MEDELLIN, 2, ANTIOQUIA, 3018022316, 5/17/2026, Colageno, 120243626234290122
-BOGOTA, 3, CUNDINAMARCA, 3018022317, 5/17/2026, Triflex, ,
-CARTAGENA, 2, BOLIVAR, 3018022318, 5/17/2026, Colageno, , INTERRAPIDISIMO" style="width:100%;min-height:140px;padding:10px;font-family:monospace;font-size:12px;border:1px solid var(--border);border-radius:8px;background:var(--card2);color:var(--text);resize:vertical"></textarea>
+        <textarea id="asign-input" placeholder="MEDELLIN, 2, ANTIOQUIA, 3018022316, 5/17/2026, Colageno, Neocell_X3_A1, 120243626234290122
+BOGOTA, 3, CUNDINAMARCA, 3018022317, 5/17/2026, Triflex, Triflex_X3_A1, ,
+CARTAGENA, 2, BOLIVAR, 3018022318, 5/17/2026, Colageno, Neocell_X3_A1, , INTERRAPIDISIMO" style="width:100%;min-height:140px;padding:10px;font-family:monospace;font-size:12px;border:1px solid var(--border);border-radius:8px;background:var(--card2);color:var(--text);resize:vertical"></textarea>
         <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
           <button class="btn-sm btn-primary" onclick="procesarAsignador()">▶ Procesar y guardar</button>
           <button class="btn-sm btn-outline" onclick="limpiarAsignador()">Limpiar</button>
@@ -3293,7 +3863,7 @@ window.procesarAsignador=async()=>{
   const conErrores=[]
   parsed.forEach((p,i)=>{
     if(p.tipo==='nuevo'&&p.errores.length>0)conErrores.push({linea:i+1,raw:p.raw,faltan:p.errores})
-    else if(p.tipo==='invalido')conErrores.push({linea:i+1,raw:p.raw,faltan:[p.msg||`Número de campos inválido (${p.campos}). Formato: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, ID_ANUNCIO, [carrier]`]})
+    else if(p.tipo==='invalido')conErrores.push({linea:i+1,raw:p.raw,faltan:[p.msg||`Número de campos inválido (${p.campos}). Formato: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_ANUNCIO, [carrier]`]})
   })
 
   // PASO 1.5: validar producto reconocido y fecha en rango
@@ -3326,6 +3896,77 @@ window.procesarAsignador=async()=>{
   if(conErrores.length>0){
     msg.innerHTML=`<div class="alert alert-red"><strong>❌ ${conErrores.length} línea(s) con errores. Corrige antes de procesar:</strong><ul style="margin-top:6px;margin-left:14px;font-size:12px">
       ${conErrores.map(e=>`<li><strong>Línea ${e.linea}:</strong> ${e.faltan.join(', ')}<br><code style="font-size:10px;color:var(--muted)">${e.raw}</code></li>`).join('')}
+    </ul></div>`
+    return
+  }
+
+  // PASO 1.6 — Feature A: lookup de agentes (nombre → id) y validación de autorización por producto
+  // Recoger nombres únicos de agentes de las líneas válidas
+  const nombresAgentes=[...new Set(parsed.filter(p=>p.tipo==='nuevo'&&p.errores.length===0&&p.agente).map(p=>p.agente))]
+  const agenteByNombre={} // nombre → {id, activo}
+  if(nombresAgentes.length){
+    const{data:agentesDB,error:eAg}=await sb.from('agentes').select('id,nombre,activo').in('nombre',nombresAgentes)
+    if(eAg){
+      msg.innerHTML=`<div class="alert alert-red">Error consultando agentes: ${eAg.message}</div>`
+      return
+    }
+    for(const a of (agentesDB||[]))agenteByNombre[a.nombre]={id:a.id,activo:a.activo}
+  }
+  // Construir mapa producto_id → Set(agente_id autorizados) — solo para los productos que aparecen
+  const prodAgentMap={} // producto_id → Set(agente_id)
+  const prodIdsParaAuth=new Set()
+  // Pre-resolver producto_id de cada línea válida (replicando lógica de resolveProdName y adProdMap, pero rápido)
+  // Necesitamos adProdMap antes para esto. Lo calculamos acá adelantado.
+  const _adIdsPre=parsed.filter(p=>p.tipo==='nuevo'&&p.errores.length===0&&p.adId).map(p=>p.adId)
+  const _adProdMapPre=await buildAdProductMap(_adIdsPre)
+  const _lineaProdId=[] // por índice de parsed, guardar producto_id resuelto (o null)
+  parsed.forEach((p,i)=>{
+    if(p.tipo!=='nuevo'||p.errores.length>0){_lineaProdId[i]=null;return}
+    let pid=null
+    if(p.adId&&_adProdMapPre[p.adId])pid=_adProdMapPre[p.adId].producto_id
+    if(!pid){const r=resolveProdName(p.producto);if(r&&r.id)pid=r.id}
+    _lineaProdId[i]=pid
+    if(pid)prodIdsParaAuth.add(pid)
+  })
+  if(prodIdsParaAuth.size){
+    const{data:autoriz,error:eAuth}=await sb.from('producto_agentes')
+      .select('producto_id,agente_id').in('producto_id',[...prodIdsParaAuth])
+    if(eAuth){
+      msg.innerHTML=`<div class="alert alert-red">Error consultando autorización de agentes: ${eAuth.message}</div>`
+      return
+    }
+    for(const r of (autoriz||[])){
+      if(!prodAgentMap[r.producto_id])prodAgentMap[r.producto_id]=new Set()
+      prodAgentMap[r.producto_id].add(r.agente_id)
+    }
+  }
+  // Validar cada línea: agente existe + activo + autorizado para el producto detectado
+  const erroresAgente=[]
+  parsed.forEach((p,i)=>{
+    if(p.tipo!=='nuevo'||p.errores.length>0)return
+    const info=agenteByNombre[p.agente]
+    if(!info){
+      erroresAgente.push({linea:i+1,raw:p.raw,faltan:[`agente "${p.agente}" no registrado en el sistema. Créalo en Productos → tarjeta del producto → "🤖 Agentes autorizados"`]})
+      return
+    }
+    if(!info.activo){
+      erroresAgente.push({linea:i+1,raw:p.raw,faltan:[`agente "${p.agente}" está desactivado. Reactívalo en BD o usa otro agente.`]})
+      return
+    }
+    const pid=_lineaProdId[i]
+    if(!pid){
+      // Si no se pudo resolver producto, los errores anteriores ya lo habrán capturado o lo capturará el flujo principal. Aquí no agregamos error extra.
+      return
+    }
+    const autorizados=prodAgentMap[pid]
+    if(!autorizados||!autorizados.has(info.id)){
+      const prodNombre=(productos.find(pp=>pp.id===pid)||{}).nombre||p.producto
+      erroresAgente.push({linea:i+1,raw:p.raw,faltan:[`agente "${p.agente}" no está autorizado para el producto "${prodNombre}". Asígnalo en Productos → tarjeta del producto.`]})
+    }
+  })
+  if(erroresAgente.length>0){
+    msg.innerHTML=`<div class="alert alert-red"><strong>❌ ${erroresAgente.length} línea(s) con errores de agente. Corrige antes de procesar:</strong><ul style="margin-top:6px;margin-left:14px;font-size:12px">
+      ${erroresAgente.map(e=>`<li><strong>Línea ${e.linea}:</strong> ${e.faltan.join(', ')}<br><code style="font-size:10px;color:var(--muted)">${e.raw}</code></li>`).join('')}
     </ul></div>`
     return
   }
@@ -3390,6 +4031,8 @@ window.procesarAsignador=async()=>{
       // Snapshot de costos del producto vigente (Fase 2.1)
       const _prodSnap=prodId?productos.find(pp=>pp.id===prodId):null
       const _q=p.qty||1
+      // Feature A: agente_id resuelto en validación previa (PASO 1.6)
+      const _agenteId=(p.agente&&agenteByNombre[p.agente])?agenteByNombre[p.agente].id:null
       mapeosAGuardar.push({
         fecha:p.fecha,
         telefono:p.tel,
@@ -3401,7 +4044,8 @@ window.procesarAsignador=async()=>{
         estado_inicial:estado,
         costo_snapshot:_prodSnap?(_prodSnap['costo_'+_q+'u']||null):null,
         flete_snapshot:_prodSnap?(_prodSnap.flete_outbound||null):null,
-        flete_dev_snapshot:_prodSnap?(_prodSnap.flete_devolucion||null):null
+        flete_dev_snapshot:_prodSnap?(_prodSnap.flete_devolucion||null):null,
+        agente_id:_agenteId
       })
     }
   }
@@ -3598,7 +4242,7 @@ async function cargarReporteData(){
   }
 
   // 2. Manual: reportes_diarios existentes (indexados por nombre normalizado)
-  const{data:reportes}=await sb.from('reportes_diarios').select('*').eq('fecha',fecha).eq('usuario_id',me?.id)
+  const{data:reportes}=await sb.from('reportes_diarios').select('*').eq('fecha',fecha).eq('usuario_id',currentMe()?.id)
   const repByProd={}
   if(reportes)for(const r of reportes)repByProd[_normProd(r.producto_nombre)||'']=r
 
@@ -3709,8 +4353,13 @@ async function cargarReporteData(){
   // Cargar ventas existentes o crear primera fila
   if(esHoy){
     const ventasExist=reportes?.filter(r=>r.ad_ids)||[]
-    if(ventasExist.length>0)for(const v of ventasExist)addVentaRow(v.producto_nombre||'',v.ad_ids||'',v.conversaciones_aprox||0)
-    else addVentaRow()
+    if(impersonating&&ventasExist.length>0){
+      // Admin viendo como aux: muestra los IDs guardados (read-only visual con badge)
+      for(const v of ventasExist)addVentaRow(v.producto_nombre||'',v.ad_ids||'',v.conversaciones_aprox||0)
+    }else{
+      // Aux normal: día nuevo siempre arranca vacío (no hereda IDs)
+      addVentaRow()
+    }
   }
   }catch(e){el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`}
 }
@@ -3785,11 +4434,18 @@ window.saveReporteV2=async(fecha)=>{
     // Also get conversaciones from auto section if exists
     const pid=_normProd(prodNom).replace(/\s+/g,'_')
     const convReal=parseInt(document.getElementById(`rc-${pid}`)?.value)||0
+    // Acumular ad_ids: leer existente y combinar (PRESERVANDO duplicados) para no sobrescribir
+    const{data:existente}=await sb.from('reportes_diarios')
+      .select('ad_ids').eq('fecha',fecha).eq('producto_id',prodObj.id).eq('usuario_id',currentMe().id).maybeSingle()
+    const idsViejos=(existente?.ad_ids||'').split(/[\n,;\s]+/).map(s=>s.trim()).filter(Boolean)
+    const idsNuevos=adIds.split(/[\n,;\s]+/).map(s=>s.trim()).filter(Boolean)
+    // FIX: NO deduplicar — cada ID repetido = 1 venta distinta del mismo anuncio
+    const adIdsMerged=[...idsViejos,...idsNuevos].join('\n')
     const{error}=await sb.from('reportes_diarios').upsert({
       fecha,producto_id:prodObj.id,producto_nombre:prodObj.nombre,
-      conversaciones:convReal,conversaciones_aprox:convAp,ad_ids:adIds,
+      conversaciones:convReal,conversaciones_aprox:convAp,ad_ids:adIdsMerged,
       nota:document.getElementById('rep-nota')?.value||'',
-      usuario_id:me.id,updated_at:new Date().toISOString()
+      usuario_id:currentMe().id,updated_at:new Date().toISOString()
     },{onConflict:'fecha,producto_id,usuario_id'})
     if(error){msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
     saved++
@@ -3805,7 +4461,7 @@ window.saveReporteV2=async(fecha)=>{
     if(!prodObj)continue
     await sb.from('reportes_diarios').upsert({
       fecha,producto_id:prodObj.id,producto_nombre:prodObj.nombre,
-      conversaciones:conv,usuario_id:me.id,updated_at:new Date().toISOString()
+      conversaciones:conv,usuario_id:currentMe().id,updated_at:new Date().toISOString()
     },{onConflict:'fecha,producto_id,usuario_id'}).catch(()=>{})
   }
   msg.innerHTML=`<div class="alert alert-green">✅ ${saved} producto(s) guardado(s)</div>`
@@ -6875,6 +7531,7 @@ const DROPI_STATUS={
   'SIN MOVIMIENTOS':{cat:'novedad',emoji:'⚠️',pill:'pill-amber',label:'Sin movimiento'},
   'NOVEDAD SOLUCIONADA':{cat:'novedad_ok',emoji:'✅',pill:'pill-green',label:'Novedad resuelta'},
 }
+window.DROPI_STATUS=DROPI_STATUS
 
 async function pageAuxDropi(c){
   c.innerHTML=`<div class="page-title">📊 Cruce Dropi</div>
@@ -8839,9 +9496,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
 
   // Strip contador + mini-leyenda (solo si hay actividad)
   if(conActividad.length){
-    const _pill=(code,n,label,color,bg)=>{
+    const _pill=(code,n,label,color,bg,tooltip)=>{
       const dim=n===0?'opacity:.35;cursor:default':'cursor:pointer'
-      return `<button class="nexo-count-pill" data-code="${code}" data-accid="${accountId}" onclick="nexoFilterByUrgencia('${accountId}','${code}',this)" style="${dim};background:${bg};color:${color};border:1px solid ${color};border-radius:8px;padding:6px 10px;font-size:11px;font-weight:600;display:flex;align-items:center;gap:6px">
+      return `<button class="nexo-count-pill" data-code="${code}" data-accid="${accountId}" title="${tooltip}" onclick="nexoFilterByUrgencia('${accountId}','${code}',this)" style="${dim};background:${bg};color:${color};border:1px solid ${color};border-radius:8px;padding:6px 10px;font-size:11px;font-weight:600;display:flex;align-items:center;gap:6px">
         <span style="font-size:14px">${label.split(' ')[0]}</span>
         <span style="font-weight:700">${n}</span>
         <span style="opacity:.85">${label.split(' ').slice(1).join(' ')}</span>
@@ -8849,12 +9506,12 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     }
     campHtml+=`<div style="display:flex;gap:6px;flex-wrap:wrap;margin:10px 0;padding:8px;background:var(--card2);border-radius:8px;align-items:center">
       <span style="font-size:10px;color:var(--muted);letter-spacing:.5px;margin-right:4px">URGENCIA →</span>
-      ${_pill('stop',_conta.stop,'🔴 PAUSAR','var(--red)','var(--red-bg)')}
-      ${_pill('precaucion',_conta.precaucion,'🟡 CUIDADO','var(--amber)','var(--amber-bg)')}
-      ${_pill('fuego',_conta.fuego,'🟣 DOBLAR','var(--purple)','var(--purple-bg)')}
-      ${_pill('escalar',_conta.escalar,'🟢 ESCALAR','var(--green)','var(--green-bg)')}
-      ${_pill('sin_ventas',_conta.sin_ventas,'⏳ ESPERAR','var(--muted)','var(--card)')}
-      <button onclick="nexoFilterByUrgencia('${accountId}','',this)" style="margin-left:auto;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:10px;cursor:pointer">Ver todas</button>
+      ${_pill('stop',_conta.stop,'🔴 PAUSAR','var(--red)','var(--red-bg)','APAGAR: campañas perdiendo plata. Click para filtrar y pausarlas ya.')}
+      ${_pill('precaucion',_conta.precaucion,'🟡 CUIDADO','var(--amber)','var(--amber-bg)','CUIDADO: campañas al límite del break-even. Click para filtrar y vigilarlas.')}
+      ${_pill('fuego',_conta.fuego,'🟣 DOBLAR','var(--purple)','var(--purple-bg)','FUEGO: campañas rindiendo brutal. Click para filtrar y doblar presupuesto.')}
+      ${_pill('escalar',_conta.escalar,'🟢 ESCALAR','var(--green)','var(--green-bg)','ESCALAR: campañas sanas. Click para filtrar y subir presupuesto +30%.')}
+      ${_pill('sin_ventas',_conta.sin_ventas,'⏳ ESPERAR','var(--muted)','var(--card)','ESPERAR: campañas sin ventas todavía. Click para filtrar y dejar correr.')}
+      <button onclick="nexoFilterByUrgencia('${accountId}','',this)" title="Mostrar todas las campañas sin filtro" style="margin-left:auto;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:10px;cursor:pointer">Ver todas</button>
     </div>
     <div style="display:flex;gap:10px;flex-wrap:wrap;margin:0 0 10px 0;font-size:10px;color:var(--muted);align-items:center">
       <span style="letter-spacing:.5px">LEYENDA →</span>
@@ -9007,9 +9664,9 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
     const adIdsUnicos=[...new Set(adIds.filter(Boolean))]
     if(!adIdsUnicos.length){console.log('[SEM] salida: adIdsUnicos vacío');return}
     const hoy=new Date().toISOString().slice(0,10)
-    // Rango de 30 días (igual que el default del portafolio) para que el semáforo
-    // refleje el mismo dato que el auxiliar ve en la tarjeta de campaña.
-    const desde=new Date(Date.now()-30*86400000).toISOString().slice(0,10)
+    // Rango = SOLO HOY: cada snapshot del semáforo refleja qué pasó hoy hasta este momento.
+    // Así el "Plata del día" del historial coincide con la realidad del día.
+    const desde=hoy
     const hasta=hoy
 
     // 1. Subir jerarquía: ad → adset → campaign
@@ -9234,19 +9891,19 @@ window._semColorMap={
 window.nexoBadgeMega=function(code,size){
   if(!code)return ''
   const MAP={
-    fuego:{dot:'🟣',state:'FUEGO',action:'DOBLAR 🚀',color:'var(--purple)',bg:'var(--purple-bg)',pulse:true},
-    escalar:{dot:'🟢',state:'ESCALAR',action:'SUBIR +30%',color:'var(--green)',bg:'var(--green-bg)',pulse:false},
-    precaucion:{dot:'🟡',state:'CUIDADO',action:'NO TOCAR',color:'var(--amber)',bg:'var(--amber-bg)',pulse:false},
-    stop:{dot:'🔴',state:'APAGAR',action:'PAUSAR YA',color:'var(--red)',bg:'var(--red-bg)',pulse:true},
-    sin_ventas:{dot:'⏳',state:'ESPERAR',action:'DEJAR CORRER',color:'var(--muted)',bg:'var(--card2)',pulse:false},
-    pendiente_sync:{dot:'⏳',state:'ESPERAR',action:'SIN SYNC',color:'var(--muted)',bg:'var(--card2)',pulse:false},
-    reportado:{dot:'📝',state:'REPORTADO',action:'REVISAR',color:'var(--blue)',bg:'var(--blue-bg)',pulse:false}
+    fuego:{dot:'🟣',state:'FUEGO',action:'DOBLAR 🚀',color:'var(--purple)',bg:'var(--purple-bg)',pulse:true,tooltip:'FUEGO — CPA muy por debajo del break-even. Está rindiendo brutal. DOBLÁ el presupuesto sin miedo.'},
+    escalar:{dot:'🟢',state:'ESCALAR',action:'SUBIR +30%',color:'var(--green)',bg:'var(--green-bg)',pulse:false,tooltip:'ESCALAR — CPA dentro del rango saludable. SUBÍ el presupuesto un 30% y seguí mirando.'},
+    precaucion:{dot:'🟡',state:'CUIDADO',action:'NO TOCAR',color:'var(--amber)',bg:'var(--amber-bg)',pulse:false,tooltip:'CUIDADO — CPA cerca del límite del break-even. NO TOQUES el presupuesto, esperá 1-2 días para ver tendencia.'},
+    stop:{dot:'🔴',state:'APAGAR',action:'PAUSAR YA',color:'var(--red)',bg:'var(--red-bg)',pulse:true,tooltip:'APAGAR — CPA por encima del break-even. Estás perdiendo plata en cada peso invertido. PAUSÁ YA.'},
+    sin_ventas:{dot:'⏳',state:'ESPERAR',action:'DEJAR CORRER',color:'var(--muted)',bg:'var(--card2)',pulse:false,tooltip:'ESPERAR — Aún sin ventas registradas. DEJÁ CORRER hasta tener datos suficientes para decidir.'},
+    pendiente_sync:{dot:'⏳',state:'ESPERAR',action:'SIN SYNC',color:'var(--muted)',bg:'var(--card2)',pulse:false,tooltip:'ESPERAR — Falta sincronización con Meta. SIN SYNC todavía, vuelve a chequear después del próximo sync.'},
+    reportado:{dot:'📝',state:'REPORTADO',action:'REVISAR',color:'var(--blue)',bg:'var(--blue-bg)',pulse:false,tooltip:'REPORTADO — Se cargaron ventas manualmente desde el reporte del día. REVISÁ que el dato esté correcto.'}
   }
   const o=MAP[code]
   if(!o)return ''
   const sizeCls=size==='sm'?' nbm-sm':''
   const pulseCls=o.pulse?' nexo-pulse':''
-  return `<div class="nexo-badge-mega${sizeCls}${pulseCls}" style="background:${o.bg};border-color:${o.color};color:${o.color}">
+  return `<div class="nexo-badge-mega${sizeCls}${pulseCls}" title="${o.tooltip}" style="background:${o.bg};border-color:${o.color};color:${o.color};cursor:help">
     <div class="nbm-dot">${o.dot}</div>
     <div class="nbm-state">${o.state}</div>
     <div class="nbm-action">${o.action}</div>
@@ -9270,7 +9927,12 @@ window.nexoCpaColor=function(cpaReal,margenBE){
 // para que la tira coincida visualmente con el badge.
 window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
   try{
-    const sems=(window._metaPort?.semaforosByMeta||{})[metaId]||[]
+    const semsRaw=(window._metaPort?.semaforosByMeta||{})[metaId]||[]
+    // FIX timezone: filtrar por día LOCAL usando hora_calculo (no por columna 'fecha' que es UTC).
+    // Esto evita que un registro creado a las 8:36 pm hora local del 23 (= 1:36 am UTC del 24) aparezca como "Hoy".
+    const _localDay=(ts)=>{const d=new Date(ts);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
+    const _hoyLocal=_localDay(new Date().toISOString())
+    const sems=semsRaw.filter(s=>s.hora_calculo&&_localDay(s.hora_calculo)===_hoyLocal)
     if(!sems.length&&!vivoData)return ''
     const COLOR_MAP=window._semColorMap
     // Mostrar solo: el primero del día + todos los cambios reales + cambio_presupuesto + el último siempre
@@ -9441,14 +10103,15 @@ window._semHistRango=async()=>{
 // Renderiza el timeline visual: agrupa por día, muestra eventos en lenguaje
 // natural, destaca el evento "cruce_dropi" como veredicto final del día.
 window._semRenderTimeline=(data)=>{
-  const COLOR_MAP={
-    sin_ventas:{bg:'var(--muted)',bd:'var(--muted)',cls:'⏳ Sin ventas'},
-    pendiente_sync:{bg:'var(--muted)',bd:'var(--muted)',cls:'⏳ Ventas sin sync de gasto'},
-    reportado:{bg:'var(--blue)',bd:'var(--blue)',cls:'📝 Reportado sin datos'},
-    stop:{bg:'var(--red)',bd:'var(--red)',cls:'🔴 STOP'},
-    precaucion:{bg:'var(--amber)',bd:'var(--amber)',cls:'🟡 Precaución'},
-    escalar:{bg:'var(--green)',bd:'var(--green)',cls:'🟢 Escalar'},
-    fuego:{bg:'var(--purple)',bd:'var(--purple)',cls:'🟣 Fuego'}
+  // Mapa de semáforos con info visual completa
+  const SEM={
+    sin_ventas:{bg:'#1f1f1f',color:'#a3a3a3',label:'Sin ventas',accion:'Esperar',emoji:'⏳'},
+    pendiente_sync:{bg:'#1f1f1f',color:'#a3a3a3',label:'Sin sync',accion:'Esperar',emoji:'⏳'},
+    reportado:{bg:'var(--blue-bg)',color:'var(--blue)',label:'Reportado',accion:'Esperar',emoji:'📝'},
+    stop:{bg:'var(--red-bg)',color:'var(--red)',label:'PAUSAR',accion:'Pausar ya',emoji:'🔴'},
+    precaucion:{bg:'var(--amber-bg)',color:'var(--amber)',label:'CUIDADO',accion:'Ojo pues',emoji:'🟡'},
+    escalar:{bg:'var(--green-bg)',color:'var(--green)',label:'ESCALAR',accion:'Subir presupuesto',emoji:'🟢'},
+    fuego:{bg:'var(--purple-bg)',color:'var(--purple)',label:'EN FUEGO',accion:'Doblar presupuesto',emoji:'🟣'}
   }
   const FUENTE_LEG={
     reporte_dia:'Auxiliar reportó ventas',
@@ -9458,108 +10121,242 @@ window._semRenderTimeline=(data)=>{
     meta_api:'Sync de Meta',
     cambio_presupuesto:'Cambio de presupuesto'
   }
-  // Agrupar por fecha (descendente)
+  // Agrupar por día LOCAL (corrige bug de timezone: hora_calculo en local)
+  const localDay=(ts)=>{
+    const d=new Date(ts)
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+  }
   const porDia={}
-  for(const r of data){if(!porDia[r.fecha])porDia[r.fecha]=[];porDia[r.fecha].push(r)}
+  for(const r of data){
+    const day=r.hora_calculo?localDay(r.hora_calculo):r.fecha
+    if(!porDia[day])porDia[day]=[]
+    porDia[day].push(r)
+  }
   const dias=Object.keys(porDia).sort((a,b)=>b.localeCompare(a))
-  const hoyStr=new Date().toISOString().slice(0,10)
+  const hoyLocal=localDay(new Date().toISOString())
+
   return dias.map(d=>{
     const regs=porDia[d].sort((a,b)=>new Date(a.hora_calculo)-new Date(b.hora_calculo))
     const fechaStr=new Date(d+'T12:00').toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long'})
-    // Mostrar solo: primero + todos los cambios + cambio_presupuesto + último (evita repetición)
-    let eventos=regs.filter((r,i)=>i===0||r.cambio_vs_anterior||r.triggered_by==='cambio_presupuesto'||i===regs.length-1)
-    const seen=new Set()
-    eventos=eventos.filter(r=>{if(seen.has(r.hora_calculo))return false;seen.add(r.hora_calculo);return true})
-    const itemsHtml=eventos.map((r,i)=>{
-      const c=COLOR_MAP[r.semaforo]||{bg:'var(--subtle)',bd:'var(--muted)',cls:r.semaforo_label||r.semaforo}
-      const hora=new Date(r.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
-      const esDropi=r.triggered_by==='cruce_dropi'
-      const esUltimo=i===eventos.length-1
-      // Descripción en lenguaje natural según contexto
-      let titulo=''
-      if(esDropi){
-        titulo='Cruce con Dropi completado'
-      }else if(i===0){
-        titulo='Primer registro del día'
-      }else if(r.cambio_vs_anterior){
-        titulo='Cambió a '+(r.semaforo_label||r.semaforo)
-      }else{
-        titulo=r.semaforo_label||r.semaforo
+    const totalCalc=regs.length
+
+    // Eventos importantes: primer + cambios reales + cambio_presupuesto + cruce_dropi + último
+    const horasMostradas=new Set()
+    const eventos=[]
+    if(regs.length>0){eventos.push(regs[0]);horasMostradas.add(regs[0].hora_calculo)}
+    for(const r of regs){
+      if(horasMostradas.has(r.hora_calculo))continue
+      if(r.cambio_vs_anterior||r.triggered_by==='cambio_presupuesto'||r.triggered_by==='cruce_dropi'){
+        eventos.push(r);horasMostradas.add(r.hora_calculo)
       }
+    }
+    const ultimo=regs[regs.length-1]
+    const cambiosRealesPre=regs.filter(r=>r.cambio_vs_anterior||r.triggered_by==='cambio_presupuesto')
+    // Solo incluir el último si hubo cambios reales o si es el único registro del día
+    if(ultimo&&!horasMostradas.has(ultimo.hora_calculo)&&(cambiosRealesPre.length>0||regs.length===1)){
+      eventos.push(ultimo);horasMostradas.add(ultimo.hora_calculo)
+    }
+    eventos.sort((a,b)=>new Date(a.hora_calculo)-new Date(b.hora_calculo))
+
+    const cambiosReales=cambiosRealesPre
+    const cambiosCount=cambiosReales.length
+    const sinCambioRegs=regs.filter(r=>!horasMostradas.has(r.hora_calculo))
+    const dropiReg=regs.find(r=>r.triggered_by==='cruce_dropi')
+
+    // Estado actual = último (espejo del historial)
+    const estadoActual=ultimo?(SEM[ultimo.semaforo]||{label:ultimo.semaforo,color:'var(--muted)',emoji:'•'}):null
+
+    // ── Resumen del día en 1 línea ──
+    let resumenLinea=''
+    if(eventos.length>=1){
+      const eventosNoDropi=eventos.filter(r=>r.triggered_by!=='cruce_dropi')
+      // Deduplicar estados consecutivos iguales (evita "EN FUEGO → luego EN FUEGO")
+      const estadosUnicos=[]
+      for(const r of eventosNoDropi){
+        if(!estadosUnicos.length||estadosUnicos[estadosUnicos.length-1].semaforo!==r.semaforo){
+          estadosUnicos.push(r)
+        }
+      }
+      const tags=estadosUnicos.map(r=>{
+        const s=SEM[r.semaforo]||{label:r.semaforo,color:'var(--muted)',emoji:'•'}
+        return `<span style="display:inline-flex;align-items:center;gap:3px;font-weight:600;color:${s.color}">${s.emoji} ${s.label}</span>`
+      })
+      if(tags.length===1){
+        // Sin cambios: "Mantuvo X todo el día"
+        resumenLinea=`<div style="background:var(--card);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px">
+          <span style="color:var(--muted);font-weight:600;margin-right:6px">RESUMEN:</span>Mantuvo ${tags[0]} todo el día (sin cambios)
+        </div>`
+      }else if(tags.length>1){
+        const partes=tags.map((t,i)=>`${i===0?'Empezó':'<span style="color:var(--subtle);margin:0 4px">→</span> luego'} ${t}`).join(' ')
+        resumenLinea=`<div style="background:var(--card);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px">
+          <span style="color:var(--muted);font-weight:600;margin-right:6px">RESUMEN:</span>${partes}
+        </div>`
+      }
+    }
+
+    // ── Timeline horizontal con dots + horas ──
+    let timelineHtml=''
+    if(regs.length>0){
+      const dots=regs.map((r,i)=>{
+        const s=SEM[r.semaforo]||{label:r.semaforo,color:'var(--muted)',emoji:'•'}
+        const hora=new Date(r.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
+        const esCambio=r.cambio_vs_anterior||i===0||r.triggered_by==='cambio_presupuesto'||r.triggered_by==='cruce_dropi'
+        const size=esCambio?20:13
+        return `<div style="position:relative;z-index:1;text-align:center;flex:1;min-width:0">
+          <div style="width:${size}px;height:${size}px;border-radius:50%;background:${s.color};margin:${esCambio?'0':'3.5px'} auto 0;border:3px solid var(--card2);box-sizing:content-box${!esCambio?';opacity:.55':''}"></div>
+          <div style="font-size:10px;margin:4px 0 0;font-family:monospace;color:var(--muted);white-space:nowrap">${hora}</div>
+          <div style="font-size:9px;margin:1px 0 0;color:${esCambio?s.color:'var(--subtle)'};font-weight:${esCambio?'600':'400'}">${esCambio?s.label:'sin cambio'}</div>
+        </div>`
+      }).join('')
+      timelineHtml=`<div style="background:var(--card);border-radius:8px;padding:14px 8px;margin-bottom:14px">
+        <div style="position:relative;display:flex;justify-content:space-between;align-items:flex-start;padding:0 4px">
+          <div style="position:absolute;left:18px;right:18px;top:11px;height:2px;background:var(--border);z-index:0"></div>
+          ${dots}
+        </div>
+        ${estadoActual?`<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border);text-align:center;font-size:12px;color:var(--muted)">Estado actual: <span style="color:${estadoActual.color};font-weight:600;font-size:13px">${estadoActual.emoji} ${estadoActual.label}</span></div>`:''}
+      </div>`
+    }
+
+    // ── Cards de cada evento ──
+    const itemsHtml=eventos.map((r,i)=>{
+      const s=SEM[r.semaforo]||{bg:'var(--card2)',color:'var(--muted)',label:r.semaforo,accion:'—',emoji:'•'}
+      const hora=new Date(r.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
       const fuenteLeg=FUENTE_LEG[r.triggered_by]||r.triggered_by||'—'
-      // Card especial: cambio de presupuesto (no afecta el semáforo, solo registra el cambio)
-      const esPresupuesto=r.triggered_by==='cambio_presupuesto'
-      if(esPresupuesto){
+      const prevR=i>0?eventos[i-1]:null
+      const cpaPrev=prevR?(prevR.cpa_real||0):0
+      const cpaCurr=r.cpa_real||0
+
+      // === Card especial: Cambio de presupuesto ===
+      if(r.triggered_by==='cambio_presupuesto'){
         const ant=r.presupuesto_anterior||0
         const nue=r.presupuesto_nuevo||0
         const pct=r.presupuesto_pct_cambio||0
         const sube=nue>ant
-        return`<div style="position:relative;margin-bottom:14px">
-          <div style="position:absolute;left:-32px;top:0;width:24px;height:24px;border-radius:50%;background:var(--amber);border:3px solid var(--amber);display:flex;align-items:center;justify-content:center">
-            <span style="font-size:13px;color:#412402">⚙️</span>
+        return `<div style="background:var(--amber-bg);border-left:4px solid var(--amber);border-radius:8px;padding:12px 14px;margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <span style="font-size:11px;color:var(--amber);font-weight:700;letter-spacing:.5px">⚙️ CAMBIO DE PRESUPUESTO</span>
+            <span style="font-size:11px;color:var(--amber);font-family:monospace">${hora}</span>
           </div>
-          <div style="background:var(--amber-bg);border:1px solid var(--amber);border-radius:8px;padding:12px 14px">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-              <span style="font-size:10px;color:var(--amber);font-weight:700;letter-spacing:.6px">⚙️ CAMBIO DE PRESUPUESTO</span>
-              <span style="font-size:11px;color:var(--amber);font-weight:600">${hora}</span>
-            </div>
-            <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px">
-              ${sube?'Subió':'Bajó'} el presupuesto diario
-            </div>
-            <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-              <span style="background:var(--card);padding:4px 10px;border-radius:4px;font-size:11px;color:var(--muted)">Antes: $${fmt(ant)}</span>
-              <span style="color:var(--amber);font-weight:700">→</span>
-              <span style="background:var(--card);padding:4px 10px;border-radius:4px;font-size:11px;color:var(--text);font-weight:600">Ahora: $${fmt(nue)}</span>
-              <span style="background:var(--amber);color:#412402;padding:4px 10px;border-radius:4px;font-size:11px;font-weight:600">${sube?'+':''}${pct.toFixed(0)}%</span>
-            </div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:8px">${sube?'Subiste':'Bajaste'} el presupuesto diario</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:11px">
+            <span style="background:var(--card);padding:4px 9px;border-radius:4px;color:var(--muted)">Antes: $${fmt(ant)}</span>
+            <span style="color:var(--amber);font-weight:700">→</span>
+            <span style="background:var(--card);padding:4px 9px;border-radius:4px;font-weight:600">Ahora: $${fmt(nue)}</span>
+            <span style="background:var(--amber);color:#412402;padding:4px 9px;border-radius:4px;font-weight:600">${sube?'+':''}${pct.toFixed(0)}%</span>
           </div>
         </div>`
       }
-      // Card especial para el cruce Dropi (veredicto final destacado)
-      if(esDropi){
-        return`<div style="position:relative;margin-bottom:14px">
-          <div style="position:absolute;left:-32px;top:0;width:24px;height:24px;border-radius:50%;background:${c.bg};border:3px solid ${c.bd};display:flex;align-items:center;justify-content:center">
-            <span style="color:#fff;font-size:13px;font-weight:700">✓</span>
+
+      // === Card especial: Cruce con Dropi (veredicto final) ===
+      if(r.triggered_by==='cruce_dropi'){
+        return `<div style="background:var(--green-bg);border-left:4px solid var(--green);border-radius:8px;padding:12px 14px;margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <span style="font-size:11px;color:var(--green);font-weight:700;letter-spacing:.5px">★ VEREDICTO FINAL · DROPI</span>
+            <span style="font-size:11px;color:var(--green);font-family:monospace">${hora}</span>
           </div>
-          <div style="background:var(--green-bg);border:1px solid var(--green);border-radius:8px;padding:12px 14px">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-              <span style="font-size:10px;color:var(--green);font-weight:700;letter-spacing:.6px">★ VEREDICTO FINAL DEL DÍA</span>
-              <span style="font-size:11px;color:var(--green);font-weight:600">Dropi · ${hora}</span>
+          <div style="font-size:14px;font-weight:600;margin-bottom:6px">Cruce con Dropi completado · estado final: <span style="color:${s.color}">${s.emoji} ${s.label}</span></div>
+          <div style="background:var(--card);border-radius:6px;padding:10px 12px;margin-top:8px">
+            <div style="font-size:10px;color:var(--subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Costo por venta REAL</div>
+            <div style="font-size:22px;font-weight:700;font-family:monospace;color:${s.color}">$${fmt(r.cpa_real||0)}</div>
+            <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);font-size:11px;color:var(--muted)">
+              <span>Ventas <strong style="color:var(--text);font-family:monospace">${r.ventas||0}</strong></span>
+              <span>Gasto <strong style="color:var(--text);font-family:monospace">$${fmt(r.gasto||0)}</strong></span>
+              <span>Pendientes <strong style="color:var(--text);font-family:monospace">${r.pendientes||0}</strong></span>
             </div>
-            <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:4px">${titulo}</div>
-            <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Estado final: <strong style="color:var(--text)">${r.semaforo_label||r.semaforo}</strong></div>
-            <div style="display:flex;gap:6px;flex-wrap:wrap">
-              <span style="background:var(--card);padding:4px 10px;border-radius:4px;font-size:10px;color:var(--muted)">Gasto $${fmt(r.gasto||0)}</span>
-              <span style="background:var(--card);padding:4px 10px;border-radius:4px;font-size:10px;color:var(--muted)">${r.ventas||0} entregadas · ${r.pendientes||0} pendientes</span>
-              <span style="background:var(--green);color:#0D2818;padding:4px 10px;border-radius:4px;font-size:11px;font-weight:600">CPA Real $${fmt(r.cpa_real||0)}</span>
-            </div>
-            <div style="font-size:11px;color:var(--green);margin-top:10px;padding-top:8px;border-top:1px solid var(--green);opacity:.85">🎯 Este es el CPA que vale para decidir si escalar mañana.</div>
           </div>
+          <div style="font-size:11px;color:var(--green);margin-top:8px;opacity:.85">🎯 Este es el CPA que vale para decidir si escalar mañana.</div>
         </div>`
       }
-      // Card normal para el resto de eventos
-      return`<div style="position:relative;margin-bottom:14px">
-        <div style="position:absolute;left:-32px;top:2px;width:${esUltimo?'22':'20'}px;height:${esUltimo?'22':'20'}px;border-radius:50%;background:${c.bg};border:${esUltimo?'3':'2'}px solid ${c.bd};flex-shrink:0"></div>
-        <div style="padding:2px 0 2px 4px">
-          <div style="font-size:11px;color:var(--muted);font-weight:500;margin-bottom:2px">${hora}</div>
-          <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:6px">${titulo}</div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap">
-            <span style="background:var(--card);padding:3px 9px;border-radius:4px;font-size:10px;color:var(--muted)">Gasto acumulado $${fmt(r.gasto||0)}</span>
-            <span style="background:var(--card);padding:3px 9px;border-radius:4px;font-size:10px;color:var(--muted)">${r.ventas||0} entregadas · ${r.pendientes||0} pendientes</span>
-            <span style="background:var(--card);padding:3px 9px;border-radius:4px;font-size:10px;color:var(--muted)">CPA $${fmt(r.cpa_real||0)}</span>
-            <span style="background:var(--card);padding:3px 9px;border-radius:4px;font-size:9px;color:var(--subtle)">${fuenteLeg}</span>
+
+      // === Card normal: primer registro o cambio ===
+      const esPrimer=i===0
+      let titulo='',porque='',queHago=s.accion
+      if(esPrimer){
+        titulo=`Arrancaste ${s.emoji} ${s.label}`
+        if(r.semaforo==='fuego')porque='Costo por venta súper bajo'
+        else if(r.semaforo==='escalar')porque='Buen rendimiento desde el arranque'
+        else if(r.semaforo==='stop')porque='Costo por venta arriba del meta'
+        else if(r.semaforo==='precaucion')porque='Cerca del meta · vigilar'
+        else if(r.semaforo==='sin_ventas'||r.semaforo==='pendiente_sync')porque='Aún sin datos suficientes'
+        else porque='Primer cálculo del día'
+      }else{
+        const prevS=prevR?(SEM[prevR.semaforo]||{label:prevR.semaforo,emoji:'•'}):null
+        titulo=prevS?`Pasó de ${prevS.emoji} ${prevS.label} → ${s.emoji} ${s.label}`:`Cambió a ${s.emoji} ${s.label}`
+        if(cpaPrev>0&&cpaCurr>0){
+          if(cpaCurr>cpaPrev*1.5)porque=`Costo por venta subió a $${fmt(cpaCurr)} (era $${fmt(cpaPrev)})`
+          else if(cpaCurr<cpaPrev*0.7)porque=`Costo por venta bajó a $${fmt(cpaCurr)} (era $${fmt(cpaPrev)})`
+          else porque=`Costo por venta ahora $${fmt(cpaCurr)}`
+        }else{
+          porque=`Costo por venta ahora $${fmt(cpaCurr)}`
+        }
+      }
+
+      // CPA hero con antes→después
+      const pct=(cpaPrev>0&&cpaCurr>0)?Math.round(((cpaCurr-cpaPrev)/cpaPrev)*100):null
+      const pctTxt=pct!==null?(pct>0?`+${pct}%`:`${pct}%`):''
+      const pctColor=pct===null?'var(--muted)':(pct>0?'var(--red)':(pct<0?'var(--green)':'var(--muted)'))
+      const pctBg=pct===null?'var(--card2)':(pct>0?'var(--red-bg)':(pct<0?'var(--green-bg)':'var(--card2)'))
+      let cpaHeroHtml=''
+      if(esPrimer||cpaPrev<=0){
+        cpaHeroHtml=`<div style="font-size:24px;font-weight:700;font-family:monospace;color:${s.color}">$${fmt(cpaCurr)}</div>`
+      }else{
+        cpaHeroHtml=`<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">
+          <span style="font-size:13px;font-family:monospace;color:var(--subtle);text-decoration:line-through">$${fmt(cpaPrev)}</span>
+          <span style="font-size:12px;color:var(--subtle)">→</span>
+          <span style="font-size:24px;font-weight:700;font-family:monospace;color:${s.color}">$${fmt(cpaCurr)}</span>
+          ${pctTxt?`<span style="font-size:11px;padding:2px 7px;background:${pctBg};color:${pctColor};border-radius:4px;font-weight:600">${pctTxt}</span>`:''}
+        </div>`
+      }
+
+      return `<div style="background:${s.bg};border-left:4px solid ${s.color};border-radius:8px;padding:12px 14px;margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:6px">
+          <span style="display:flex;align-items:center;gap:8px;font-size:15px;font-weight:700;color:${s.color}">${s.emoji} ${s.label}</span>
+          <div style="text-align:right">
+            <div style="font-size:11px;color:${s.color};font-family:monospace">${hora}</div>
+            <div style="font-size:9px;padding:2px 7px;background:var(--card);color:${s.color};border-radius:4px;font-weight:600;display:inline-block;margin-top:2px">${s.accion.toUpperCase()}</div>
+          </div>
+        </div>
+        <div style="background:var(--card);border-radius:6px;padding:9px 12px;margin-bottom:10px;font-size:12px;line-height:1.6">
+          <div><span style="color:var(--muted);font-weight:600">¿Qué pasó?</span> ${titulo}</div>
+          <div><span style="color:var(--muted);font-weight:600">¿Por qué?</span> ${porque}</div>
+          <div><span style="color:var(--muted);font-weight:600">¿Qué hago?</span> ${queHago}</div>
+        </div>
+        <div style="background:var(--card);border-radius:6px;padding:10px 12px">
+          <div style="font-size:10px;color:var(--subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Costo por venta</div>
+          ${cpaHeroHtml}
+          <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);font-size:11px;color:var(--muted)">
+            <span>Ventas <strong style="color:var(--text);font-family:monospace">${r.ventas||0}</strong></span>
+            <span>Gasto <strong style="color:var(--text);font-family:monospace">$${fmt(r.gasto||0)}</strong></span>
+            <span>Pendientes <strong style="color:var(--text);font-family:monospace">${r.pendientes||0}</strong></span>
+            <span style="opacity:.7">${fuenteLeg}</span>
           </div>
         </div>
       </div>`
     }).join('')
-    const totalCalc=regs.length
-    const cambiosCount=regs.filter(r=>r.cambio_vs_anterior).length
-    return`<details ${d===hoyStr?'open':''} style="margin-bottom:14px;background:var(--card2);border-radius:8px;padding:12px 14px">
-      <summary style="cursor:pointer;font-weight:600;font-size:13px;color:var(--text);text-transform:capitalize">📅 ${fechaStr} · ${totalCalc} cálculo${totalCalc!==1?'s':''}${cambiosCount>0?` · ${cambiosCount} cambio${cambiosCount!==1?'s':''}`:''}</summary>
-      <div style="margin-top:14px;padding-left:32px;position:relative">
-        <div style="position:absolute;left:-21px;top:8px;bottom:8px;width:2px;background:var(--border)"></div>
-        ${itemsHtml}
-      </div>
+
+    // Línea colapsada para registros sin cambio
+    let sinCambioHtml=''
+    if(sinCambioRegs.length){
+      const horas=sinCambioRegs.map(r=>new Date(r.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})).join(' · ')
+      sinCambioHtml=`<div style="background:var(--card);border-radius:6px;padding:8px 12px;margin-top:6px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;font-size:11px;color:var(--muted)">
+        <span>+ ${sinCambioRegs.length} revisi${sinCambioRegs.length===1?'ón':'ones'} sin cambio</span>
+        <span style="font-family:monospace">${horas}</span>
+      </div>`
+    }
+
+    // Plata del día (basada en último registro)
+    const plataHtml=ultimo?`<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;font-size:11px;color:var(--muted)">
+      <span><span style="color:var(--text);font-weight:600">Plata del día:</span> gastaste <strong style="font-family:monospace;color:var(--text)">$${fmt(ultimo.gasto||0)}</strong> · vendiste <strong style="font-family:monospace;color:var(--text)">${ultimo.ventas||0}</strong></span>
+      <span style="color:var(--subtle)">${totalCalc} cálculo${totalCalc!==1?'s':''} · ${cambiosCount} cambio${cambiosCount!==1?'s':''}${dropiReg?' · cruce Dropi ✓':''}</span>
+    </div>`:''
+
+    return`<details ${d===hoyLocal?'open':''} style="margin-bottom:14px;background:var(--card2);border-radius:8px;padding:12px 14px">
+      <summary style="cursor:pointer;font-weight:600;font-size:13px;color:var(--text);text-transform:capitalize;margin-bottom:10px">📅 ${fechaStr} · ${totalCalc} cálculo${totalCalc!==1?'s':''}${cambiosCount>0?` · ${cambiosCount} cambio${cambiosCount!==1?'s':''}`:''}</summary>
+      ${resumenLinea}
+      ${timelineHtml}
+      ${itemsHtml}
+      ${sinCambioHtml}
+      ${plataHtml}
     </details>`
   }).join('')
 }

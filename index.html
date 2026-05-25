@@ -9153,11 +9153,23 @@ async function _renderResumenProductos(desde,hasta,hoy){
     .select('cantidad,producto,estado_final,fecha,ad_id')
     .gte('fecha',desde).lte('fecha',hasta).limit(10000)
 
-  // 2. Gasto por campaña: Meta API en tiempo real (igual que cards individuales).
-  //    Fallback por cuenta a meta_insights si Meta falla en esa cuenta.
-  //    Fallback completo a BD si no hay token Meta.
+  // 2. Gasto por campaña: decisión inteligente.
+  //    - Si el rango incluye HOY o AYER (datos vivos) → Meta API en tiempo real.
+  //    - Si el rango es solo días viejos (≥ 2 días atrás) → BD directamente (ya fijo, no llama Meta).
+  //    Fallbacks: por cuenta a BD si Meta falla; completo a BD si no hay token.
   const gastoByCampId={}
-  try{
+  const todayBogota=new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
+  const ayerBg=new Date(todayBogota+'T12:00:00Z');ayerBg.setDate(ayerBg.getDate()-1)
+  const ayerBogota=ayerBg.toISOString().slice(0,10)
+  const incluyeVivos=hasta>=ayerBogota
+  if(!incluyeVivos){
+    // Rango solo histórico cerrado → BD directo (Meta no agrega nada nuevo)
+    const{data:insByCamp}=await sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
+    for(const i of (insByCamp||[])){
+      if(!i.meta_id)continue
+      gastoByCampId[String(i.meta_id)]=(gastoByCampId[String(i.meta_id)]||0)+(i.spend||0)
+    }
+  }else try{
     let token=await getConfig('meta_access_token')
     if(!token)throw new Error('Sin token')
     const{data:cuentasAll}=await sb.from('meta_cuentas').select('account_id')

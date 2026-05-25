@@ -9246,9 +9246,11 @@ async function _renderResumenProductos(desde,hasta,hoy){
   }
 
   // 7. Calcular metricas por producto
+  // esSoloHoy = el rango es exactamente HOY (sin cruce Dropi todavía)
+  const esSoloHoy=(desde===hoy&&hasta===hoy)
   const productosResumen=[]
   for(const prod of productos){
-    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd)
+    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy)
     if(data)productosResumen.push(data)
   }
 
@@ -9314,7 +9316,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
 
 // Calcula las metricas consolidadas de un producto en el rango.
 // Devuelve null si no hay actividad relevante (sin gasto y sin pedidos).
-function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd){
+function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy){
   // Gasto desde campaign_ids configurados del producto
   let gasto=0
   const campIds=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
@@ -9369,19 +9371,28 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd){
   const pedidosParaCpa=totalMapeos>0?pConf:pReportados
   const cpaReal=pedidosParaCpa>0?gasto/pedidosParaCpa:0
 
+  // ── Pedidos Efectivos y CPA Real Efectivo (solo HOY, sin cruce Dropi) ──
+  // Estimación: total_pedidos × pct_confirmacion del producto (default 0.62)
+  const pctConf=(prod.pct_confirmacion!=null&&!isNaN(prod.pct_confirmacion))?Number(prod.pct_confirmacion):0.62
+  const pedidosEfectivos=esSoloHoy?(totalPedidos*pctConf):pedidosParaCpa
+  const cpaRealEfectivo=esSoloHoy&&pedidosEfectivos>0?gasto/pedidosEfectivos:0
+  // El CPA que manda el semáforo es el EFECTIVO cuando es HOY, sino el normal
+  const cpaParaSemaforo=esSoloHoy?cpaRealEfectivo:cpaReal
+
   // ROAS
   const roas=gasto>0?venta/gasto:0
 
   // Estado del semaforo (reglas oficiales NEXO, Opcion A: 45/70/100% del BE)
   let semCode=''
   if(gasto===0&&totalPedidos===0)semCode=''
-  else if(cpaReal===0&&totalPedidos===0)semCode='sin_ventas'
+  else if(cpaParaSemaforo===0&&totalPedidos===0)semCode='sin_ventas'
   else if(gasto===0&&totalPedidos>0)semCode='pendiente_sync'
   else if(margenBE<=0)semCode='sin_ventas'
-  else if(pedidosParaCpa===0)semCode='sin_ventas' // hay mapeos/gasto pero ningun confirmado aun: no asumir fuego
-  else if(cpaReal>margenBE)semCode='stop'
-  else if(cpaReal>margenBE*0.7)semCode='precaucion'
-  else if(cpaReal>margenBE*0.45)semCode='escalar'
+  else if(esSoloHoy&&pedidosEfectivos===0)semCode='sin_ventas' // HOY sin pedidos estimados
+  else if(!esSoloHoy&&pedidosParaCpa===0)semCode='sin_ventas' // hay mapeos/gasto pero ningun confirmado aun: no asumir fuego
+  else if(cpaParaSemaforo>margenBE)semCode='stop'
+  else if(cpaParaSemaforo>margenBE*0.7)semCode='precaucion'
+  else if(cpaParaSemaforo>margenBE*0.45)semCode='escalar'
   else semCode='fuego'
 
   return{
@@ -9390,7 +9401,8 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd){
     inicial:(prod.nombre||'?').charAt(0).toUpperCase(),
     gasto,totalPedidos,pedidosConfirmados:pConf,canc,pend,
     o1,o2,o3,o4,venta,costoProv,gananciaNeta,
-    cpaReal,margenBE,roas,semCode
+    cpaReal,margenBE,roas,semCode,
+    pedidosEfectivos,cpaRealEfectivo,pctConf,esSoloHoy
   }
 }
 
@@ -9451,9 +9463,15 @@ function _renderProductoCardResumen(data,ranking){
         <span style="display:inline-flex;align-items:center;gap:4px;color:${cpaColor}" title="Break-even: $${fmt(data.margenBE)} · ${pctBE>0?pctBE+'% del BE':''}">
           🎯 CPA real $${fmt(data.cpaReal)} ${cpaIcon}
         </span>
+        ${data.esSoloHoy&&data.cpaRealEfectivo>0?`
+        <span style="color:var(--muted)">·</span>
+        <span style="display:inline-flex;align-items:center;gap:4px;color:var(--purple);font-weight:500" title="Estimación: gasto / (pedidos × ${Math.round((data.pctConf||0.62)*100)}% confirmación). Solo aplica HOY (sin cruce Dropi).">
+          🟣 CPA Efectivo $${fmt(data.cpaRealEfectivo)}
+        </span>
+        `:''}
         ${data.totalPedidos>0?`
         <span style="color:var(--muted)">·</span>
-        <span style="color:var(--muted)">📦 ${data.totalPedidos} pedidos</span>
+        <span style="color:var(--muted)">📦 ${data.totalPedidos} pedidos${data.esSoloHoy&&data.pedidosEfectivos>0?` + <span style="color:var(--purple);font-weight:500" title="Estimación: ${data.totalPedidos} × ${Math.round((data.pctConf||0.62)*100)}% confirmación">🟣 P.Efectivos ${data.pedidosEfectivos.toFixed(2)}</span>`:''}</span>
         `:''}
       </div>
     </summary>

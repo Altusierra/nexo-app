@@ -1601,6 +1601,7 @@ async function pageAdminProductos(c){
 
     const updateData={
       flete_outbound:g('fo'),flete_devolucion:g('fd'),dev_pct:gf('dp')/100,
+      pct_confirmacion:gf('pc')/100,
       costo_conversacion:g('cc'),campaign_ids:cids,maestro_codigo:mc
     }
     // Stock: solo actualizar si el aux/admin escribió un valor (no pisar con vacío)
@@ -1749,6 +1750,12 @@ async function pageAdminProductos(c){
         <div class="fld"><label>% Devolución</label><input type="number" step="0.01" id="np-dp" value="19"></div>
         <div class="fld"><label>Costo/conversación</label><input type="number" id="np-cc" value="100"></div>
       </div>
+      <div class="form-grid g2" style="margin-top:10px">
+        <div class="fld"><label title="% de órdenes que se confirman post-Dropi. Se usa para estimar ventas efectivas en Portafolio Meta solo para HOY.">✅ % Confirmación post-Dropi</label>
+          <input type="number" step="0.1" min="0" max="100" id="np-pc" value="62">
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">% de órdenes que terminan confirmadas (no canceladas/pendientes). Default 62%. Solo aplica para estimar ventas efectivas en Portafolio Meta de HOY.</div>
+        </div>
+      </div>
       <div class="fld" style="margin-top:10px;max-width:300px">
         <label>📦 Stock inicial (unidades)</label>
         <input type="number" id="np-stock" value="0" min="0" placeholder="0">
@@ -1783,6 +1790,7 @@ async function pageAdminProductos(c){
       costo_1u:g('np-c1'),costo_2u:g('np-c2'),costo_3u:g('np-c3'),costo_4u:g('np-c4'),
       flete_outbound:g('np-fo'),flete_devolucion:g('np-fd'),
       dev_pct:(parseFloat(document.getElementById('np-dp').value)||19)/100,
+      pct_confirmacion:(parseFloat(document.getElementById('np-pc')?.value)||62)/100,
       costo_conversacion:parseInt(document.getElementById('np-cc').value)||100,
       campaign_ids:cids,
       maestro_codigo:document.getElementById('np-mc').value||'GEN',
@@ -2622,6 +2630,11 @@ async function renderProdBody(id,maestrosList){
       <div class="fld"><label>Flete devolución</label><input type="number" id="fd-${id}" value="${prod.flete_devolucion||18000}" oninput="recalcProdAuto('${id}')"></div>
       <div class="fld"><label>% Devolución</label><input type="number" step="0.01" id="dp-${id}" value="${(prod.dev_pct*100)||19}" oninput="recalcProdAuto('${id}')"></div>
       <div class="fld"><label>Costo/conversación</label><input type="number" id="cc-${id}" value="${prod.costo_conversacion||100}" oninput="recalcProdAuto('${id}')"></div>
+    </div>
+    <div class="fld" style="margin-top:10px;max-width:340px" title="Solo afecta Portafolio Meta cuando la fecha es HOY (antes del cruce Dropi).">
+      <label>✅ % Confirmación post-Dropi</label>
+      <input type="number" step="0.1" min="0" max="100" id="pc-${id}" value="${prod.pct_confirmacion!=null?(prod.pct_confirmacion*100):62}">
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">% de órdenes que terminan confirmadas. Default 62%. Solo aplica para estimar ventas efectivas en Portafolio Meta de HOY (días anteriores usan el cruce Dropi real).</div>
     </div>
     <div class="fld" style="margin-top:10px;max-width:300px">
       <label>📦 Stock actual (unidades disponibles)</label>
@@ -9589,22 +9602,24 @@ async function renderMetaPortafolio(el,isAdmin){
       if(cid&&!campToProd[cid])campToProd[cid]=p
     }
   }
-  // Función helper: dado un campId, devuelve {p2,c2,fo,fd,dp,margenBE,roasBE,nombre,esGlobal}
+  // Función helper: dado un campId, devuelve {p2,c2,fo,fd,dp,margenBE,roasBE,nombre,esGlobal,pctConf}
   function _ctxProductoPorCamp(campId){
     const p=campToProd[campId]
-    if(!p)return{p2,c2,fo,fd,dp,margenBE,roasBE,nombre:'(sin producto asignado)',esGlobal:true}
+    if(!p)return{p2,c2,fo,fd,dp,margenBE,roasBE,nombre:'(sin producto asignado)',esGlobal:true,pctConf:0.62}
     const _p2=p.precio_2u||129900
     const _c2=p.costo_2u||36000
     const _fo=p.flete_outbound||21000
     const _fd=p.flete_devolucion||18000
     const _dp=p.dev_pct||0.19
     const _mBE=_p2*(1-_dp)-_c2-_fo-(_fd*_dp)
+    const _pctConf=(p.pct_confirmacion!=null&&!isNaN(p.pct_confirmacion))?Number(p.pct_confirmacion):0.62
     return{
       p2:_p2,c2:_c2,fo:_fo,fd:_fd,dp:_dp,
       margenBE:_mBE,
       roasBE:_mBE>0?_p2/_mBE:999,
       nombre:p.nombre||'(producto sin nombre)',
-      esGlobal:false
+      esGlobal:false,
+      pctConf:_pctConf
     }
   }
 
@@ -9871,24 +9886,31 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     // ── BUG FIX: contexto del producto específico de ESTA campaña ──
     // Leer desde window._metaPort porque renderCamp puede ejecutarse en otro scope
     const _fnCtx=(window._metaPort&&typeof window._metaPort._ctxProductoPorCamp==='function')?window._metaPort._ctxProductoPorCamp:null
-    const ctxCamp=_fnCtx?_fnCtx(camp.meta_id):{p2:ctx.p2,c2:ctx.c2,fo:ctx.fo,fd:ctx.fd,dp:ctx.dp,margenBE:ctx.margenBE,roasBE:ctx.roasBE,nombre:'(global)',esGlobal:true}
+    const ctxCamp=_fnCtx?_fnCtx(camp.meta_id):{p2:ctx.p2,c2:ctx.c2,fo:ctx.fo,fd:ctx.fd,dp:ctx.dp,margenBE:ctx.margenBE,roasBE:ctx.roasBE,nombre:'(global)',esGlobal:true,pctConf:0.62}
+    // ── Ventas Efectivas (solo HOY, sin cruce Dropi) ──
+    // Estimación: ventas × pct_confirmacion del producto (default 0.62)
+    const pctConf=ctxCamp.pctConf!=null?ctxCamp.pctConf:0.62
+    const ventasEfectivas=esSoloHoy?(ventasReales*pctConf):ventasReales
+    const cpaRealEfectivas=ventasEfectivas>0?m.spend/ventasEfectivas:0
+    // El CPA que manda el semáforo es el EFECTIVO cuando es HOY, sino el normal
+    const cpaParaSemaforo=esSoloHoy?cpaRealEfectivas:cpaReal
     // ROAS Real = (Ventas reales × Precio del producto correcto) / Gasto
     const roasReal=m.spend>0&&ventasReales>0?(ventasReales*ctxCamp.p2)/m.spend:0
     const avgCtr=m.ctrs.length?(m.ctrs.reduce((a,b)=>a+b,0)/m.ctrs.length):0
     const avgCpm=m.cpms.length?(m.cpms.reduce((a,b)=>a+b,0)/m.cpms.length):0
     const avgFreq=m.freqs.length?(m.freqs.reduce((a,b)=>a+b,0)/m.freqs.length):0
 
-    // Semáforo basado en CPA Real vs CPA Break-even DE LA CAMPAÑA (no global)
+    // Semáforo basado en CPA (Efectivo si HOY, normal si rango con Dropi) vs CPA Break-even
     let semCls='',semTxt='Sin actividad',semBorder='var(--border)',semCode=''
     if(camp._hasData&&m.spend>0){
-      if(cpaReal===0&&ventasReales===0){
+      if(cpaParaSemaforo===0&&ventasReales===0){
         // Hay gasto pero no hay ventas reales aún
         semCls='pill-amber';semTxt='⏳ Sin ventas';semBorder='var(--amber)';semCode='sin_ventas'
-      }else if(cpaReal>ctxCamp.margenBE){
+      }else if(cpaParaSemaforo>ctxCamp.margenBE){
         semCls='pill-red';semTxt='🔴 STOP';semBorder='var(--red)';semCode='stop'
-      }else if(cpaReal>ctxCamp.margenBE*0.7){
+      }else if(cpaParaSemaforo>ctxCamp.margenBE*0.7){
         semCls='pill-amber';semTxt='🟡 Precaución';semBorder='var(--amber)';semCode='precaucion'
-      }else if(cpaReal>ctxCamp.margenBE*0.45){
+      }else if(cpaParaSemaforo>ctxCamp.margenBE*0.45){
         semCls='pill-green';semTxt='🟢 Escalar';semBorder='var(--green)';semCode='escalar'
       }else{
         semCls='pill-blue';semTxt='🟣 Fuego';semBorder='var(--purple)';semCode='fuego'
@@ -9907,8 +9929,12 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
 
     // Badge MEGA de accion (nuevo) — pulsa en FUEGO y APAGAR
     const badgeMega=camp._hasData&&semCode?window.nexoBadgeMega(semCode,'lg'):''
-    // Color CPA real segun break-even
-    const cpaColorCss=window.nexoCpaColor(cpaReal,ctxCamp.margenBE)
+    // Color CPA: si HOY usar cpaRealEfectivas; sino, cpaReal normal
+    const cpaColorCss=window.nexoCpaColor(cpaParaSemaforo,ctxCamp.margenBE)
+    // Etiqueta y valor del hero grande (cambia según esSoloHoy)
+    const heroLbl=esSoloHoy?'CPA Real Efectivas':'CPA Real'
+    const heroVal=esSoloHoy?cpaRealEfectivas:cpaReal
+    const heroTitle=esSoloHoy?`Estimado con ${Math.round(pctConf*100)}% confirmación · Break-even: $${fmt(ctxCamp.margenBE)}`:`Break-even: $${fmt(ctxCamp.margenBE)}`
 
     return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" style="margin-bottom:5px;${opacity}">
       <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-camp)">
@@ -9917,7 +9943,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
           <div style="font-weight:600;font-size:12px;line-height:1.25"><span class="nexo-hier-pill" style="background:var(--hier-camp-bg);color:var(--hier-camp);border:1px solid var(--hier-camp)">🎯 Campaña</span>${camp.nombre||camp.meta_id}</div>
           <div style="font-size:10px;color:var(--muted);margin-top:1px">${camp.objetivo||''} · ${camp.estado}${ctxCamp.esGlobal?' · <span style="color:var(--amber)">⚠️ sin producto</span>':''}</div></div>
         <div style="display:flex;gap:4px;align-items:center;flex-shrink:0">
-          ${camp._hasData&&cpaReal>0?`<div class="nexo-cpa-hero"><div class="nch-lbl">CPA Real</div><div class="nch-val" style="color:${cpaColorCss}" title="Break-even: $${fmt(ctxCamp.margenBE)}">$${fmt(cpaReal)}</div></div>`:''}
+          ${camp._hasData&&heroVal>0?`<div class="nexo-cpa-hero"><div class="nch-lbl">${heroLbl}</div><div class="nch-val" style="color:${cpaColorCss}" title="${heroTitle}">$${fmt(heroVal)}</div></div>`:''}
           <div style="display:flex;flex-direction:column;gap:3px;align-items:flex-end">
             ${camp._hasData?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();toggleCampDesglose('${camp.meta_id}','${accountId}')" style="padding:3px 7px;font-size:9px" title="Ver conjuntos y anuncios">📊 Desglose</button>`:''}
             <div style="display:flex;gap:3px">
@@ -9928,20 +9954,21 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
           ${badgeMega||`<span class="pill ${semCls}" ${prodTooltip}>${semTxt}</span>`}
         </div>
       </div>
-      ${camp._hasData?`<div style="margin-top:6px;display:grid;grid-template-columns:repeat(6,1fr);gap:6px">
+      ${camp._hasData?`<div style="margin-top:6px;display:grid;grid-template-columns:repeat(${esSoloHoy?7:6},1fr);gap:6px">
         <div class="nexo-met"><div class="nm-lbl">Gasto</div><div class="nm-val">$${fmt(m.spend)}</div></div>
         <div class="nexo-met"><div class="nm-lbl" title="(Ventas reales × Precio) / Gasto">ROAS Real</div><div class="nm-val" style="color:${roasReal>=1?'var(--green)':roasReal>0?'var(--red)':'var(--muted)'}">${roasReal>0?roasReal.toFixed(2)+'x':'—'}</div></div>
         <div class="nexo-met"><div class="nm-lbl">CPA Meta</div><div class="nm-val">${cpa>0?'$'+fmt(cpa):'—'}</div></div>
         <div class="nexo-met"><div class="nm-lbl">Conv.</div><div class="nm-val">${m.conv}</div></div>
         <div class="nexo-met"><div class="nm-lbl">Ventas</div><div class="nm-val" style="color:${esSoloHoy?'var(--amber)':'var(--green)'}">${esSoloHoy?v.pendientes+' ⏳':v.ventas+' ✅'}</div></div>
-        <div class="nexo-met"><div class="nm-lbl">CPA Real</div><div class="nm-val" style="color:${cpaColorCss}" title="Break-even: $${fmt(ctxCamp.margenBE)}">${cpaReal>0?'$'+fmt(cpaReal):'—'}</div></div>
+        ${esSoloHoy?`<div class="nexo-met"><div class="nm-lbl" title="Estimación: ventas × ${Math.round(pctConf*100)}%">V. Efectivas</div><div class="nm-val" style="color:var(--purple)" title="${Math.round(pctConf*100)}% confirmación">${ventasEfectivas.toFixed(2)}</div></div>`:''}
+        <div class="nexo-met"><div class="nm-lbl">CPA Real</div><div class="nm-val" style="color:${window.nexoCpaColor(cpaReal,ctxCamp.margenBE)}" title="Break-even: $${fmt(ctxCamp.margenBE)}">${cpaReal>0?'$'+fmt(cpaReal):'—'}</div></div>
       </div>
       <div style="display:flex;gap:12px;margin-top:4px;font-size:10px;color:var(--muted)">
         <span>CTR: ${avgCtr.toFixed(2)}%</span><span>CPM: $${fmt(avgCpm)}</span><span>Freq: ${avgFreq.toFixed(1)}</span>
       </div>
       ${_renderEscaladasBadges(escaladasByCamp[camp.meta_id]||[],camp.meta_id)}
       <div class="nexo-sep"></div>
-      ${window._renderSemHistorialBlock(camp.meta_id,'campaign',{sem:window._semTxtToCode(semTxt),label:semTxt,cpa:cpaReal,gasto:m.spend,ventas:v.ventas,pendientes:v.pendientes})}`:''}</div>
+      ${window._renderSemHistorialBlock(camp.meta_id,'campaign',{sem:window._semTxtToCode(semTxt),label:semTxt,cpa:cpaParaSemaforo,gasto:m.spend,ventas:v.ventas,pendientes:v.pendientes})}`:''}</div>
       <div id="desglose-${camp.meta_id}" style="display:none;padding:3px 0 3px 14px"></div>
     </div>`
   }
@@ -9960,8 +9987,11 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const m=agg[camp.meta_id]||{spend:0,conv:0}
     const v=ventasByCamp[camp.meta_id]||{ventas:0,pendientes:0}
     const vr=esSoloHoy?v.pendientes:v.ventas
-    const cpaR=vr>0?m.spend/vr:0
-    const ctxC=_ctxFn?_ctxFn(camp.meta_id):{margenBE:ctx.margenBE}
+    const ctxC=_ctxFn?_ctxFn(camp.meta_id):{margenBE:ctx.margenBE,pctConf:0.62}
+    // Aplicar pct_confirmacion solo si esSoloHoy
+    const pctC=ctxC.pctConf!=null?ctxC.pctConf:0.62
+    const vrEff=esSoloHoy?(vr*pctC):vr
+    const cpaR=vrEff>0?m.spend/vrEff:0
     if(!camp._hasData||m.spend<=0)return ''
     if(cpaR===0&&vr===0)return 'sin_ventas'
     if(cpaR>ctxC.margenBE)return 'stop'
@@ -10857,7 +10887,7 @@ window._semRenderTimeline=(data)=>{
 // (ventas, canceladas, pendientes) cruzando con la tabla mapeos.
 // También calcula CPA Real, ROAS Real y semáforo según ctx (break-even).
 async function _calcMetricasPorAdIds(adIds,desde,hasta,gasto,ctx){
-  const out={ventas:0,canceladas:0,pendientes:0,cpaReal:0,roasReal:0,tasaCancel:0,sem:{cls:'',txt:'Sin actividad',border:'var(--border)'}}
+  const out={ventas:0,canceladas:0,pendientes:0,cpaReal:0,roasReal:0,tasaCancel:0,ventasEfectivas:0,cpaRealEfectivas:0,sem:{cls:'',txt:'Sin actividad',border:'var(--border)'}}
   if(!adIds||!adIds.length)return out
   const hoy=new Date().toISOString().slice(0,10)
   const esSoloHoy=(desde===hoy&&hasta===hoy)
@@ -10915,23 +10945,30 @@ async function _calcMetricasPorAdIds(adIds,desde,hasta,gasto,ctx){
   const ventasReales=esSoloHoy?out.pendientes:out.ventas
   out.cpaReal=ventasReales>0&&gasto>0?gasto/ventasReales:0
   out.roasReal=ventasReales>0&&gasto>0?(ventasReales*(ctx?.p2||0))/gasto:0
+  // ── Ventas Efectivas y CPA Real Efectivas (solo HOY, sin cruce Dropi) ──
+  const pctConf=(ctx&&ctx.pctConf!=null)?ctx.pctConf:0.62
+  out.ventasEfectivas=esSoloHoy?(ventasReales*pctConf):ventasReales
+  out.cpaRealEfectivas=out.ventasEfectivas>0&&gasto>0?gasto/out.ventasEfectivas:0
+  // El CPA que manda el semáforo es el EFECTIVO cuando es HOY, sino el normal
+  const cpaParaSemaforo=esSoloHoy?out.cpaRealEfectivas:out.cpaReal
   const totalDecidido=out.ventas+out.canceladas
   out.tasaCancel=totalDecidido>0?(out.canceladas/totalDecidido)*100:0
   // Semáforo (mismas reglas que renderCamp)
   if(gasto>0){
-    if(out.cpaReal===0&&ventasReales===0){
+    if(cpaParaSemaforo===0&&ventasReales===0){
       out.sem={cls:'pill-amber',txt:'⏳ Sin ventas',border:'var(--amber)'}
-    }else if(ctx?.margenBE&&out.cpaReal>ctx.margenBE){
+    }else if(ctx?.margenBE&&cpaParaSemaforo>ctx.margenBE){
       out.sem={cls:'pill-red',txt:'🔴 STOP',border:'var(--red)'}
-    }else if(ctx?.margenBE&&out.cpaReal>ctx.margenBE*0.7){
+    }else if(ctx?.margenBE&&cpaParaSemaforo>ctx.margenBE*0.7){
       out.sem={cls:'pill-amber',txt:'🟡 Precaución',border:'var(--amber)'}
-    }else if(ctx?.margenBE&&out.cpaReal>ctx.margenBE*0.45){
+    }else if(ctx?.margenBE&&cpaParaSemaforo>ctx.margenBE*0.45){
       out.sem={cls:'pill-green',txt:'🟢 Escalar',border:'var(--green)'}
     }else if(ctx?.margenBE){
       out.sem={cls:'pill-blue',txt:'🟣 Fuego',border:'#a78bfa'}
     }
   }
   out.esSoloHoy=esSoloHoy
+  out.pctConf=pctConf
   return out
 }
 
@@ -11036,7 +11073,7 @@ window.toggleCampDesglose=async(campId,accountId)=>{
       ${adsets.map(as=>{
         const d=agg[as.meta_id]||{spend:0,conv:0,imp:0,clicks:0,ctrs:[],cpms:[],freqs:[]}
         const hasSpend=d.spend>0
-        const mr=metricasByAdset[as.meta_id]||{ventas:0,canceladas:0,pendientes:0,cpaReal:0,roasReal:0,tasaCancel:0,sem:{cls:'',txt:'',border:'var(--border)'},esSoloHoy:false}
+        const mr=metricasByAdset[as.meta_id]||{ventas:0,canceladas:0,pendientes:0,cpaReal:0,roasReal:0,tasaCancel:0,ventasEfectivas:0,cpaRealEfectivas:0,sem:{cls:'',txt:'',border:'var(--border)'},esSoloHoy:false,pctConf:0.62}
         const cpaMeta=d.conv>0?d.spend/d.conv:0
         const avgCtr=d.ctrs.length?(d.ctrs.reduce((a,b)=>a+b,0)/d.ctrs.length):0
         const avgCpm=d.cpms.length?(d.cpms.reduce((a,b)=>a+b,0)/d.cpms.length):0
@@ -11047,7 +11084,14 @@ window.toggleCampDesglose=async(campId,accountId)=>{
         // Badge MEGA (chico) basado en código de semáforo
         const semCode=mr.sem?window._semTxtToCode(mr.sem.txt):''
         const badgeMega=hasSpend&&semCode?window.nexoBadgeMega(semCode,'sm'):''
-        const cpaColorCss=window.nexoCpaColor(mr.cpaReal,ctx.margenBE)
+        // El hero usa CPA EFECTIVO cuando esSoloHoy
+        const heroLbl=mr.esSoloHoy?'CPA Real Efectivas':'CPA Real'
+        const heroVal=mr.esSoloHoy?mr.cpaRealEfectivas:mr.cpaReal
+        const cpaParaColor=mr.esSoloHoy?mr.cpaRealEfectivas:mr.cpaReal
+        const cpaColorCss=window.nexoCpaColor(cpaParaColor,ctx.margenBE)
+        const cpaNormalColor=window.nexoCpaColor(mr.cpaReal,ctx.margenBE)
+        const pctConfTxt=Math.round((mr.pctConf||0.62)*100)
+        const heroTitle=mr.esSoloHoy?`Estimado con ${pctConfTxt}% confirmación`:''
         return`<div style="margin-bottom:4px;${hasSpend?'':'opacity:0.4'}">
           <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-adset)">
             <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:${hasSpend?'6px':'0'}">
@@ -11056,7 +11100,7 @@ window.toggleCampDesglose=async(campId,accountId)=>{
                 <div style="font-size:9px;color:var(--muted);margin-top:1px">${as.estado}</div>
               </div>
               <div style="display:flex;gap:4px;align-items:center">
-                ${hasSpend&&mr.cpaReal>0?`<div class="nexo-cpa-hero nch-sm"><div class="nch-lbl">CPA Real</div><div class="nch-val" style="color:${cpaColorCss}">$${fmt(mr.cpaReal)}</div></div>`:''}
+                ${hasSpend&&heroVal>0?`<div class="nexo-cpa-hero nch-sm"><div class="nch-lbl">${heroLbl}</div><div class="nch-val" style="color:${cpaColorCss}" title="${heroTitle}">$${fmt(heroVal)}</div></div>`:''}
                 <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end">
                   ${hasSpend?`<button class="btn-sm btn-outline" onclick="toggleAdsetDesglose('${as.meta_id}','${accountId}')" style="padding:2px 5px;font-size:8px" title="Ver anuncios">📌 Ads</button>`:''}
                   <div style="display:flex;gap:3px">
@@ -11067,13 +11111,14 @@ window.toggleCampDesglose=async(campId,accountId)=>{
                 ${badgeMega||(hasSpend&&mr.sem.txt?`<span class="pill ${mr.sem.cls}" style="font-size:10px">${mr.sem.txt}</span>`:'')}
               </div>
             </div>
-            ${hasSpend?`<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:5px">
+            ${hasSpend?`<div style="display:grid;grid-template-columns:repeat(${mr.esSoloHoy?7:6},1fr);gap:5px">
               <div class="nexo-met nm-sm"><div class="nm-lbl">Gasto</div><div class="nm-val">$${fmt(d.spend)}</div></div>
               <div class="nexo-met nm-sm"><div class="nm-lbl" title="(Ventas reales × Precio) / Gasto">ROAS Real</div><div class="nm-val" style="color:${mr.roasReal>=1?'var(--green)':mr.roasReal>0?'var(--red)':'var(--muted)'}">${mr.roasReal>0?mr.roasReal.toFixed(2)+'x':'—'}</div></div>
               <div class="nexo-met nm-sm"><div class="nm-lbl">CPA Meta</div><div class="nm-val">${cpaMeta>0?'$'+fmt(cpaMeta):'—'}</div></div>
               <div class="nexo-met nm-sm"><div class="nm-lbl">Conv.</div><div class="nm-val">${d.conv}</div></div>
               <div class="nexo-met nm-sm"><div class="nm-lbl">Ventas</div><div class="nm-val" style="color:${ventasColor}">${ventasShow} ${ventasIcon}</div></div>
-              <div class="nexo-met nm-sm"><div class="nm-lbl">CPA Real</div><div class="nm-val" style="color:${cpaColorCss}">${mr.cpaReal>0?'$'+fmt(mr.cpaReal):'—'}</div></div>
+              ${mr.esSoloHoy?`<div class="nexo-met nm-sm"><div class="nm-lbl" title="Estimación: ventas × ${pctConfTxt}%">V. Efectivas</div><div class="nm-val" style="color:var(--purple)">${mr.ventasEfectivas.toFixed(2)}</div></div>`:''}
+              <div class="nexo-met nm-sm"><div class="nm-lbl">CPA Real</div><div class="nm-val" style="color:${cpaNormalColor}">${mr.cpaReal>0?'$'+fmt(mr.cpaReal):'—'}</div></div>
             </div>
             <div style="display:flex;gap:10px;margin-top:3px;font-size:9px;color:var(--muted);flex-wrap:wrap">
               <span>CTR: ${avgCtr.toFixed(2)}%</span>
@@ -11083,7 +11128,7 @@ window.toggleCampDesglose=async(campId,accountId)=>{
               ${mr.pendientes>0&&!mr.esSoloHoy?`<span style="color:var(--amber)">Pendientes: ${mr.pendientes}</span>`:''}
             </div>
             <div class="nexo-sep"></div>
-            ${window._renderSemHistorialBlock(as.meta_id,'adset',{sem:window._semTxtToCode(mr.sem.txt),label:mr.sem.txt,cpa:mr.cpaReal,gasto:d.spend,ventas:mr.ventas,pendientes:mr.pendientes})}`:''}
+            ${window._renderSemHistorialBlock(as.meta_id,'adset',{sem:window._semTxtToCode(mr.sem.txt),label:mr.sem.txt,cpa:cpaParaColor,gasto:d.spend,ventas:mr.ventas,pendientes:mr.pendientes})}`:''}
           </div>
           <div id="desglose-as-${as.meta_id}" style="display:none;padding:2px 0 2px 18px"></div>
         </div>`
@@ -11171,7 +11216,7 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
     el.innerHTML=ads.map(ad=>{
       const d=agg[ad.meta_id]||{spend:0,conv:0,imp:0,clicks:0,ctrs:[],cpms:[],freqs:[]}
       const hasSpend=d.spend>0
-      const mr=metricasByAd[ad.meta_id]||{ventas:0,canceladas:0,pendientes:0,cpaReal:0,roasReal:0,tasaCancel:0,sem:{cls:'',txt:'',border:'var(--border)'},esSoloHoy:false}
+      const mr=metricasByAd[ad.meta_id]||{ventas:0,canceladas:0,pendientes:0,cpaReal:0,roasReal:0,tasaCancel:0,ventasEfectivas:0,cpaRealEfectivas:0,sem:{cls:'',txt:'',border:'var(--border)'},esSoloHoy:false,pctConf:0.62}
       const cpaMeta=d.conv>0?d.spend/d.conv:0
       const avgCtr=d.ctrs.length?(d.ctrs.reduce((a,b)=>a+b,0)/d.ctrs.length):0
       const avgCpm=d.cpms.length?(d.cpms.reduce((a,b)=>a+b,0)/d.cpms.length):0
@@ -11181,7 +11226,14 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
       const ventasIcon=mr.esSoloHoy?'⏳':'✅'
       const semCode=mr.sem?window._semTxtToCode(mr.sem.txt):''
       const badgeMega=hasSpend&&semCode?window.nexoBadgeMega(semCode,'sm'):''
-      const cpaColorCss=window.nexoCpaColor(mr.cpaReal,ctx.margenBE)
+      // El hero usa CPA EFECTIVO cuando esSoloHoy
+      const heroLbl=mr.esSoloHoy?'CPA Real Efectivas':'CPA Real'
+      const heroVal=mr.esSoloHoy?mr.cpaRealEfectivas:mr.cpaReal
+      const cpaParaColor=mr.esSoloHoy?mr.cpaRealEfectivas:mr.cpaReal
+      const cpaColorCss=window.nexoCpaColor(cpaParaColor,ctx.margenBE)
+      const cpaNormalColor=window.nexoCpaColor(mr.cpaReal,ctx.margenBE)
+      const pctConfTxt=Math.round((mr.pctConf||0.62)*100)
+      const heroTitle=mr.esSoloHoy?`Estimado con ${pctConfTxt}% confirmación`:''
       return`<div style="padding:6px 9px;border-left:4px solid var(--hier-ad);margin-bottom:3px;background:var(--card2);border-radius:5px;${hasSpend?'':'opacity:0.4'}">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:5px;margin-bottom:${hasSpend?'5px':'0'}">
           <div style="flex:1;min-width:0">
@@ -11189,7 +11241,7 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
             <div style="font-size:9px;color:var(--muted);margin-top:1px">${ad.estado}</div>
           </div>
           <div style="display:flex;gap:4px;align-items:center">
-            ${hasSpend&&mr.cpaReal>0?`<div class="nexo-cpa-hero nch-sm"><div class="nch-lbl">CPA Real</div><div class="nch-val" style="color:${cpaColorCss}">$${fmt(mr.cpaReal)}</div></div>`:''}
+            ${hasSpend&&heroVal>0?`<div class="nexo-cpa-hero nch-sm"><div class="nch-lbl">${heroLbl}</div><div class="nch-val" style="color:${cpaColorCss}" title="${heroTitle}">$${fmt(heroVal)}</div></div>`:''}
             <div style="display:flex;gap:3px">
               <button class="btn-sm btn-outline" onclick="copyMetaId('${ad.meta_id}',this)" style="padding:2px 5px;font-size:8px" title="Copiar ad_id">📋</button>
               <button class="btn-sm btn-outline" onclick="analizarConIA('anuncio','${ad.meta_id}','${(ad.nombre||'').replace(/'/g,"\\'")}')" style="padding:2px 5px;font-size:8px">🤖</button>
@@ -11197,13 +11249,14 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
             ${badgeMega||(hasSpend&&mr.sem.txt?`<span class="pill ${mr.sem.cls}" style="font-size:10px">${mr.sem.txt}</span>`:'')}
           </div>
         </div>
-        ${hasSpend?`<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:5px">
+        ${hasSpend?`<div style="display:grid;grid-template-columns:repeat(${mr.esSoloHoy?7:6},1fr);gap:5px">
           <div class="nexo-met nm-sm"><div class="nm-lbl">Gasto</div><div class="nm-val">$${fmt(d.spend)}</div></div>
           <div class="nexo-met nm-sm"><div class="nm-lbl" title="(Ventas reales × Precio) / Gasto">ROAS Real</div><div class="nm-val" style="color:${mr.roasReal>=1?'var(--green)':mr.roasReal>0?'var(--red)':'var(--muted)'}">${mr.roasReal>0?mr.roasReal.toFixed(2)+'x':'—'}</div></div>
           <div class="nexo-met nm-sm"><div class="nm-lbl">CPA Meta</div><div class="nm-val">${cpaMeta>0?'$'+fmt(cpaMeta):'—'}</div></div>
           <div class="nexo-met nm-sm"><div class="nm-lbl">Conv.</div><div class="nm-val">${d.conv}</div></div>
           <div class="nexo-met nm-sm"><div class="nm-lbl">Ventas</div><div class="nm-val" style="color:${ventasColor}">${ventasShow} ${ventasIcon}</div></div>
-          <div class="nexo-met nm-sm"><div class="nm-lbl">CPA Real</div><div class="nm-val" style="color:${cpaColorCss}">${mr.cpaReal>0?'$'+fmt(mr.cpaReal):'—'}</div></div>
+          ${mr.esSoloHoy?`<div class="nexo-met nm-sm"><div class="nm-lbl" title="Estimación: ventas × ${pctConfTxt}%">V. Efectivas</div><div class="nm-val" style="color:var(--purple)">${mr.ventasEfectivas.toFixed(2)}</div></div>`:''}
+          <div class="nexo-met nm-sm"><div class="nm-lbl">CPA Real</div><div class="nm-val" style="color:${cpaNormalColor}">${mr.cpaReal>0?'$'+fmt(mr.cpaReal):'—'}</div></div>
         </div>
         <div style="display:flex;gap:10px;margin-top:3px;font-size:9px;color:var(--muted);flex-wrap:wrap">
           <span>CTR: ${avgCtr.toFixed(2)}%</span>
@@ -11213,7 +11266,7 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
           ${mr.pendientes>0&&!mr.esSoloHoy?`<span style="color:var(--amber)">Pendientes: ${mr.pendientes}</span>`:''}
         </div>
         <div class="nexo-sep"></div>
-        ${window._renderSemHistorialBlock(ad.meta_id,'ad',{sem:window._semTxtToCode(mr.sem.txt),label:mr.sem.txt,cpa:mr.cpaReal,gasto:d.spend,ventas:mr.ventas,pendientes:mr.pendientes})}`:''}
+        ${window._renderSemHistorialBlock(ad.meta_id,'ad',{sem:window._semTxtToCode(mr.sem.txt),label:mr.sem.txt,cpa:cpaParaColor,gasto:d.spend,ventas:mr.ventas,pendientes:mr.pendientes})}`:''}
       </div>`
     }).join('')
     el.dataset.loaded='1'

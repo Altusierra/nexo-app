@@ -9153,16 +9153,38 @@ async function _renderResumenProductos(desde,hasta,hoy){
     .select('cantidad,producto,estado_final,fecha,ad_id')
     .gte('fecha',desde).lte('fecha',hasta).limit(10000)
 
-  // 2. Traer insights por campaña (gasto por meta_id de la campaña)
-  // BUG FIX: la columna en meta_insights es meta_id, no campaign_id
-  const{data:insByCamp}=await sb.from('meta_insights')
-    .select('meta_id,spend')
-    .eq('nivel','campaign')
-    .gte('fecha',desde).lte('fecha',hasta)
+  // 2. Gasto por campaña: Meta API en tiempo real (igual que cards individuales).
+  //    Fallback por cuenta a meta_insights si Meta falla en esa cuenta.
+  //    Fallback completo a BD si no hay token Meta.
   const gastoByCampId={}
-  for(const i of (insByCamp||[])){
-    if(!i.meta_id)continue
-    gastoByCampId[String(i.meta_id)]=(gastoByCampId[String(i.meta_id)]||0)+(i.spend||0)
+  try{
+    let token=await getConfig('meta_access_token')
+    if(!token)throw new Error('Sin token')
+    const{data:cuentasAll}=await sb.from('meta_cuentas').select('account_id')
+    const timeRange=JSON.stringify({since:desde,until:hasta})
+    for(const cuenta of (cuentasAll||[])){
+      try{
+        const ins=await metaGet(`/act_${cuenta.account_id}/insights`,token,{fields:'campaign_id,spend',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
+        for(const i of (ins||[])){
+          if(!i.campaign_id)continue
+          gastoByCampId[String(i.campaign_id)]=(gastoByCampId[String(i.campaign_id)]||0)+(parseFloat(i.spend)||0)
+        }
+      }catch(e){
+        console.warn(`[resumen producto] Meta API fallo cuenta ${cuenta.account_id}, fallback BD:`,e.message)
+        const{data:insBD}=await sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').eq('account_id',cuenta.account_id).gte('fecha',desde).lte('fecha',hasta)
+        for(const i of (insBD||[])){
+          if(!i.meta_id)continue
+          gastoByCampId[String(i.meta_id)]=(gastoByCampId[String(i.meta_id)]||0)+(i.spend||0)
+        }
+      }
+    }
+  }catch(e){
+    console.warn('[resumen producto] sin token Meta, fallback BD completa:',e.message)
+    const{data:insByCamp}=await sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
+    for(const i of (insByCamp||[])){
+      if(!i.meta_id)continue
+      gastoByCampId[String(i.meta_id)]=(gastoByCampId[String(i.meta_id)]||0)+(i.spend||0)
+    }
   }
 
   // 3. Traer reportes_diarios con ad_ids manuales (auxiliar)

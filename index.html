@@ -9031,10 +9031,27 @@ async function _actualizarEscaladasAbiertas(accountId){
 async function _syncOneAccount(accountId,token,days,onProgress){
   const _p=onProgress||(()=>{})
   const actId='act_'+accountId
-  const until=new Date().toISOString().slice(0,10)
-  const sd=new Date()
-  if(days==='all')sd.setFullYear(sd.getFullYear()-3);else sd.setDate(sd.getDate()-days)
-  const since=sd.toISOString().slice(0,10)
+  // FIX (incremental + TZ Bogota): "hoy" se calcula en zona horaria de Colombia para
+  // que coincida con el date_start que devuelve Meta. Si days es numerico, se arranca
+  // desde el MAX(fecha) ya sincronizado de esta cuenta (cuando es mas reciente que
+  // hoy-days), evitando re-traer dias ya guardados. days==='all' baja 3 anios.
+  const todayBogota=new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
+  const until=todayBogota
+  let since
+  if(days==='all'){
+    const sdAll=new Date();sdAll.setFullYear(sdAll.getFullYear()-3)
+    since=sdAll.toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
+  }else{
+    const sdN=new Date();sdN.setDate(sdN.getDate()-days)
+    const fallback=sdN.toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
+    try{
+      const{data:lastRow}=await sb.from('meta_insights')
+        .select('fecha').eq('account_id',accountId)
+        .order('fecha',{ascending:false}).limit(1)
+      const lastFecha=lastRow&&lastRow[0]?lastRow[0].fecha:null
+      since=lastFecha&&lastFecha>fallback?lastFecha:fallback
+    }catch(e){since=fallback}
+  }
 
   // ── Snapshot de budgets anteriores ANTES del upsert (para detectar cambios) ──
   const{data:prevBudgets}=await sb.from('meta_campanas')
@@ -9283,6 +9300,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd){
   let semCode=''
   if(gasto===0&&totalPedidos===0)semCode=''
   else if(cpaReal===0&&totalPedidos===0)semCode='sin_ventas'
+  else if(gasto===0&&totalPedidos>0)semCode='pendiente_sync'
   else if(margenBE<=0)semCode='sin_ventas'
   else if(cpaReal>margenBE)semCode='stop'
   else if(cpaReal>margenBE*0.7)semCode='precaucion'

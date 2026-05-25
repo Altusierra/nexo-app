@@ -1603,6 +1603,16 @@ async function pageAdminProductos(c){
       flete_outbound:g('fo'),flete_devolucion:g('fd'),dev_pct:gf('dp')/100,
       costo_conversacion:g('cc'),campaign_ids:cids,maestro_codigo:mc
     }
+    // Stock: solo actualizar si el aux/admin escribió un valor (no pisar con vacío)
+    const stockEl=document.getElementById('stock-'+id)
+    if(stockEl&&stockEl.value!==''){
+      const stockNum=parseInt(stockEl.value)
+      if(!isNaN(stockNum)&&stockNum>=0){
+        updateData.stock_actual=stockNum
+        updateData.stock_updated_at=new Date().toISOString()
+        updateData.stock_updated_by=me?.id||null
+      }
+    }
     if(nombre)updateData.nombre=nombre
 
     // Intentar guardar incluyendo todos los campos nuevos; si una columna no existe, ir quitándola
@@ -1739,6 +1749,11 @@ async function pageAdminProductos(c){
         <div class="fld"><label>% Devolución</label><input type="number" step="0.01" id="np-dp" value="19"></div>
         <div class="fld"><label>Costo/conversación</label><input type="number" id="np-cc" value="100"></div>
       </div>
+      <div class="fld" style="margin-top:10px;max-width:300px">
+        <label>📦 Stock inicial (unidades)</label>
+        <input type="number" id="np-stock" value="0" min="0" placeholder="0">
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">Unidades disponibles ahora. Se actualiza desde el reporte del día del aux.</div>
+      </div>
       <div class="form-grid g2" style="margin-top:10px">
         <div class="fld"><label>IDs de campañas Meta (separadas por coma)</label><input type="text" id="np-cids" placeholder="120244302541010122, 120243626234290122"></div>
         <div class="fld"><label>Maestro carrier</label>
@@ -1771,7 +1786,10 @@ async function pageAdminProductos(c){
       costo_conversacion:parseInt(document.getElementById('np-cc').value)||100,
       campaign_ids:cids,
       maestro_codigo:document.getElementById('np-mc').value||'GEN',
-      aliases,aliases_visibles:[],tipo_producto:'dropshipping',almacenamiento:0
+      aliases,aliases_visibles:[],tipo_producto:'dropshipping',almacenamiento:0,
+      stock_actual:parseInt(document.getElementById('np-stock')?.value)||0,
+      stock_updated_at:new Date().toISOString(),
+      stock_updated_by:me?.id||null
     }
     // Fallback progresivo si alguna columna no existe en DB
     const tryInsert=async(p)=>sb.from('productos').insert(p).select().single()
@@ -2604,6 +2622,11 @@ async function renderProdBody(id,maestrosList){
       <div class="fld"><label>Flete devolución</label><input type="number" id="fd-${id}" value="${prod.flete_devolucion||18000}" oninput="recalcProdAuto('${id}')"></div>
       <div class="fld"><label>% Devolución</label><input type="number" step="0.01" id="dp-${id}" value="${(prod.dev_pct*100)||19}" oninput="recalcProdAuto('${id}')"></div>
       <div class="fld"><label>Costo/conversación</label><input type="number" id="cc-${id}" value="${prod.costo_conversacion||100}" oninput="recalcProdAuto('${id}')"></div>
+    </div>
+    <div class="fld" style="margin-top:10px;max-width:300px">
+      <label>📦 Stock actual (unidades disponibles)</label>
+      <input type="number" id="stock-${id}" value="${prod.stock_actual!=null?prod.stock_actual:''}" min="0" placeholder="Ej: 240" title="Unidades disponibles en bodega. Se actualiza al guardar este producto o desde el reporte del día del aux.">
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">${prod.stock_updated_at?'Última actualización: '+new Date(prod.stock_updated_at).toLocaleString('es-CO'):'Sin actualizar todavía'}</div>
     </div>
     <div class="fld" id="alm-wrap-${id}" style="margin-top:10px;display:${tipoProd==='marca_propia'?'block':'none'}">
       <label>📦 Almacenamiento (por orden)</label>
@@ -4365,15 +4388,18 @@ async function cargarReporteData(){
 }
 window.cargarReporteData=cargarReporteData
 
-window.addVentaRow=(prodNom,adIds,convAp)=>{
+window.addVentaRow=(prodNom,adIds,convAp,stockAct)=>{
   const idx=window._ventaIdx++
   const container=document.getElementById('ventas-rows')
   if(!container)return
   const div=document.createElement('div')
   div.className='card';div.id=`vrow-${idx}`;div.style.marginBottom='10px'
+  // Helper para resolver stock_actual del producto seleccionado (si la columna existe)
+  const _stockProd=(name)=>{const p=productos.find(x=>x.nombre===name);return p&&p.stock_actual!=null?p.stock_actual:''}
+  const stockInicial=stockAct!=null&&stockAct!==''?stockAct:_stockProd(prodNom)
   div.innerHTML=`<div class="form-grid g3" style="align-items:start">
     <div class="fld"><label>Producto</label>
-      <select id="vp-${idx}">
+      <select id="vp-${idx}" onchange="(()=>{const s=document.getElementById('vs-${idx}');const p=productos.find(x=>x.nombre===this.value);if(s&&p&&p.stock_actual!=null&&!s.dataset.touched)s.value=p.stock_actual}).call(this)">
         <option value="">Seleccionar...</option>
         ${productos.map(p=>`<option value="${p.nombre}" ${p.nombre===prodNom?'selected':''}>${p.nombre}</option>`).join('')}
       </select></div>
@@ -4381,6 +4407,8 @@ window.addVentaRow=(prodNom,adIds,convAp)=>{
       <textarea id="vi-${idx}" rows="3" placeholder="Pega todos los IDs aquí">${adIds||''}</textarea></div>
     <div class="fld"><label>Conv. aprox.</label>
       <input type="number" id="vc-${idx}" value="${convAp||0}" min="0">
+      <label style="margin-top:8px;font-size:11px;color:var(--muted);display:block">📦 Stock al cierre (unidades)</label>
+      <input type="number" id="vs-${idx}" value="${stockInicial}" min="0" placeholder="Stock actual" oninput="this.dataset.touched='1'" title="Stock disponible al cierre del día. Al guardar se sincroniza con la ficha del producto.">
       <button class="btn-sm btn-red" onclick="document.getElementById('vrow-${idx}').remove()" style="margin-top:6px;font-size:11px">✕ Quitar</button></div>
   </div>`
   container.appendChild(div)
@@ -4423,14 +4451,22 @@ window.saveReporteV2=async(fecha)=>{
   // Save ventas de hoy
   const rows=document.getElementById('ventas-rows')?.children||[]
   let saved=0
+  // Stock a sincronizar con la tabla productos (id → {stock, nombre})
+  const stockToSync={}
   for(const row of rows){
     const idx=row.id.replace('vrow-','')
     const prodNom=document.getElementById(`vp-${idx}`)?.value
     if(!prodNom)continue
     const adIds=document.getElementById(`vi-${idx}`)?.value?.trim()||''
     const convAp=parseInt(document.getElementById(`vc-${idx}`)?.value)||0
+    const stockInput=document.getElementById(`vs-${idx}`)
+    const stockVal=stockInput&&stockInput.value!==''?parseInt(stockInput.value):null
     const prodObj=productos.find(p=>_normProd(p.nombre)===_normProd(prodNom))
     if(!prodObj){msg.innerHTML=`<div class="alert alert-red">Producto "${prodNom}" no existe en config</div>`;return}
+    // Si el aux ingresó stock, lo marcamos para sincronizar con productos.stock_actual
+    if(stockVal!=null&&!isNaN(stockVal)&&stockVal>=0){
+      stockToSync[prodObj.id]={stock:stockVal,nombre:prodObj.nombre}
+    }
     // Also get conversaciones from auto section if exists
     const pid=_normProd(prodNom).replace(/\s+/g,'_')
     const convReal=parseInt(document.getElementById(`rc-${pid}`)?.value)||0
@@ -4449,6 +4485,24 @@ window.saveReporteV2=async(fecha)=>{
     },{onConflict:'fecha,producto_id,usuario_id'})
     if(error){msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
     saved++
+  }
+  // Sincronizar stock_actual con productos (si la columna existe en DB; silencioso si no)
+  for(const[prodId,info]of Object.entries(stockToSync)){
+    try{
+      const{error:eSt}=await sb.from('productos').update({
+        stock_actual:info.stock,
+        stock_updated_at:new Date().toISOString(),
+        stock_updated_by:currentMe().id
+      }).eq('id',prodId)
+      if(eSt){
+        // Fallback: intentar sin stock_updated_by, después sin stock_updated_at
+        const{error:eSt2}=await sb.from('productos').update({stock_actual:info.stock,stock_updated_at:new Date().toISOString()}).eq('id',prodId)
+        if(eSt2){await sb.from('productos').update({stock_actual:info.stock}).eq('id',prodId).catch(()=>{})}
+      }
+      // Refrescar en memoria local
+      const pMem=productos.find(p=>p.id===prodId)
+      if(pMem){pMem.stock_actual=info.stock;pMem.stock_updated_at=new Date().toISOString()}
+    }catch(e){console.warn('[sync stock]',info.nombre,e?.message)}
   }
   // Also save conv for products in auto section that aren't in ventas rows
   const convEls=document.querySelectorAll('.rep-conv')
@@ -9058,15 +9112,16 @@ async function _renderResumenProductos(desde,hasta,hoy){
     .select('cantidad,producto,estado_final,fecha,ad_id')
     .gte('fecha',desde).lte('fecha',hasta).limit(10000)
 
-  // 2. Traer insights por campaña (gasto por campaign_id)
+  // 2. Traer insights por campaña (gasto por meta_id de la campaña)
+  // BUG FIX: la columna en meta_insights es meta_id, no campaign_id
   const{data:insByCamp}=await sb.from('meta_insights')
-    .select('campaign_id,spend')
+    .select('meta_id,spend')
     .eq('nivel','campaign')
     .gte('fecha',desde).lte('fecha',hasta)
   const gastoByCampId={}
   for(const i of (insByCamp||[])){
-    if(!i.campaign_id)continue
-    gastoByCampId[String(i.campaign_id)]=(gastoByCampId[String(i.campaign_id)]||0)+(i.spend||0)
+    if(!i.meta_id)continue
+    gastoByCampId[String(i.meta_id)]=(gastoByCampId[String(i.meta_id)]||0)+(i.spend||0)
   }
 
   // 3. Traer reportes_diarios con ad_ids manuales (auxiliar)

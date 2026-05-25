@@ -8445,6 +8445,22 @@ function metaCPR(costActions){
   return 0
 }
 
+// Suma values de arrays tipo outbound_clicks / unique_outbound_clicks
+// (Meta los devuelve como [{action_type:'outbound_click',value:'123'}])
+function metaOutbound(arr){
+  if(!arr?.length)return 0
+  let total=0
+  for(const a of arr)total+=parseInt(a.value)||0
+  return total
+}
+
+// Extrae cuenta de landing_page_view del array actions
+function metaLandingViews(actions){
+  if(!actions?.length)return 0
+  const f=actions.find(a=>a.action_type==='landing_page_view')
+  return f?(parseInt(f.value)||0):0
+}
+
 window.saveMetaConfig=async()=>{
   const token=document.getElementById('cfg-token').value.trim()
   const appId=document.getElementById('cfg-appid').value.trim()
@@ -9031,27 +9047,33 @@ async function _actualizarEscaladasAbiertas(accountId){
 async function _syncOneAccount(accountId,token,days,onProgress){
   const _p=onProgress||(()=>{})
   const actId='act_'+accountId
-  // FIX (incremental + TZ Bogota): "hoy" se calcula en zona horaria de Colombia para
-  // que coincida con el date_start que devuelve Meta. Si days es numerico, se arranca
-  // desde el MAX(fecha) ya sincronizado de esta cuenta (cuando es mas reciente que
-  // hoy-days), evitando re-traer dias ya guardados. days==='all' baja 3 anios.
+  // FIX (incremental TOTAL + TZ Bogota): "hoy" se calcula en zona horaria de Colombia
+  // para que coincida con el date_start que devuelve Meta. Ambos modos son
+  // incrementales: si la BD tiene datos, se arranca desde MAX(fecha)-1 dia
+  // (re-baja ayer porque Meta sigue ajustando conversiones tardias). El fallback
+  // solo se usa cuando la BD esta vacia: days==='all' = 3 anios, days numerico = N dias.
   const todayBogota=new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
   const until=todayBogota
-  let since
+  let fallback
   if(days==='all'){
     const sdAll=new Date();sdAll.setFullYear(sdAll.getFullYear()-3)
-    since=sdAll.toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
+    fallback=sdAll.toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
   }else{
     const sdN=new Date();sdN.setDate(sdN.getDate()-days)
-    const fallback=sdN.toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
-    try{
-      const{data:lastRow}=await sb.from('meta_insights')
-        .select('fecha').eq('account_id',accountId)
-        .order('fecha',{ascending:false}).limit(1)
-      const lastFecha=lastRow&&lastRow[0]?lastRow[0].fecha:null
-      since=lastFecha&&lastFecha>fallback?lastFecha:fallback
-    }catch(e){since=fallback}
+    fallback=sdN.toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
   }
+  let since=fallback
+  try{
+    const{data:lastRow}=await sb.from('meta_insights')
+      .select('fecha').eq('account_id',accountId)
+      .order('fecha',{ascending:false}).limit(1)
+    const lastFecha=lastRow&&lastRow[0]?lastRow[0].fecha:null
+    if(lastFecha){
+      const d=new Date(lastFecha+'T12:00:00Z');d.setDate(d.getDate()-1)
+      const lastMinus1=d.toISOString().slice(0,10)
+      since=lastMinus1>fallback?lastMinus1:fallback
+    }
+  }catch(e){/* usar fallback si falla la query */}
 
   // ── Snapshot de budgets anteriores ANTES del upsert (para detectar cambios) ──
   const{data:prevBudgets}=await sb.from('meta_campanas')
@@ -9102,13 +9124,17 @@ async function _syncOneAccount(accountId,token,days,onProgress){
     const ch=chunks[ci]
     const pct=50+Math.round((ci/totalChunks)*50)
     _p(pct,`Métricas ${ci+1}/${totalChunks}...`)
-    const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:JSON.stringify(ch),level:'campaign',time_increment:'1',limit:'500'})
+    const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values',time_range:JSON.stringify(ch),level:'campaign',time_increment:'1',limit:'500'})
     for(const i of cIns){
-      await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+      await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
     }
-    const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:JSON.stringify(ch),level:'ad',time_increment:'1',limit:'500'})
+    const sIns=await metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values',time_range:JSON.stringify(ch),level:'adset',time_increment:'1',limit:'500'})
+    for(const i of sIns){
+      await sb.from('meta_insights').upsert({meta_id:i.adset_id,nivel:'adset',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+    }
+    const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values,quality_ranking,engagement_rate_ranking,conversion_rate_ranking',time_range:JSON.stringify(ch),level:'ad',time_increment:'1',limit:'500'})
     for(const i of aIns){
-      await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+      await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,quality_ranking:i.quality_ranking||null,engagement_rate_ranking:i.engagement_rate_ranking||null,conversion_rate_ranking:i.conversion_rate_ranking||null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
     }
   }
   // ── Snapshot horario + actualizar escaladas abiertas ──

@@ -796,11 +796,7 @@ async function loadDash(){
     semHtml=`<div class="semaforo ${cpaSem}"><div class="sem-dot"></div><div><div class="sem-title">${cpaTit}</div><div class="sem-msg">CPA: $${fmt(cpa)} vs límite: $${fmt(margenBE)} · ROAS pendiente (sin oferta aún)</div></div></div>`
   }
 
-  // Resumen por producto (consolidado por producto, ordenado por urgencia, colapsable)
-  const resumenHtml=await _renderResumenProductos(desde,hasta,hoy).catch(e=>{console.warn('[resumen productos]',e?.message);return''})
-
   el.innerHTML=`
-    ${resumenHtml}
     ${semHtml}
     <div class="cards-row c4">
       <div class="card c-blue"><div class="card-label">Órdenes</div><div class="card-val">${totalOrds}</div>
@@ -838,337 +834,6 @@ async function loadDash(){
       <div class="card"><div class="card-label">Costo Conv.</div><div class="card-val">$${fmt(costoConv)}</div>
         <div class="card-sub">${conv} conv × $${fmt(prod0.costo_conversacion||100)}</div></div>
     </div>`:''}`
-}
-
-// ── RESUMEN POR PRODUCTO (Dashboard) ───────────────────────
-// Consolida datos por producto desde meta_insights + mapeos + reportes_diarios.
-// Aplica reglas oficiales del semaforo NEXO (45%/70%/100% del break-even).
-// Reutiliza helpers existentes: nexoBadgeMega, nexoOrdenUrgencia, resolveProdName, fmt.
-async function _renderResumenProductos(desde,hasta,hoy){
-  if(!productos||!productos.length)return''
-
-  // 1. Traer mapeos del rango (ventas reales por producto)
-  const{data:mapeos}=await sb.from('mapeos')
-    .select('cantidad,producto,estado_final,fecha,ad_id')
-    .gte('fecha',desde).lte('fecha',hasta).limit(10000)
-
-  // 2. Traer insights por campaña (gasto por campaign_id)
-  const{data:insByCamp}=await sb.from('meta_insights')
-    .select('campaign_id,spend')
-    .eq('nivel','campaign')
-    .gte('fecha',desde).lte('fecha',hasta)
-  const gastoByCampId={}
-  for(const i of (insByCamp||[])){
-    if(!i.campaign_id)continue
-    gastoByCampId[String(i.campaign_id)]=(gastoByCampId[String(i.campaign_id)]||0)+(i.spend||0)
-  }
-
-  // 3. Traer reportes_diarios con ad_ids manuales (auxiliar)
-  const{data:reportes}=await sb.from('reportes_diarios')
-    .select('ad_ids,producto_id,producto_nombre,fecha,updated_at')
-    .gte('fecha',desde).lte('fecha',hasta)
-    .not('ad_ids','is',null).neq('ad_ids','')
-    .order('updated_at',{ascending:false})
-
-  // 4. Deduplicar reportes por (fecha + producto) — usar el mas reciente
-  const repsSeen=new Set(),repsUnique=[]
-  for(const r of (reportes||[])){
-    const k=(r.fecha||'')+'|'+(r.producto_id||r.producto_nombre||'')
-    if(repsSeen.has(k))continue
-    repsSeen.add(k);repsUnique.push(r)
-  }
-
-  // 5. Agrupar mapeos por nombre normalizado de producto
-  const mapeosByProd={}
-  for(const m of (mapeos||[])){
-    const pn=resolveProdName(m.producto).nombre||(m.producto||'Sin producto')
-    if(!mapeosByProd[pn])mapeosByProd[pn]=[]
-    mapeosByProd[pn].push(m)
-  }
-
-  // 6. Contar IDs reportados manualmente por producto (cada ID = 1 venta)
-  const reportesByProd={}
-  for(const r of repsUnique){
-    const pn=resolveProdName(r.producto_nombre||'').nombre||(r.producto_nombre||'')
-    if(!pn)continue
-    if(!reportesByProd[pn])reportesByProd[pn]=0
-    const ids=(r.ad_ids||'').split(/[\n,]+/).map(s=>s.trim()).filter(s=>s.length>5)
-    reportesByProd[pn]+=ids.length
-  }
-
-  // 7. Calcular metricas por producto
-  const productosResumen=[]
-  for(const prod of productos){
-    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd)
-    if(data)productosResumen.push(data)
-  }
-
-  if(productosResumen.length===0){
-    return`<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin-bottom:16px">
-      <div style="font-size:11px;color:var(--muted);margin-bottom:4px;letter-spacing:.3px">Resumen por producto</div>
-      <div style="color:var(--muted);font-size:13px">Sin actividad en este rango</div>
-    </div>`
-  }
-
-  // 8. Ranking por cantidad de pedidos (descendente)
-  const porVentas=[...productosResumen].sort((a,b)=>b.totalPedidos-a.totalPedidos)
-  const rankingMap={}
-  porVentas.forEach((d,i)=>{rankingMap[d.nombre]=i+1})
-
-  // 9. Ordenar para mostrar: por urgencia (APAGAR → CUIDADO → FUEGO → ESCALAR → ESPERAR)
-  productosResumen.sort((a,b)=>{
-    const wa=window.nexoOrdenUrgencia(a.semCode)
-    const wb=window.nexoOrdenUrgencia(b.semCode)
-    if(wa!==wb)return wa-wb
-    return b.totalPedidos-a.totalPedidos
-  })
-
-  // 10. Conteos por estado para el strip
-  const conteo={fuego:0,escalar:0,precaucion:0,stop:0,sin_ventas:0}
-  for(const d of productosResumen){if(conteo[d.semCode]!=null)conteo[d.semCode]++}
-
-  // 11. Plata neta total del periodo
-  const plataNetaTotal=productosResumen.reduce((s,d)=>s+d.gananciaNeta,0)
-
-  // 12. Etiqueta de fecha amigable
-  const fechaLabel=_resumenFechaLabel(desde,hasta,hoy)
-
-  // 13. HTML final
-  return`
-  <div class="resumen-productos" style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin-bottom:16px">
-    <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:12px;padding-bottom:12px;border-bottom:1px solid var(--border)">
-      <div>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:4px;letter-spacing:.3px">Resumen por producto</div>
-        <div style="font-size:17px;font-weight:600">${fechaLabel}</div>
-      </div>
-      <div style="text-align:right">
-        <div style="font-size:11px;color:var(--muted);margin-bottom:2px">Plata neta del periodo</div>
-        <div style="font-size:24px;font-weight:700;color:${plataNetaTotal>=0?'var(--green)':'var(--red)'}">${plataNetaTotal>=0?'+':'−'}$${fmt(Math.abs(plataNetaTotal))}</div>
-      </div>
-    </div>
-
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:14px 0">
-      <span style="font-size:11px;color:var(--muted);letter-spacing:.3px;margin-right:4px">Estado del portafolio:</span>
-      ${_resumenPillCount('fuego',conteo.fuego,'🟣','en FUEGO','var(--purple)','var(--purple-bg)','FUEGO — Click para filtrar productos rindiendo brutal (CPA < 45% del break-even).')}
-      ${_resumenPillCount('escalar',conteo.escalar,'🟢','en ESCALAR','var(--green)','var(--green-bg)','ESCALAR — Click para filtrar productos sanos (CPA entre 45-70% del break-even).')}
-      ${_resumenPillCount('precaucion',conteo.precaucion,'🟡','en CUIDADO','var(--amber)','var(--amber-bg)','CUIDADO — Click para filtrar productos al límite (CPA entre 70-100% del break-even).')}
-      ${_resumenPillCount('stop',conteo.stop,'🔴','en APAGAR','var(--red)','var(--red-bg)','APAGAR — Click para filtrar productos perdiendo plata (CPA > break-even).')}
-      ${conteo.sin_ventas>0?_resumenPillCount('sin_ventas',conteo.sin_ventas,'⏳','en ESPERAR','var(--muted)','var(--card2)','ESPERAR — Sin ventas todavía.'):''}
-      <button onclick="resumenProductosFilter('',this)" title="Mostrar todos los productos sin filtro" style="margin-left:auto;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:10px;cursor:pointer">Ver todos</button>
-    </div>
-
-    <div id="rp-cards">
-      ${productosResumen.map(d=>_renderProductoCardResumen(d,rankingMap[d.nombre])).join('')}
-    </div>
-  </div>`
-}
-
-// Calcula las metricas consolidadas de un producto en el rango.
-// Devuelve null si no hay actividad relevante (sin gasto y sin pedidos).
-function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd){
-  // Gasto desde campaign_ids configurados del producto
-  let gasto=0
-  const campIds=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
-  for(const cid of campIds){gasto+=gastoByCampId[String(cid)]||0}
-
-  // Mapeos del producto (ventas reales con estado)
-  const mps=mapeosByProd[prod.nombre]||[]
-  let pConf=0,canc=0,pend=0,o1=0,o2=0,o3=0,o4=0
-  for(const m of mps){
-    const q=m.cantidad||2
-    if(q===1)o1++;else if(q===2)o2++;else if(q===3)o3++;else o4++
-    if(m.estado_final==='CANCELADO')canc++
-    else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)pend++
-    else pConf++
-  }
-  const totalMapeos=mps.length
-
-  // Pedidos reportados manualmente (auxiliar, cuando aun no hay mapeos)
-  const pReportados=reportesByProd[prod.nombre]||0
-
-  // Total pedidos: priorizar mapeos si hay, sino reportados manuales
-  const totalPedidos=totalMapeos>0?totalMapeos:pReportados
-
-  // Si no hay gasto NI pedidos, no mostramos este producto
-  if(gasto===0&&totalPedidos===0)return null
-
-  // Venta por oferta (solo confirmados, con precios reales del producto)
-  const venta=(o1*(prod.precio_1u||0))+(o2*(prod.precio_2u||0))+(o3*(prod.precio_3u||0))+(o4*(prod.precio_4u||0))
-  const costoProv=(o1*(prod.costo_1u||0))+(o2*(prod.costo_2u||0))+(o3*(prod.costo_3u||0))+(o4*(prod.costo_4u||0))
-
-  // Fletes y devoluciones
-  const devPct=prod.dev_pct||0.19
-  const costoFlete=pConf*(prod.flete_outbound||21000)
-  const costoDev=Math.round(pConf*devPct*(prod.flete_devolucion||18000))
-  const ventaEfectiva=Math.round(venta*(1-devPct))
-
-  // Ganancia neta del producto (sin gastos fijos)
-  const gananciaNeta=ventaEfectiva-costoProv-costoFlete-costoDev-gasto
-
-  // Break-even del producto (basado en oferta 2u por defecto)
-  const p2=prod.precio_2u||129900
-  const c2=prod.costo_2u||36000
-  const fo=prod.flete_outbound||21000
-  const fd=prod.flete_devolucion||18000
-  const margenBE=p2*(1-devPct)-c2-fo-(fd*devPct)
-
-  // CPA real
-  const cpaReal=totalPedidos>0?gasto/totalPedidos:0
-
-  // ROAS
-  const roas=gasto>0?venta/gasto:0
-
-  // Estado del semaforo (reglas oficiales NEXO, Opcion A: 45/70/100% del BE)
-  let semCode=''
-  if(gasto===0&&totalPedidos===0)semCode=''
-  else if(cpaReal===0&&totalPedidos===0)semCode='sin_ventas'
-  else if(margenBE<=0)semCode='sin_ventas'
-  else if(cpaReal>margenBE)semCode='stop'
-  else if(cpaReal>margenBE*0.7)semCode='precaucion'
-  else if(cpaReal>margenBE*0.45)semCode='escalar'
-  else semCode='fuego'
-
-  return{
-    producto:prod,
-    nombre:prod.nombre,
-    inicial:(prod.nombre||'?').charAt(0).toUpperCase(),
-    gasto,totalPedidos,pedidosConfirmados:pConf,canc,pend,
-    o1,o2,o3,o4,venta,costoProv,gananciaNeta,
-    cpaReal,margenBE,roas,semCode
-  }
-}
-
-// Renderiza una card colapsable (details/summary) para un producto.
-function _renderProductoCardResumen(data,ranking){
-  if(!data)return''
-
-  const SEM_COLORS={
-    fuego:{bg:'rgba(167,139,250,.08)',color:'var(--purple)',border:'rgba(167,139,250,.3)'},
-    escalar:{bg:'rgba(34,197,94,.08)',color:'var(--green)',border:'rgba(34,197,94,.3)'},
-    precaucion:{bg:'rgba(245,158,11,.08)',color:'var(--amber)',border:'rgba(245,158,11,.3)'},
-    stop:{bg:'rgba(239,68,68,.08)',color:'var(--red)',border:'rgba(239,68,68,.3)'},
-    sin_ventas:{bg:'var(--card2)',color:'var(--muted)',border:'var(--border)'},
-    '':{bg:'var(--card2)',color:'var(--muted)',border:'var(--border)'}
-  }
-  const c=SEM_COLORS[data.semCode]||SEM_COLORS['']
-  const badge=window.nexoBadgeMega(data.semCode,'lg')||''
-
-  // Plata (ganancia o perdida)
-  const plataColor=data.gananciaNeta>=0?'var(--green)':'var(--red)'
-  const plataSign=data.gananciaNeta>=0?'+':'−'
-  const plataAbs=Math.abs(data.gananciaNeta)
-
-  // CPA real con check
-  let cpaIcon='',cpaColor='var(--muted)'
-  if(data.cpaReal>0){
-    if(data.cpaReal>data.margenBE){cpaIcon='✗';cpaColor='var(--red)'}
-    else if(data.cpaReal>data.margenBE*0.7){cpaIcon='⚠';cpaColor='var(--amber)'}
-    else{cpaIcon='✓';cpaColor='var(--green)'}
-  }
-
-  // Porcentaje del BE
-  const pctBE=data.cpaReal>0&&data.margenBE>0?Math.round(data.cpaReal/data.margenBE*100):0
-
-  // ROAS color (verde si >= BE de ROAS, sino rojo)
-  const beRoas=data.margenBE>0?(data.producto.precio_2u||129900)/data.margenBE:0
-  const roasColor=data.roas>0?(data.roas>=beRoas?'var(--green)':'var(--red)'):'var(--muted)'
-
-  return`
-  <details class="rp-card" data-sem-code="${data.semCode}" style="background:${c.bg};border:1px solid ${c.border};border-radius:10px;margin-bottom:8px;overflow:hidden">
-    <summary style="list-style:none;cursor:pointer;padding:14px 16px;display:block;outline:none">
-      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-        <div style="width:34px;height:34px;border-radius:50%;background:${c.color};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0">${data.inicial}</div>
-        <div style="display:flex;align-items:baseline;gap:10px;flex:1;min-width:0;flex-wrap:wrap">
-          <span style="font-size:17px;font-weight:600;color:${c.color}">${data.nombre}</span>
-          <span style="font-size:10px;padding:2px 8px;background:rgba(255,255,255,.06);border-radius:999px;color:${c.color};font-weight:500">${ranking||'?'}° en ventas</span>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-          ${badge}
-          <span class="rp-chevron" style="font-size:14px;color:${c.color};opacity:.6">▼</span>
-        </div>
-      </div>
-      <div style="display:flex;align-items:center;gap:12px;margin-top:8px;flex-wrap:wrap;padding-left:46px;font-size:13px">
-        <span style="display:inline-flex;align-items:center;gap:4px;font-size:16px;font-weight:600;color:${plataColor}">
-          ${plataSign}$${fmt(plataAbs)}
-        </span>
-        <span style="color:var(--muted)">·</span>
-        <span style="display:inline-flex;align-items:center;gap:4px;color:${cpaColor}" title="Break-even: $${fmt(data.margenBE)} · ${pctBE>0?pctBE+'% del BE':''}">
-          🎯 CPA real $${fmt(data.cpaReal)} ${cpaIcon}
-        </span>
-        ${data.totalPedidos>0?`
-        <span style="color:var(--muted)">·</span>
-        <span style="color:var(--muted)">📦 ${data.totalPedidos} pedidos</span>
-        `:''}
-      </div>
-    </summary>
-    <div style="padding:0 16px 16px;border-top:1px solid ${c.border};margin-top:6px;padding-top:14px">
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px">
-        <div style="background:rgba(0,0,0,.2);border-radius:8px;padding:11px 12px">
-          <div style="font-size:10px;color:var(--muted);margin-bottom:3px">📦 PEDIDOS</div>
-          <div style="font-size:19px;font-weight:600">${data.totalPedidos}</div>
-          <div style="font-size:10px;color:var(--muted);margin-top:2px">Conf:${data.pedidosConfirmados} · Pend:${data.pend} · Canc:${data.canc}</div>
-        </div>
-        <div style="background:rgba(0,0,0,.2);border-radius:8px;padding:11px 12px">
-          <div style="font-size:10px;color:var(--muted);margin-bottom:3px">💸 GASTO ADS</div>
-          <div style="font-size:19px;font-weight:600">$${fmt(data.gasto)}</div>
-          <div style="font-size:10px;color:var(--muted);margin-top:2px">CPA $${fmt(data.cpaReal)}</div>
-        </div>
-        <div style="background:rgba(0,0,0,.2);border-radius:8px;padding:11px 12px">
-          <div style="font-size:10px;color:var(--muted);margin-bottom:3px">🎯 BREAK-EVEN</div>
-          <div style="font-size:19px;font-weight:600">$${fmt(data.margenBE)}</div>
-          <div style="font-size:10px;color:${cpaColor};margin-top:2px">${pctBE>0?pctBE+'% del BE':'sin pedidos'}</div>
-        </div>
-        <div style="background:rgba(0,0,0,.2);border-radius:8px;padding:11px 12px">
-          <div style="font-size:10px;color:var(--muted);margin-bottom:3px">📊 ROAS</div>
-          <div style="font-size:19px;font-weight:600;color:${roasColor}">${data.roas>0?data.roas.toFixed(2)+'x':'—'}</div>
-          <div style="font-size:10px;color:var(--muted);margin-top:2px">BE: ${beRoas>0?beRoas.toFixed(2)+'x':'—'} · Venta $${fmt(data.venta)}</div>
-        </div>
-      </div>
-      ${(data.o1+data.o2+data.o3+data.o4)>0?`
-      <div style="margin-top:10px;padding:10px 12px;background:rgba(0,0,0,.15);border-radius:8px;font-size:11px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap;align-items:center">
-        <span style="color:var(--text);font-weight:500">Distribución por oferta:</span>
-        <span>1u: <strong style="color:var(--text)">${data.o1}</strong></span>
-        <span>2u: <strong style="color:var(--text)">${data.o2}</strong></span>
-        <span>3u: <strong style="color:var(--text)">${data.o3}</strong></span>
-        <span>4u: <strong style="color:var(--text)">${data.o4}</strong></span>
-      </div>`:''}
-    </div>
-  </details>`
-}
-
-// Pill del strip de urgencia (counts por estado del semaforo).
-function _resumenPillCount(code,n,emoji,label,color,bg,tooltip){
-  const dim=n===0?'opacity:.35;cursor:default':'cursor:pointer'
-  return`<button class="rp-pill-strip" data-code="${code}" title="${tooltip||''}" onclick="resumenProductosFilter('${code}',this)" style="${dim};background:${bg};color:${color};border:1px solid ${color};border-radius:999px;padding:5px 12px;font-size:11px;font-weight:600;display:inline-flex;align-items:center;gap:5px">
-    <span>${emoji}</span>
-    <span>${n} ${label}</span>
-  </button>`
-}
-
-// Filtra las cards del resumen por estado del semaforo (al hacer click en el strip).
-window.resumenProductosFilter=function(code,btn){
-  const cards=document.querySelectorAll('#rp-cards .rp-card')
-  cards.forEach(c=>{
-    if(!code)c.style.display=''
-    else c.style.display=(c.dataset.semCode===code?'':'none')
-  })
-  document.querySelectorAll('.rp-pill-strip').forEach(p=>{
-    p.style.outline=(code&&p.dataset.code===code)?'2px solid currentColor':'none'
-    p.style.outlineOffset='1px'
-  })
-}
-
-// Etiqueta amigable de fecha (Dom 24 may 2026, o rango).
-function _resumenFechaLabel(desde,hasta,hoy){
-  if(!desde||!hasta)return''
-  if(desde===hasta){
-    try{
-      const d=new Date(desde+'T00:00:00')
-      const txt=d.toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long',year:'numeric'})
-      return desde===hoy?(txt+' (Hoy)'):txt
-    }catch(_){return desde}
-  }
-  return desde+' → '+hasta
 }
 
 // ── ADMIN: REPORTES ────────────────────────────────────────
@@ -9381,6 +9046,353 @@ async function _syncOneAccount(accountId,token,days,onProgress){
   _p(100,'✅')
 }
 
+// ── RESUMEN POR PRODUCTO (Meta Ads) ────────────────────────
+// Consolida datos por producto desde meta_insights + mapeos + reportes_diarios.
+// Aplica reglas oficiales del semaforo NEXO (45%/70%/100% del break-even).
+// Reutiliza helpers existentes: nexoBadgeMega, nexoOrdenUrgencia, resolveProdName, fmt.
+async function _renderResumenProductos(desde,hasta,hoy){
+  if(!productos||!productos.length)return''
+
+  // 1. Traer mapeos del rango (ventas reales por producto)
+  const{data:mapeos}=await sb.from('mapeos')
+    .select('cantidad,producto,estado_final,fecha,ad_id')
+    .gte('fecha',desde).lte('fecha',hasta).limit(10000)
+
+  // 2. Traer insights por campaña (gasto por campaign_id)
+  const{data:insByCamp}=await sb.from('meta_insights')
+    .select('campaign_id,spend')
+    .eq('nivel','campaign')
+    .gte('fecha',desde).lte('fecha',hasta)
+  const gastoByCampId={}
+  for(const i of (insByCamp||[])){
+    if(!i.campaign_id)continue
+    gastoByCampId[String(i.campaign_id)]=(gastoByCampId[String(i.campaign_id)]||0)+(i.spend||0)
+  }
+
+  // 3. Traer reportes_diarios con ad_ids manuales (auxiliar)
+  const{data:reportes}=await sb.from('reportes_diarios')
+    .select('ad_ids,producto_id,producto_nombre,fecha,updated_at')
+    .gte('fecha',desde).lte('fecha',hasta)
+    .not('ad_ids','is',null).neq('ad_ids','')
+    .order('updated_at',{ascending:false})
+
+  // 4. Deduplicar reportes por (fecha + producto) — usar el mas reciente
+  const repsSeen=new Set(),repsUnique=[]
+  for(const r of (reportes||[])){
+    const k=(r.fecha||'')+'|'+(r.producto_id||r.producto_nombre||'')
+    if(repsSeen.has(k))continue
+    repsSeen.add(k);repsUnique.push(r)
+  }
+
+  // 5. Agrupar mapeos por nombre normalizado de producto
+  const mapeosByProd={}
+  for(const m of (mapeos||[])){
+    const pn=resolveProdName(m.producto).nombre||(m.producto||'Sin producto')
+    if(!mapeosByProd[pn])mapeosByProd[pn]=[]
+    mapeosByProd[pn].push(m)
+  }
+
+  // 6. Contar IDs reportados manualmente por producto (cada ID = 1 venta)
+  const reportesByProd={}
+  for(const r of repsUnique){
+    const pn=resolveProdName(r.producto_nombre||'').nombre||(r.producto_nombre||'')
+    if(!pn)continue
+    if(!reportesByProd[pn])reportesByProd[pn]=0
+    const ids=(r.ad_ids||'').split(/[\n,]+/).map(s=>s.trim()).filter(s=>s.length>5)
+    reportesByProd[pn]+=ids.length
+  }
+
+  // 7. Calcular metricas por producto
+  const productosResumen=[]
+  for(const prod of productos){
+    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd)
+    if(data)productosResumen.push(data)
+  }
+
+  if(productosResumen.length===0){
+    return`<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin-bottom:16px">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px;letter-spacing:.3px">Resumen por producto</div>
+      <div style="color:var(--muted);font-size:13px">Sin actividad en este rango</div>
+    </div>`
+  }
+
+  // 8. Ranking por cantidad de pedidos (descendente)
+  const porVentas=[...productosResumen].sort((a,b)=>b.totalPedidos-a.totalPedidos)
+  const rankingMap={}
+  porVentas.forEach((d,i)=>{rankingMap[d.nombre]=i+1})
+
+  // 9. Ordenar para mostrar: por urgencia (APAGAR → CUIDADO → FUEGO → ESCALAR → ESPERAR)
+  productosResumen.sort((a,b)=>{
+    const wa=window.nexoOrdenUrgencia(a.semCode)
+    const wb=window.nexoOrdenUrgencia(b.semCode)
+    if(wa!==wb)return wa-wb
+    return b.totalPedidos-a.totalPedidos
+  })
+
+  // 10. Conteos por estado para el strip
+  const conteo={fuego:0,escalar:0,precaucion:0,stop:0,sin_ventas:0}
+  for(const d of productosResumen){if(conteo[d.semCode]!=null)conteo[d.semCode]++}
+
+  // 11. Plata neta total del periodo
+  const plataNetaTotal=productosResumen.reduce((s,d)=>s+d.gananciaNeta,0)
+
+  // 12. Etiqueta de fecha amigable
+  const fechaLabel=_resumenFechaLabel(desde,hasta,hoy)
+
+  // 13. HTML final
+  return`
+  <div class="resumen-productos" style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin-bottom:16px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:12px;padding-bottom:12px;border-bottom:1px solid var(--border)">
+      <div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px;letter-spacing:.3px">Resumen por producto</div>
+        <div style="font-size:17px;font-weight:600">${fechaLabel}</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:2px">Plata neta del periodo</div>
+        <div style="font-size:24px;font-weight:700;color:${plataNetaTotal>=0?'var(--green)':'var(--red)'}">${plataNetaTotal>=0?'+':'−'}$${fmt(Math.abs(plataNetaTotal))}</div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:14px 0">
+      <span style="font-size:11px;color:var(--muted);letter-spacing:.3px;margin-right:4px">Estado del portafolio:</span>
+      ${_resumenPillCount('fuego',conteo.fuego,'🟣','en FUEGO','var(--purple)','var(--purple-bg)','FUEGO — Click para filtrar productos rindiendo brutal (CPA < 45% del break-even).')}
+      ${_resumenPillCount('escalar',conteo.escalar,'🟢','en ESCALAR','var(--green)','var(--green-bg)','ESCALAR — Click para filtrar productos sanos (CPA entre 45-70% del break-even).')}
+      ${_resumenPillCount('precaucion',conteo.precaucion,'🟡','en CUIDADO','var(--amber)','var(--amber-bg)','CUIDADO — Click para filtrar productos al límite (CPA entre 70-100% del break-even).')}
+      ${_resumenPillCount('stop',conteo.stop,'🔴','en APAGAR','var(--red)','var(--red-bg)','APAGAR — Click para filtrar productos perdiendo plata (CPA > break-even).')}
+      ${conteo.sin_ventas>0?_resumenPillCount('sin_ventas',conteo.sin_ventas,'⏳','en ESPERAR','var(--muted)','var(--card2)','ESPERAR — Sin ventas todavía.'):''}
+      <button onclick="resumenProductosFilter('',this)" title="Mostrar todos los productos sin filtro" style="margin-left:auto;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:10px;cursor:pointer">Ver todos</button>
+    </div>
+
+    <div id="rp-cards">
+      ${productosResumen.map(d=>_renderProductoCardResumen(d,rankingMap[d.nombre])).join('')}
+    </div>
+  </div>`
+}
+
+// Calcula las metricas consolidadas de un producto en el rango.
+// Devuelve null si no hay actividad relevante (sin gasto y sin pedidos).
+function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd){
+  // Gasto desde campaign_ids configurados del producto
+  let gasto=0
+  const campIds=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
+  for(const cid of campIds){gasto+=gastoByCampId[String(cid)]||0}
+
+  // Mapeos del producto (ventas reales con estado)
+  const mps=mapeosByProd[prod.nombre]||[]
+  let pConf=0,canc=0,pend=0,o1=0,o2=0,o3=0,o4=0
+  for(const m of mps){
+    const q=m.cantidad||2
+    if(q===1)o1++;else if(q===2)o2++;else if(q===3)o3++;else o4++
+    if(m.estado_final==='CANCELADO')canc++
+    else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)pend++
+    else pConf++
+  }
+  const totalMapeos=mps.length
+
+  // Pedidos reportados manualmente (auxiliar, cuando aun no hay mapeos)
+  const pReportados=reportesByProd[prod.nombre]||0
+
+  // Total pedidos: priorizar mapeos si hay, sino reportados manuales
+  const totalPedidos=totalMapeos>0?totalMapeos:pReportados
+
+  // Si no hay gasto NI pedidos, no mostramos este producto
+  if(gasto===0&&totalPedidos===0)return null
+
+  // Venta por oferta (solo confirmados, con precios reales del producto)
+  const venta=(o1*(prod.precio_1u||0))+(o2*(prod.precio_2u||0))+(o3*(prod.precio_3u||0))+(o4*(prod.precio_4u||0))
+  const costoProv=(o1*(prod.costo_1u||0))+(o2*(prod.costo_2u||0))+(o3*(prod.costo_3u||0))+(o4*(prod.costo_4u||0))
+
+  // Fletes y devoluciones
+  const devPct=prod.dev_pct||0.19
+  const costoFlete=pConf*(prod.flete_outbound||21000)
+  const costoDev=Math.round(pConf*devPct*(prod.flete_devolucion||18000))
+  const ventaEfectiva=Math.round(venta*(1-devPct))
+
+  // Ganancia neta del producto (sin gastos fijos)
+  const gananciaNeta=ventaEfectiva-costoProv-costoFlete-costoDev-gasto
+
+  // Break-even del producto (basado en oferta 2u por defecto)
+  const p2=prod.precio_2u||129900
+  const c2=prod.costo_2u||36000
+  const fo=prod.flete_outbound||21000
+  const fd=prod.flete_devolucion||18000
+  const margenBE=p2*(1-devPct)-c2-fo-(fd*devPct)
+
+  // CPA real
+  const cpaReal=totalPedidos>0?gasto/totalPedidos:0
+
+  // ROAS
+  const roas=gasto>0?venta/gasto:0
+
+  // Estado del semaforo (reglas oficiales NEXO, Opcion A: 45/70/100% del BE)
+  let semCode=''
+  if(gasto===0&&totalPedidos===0)semCode=''
+  else if(cpaReal===0&&totalPedidos===0)semCode='sin_ventas'
+  else if(margenBE<=0)semCode='sin_ventas'
+  else if(cpaReal>margenBE)semCode='stop'
+  else if(cpaReal>margenBE*0.7)semCode='precaucion'
+  else if(cpaReal>margenBE*0.45)semCode='escalar'
+  else semCode='fuego'
+
+  return{
+    producto:prod,
+    nombre:prod.nombre,
+    inicial:(prod.nombre||'?').charAt(0).toUpperCase(),
+    gasto,totalPedidos,pedidosConfirmados:pConf,canc,pend,
+    o1,o2,o3,o4,venta,costoProv,gananciaNeta,
+    cpaReal,margenBE,roas,semCode
+  }
+}
+
+// Renderiza una card colapsable (details/summary) para un producto.
+function _renderProductoCardResumen(data,ranking){
+  if(!data)return''
+
+  const SEM_COLORS={
+    fuego:{bg:'rgba(167,139,250,.08)',color:'var(--purple)',border:'rgba(167,139,250,.3)'},
+    escalar:{bg:'rgba(34,197,94,.08)',color:'var(--green)',border:'rgba(34,197,94,.3)'},
+    precaucion:{bg:'rgba(245,158,11,.08)',color:'var(--amber)',border:'rgba(245,158,11,.3)'},
+    stop:{bg:'rgba(239,68,68,.08)',color:'var(--red)',border:'rgba(239,68,68,.3)'},
+    sin_ventas:{bg:'var(--card2)',color:'var(--muted)',border:'var(--border)'},
+    '':{bg:'var(--card2)',color:'var(--muted)',border:'var(--border)'}
+  }
+  const c=SEM_COLORS[data.semCode]||SEM_COLORS['']
+  const badge=window.nexoBadgeMega(data.semCode,'lg')||''
+
+  // Plata (ganancia o perdida)
+  const plataColor=data.gananciaNeta>=0?'var(--green)':'var(--red)'
+  const plataSign=data.gananciaNeta>=0?'+':'−'
+  const plataAbs=Math.abs(data.gananciaNeta)
+
+  // CPA real con check
+  let cpaIcon='',cpaColor='var(--muted)'
+  if(data.cpaReal>0){
+    if(data.cpaReal>data.margenBE){cpaIcon='✗';cpaColor='var(--red)'}
+    else if(data.cpaReal>data.margenBE*0.7){cpaIcon='⚠';cpaColor='var(--amber)'}
+    else{cpaIcon='✓';cpaColor='var(--green)'}
+  }
+
+  // Porcentaje del BE
+  const pctBE=data.cpaReal>0&&data.margenBE>0?Math.round(data.cpaReal/data.margenBE*100):0
+
+  // ROAS color (verde si >= BE de ROAS, sino rojo)
+  const beRoas=data.margenBE>0?(data.producto.precio_2u||129900)/data.margenBE:0
+  const roasColor=data.roas>0?(data.roas>=beRoas?'var(--green)':'var(--red)'):'var(--muted)'
+
+  return`
+  <details class="rp-card" data-sem-code="${data.semCode}" style="background:${c.bg};border:1px solid ${c.border};border-radius:10px;margin-bottom:8px;overflow:hidden">
+    <summary style="list-style:none;cursor:pointer;padding:14px 16px;display:block;outline:none">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <div style="width:34px;height:34px;border-radius:50%;background:${c.color};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0">${data.inicial}</div>
+        <div style="display:flex;align-items:baseline;gap:10px;flex:1;min-width:0;flex-wrap:wrap">
+          <span style="font-size:17px;font-weight:600;color:${c.color}">${data.nombre}</span>
+          <span style="font-size:10px;padding:2px 8px;background:rgba(255,255,255,.06);border-radius:999px;color:${c.color};font-weight:500">${ranking||'?'}° en ventas</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+          ${badge}
+          <span class="rp-chevron" style="font-size:14px;color:${c.color};opacity:.6">▼</span>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;margin-top:8px;flex-wrap:wrap;padding-left:46px;font-size:13px">
+        <span style="display:inline-flex;align-items:center;gap:4px;font-size:16px;font-weight:600;color:${plataColor}">
+          ${plataSign}$${fmt(plataAbs)}
+        </span>
+        <span style="color:var(--muted)">·</span>
+        <span style="display:inline-flex;align-items:center;gap:4px;color:${cpaColor}" title="Break-even: $${fmt(data.margenBE)} · ${pctBE>0?pctBE+'% del BE':''}">
+          🎯 CPA real $${fmt(data.cpaReal)} ${cpaIcon}
+        </span>
+        ${data.totalPedidos>0?`
+        <span style="color:var(--muted)">·</span>
+        <span style="color:var(--muted)">📦 ${data.totalPedidos} pedidos</span>
+        `:''}
+      </div>
+    </summary>
+    <div style="padding:0 16px 16px;border-top:1px solid ${c.border};margin-top:6px;padding-top:14px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px">
+        <div style="background:rgba(0,0,0,.2);border-radius:8px;padding:11px 12px">
+          <div style="font-size:10px;color:var(--muted);margin-bottom:3px">📦 PEDIDOS</div>
+          <div style="font-size:19px;font-weight:600">${data.totalPedidos}</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:2px">Conf:${data.pedidosConfirmados} · Pend:${data.pend} · Canc:${data.canc}</div>
+        </div>
+        <div style="background:rgba(0,0,0,.2);border-radius:8px;padding:11px 12px">
+          <div style="font-size:10px;color:var(--muted);margin-bottom:3px">💸 GASTO ADS</div>
+          <div style="font-size:19px;font-weight:600">$${fmt(data.gasto)}</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:2px">CPA $${fmt(data.cpaReal)}</div>
+        </div>
+        <div style="background:rgba(0,0,0,.2);border-radius:8px;padding:11px 12px">
+          <div style="font-size:10px;color:var(--muted);margin-bottom:3px">🎯 BREAK-EVEN</div>
+          <div style="font-size:19px;font-weight:600">$${fmt(data.margenBE)}</div>
+          <div style="font-size:10px;color:${cpaColor};margin-top:2px">${pctBE>0?pctBE+'% del BE':'sin pedidos'}</div>
+        </div>
+        <div style="background:rgba(0,0,0,.2);border-radius:8px;padding:11px 12px">
+          <div style="font-size:10px;color:var(--muted);margin-bottom:3px">📊 ROAS</div>
+          <div style="font-size:19px;font-weight:600;color:${roasColor}">${data.roas>0?data.roas.toFixed(2)+'x':'—'}</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:2px">BE: ${beRoas>0?beRoas.toFixed(2)+'x':'—'} · Venta $${fmt(data.venta)}</div>
+        </div>
+      </div>
+      ${(data.o1+data.o2+data.o3+data.o4)>0?`
+      <div style="margin-top:10px;padding:10px 12px;background:rgba(0,0,0,.15);border-radius:8px;font-size:11px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap;align-items:center">
+        <span style="color:var(--text);font-weight:500">Distribución por oferta:</span>
+        <span>1u: <strong style="color:var(--text)">${data.o1}</strong></span>
+        <span>2u: <strong style="color:var(--text)">${data.o2}</strong></span>
+        <span>3u: <strong style="color:var(--text)">${data.o3}</strong></span>
+        <span>4u: <strong style="color:var(--text)">${data.o4}</strong></span>
+      </div>`:''}
+    </div>
+  </details>`
+}
+
+// Pill del strip de urgencia (counts por estado del semaforo).
+function _resumenPillCount(code,n,emoji,label,color,bg,tooltip){
+  const dim=n===0?'opacity:.35;cursor:default':'cursor:pointer'
+  return`<button class="rp-pill-strip" data-code="${code}" title="${tooltip||''}" onclick="resumenProductosFilter('${code}',this)" style="${dim};background:${bg};color:${color};border:1px solid ${color};border-radius:999px;padding:5px 12px;font-size:11px;font-weight:600;display:inline-flex;align-items:center;gap:5px">
+    <span>${emoji}</span>
+    <span>${n} ${label}</span>
+  </button>`
+}
+
+// Filtra las cards del resumen por estado del semaforo (al hacer click en el strip).
+window.resumenProductosFilter=function(code,btn){
+  const cards=document.querySelectorAll('#rp-cards .rp-card')
+  cards.forEach(c=>{
+    if(!code)c.style.display=''
+    else c.style.display=(c.dataset.semCode===code?'':'none')
+  })
+  document.querySelectorAll('.rp-pill-strip').forEach(p=>{
+    p.style.outline=(code&&p.dataset.code===code)?'2px solid currentColor':'none'
+    p.style.outlineOffset='1px'
+  })
+}
+
+// Etiqueta amigable de fecha (Dom 24 may 2026, o rango).
+function _resumenFechaLabel(desde,hasta,hoy){
+  if(!desde||!hasta)return''
+  if(desde===hasta){
+    try{
+      const d=new Date(desde+'T00:00:00')
+      const txt=d.toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long',year:'numeric'})
+      return desde===hoy?(txt+' (Hoy)'):txt
+    }catch(_){return desde}
+  }
+  return desde+' → '+hasta
+}
+
+// Actualiza el resumen en el contenedor de Meta Ads (lee desde/hasta del selector global).
+window._actualizarResumenMetaProductos=async function(){
+  const cont=document.getElementById('meta-resumen-productos')
+  if(!cont)return
+  const desde=document.getElementById('meta-desde')?.value||today()
+  const hasta=document.getElementById('meta-hasta')?.value||today()
+  const hoy=today()
+  cont.innerHTML='<div class="loading" style="padding:20px;text-align:center;color:var(--muted);font-size:13px">Cargando resumen por producto...</div>'
+  try{
+    cont.innerHTML=await _renderResumenProductos(desde,hasta,hoy)||''
+  }catch(e){
+    console.warn('[resumen productos]',e?.message)
+    cont.innerHTML=''
+  }
+}
+
 async function renderMetaPortafolio(el,isAdmin){
   if(!el)return
   const{data:cuentas}=await sb.from('meta_cuentas').select('*').order('nombre')
@@ -9492,6 +9504,10 @@ async function renderMetaPortafolio(el,isAdmin){
     </div>`
   }
 
+  // Resumen por producto (consolidado por producto, ordenado por urgencia, colapsable).
+  // Usa el rango global de Meta Ads (meta-desde / meta-hasta) — se refresca con applyMetaDateRange().
+  html+=`<div id="meta-resumen-productos" style="margin-bottom:16px"><div class="loading" style="padding:20px;text-align:center;color:var(--muted);font-size:13px">Cargando resumen por producto...</div></div>`
+
   // Render accounts as accordions
   for(const cuenta of cuentas){
     const cc=campsByAcc[cuenta.account_id]||{total:0,activas:0}
@@ -9528,6 +9544,9 @@ async function renderMetaPortafolio(el,isAdmin){
 
   el.innerHTML=html
   window._metaFilterState='all'
+
+  // Cargar resumen por producto (en su div placeholder)
+  _actualizarResumenMetaProductos()
 }
 
 window.toggleMetaCuenta=async(accountId,forceReload)=>{
@@ -11111,6 +11130,8 @@ window.applyMetaDateRange=async()=>{
     el.dataset.tienegastohoy=(hasGasto&&hasActive)?'1':'0'
   })
   filterMetaCuentas()
+  // Refrescar resumen por producto cuando cambia el rango
+  if(typeof _actualizarResumenMetaProductos==='function')_actualizarResumenMetaProductos()
 }
 
 // ── META: DETALLE CAMPAÑA ────────────────────────────────

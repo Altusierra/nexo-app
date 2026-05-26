@@ -4586,21 +4586,13 @@ window.saveReporteV2=async(fecha)=>{
   }
   msg.innerHTML=`<div class="alert alert-green">✅ ${saved} producto(s) guardado(s)</div>`
   logAction('reporte_guardado',{fecha,productos:saved}).catch(()=>{})
-  // ── ENTREGA 3B: disparar histórico de semáforos con los ad_ids reportados ──
-  try{
-    const adIdsAfectados=[]
-    for(const row of rows){
-      const idx=row.id.replace('vrow-','')
-      const adIdsStr=document.getElementById(`vi-${idx}`)?.value?.trim()||''
-      if(!adIdsStr)continue
-      const ids=adIdsStr.split(/[,;\s]+/).map(s=>s.trim()).filter(Boolean)
-      adIdsAfectados.push(...ids)
-    }
-    const adIdsUnicos=[...new Set(adIdsAfectados)]
-    if(adIdsUnicos.length){
-      setTimeout(()=>{_calcularYGuardarSemaforos(adIdsUnicos,'reporte_dia').catch(()=>{})},0)
-    }
-  }catch(_){}
+  // ── ENTREGA 3B: snapshot del semáforo DIFERIDO ──
+  // Antes se disparaba aquí _calcularYGuardarSemaforos inmediatamente,
+  // pero el gasto de meta_insights todavía no estaba sincronizado y el
+  // snapshot guardaba datos viejos (gasto parcial, CPA incorrecto, semáforo
+  // del color equivocado). Ahora el snapshot se dispara cuando un admin/trafficker
+  // expande la cuenta en Meta Ads (toggleMetaCuenta), donde sí hay datos frescos
+  // directo de Meta API.
 }
 
 // ── AUXILIAR: PEDIDOS ──────────────────────────────────────
@@ -10132,6 +10124,83 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     campHtml+=sinActividad.map(renderCamp).join('')
   }
   accEl.innerHTML=campHtml
+
+  // ── SNAPSHOT DIFERIDO DEL SEMÁFORO ──────────────────────────
+  // Después de mostrar la cuenta con DATOS EN VIVO de Meta API (gasto fresco),
+  // verificamos si hay reportes_diarios de HOY sin snapshot reciente y disparamos
+  // _calcularYGuardarSemaforos con datos frescos. Solo aplica si:
+  //   - source === 'meta'           → datos fresquitos vía API
+  //   - desde === hoy && hasta === hoy → estamos viendo HOY (no días pasados)
+  //   - existen reportes_diarios de HOY con ad_ids para esta cuenta
+  //   - el último snapshot del semáforo es ANTERIOR al último reporte (evita spam)
+  try{
+    const _esSoloHoyAcc=(desde===hoy&&hasta===hoy)
+    if(source==='meta'&&_esSoloHoyAcc){
+      // Anti-spam: cooldown por cuenta — no disparar más de 1 vez cada 60s
+      const _lastKey='_semSnapLast_'+accountId
+      const _lastTs=Number(window[_lastKey]||0)
+      const _nowTs=Date.now()
+      if(_nowTs-_lastTs>60000){
+        window[_lastKey]=_nowTs
+        // Lanzar en background para no bloquear el render
+        setTimeout(async()=>{
+          try{
+            // 1) Traer reportes de HOY con ad_ids
+            const{data:reportes}=await sb.from('reportes_diarios')
+              .select('ad_ids,updated_at,producto_id,producto_nombre')
+              .eq('fecha',hoy)
+              .not('ad_ids','is',null).neq('ad_ids','')
+              .order('updated_at',{ascending:false})
+            if(!reportes||!reportes.length)return
+            // Dedup por (producto) quedándose con el más reciente
+            const seenP=new Set()
+            const uniqRep=[]
+            for(const r of reportes){
+              const k=r.producto_id||r.producto_nombre
+              if(seenP.has(k))continue
+              seenP.add(k)
+              uniqRep.push(r)
+            }
+            // 2) Sacar todos los ad_ids
+            const adIds=[]
+            let ultimoReporteTs=0
+            for(const r of uniqRep){
+              if(!r.ad_ids)continue
+              const ids=r.ad_ids.split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)
+              adIds.push(...ids)
+              const ts=new Date(r.updated_at).getTime()
+              if(ts>ultimoReporteTs)ultimoReporteTs=ts
+            }
+            const adIdsUnicos=[...new Set(adIds)]
+            if(!adIdsUnicos.length)return
+            // 3) Filtrar a los ads que pertenecen a ESTA cuenta (para no disparar global)
+            const{data:adsCuenta}=await sb.from('meta_campanas')
+              .select('meta_id').eq('account_id',accountId).eq('nivel','ad').in('meta_id',adIdsUnicos)
+            const adsCuentaSet=new Set((adsCuenta||[]).map(a=>a.meta_id))
+            const adIdsFiltrados=adIdsUnicos.filter(id=>adsCuentaSet.has(id))
+            if(!adIdsFiltrados.length){
+              console.log('[SEM-snapshot] Ningún ad reportado pertenece a la cuenta',accountId)
+              return
+            }
+            // 4) Anti-spam: ¿el último snapshot ya es POSTERIOR al último reporte?
+            const{data:ultimoSnap}=await sb.from('semaforo_historial')
+              .select('hora_calculo').eq('account_id',accountId).eq('fecha',hoy)
+              .eq('triggered_by','reporte_dia').order('hora_calculo',{ascending:false}).limit(1)
+            if(ultimoSnap&&ultimoSnap.length){
+              const ultimoSnapTs=new Date(ultimoSnap[0].hora_calculo).getTime()
+              if(ultimoSnapTs>=ultimoReporteTs){
+                console.log('[SEM-snapshot] Ya hay snapshot posterior al último reporte, skip')
+                return
+              }
+            }
+            // 5) Disparar el snapshot con datos frescos
+            console.log('[SEM-snapshot] Disparando snapshot para cuenta',accountId,'con',adIdsFiltrados.length,'ads')
+            await _calcularYGuardarSemaforos(adIdsFiltrados,'reporte_dia')
+          }catch(e){console.warn('[SEM-snapshot] error:',e.message)}
+        },300)
+      }
+    }
+  }catch(_){}
 }
 
 window.filterCampsInAccount=(accountId,filter,btn)=>{

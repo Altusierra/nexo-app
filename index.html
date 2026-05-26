@@ -9926,7 +9926,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   const semaforosByMeta={}
   try{
     const{data:semData}=await sb.from('semaforo_historial')
-      .select('meta_id,nivel,fecha,hora_calculo,semaforo,semaforo_label,cpa_real,ventas,pendientes,gasto,triggered_by,cambio_vs_anterior,semaforo_anterior')
+      .select('meta_id,nivel,fecha,hora_calculo,semaforo,semaforo_label,cpa_real,ventas,pendientes,gasto,triggered_by,cambio_vs_anterior,semaforo_anterior,ventas_efectivas,cpa_real_efectivas')
       .eq('account_id',accountId).gte('fecha',desde).lte('fecha',hasta)
       .order('hora_calculo',{ascending:true})
       .limit(5000)
@@ -10265,6 +10265,9 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
     const adIdsUnicos=[...new Set(adIds.filter(Boolean))]
     if(!adIdsUnicos.length){console.log('[SEM] salida: adIdsUnicos vacío');return}
     const hoy=today()
+    // hora_calculo explícito y único para todo el lote — evita colisiones cuando
+    // se hacen múltiples inserts en menos de un segundo (lleva milisegundos)
+    const _horaAhora=new Date().toISOString()
     // Rango = SOLO HOY: cada snapshot del semáforo refleja qué pasó hoy hasta este momento.
     // Así el "Plata del día" del historial coincide con la realidad del día.
     const desde=hoy
@@ -10422,13 +10425,14 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
         // el siguiente cálculo tendrá gasto y semáforo definitivo.
         sem='pendiente_sync'
         semLabel='⏳ Ventas sin sync de gasto'
-      }else if(triggeredBy==='reporte_dia'){
-        // El auxiliar reportó este anuncio pero todavía no hay mapeos ni gasto sync.
-        // Igual guardamos el registro para tener el timeline de "se reportó a esta hora".
+      }else if(triggeredBy==='reporte_dia'||triggeredBy==='asignador'||triggeredBy==='reservados'||triggeredBy==='cruce_dropi'||triggeredBy==='seguimiento'){
+        // El auxiliar/sistema reportó actividad en este nivel pero todavía no hay datos
+        // (típico en niveles adset/campaign cuando la venta es a nivel ad).
+        // Igual guardamos el registro en TODOS los niveles para tener el timeline en la card de campaña/adset.
         sem='reportado'
         semLabel='📝 Reportado sin datos'
       }else{
-        // sin gasto, sin ventas y no es reporte manual: no insertamos
+        // sin gasto, sin ventas y no es trigger reconocido: no insertamos
         continue
       }
 
@@ -10441,6 +10445,9 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
         nivel:it.nivel,
         account_id:it.account_id,
         fecha:hoy,
+        // hora_calculo explícito desde el cliente para evitar colisiones de timestamp
+        // cuando se hacen múltiples inserts en menos de un segundo
+        hora_calculo:_horaAhora,
         semaforo:sem,
         semaforo_label:semLabel,
         cpa_real:cpaReal,
@@ -10453,7 +10460,10 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
         producto_referencia:prodRef,
         triggered_by:triggeredBy||'manual',
         cambio_vs_anterior:cambio,
-        semaforo_anterior:semAnterior
+        semaforo_anterior:semAnterior,
+        // ── Nuevas columnas: V. Efectivas + CPA Efectivo (guardadas en BD) ──
+        ventas_efectivas:ventasEfectivas,
+        cpa_real_efectivas:cpaRealEfectivas
       })
     }
 
@@ -10549,7 +10559,14 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
     // (antes filtraba solo cambios; ahora cada reporte_dia, asignador, cruce_dropi, etc. cuenta)
     let eventos=sems.slice()
     const seen=new Set()
-    eventos=eventos.filter(s=>{if(seen.has(s.hora_calculo))return false;seen.add(s.hora_calculo);return true})
+    // Dedup permisivo: solo descarta registros 100% idénticos (misma hora + mismo semáforo + mismo gasto + mismas ventas)
+    // Antes filtraba solo por hora_calculo → si 2 inserts caían en el mismo segundo, perdías uno
+    eventos=eventos.filter(s=>{
+      const k=`${s.hora_calculo}|${s.semaforo}|${s.gasto||0}|${(s.ventas||0)+(s.pendientes||0)}`
+      if(seen.has(k))return false
+      seen.add(k)
+      return true
+    })
     // Obtener pctConf del producto de esta meta (para calcular Ventas Efectivas + CPA Efectivo en tooltip)
     let pctConfMeta=0.62
     try{
@@ -10619,10 +10636,15 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
       const cFinal=isPresupuesto
         ?{bg:'var(--amber)',bd:'var(--amber)',cssVar:'var(--amber)'}
         :c
-      // Calcular Ventas Efectivas + CPA Efectivo para este punto (al vuelo)
+      // V. Efectivas y CPA Efectivo: priorizar valores guardados en BD
+      // (registros nuevos), fallback al cálculo al vuelo para data vieja sin estas columnas
       const ventasPunto=(s.ventas||0)+(s.pendientes||0)
-      const vEfectPunto=ventasPunto*pctConfMeta
-      const cpaEfectPunto=vEfectPunto>0&&s.gasto>0?s.gasto/vEfectPunto:0
+      const vEfectPunto=(s.ventas_efectivas!=null&&!isNaN(s.ventas_efectivas))
+        ?Number(s.ventas_efectivas)
+        :(ventasPunto*pctConfMeta)
+      const cpaEfectPunto=(s.cpa_real_efectivas!=null&&!isNaN(s.cpa_real_efectivas)&&Number(s.cpa_real_efectivas)>0)
+        ?Number(s.cpa_real_efectivas)
+        :(vEfectPunto>0&&s.gasto>0?s.gasto/vEfectPunto:0)
       const fuenteLbl=FUENTE_LABEL[s.triggered_by]||s.triggered_by||'manual'
       // Tooltip enriquecido (multilínea con saltos reales)
       const tooltip=isPresupuesto

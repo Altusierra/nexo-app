@@ -10133,90 +10133,6 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   }
   accEl.innerHTML=campHtml
 
-  // ── UPDATE DIFERIDO DE PUNTOS DEL SEMÁFORO ──────────────────
-  // Cuando el aux sube reporte → se INSERTA un punto con datos parciales (gasto desactualizado).
-  // Cuando un admin/trafficker expande la cuenta → aquí ya hay datos FRESCOS de Meta API.
-  // En lugar de crear punto nuevo, REEMPLAZAMOS el último punto del día con triggered_by='reporte_dia'
-  // que aún no haya sido refrescado, comparando hora_calculo del punto vs updated_at del reporte.
-  //   - Si hora_calculo > updated_at del último reporte → ya está fresco, skip
-  //   - Si hora_calculo < updated_at → UPDATE con datos frescos (gasto, cpa, semáforo, etc.)
-  // Solo aplica si:
-  //   - source === 'meta'           → datos fresquitos vía API
-  //   - desde === hoy && hasta === hoy → estamos viendo HOY
-  try{
-    const _esSoloHoyAcc=(desde===hoy&&hasta===hoy)
-    if(source==='meta'&&_esSoloHoyAcc){
-      // Anti-spam: cooldown 60s por cuenta (evita re-procesar en clicks repetidos)
-      const _lastKey='_semSnapLast_'+accountId
-      const _lastTs=Number(window[_lastKey]||0)
-      const _nowTs=Date.now()
-      if(_nowTs-_lastTs>60000){
-        window[_lastKey]=_nowTs
-        setTimeout(async()=>{
-          try{
-            // 1) Traer reportes de HOY con ad_ids
-            const{data:reportes}=await sb.from('reportes_diarios')
-              .select('ad_ids,updated_at,producto_id,producto_nombre')
-              .eq('fecha',hoy)
-              .not('ad_ids','is',null).neq('ad_ids','')
-              .order('updated_at',{ascending:false})
-            if(!reportes||!reportes.length)return
-            // Dedup por producto (más reciente)
-            const seenP=new Set()
-            const uniqRep=[]
-            for(const r of reportes){
-              const k=r.producto_id||r.producto_nombre
-              if(seenP.has(k))continue
-              seenP.add(k)
-              uniqRep.push(r)
-            }
-            // 2) Sacar todos los ad_ids + el updated_at más reciente
-            const adIds=[]
-            let ultimoReporteTs=0
-            for(const r of uniqRep){
-              if(!r.ad_ids)continue
-              const ids=r.ad_ids.split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)
-              adIds.push(...ids)
-              const ts=new Date(r.updated_at).getTime()
-              if(ts>ultimoReporteTs)ultimoReporteTs=ts
-            }
-            const adIdsUnicos=[...new Set(adIds)]
-            if(!adIdsUnicos.length)return
-            // 3) Filtrar a los ads que pertenecen a ESTA cuenta
-            const{data:adsCuenta}=await sb.from('meta_campanas')
-              .select('meta_id').eq('account_id',accountId).eq('nivel','ad').in('meta_id',adIdsUnicos)
-            const adsCuentaSet=new Set((adsCuenta||[]).map(a=>a.meta_id))
-            const adIdsFiltrados=adIdsUnicos.filter(id=>adsCuentaSet.has(id))
-            if(!adIdsFiltrados.length){
-              console.log('[SEM-update] Ningún ad reportado pertenece a la cuenta',accountId)
-              return
-            }
-            // 4) Verificar si el último punto de reporte_dia ya está fresco
-            // (hora_calculo del punto vs updated_at del último reporte)
-            const{data:ultimoSnap}=await sb.from('semaforo_historial')
-              .select('hora_calculo').eq('account_id',accountId).eq('fecha',hoy)
-              .eq('triggered_by','reporte_dia').order('hora_calculo',{ascending:false}).limit(1)
-            if(ultimoSnap&&ultimoSnap.length){
-              const ultimoSnapTs=new Date(ultimoSnap[0].hora_calculo).getTime()
-              if(ultimoSnapTs>ultimoReporteTs){
-                console.log('[SEM-update] Último punto ya está fresco, skip')
-                return
-              }
-            }
-            // 5) Llamar _calcularYGuardarSemaforos en modo UPDATE
-            // (la función calcula con datos frescos y marca _updateInsteadOfInsert)
-            console.log('[SEM-update] Refrescando puntos del último reporte con datos frescos para cuenta',accountId,'·',adIdsFiltrados.length,'ads')
-            window._semUpdateMode=true
-            try{
-              await _calcularYGuardarSemaforos(adIdsFiltrados,'reporte_dia')
-            }finally{
-              window._semUpdateMode=false
-            }
-          }catch(e){console.warn('[SEM-update] error:',e.message)}
-        },300)
-      }
-    }
-  }catch(_){}
 }
 
 window.filterCampsInAccount=(accountId,filter,btn)=>{
@@ -10595,46 +10511,32 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
     console.log('[SEM] registros a insertar:',registros.length,registros)
     if(!registros.length){console.log('[SEM] salida: 0 registros tras filtros');return}
 
-    // ── MODO UPDATE (disparado desde toggleMetaCuenta con datos frescos) ──
-    // En vez de INSERT nuevo punto, REEMPLAZA el último punto de hoy con triggered_by='reporte_dia'
-    // para cada meta_id. Así no se duplican puntos cuando entras a Meta Ads después del aux.
-    if(window._semUpdateMode===true&&triggeredBy==='reporte_dia'){
-      console.log('[SEM] MODO UPDATE: reemplazando últimos puntos en vez de insertar nuevos')
-      let updated=0,inserted=0
-      for(const reg of registros){
-        try{
-          // Buscar último punto de HOY para este meta_id con triggered_by='reporte_dia'
-          const{data:ultimo}=await sb.from('semaforo_historial')
-            .select('id,hora_calculo')
-            .eq('meta_id',reg.meta_id).eq('fecha',hoy).eq('triggered_by','reporte_dia')
-            .order('hora_calculo',{ascending:false}).limit(1)
-          if(ultimo&&ultimo.length){
-            // UPDATE el último punto (mantiene id, fecha, triggered_by; refresca todo lo demás)
-            const{error:uErr}=await sb.from('semaforo_historial').update({
-              semaforo:reg.semaforo,
-              semaforo_label:reg.semaforo_label,
-              cpa_real:reg.cpa_real,
-              ventas:reg.ventas,
-              canceladas:reg.canceladas,
-              pendientes:reg.pendientes,
-              gasto:reg.gasto,
-              conv_meta:reg.conv_meta,
-              margenbe_referencia:reg.margenbe_referencia,
-              ventas_efectivas:reg.ventas_efectivas,
-              cpa_real_efectivas:reg.cpa_real_efectivas,
-              hora_calculo:reg.hora_calculo
-            }).eq('id',ultimo[0].id)
-            if(uErr){console.warn('[SEM-upd] update falló para',reg.meta_id,':',uErr.message)}
-            else updated++
-          }else{
-            // No hay punto previo → INSERT normal
-            const{error:iErr}=await sb.from('semaforo_historial').insert(reg)
-            if(iErr){console.warn('[SEM-upd] insert (sin previo) falló:',iErr.message)}
-            else inserted++
-          }
-        }catch(e){console.warn('[SEM-upd] excepción por registro:',e.message)}
+    // ── MODO REFRESH SINGLE (disparado desde botón "🔄 Refrescar") ──
+    // UPDATE puntual del registro indicado en window._semRefreshOne. NO crea
+    // puntos nuevos ni toca otros niveles. Solo el meta_id del botón apretado.
+    if(window._semRefreshOne&&window._semRefreshOne.metaId&&window._semRefreshOne.puntoId){
+      const target=window._semRefreshOne
+      const reg=registros.find(r=>r.meta_id===target.metaId)
+      if(!reg){
+        console.warn('[SEM-refresh] no se encontró registro recalculado para',target.metaId)
+        return
       }
-      console.log(`[SEM] ✅ UPDATE: ${updated} refrescados, ${inserted} nuevos`)
+      const{error:uErr}=await sb.from('semaforo_historial').update({
+        semaforo:reg.semaforo,
+        semaforo_label:reg.semaforo_label,
+        cpa_real:reg.cpa_real,
+        ventas:reg.ventas,
+        canceladas:reg.canceladas,
+        pendientes:reg.pendientes,
+        gasto:reg.gasto,
+        conv_meta:reg.conv_meta,
+        margenbe_referencia:reg.margenbe_referencia,
+        ventas_efectivas:reg.ventas_efectivas,
+        cpa_real_efectivas:reg.cpa_real_efectivas,
+        hora_calculo:reg.hora_calculo
+      }).eq('id',target.puntoId)
+      if(uErr)console.warn('[SEM-refresh] update falló:',uErr.message)
+      else console.log('[SEM-refresh] ✅ punto',target.puntoId,'actualizado para',target.metaId)
       return
     }
 
@@ -10845,15 +10747,106 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
     const footerTxt=esCruceDropi
       ?`<span style="color:${colorUltimo.cssVar};font-weight:600">★ Final (Dropi):</span> ${ultimo.semaforo_label||ultimo.semaforo} · CPA $${fmt(ultimo.cpa_real||0)}`
       :`Actual: <span style="color:${colorUltimo.cssVar};font-weight:600">${ultimo.semaforo_label||ultimo.semaforo}</span> · sin Dropi`
+    // ── Botón "🔄 Refrescar" ──
+    // Solo visible si:
+    // - El último punto es de HOY
+    // - triggered_by === 'reporte_dia' (no toca cruce Dropi ni cambio_presupuesto)
+    // - No es _esVivo (punto virtual del badge)
+    const _hoyStr=today()
+    const _ultimoEsHoy=ultimo.fecha===_hoyStr||(ultimo.hora_calculo&&new Date(ultimo.hora_calculo).toLocaleDateString('en-CA',{timeZone:'America/Bogota'})===_hoyStr)
+    const _puedeRefrescar=_ultimoEsHoy&&ultimo.triggered_by==='reporte_dia'&&!ultimo._esVivo
+    const btnRefrescar=_puedeRefrescar
+      ?`<button class="btn-sm" onclick="event.stopPropagation();refrescarUltimoSemaforo('${metaId}','${nivel}',this)" title="Refrescar el último punto con datos frescos de Meta API" style="padding:2px 7px;font-size:9px;background:transparent;border:1px solid var(--purple);color:var(--purple);border-radius:5px;cursor:pointer">🔄 Refrescar</button>`
+      :''
     return`<div style="margin-top:4px;background:var(--card2);border-radius:5px;padding:6px 10px;border-left:2px solid ${colorUltimo.cssVar}">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;flex-wrap:wrap;gap:6px">
         <span style="font-size:10px;color:var(--muted)">🚦 <strong style="color:var(--text);font-weight:600">Hoy</strong>${cambios>0?` · ${cambios} cambio${cambios>1?'s':''}`:' · sin cambios'}</span>
-        <button class="btn-sm" onclick="event.stopPropagation();verHistorialSemaforos('${metaId}','${nivel}')" style="padding:2px 7px;font-size:9px;background:transparent;border:1px solid ${colorUltimo.cssVar};color:${colorUltimo.cssVar};border-radius:5px;cursor:pointer">📊 Historial</button>
+        <div style="display:flex;gap:4px;align-items:center">
+          ${btnRefrescar}
+          <button class="btn-sm" onclick="event.stopPropagation();verHistorialSemaforos('${metaId}','${nivel}')" style="padding:2px 7px;font-size:9px;background:transparent;border:1px solid ${colorUltimo.cssVar};color:${colorUltimo.cssVar};border-radius:5px;cursor:pointer">📊 Historial</button>
+        </div>
       </div>
       <div style="display:flex;align-items:flex-start;gap:0;padding:2px 0">${tiraHtml}</div>
       <div style="font-size:9px;color:var(--muted);text-align:center;margin-top:4px;line-height:1.3">${footerTxt}</div>
     </div>`
   }catch(e){console.warn('[SEM] render block failed:',e.message);return ''}
+}
+
+// ─────────────────────────────────────────────────────────────
+// REFRESCAR ÚLTIMO PUNTO DEL SEMÁFORO (botón manual)
+// Recalcula con datos frescos y hace UPDATE solo al último punto del día
+// para este meta_id. NO toca puntos anteriores (historial intocable).
+// Reglas:
+//   - Solo si el último punto es triggered_by='reporte_dia' (no cruce Dropi)
+//   - Solo si el último punto es de HOY
+//   - Solo afecta el meta_id de la card que se aprieta
+// ─────────────────────────────────────────────────────────────
+window.refrescarUltimoSemaforo=async(metaId,nivel,btnEl)=>{
+  if(!metaId)return
+  const origHtml=btnEl?btnEl.innerHTML:''
+  try{
+    if(btnEl){btnEl.disabled=true;btnEl.innerHTML='⏳ Refrescando...'}
+    const hoy=today()
+    // 1) Buscar el último punto de HOY para este meta_id con triggered_by='reporte_dia'
+    const{data:ultimoArr}=await sb.from('semaforo_historial')
+      .select('id,hora_calculo,fecha,account_id,nivel,triggered_by')
+      .eq('meta_id',metaId).eq('fecha',hoy).eq('triggered_by','reporte_dia')
+      .order('hora_calculo',{ascending:false}).limit(1)
+    if(!ultimoArr||!ultimoArr.length){
+      console.warn('[SEM-refresh] No hay punto reporte_dia hoy para',metaId)
+      if(btnEl){btnEl.innerHTML='❌ Sin punto';setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.disabled=false},2000)}
+      return
+    }
+    const ultimo=ultimoArr[0]
+    // 2) Recolectar los ad_ids de los reportes de HOY que pertenecen a esta cuenta
+    const{data:reportes}=await sb.from('reportes_diarios')
+      .select('ad_ids,updated_at,producto_id,producto_nombre')
+      .eq('fecha',hoy).not('ad_ids','is',null).neq('ad_ids','')
+      .order('updated_at',{ascending:false})
+    if(!reportes||!reportes.length){
+      console.warn('[SEM-refresh] No hay reportes de hoy')
+      if(btnEl){btnEl.innerHTML='❌ Sin reportes';setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.disabled=false},2000)}
+      return
+    }
+    // Dedup por producto (más reciente)
+    const seen=new Set(),uniqRep=[]
+    for(const r of reportes){
+      const k=r.producto_id||r.producto_nombre
+      if(seen.has(k))continue
+      seen.add(k);uniqRep.push(r)
+    }
+    const adIds=[]
+    for(const r of uniqRep){
+      if(!r.ad_ids)continue
+      const ids=r.ad_ids.split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)
+      adIds.push(...ids)
+    }
+    const adIdsUnicos=[...new Set(adIds)]
+    if(!adIdsUnicos.length){
+      if(btnEl){btnEl.innerHTML='❌ Sin ad_ids';setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.disabled=false},2000)}
+      return
+    }
+    // 3) Activar el modo "refresh único" → en lugar de INSERT lote, UPDATE solo este punto
+    window._semRefreshOne={metaId,puntoId:ultimo.id}
+    try{
+      await _calcularYGuardarSemaforos(adIdsUnicos,'reporte_dia')
+    }finally{
+      window._semRefreshOne=null
+    }
+    if(btnEl){
+      btnEl.innerHTML='✅ Refrescado'
+      setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.disabled=false},1800)
+    }
+    // Refrescar la cuenta visualmente (volver a leer historial)
+    const accCard=btnEl?btnEl.closest('[id^="meta-acc-"]'):null
+    if(accCard){
+      const accId=accCard.id.replace('meta-acc-','')
+      setTimeout(()=>{if(window.toggleMetaCuenta)window.toggleMetaCuenta(accId,true)},400)
+    }
+  }catch(e){
+    console.warn('[SEM-refresh] error:',e.message)
+    if(btnEl){btnEl.innerHTML='❌ Error';setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.disabled=false},2000)}
+  }
 }
 
 // Modal de historial detallado del semáforo: timeline visual con lenguaje

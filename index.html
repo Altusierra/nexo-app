@@ -10363,6 +10363,39 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
     const mapeosByAd={}
     for(const m of mapeosHoy){if(!mapeosByAd[m.ad_id])mapeosByAd[m.ad_id]=[];mapeosByAd[m.ad_id].push(m)}
 
+    // 4b. ── FIX SNAPSHOT: leer también reportes_diarios para contar ad_ids del aux ──
+    // Cuando el aux sube un reporte, los ad_ids quedan en reportes_diarios pero
+    // los mapeos formales SOLO se crean tras el cruce Dropi (al día siguiente).
+    // Si no leemos esto, el snapshot guarda "0 ventas" aunque haya 6 ad_ids reportados.
+    // Regla del usuario: ad_ids reportados de HOY se cuentan como VENTAS (no pendientes).
+    // Dedup: si hay múltiples reportes mismo (fecha+producto), usar el más reciente.
+    const ventasReportadasByAd={}
+    if(todosAdHijos.length){
+      try{
+        const adIdSet=new Set(todosAdHijos)
+        const{data:reportes}=await sb.from('reportes_diarios')
+          .select('ad_ids,fecha,producto_id,producto_nombre,updated_at')
+          .gte('fecha',desde).lte('fecha',hasta)
+          .not('ad_ids','is',null).neq('ad_ids','')
+          .order('updated_at',{ascending:false})
+        if(reportes?.length){
+          const seen=new Set()
+          for(const rep of reportes){
+            const key=rep.fecha+'|'+(rep.producto_id||rep.producto_nombre)
+            if(seen.has(key))continue
+            seen.add(key)
+            if(!rep.ad_ids)continue
+            const ids=rep.ad_ids.split(/[\n,]+/).map(s=>s.trim()).filter(s=>s.length>5)
+            for(const aId of ids){
+              if(!adIdSet.has(aId))continue
+              ventasReportadasByAd[aId]=(ventasReportadasByAd[aId]||0)+1
+            }
+          }
+        }
+      }catch(e){console.warn('[SEM] error reportes_diarios:',e.message)}
+    }
+    console.log('[SEM] ventas reportadas por ad:',Object.keys(ventasReportadasByAd).length,'ads con reportes')
+
     // 5. Traer último registro de hoy por meta_id (para detectar cambios)
     let ultimosByMeta={}
     if(todosMetaIds.length){
@@ -10385,13 +10418,20 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
       let ventas=0,canceladas=0,pendientes=0
       for(const adId of it.adIds){
         const ms=mapeosByAd[adId]||[]
-        for(const m of ms){
-          // Si el mapeo es de HOY, cuenta como pendiente (aún no procesado por Dropi)
-          if(m.fecha===hoy){pendientes++;continue}
-          const cat=(typeof DROPI_STATUS!=='undefined'&&DROPI_STATUS[m.estado_final])?DROPI_STATUS[m.estado_final].cat:'otro'
-          if(cat==='cancelado')canceladas++
-          else if(cat==='pendiente'||!m.estado_final)pendientes++
-          else ventas++
+        // Si hay mapeos formales (cruce Dropi ya hecho), usarlos
+        if(ms.length){
+          for(const m of ms){
+            // Si el mapeo es de HOY, cuenta como pendiente (aún no procesado por Dropi)
+            if(m.fecha===hoy){pendientes++;continue}
+            const cat=(typeof DROPI_STATUS!=='undefined'&&DROPI_STATUS[m.estado_final])?DROPI_STATUS[m.estado_final].cat:'otro'
+            if(cat==='cancelado')canceladas++
+            else if(cat==='pendiente'||!m.estado_final)pendientes++
+            else ventas++
+          }
+        }else{
+          // Si NO hay mapeos pero SÍ hay reportes_diarios, contar como ventas (regla usuario)
+          const vRep=ventasReportadasByAd[adId]||0
+          ventas+=vRep
         }
       }
       // Mismo cálculo de "ventas reales" que renderCamp: ventas confirmadas + pendientes del día

@@ -4586,13 +4586,21 @@ window.saveReporteV2=async(fecha)=>{
   }
   msg.innerHTML=`<div class="alert alert-green">✅ ${saved} producto(s) guardado(s)</div>`
   logAction('reporte_guardado',{fecha,productos:saved}).catch(()=>{})
-  // ── ENTREGA 3B: snapshot del semáforo DIFERIDO ──
-  // Antes se disparaba aquí _calcularYGuardarSemaforos inmediatamente,
-  // pero el gasto de meta_insights todavía no estaba sincronizado y el
-  // snapshot guardaba datos viejos (gasto parcial, CPA incorrecto, semáforo
-  // del color equivocado). Ahora el snapshot se dispara cuando un admin/trafficker
-  // expande la cuenta en Meta Ads (toggleMetaCuenta), donde sí hay datos frescos
-  // directo de Meta API.
+  // ── ENTREGA 3B: disparar histórico de semáforos con los ad_ids reportados ──
+  try{
+    const adIdsAfectados=[]
+    for(const row of rows){
+      const idx=row.id.replace('vrow-','')
+      const adIdsStr=document.getElementById(`vi-${idx}`)?.value?.trim()||''
+      if(!adIdsStr)continue
+      const ids=adIdsStr.split(/[,;\s]+/).map(s=>s.trim()).filter(Boolean)
+      adIdsAfectados.push(...ids)
+    }
+    const adIdsUnicos=[...new Set(adIdsAfectados)]
+    if(adIdsUnicos.length){
+      setTimeout(()=>{_calcularYGuardarSemaforos(adIdsUnicos,'reporte_dia').catch(()=>{})},0)
+    }
+  }catch(_){}
 }
 
 // ── AUXILIAR: PEDIDOS ──────────────────────────────────────
@@ -10125,24 +10133,25 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   }
   accEl.innerHTML=campHtml
 
-  // ── SNAPSHOT DIFERIDO DEL SEMÁFORO ──────────────────────────
-  // Después de mostrar la cuenta con DATOS EN VIVO de Meta API (gasto fresco),
-  // verificamos si hay reportes_diarios de HOY sin snapshot reciente y disparamos
-  // _calcularYGuardarSemaforos con datos frescos. Solo aplica si:
+  // ── UPDATE DIFERIDO DE PUNTOS DEL SEMÁFORO ──────────────────
+  // Cuando el aux sube reporte → se INSERTA un punto con datos parciales (gasto desactualizado).
+  // Cuando un admin/trafficker expande la cuenta → aquí ya hay datos FRESCOS de Meta API.
+  // En lugar de crear punto nuevo, REEMPLAZAMOS el último punto del día con triggered_by='reporte_dia'
+  // que aún no haya sido refrescado, comparando hora_calculo del punto vs updated_at del reporte.
+  //   - Si hora_calculo > updated_at del último reporte → ya está fresco, skip
+  //   - Si hora_calculo < updated_at → UPDATE con datos frescos (gasto, cpa, semáforo, etc.)
+  // Solo aplica si:
   //   - source === 'meta'           → datos fresquitos vía API
-  //   - desde === hoy && hasta === hoy → estamos viendo HOY (no días pasados)
-  //   - existen reportes_diarios de HOY con ad_ids para esta cuenta
-  //   - el último snapshot del semáforo es ANTERIOR al último reporte (evita spam)
+  //   - desde === hoy && hasta === hoy → estamos viendo HOY
   try{
     const _esSoloHoyAcc=(desde===hoy&&hasta===hoy)
     if(source==='meta'&&_esSoloHoyAcc){
-      // Anti-spam: cooldown por cuenta — no disparar más de 1 vez cada 60s
+      // Anti-spam: cooldown 60s por cuenta (evita re-procesar en clicks repetidos)
       const _lastKey='_semSnapLast_'+accountId
       const _lastTs=Number(window[_lastKey]||0)
       const _nowTs=Date.now()
       if(_nowTs-_lastTs>60000){
         window[_lastKey]=_nowTs
-        // Lanzar en background para no bloquear el render
         setTimeout(async()=>{
           try{
             // 1) Traer reportes de HOY con ad_ids
@@ -10152,7 +10161,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
               .not('ad_ids','is',null).neq('ad_ids','')
               .order('updated_at',{ascending:false})
             if(!reportes||!reportes.length)return
-            // Dedup por (producto) quedándose con el más reciente
+            // Dedup por producto (más reciente)
             const seenP=new Set()
             const uniqRep=[]
             for(const r of reportes){
@@ -10161,7 +10170,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
               seenP.add(k)
               uniqRep.push(r)
             }
-            // 2) Sacar todos los ad_ids
+            // 2) Sacar todos los ad_ids + el updated_at más reciente
             const adIds=[]
             let ultimoReporteTs=0
             for(const r of uniqRep){
@@ -10173,30 +10182,37 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
             }
             const adIdsUnicos=[...new Set(adIds)]
             if(!adIdsUnicos.length)return
-            // 3) Filtrar a los ads que pertenecen a ESTA cuenta (para no disparar global)
+            // 3) Filtrar a los ads que pertenecen a ESTA cuenta
             const{data:adsCuenta}=await sb.from('meta_campanas')
               .select('meta_id').eq('account_id',accountId).eq('nivel','ad').in('meta_id',adIdsUnicos)
             const adsCuentaSet=new Set((adsCuenta||[]).map(a=>a.meta_id))
             const adIdsFiltrados=adIdsUnicos.filter(id=>adsCuentaSet.has(id))
             if(!adIdsFiltrados.length){
-              console.log('[SEM-snapshot] Ningún ad reportado pertenece a la cuenta',accountId)
+              console.log('[SEM-update] Ningún ad reportado pertenece a la cuenta',accountId)
               return
             }
-            // 4) Anti-spam: ¿el último snapshot ya es POSTERIOR al último reporte?
+            // 4) Verificar si el último punto de reporte_dia ya está fresco
+            // (hora_calculo del punto vs updated_at del último reporte)
             const{data:ultimoSnap}=await sb.from('semaforo_historial')
               .select('hora_calculo').eq('account_id',accountId).eq('fecha',hoy)
               .eq('triggered_by','reporte_dia').order('hora_calculo',{ascending:false}).limit(1)
             if(ultimoSnap&&ultimoSnap.length){
               const ultimoSnapTs=new Date(ultimoSnap[0].hora_calculo).getTime()
-              if(ultimoSnapTs>=ultimoReporteTs){
-                console.log('[SEM-snapshot] Ya hay snapshot posterior al último reporte, skip')
+              if(ultimoSnapTs>ultimoReporteTs){
+                console.log('[SEM-update] Último punto ya está fresco, skip')
                 return
               }
             }
-            // 5) Disparar el snapshot con datos frescos
-            console.log('[SEM-snapshot] Disparando snapshot para cuenta',accountId,'con',adIdsFiltrados.length,'ads')
-            await _calcularYGuardarSemaforos(adIdsFiltrados,'reporte_dia')
-          }catch(e){console.warn('[SEM-snapshot] error:',e.message)}
+            // 5) Llamar _calcularYGuardarSemaforos en modo UPDATE
+            // (la función calcula con datos frescos y marca _updateInsteadOfInsert)
+            console.log('[SEM-update] Refrescando puntos del último reporte con datos frescos para cuenta',accountId,'·',adIdsFiltrados.length,'ads')
+            window._semUpdateMode=true
+            try{
+              await _calcularYGuardarSemaforos(adIdsFiltrados,'reporte_dia')
+            }finally{
+              window._semUpdateMode=false
+            }
+          }catch(e){console.warn('[SEM-update] error:',e.message)}
         },300)
       }
     }
@@ -10578,6 +10594,50 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
 
     console.log('[SEM] registros a insertar:',registros.length,registros)
     if(!registros.length){console.log('[SEM] salida: 0 registros tras filtros');return}
+
+    // ── MODO UPDATE (disparado desde toggleMetaCuenta con datos frescos) ──
+    // En vez de INSERT nuevo punto, REEMPLAZA el último punto de hoy con triggered_by='reporte_dia'
+    // para cada meta_id. Así no se duplican puntos cuando entras a Meta Ads después del aux.
+    if(window._semUpdateMode===true&&triggeredBy==='reporte_dia'){
+      console.log('[SEM] MODO UPDATE: reemplazando últimos puntos en vez de insertar nuevos')
+      let updated=0,inserted=0
+      for(const reg of registros){
+        try{
+          // Buscar último punto de HOY para este meta_id con triggered_by='reporte_dia'
+          const{data:ultimo}=await sb.from('semaforo_historial')
+            .select('id,hora_calculo')
+            .eq('meta_id',reg.meta_id).eq('fecha',hoy).eq('triggered_by','reporte_dia')
+            .order('hora_calculo',{ascending:false}).limit(1)
+          if(ultimo&&ultimo.length){
+            // UPDATE el último punto (mantiene id, fecha, triggered_by; refresca todo lo demás)
+            const{error:uErr}=await sb.from('semaforo_historial').update({
+              semaforo:reg.semaforo,
+              semaforo_label:reg.semaforo_label,
+              cpa_real:reg.cpa_real,
+              ventas:reg.ventas,
+              canceladas:reg.canceladas,
+              pendientes:reg.pendientes,
+              gasto:reg.gasto,
+              conv_meta:reg.conv_meta,
+              margenbe_referencia:reg.margenbe_referencia,
+              ventas_efectivas:reg.ventas_efectivas,
+              cpa_real_efectivas:reg.cpa_real_efectivas,
+              hora_calculo:reg.hora_calculo
+            }).eq('id',ultimo[0].id)
+            if(uErr){console.warn('[SEM-upd] update falló para',reg.meta_id,':',uErr.message)}
+            else updated++
+          }else{
+            // No hay punto previo → INSERT normal
+            const{error:iErr}=await sb.from('semaforo_historial').insert(reg)
+            if(iErr){console.warn('[SEM-upd] insert (sin previo) falló:',iErr.message)}
+            else inserted++
+          }
+        }catch(e){console.warn('[SEM-upd] excepción por registro:',e.message)}
+      }
+      console.log(`[SEM] ✅ UPDATE: ${updated} refrescados, ${inserted} nuevos`)
+      return
+    }
+
     const{error}=await sb.from('semaforo_historial').insert(registros)
     if(error){console.warn('[SEM] inserción falló:',error.message,error);console.warn('[semaforo_historial] inserción falló:',error.message)}
     else{console.log('[SEM] ✅ insertados',registros.length,'registros')}

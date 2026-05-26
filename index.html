@@ -10243,7 +10243,8 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
       const _fd=p.flete_devolucion||18000
       const _dp=p.dev_pct||0.19
       const _mBE=_p2*(1-_dp)-_c2-_fo-(_fd*_dp)
-      return{margenBE:_mBE,nombre:p.nombre||null,p2:_p2,esFallback:!campToProd[campId]}
+      const _pctConf=(p.pct_confirmacion!=null&&!isNaN(p.pct_confirmacion))?Number(p.pct_confirmacion):0.62
+      return{margenBE:_mBE,nombre:p.nombre||null,p2:_p2,esFallback:!campToProd[campId],pctConf:_pctConf}
     }
 
     // 2. Reunir cálculos a hacer (nivel ad, adset, campaign)
@@ -10338,13 +10339,21 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
       const margenBE=ctxCamp.margenBE
       const prodRef=ctxCamp.esFallback?null:ctxCamp.nombre
 
+      // ── Ventas Efectivas y CPA Efectivo (mismo criterio que renderCamp) ──
+      // Esta función solo se llama para HOY → siempre aplica pct_confirmacion
+      const pctConf=ctxCamp.pctConf!=null?ctxCamp.pctConf:0.62
+      const ventasEfectivas=ventasReales*pctConf
+      const cpaRealEfectivas=ventasEfectivas>0&&gasto>0?gasto/ventasEfectivas:0
+      // El semáforo se clasifica con CPA Efectivo (consistencia con el badge en vivo)
+      const cpaParaSemaforo=cpaRealEfectivas
+
       // Semáforo (mismas 5 reglas que renderCamp + pendiente_sync + reportado)
       let sem='sin_ventas',semLabel='⏳ Sin ventas'
       if(gasto>0){
-        if(cpaReal===0&&ventasReales===0){sem='sin_ventas';semLabel='⏳ Sin ventas'}
-        else if(margenBE&&cpaReal>margenBE){sem='stop';semLabel='🔴 STOP'}
-        else if(margenBE&&cpaReal>margenBE*0.7){sem='precaucion';semLabel='🟡 Precaución'}
-        else if(margenBE&&cpaReal>margenBE*0.45){sem='escalar';semLabel='🟢 Escalar'}
+        if(cpaParaSemaforo===0&&ventasReales===0){sem='sin_ventas';semLabel='⏳ Sin ventas'}
+        else if(margenBE&&cpaParaSemaforo>margenBE){sem='stop';semLabel='🔴 STOP'}
+        else if(margenBE&&cpaParaSemaforo>margenBE*0.7){sem='precaucion';semLabel='🟡 Precaución'}
+        else if(margenBE&&cpaParaSemaforo>margenBE*0.45){sem='escalar';semLabel='🟢 Escalar'}
         else if(margenBE){sem='fuego';semLabel='🟣 Fuego'}
       }else if(ventasReales>0){
         // Hay ventas reportadas pero el gasto de Meta aún no se sincronizó.
@@ -10475,10 +10484,20 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
     const sems=semsRaw.filter(s=>s.hora_calculo&&_localDay(s.hora_calculo)===_hoyLocal)
     if(!sems.length&&!vivoData)return ''
     const COLOR_MAP=window._semColorMap
-    // Mostrar solo: el primero del día + todos los cambios reales + cambio_presupuesto + el último siempre
-    let eventos=sems.filter((s,i)=>i===0||s.cambio_vs_anterior||s.triggered_by==='cambio_presupuesto'||i===sems.length-1)
+    // Mostrar TODOS los registros del día — cada subida de ventas del aux es un punto
+    // (antes filtraba solo cambios; ahora cada reporte_dia, asignador, cruce_dropi, etc. cuenta)
+    let eventos=sems.slice()
     const seen=new Set()
     eventos=eventos.filter(s=>{if(seen.has(s.hora_calculo))return false;seen.add(s.hora_calculo);return true})
+    // Obtener pctConf del producto de esta meta (para calcular Ventas Efectivas + CPA Efectivo en tooltip)
+    let pctConfMeta=0.62
+    try{
+      const port=window._metaPort||{}
+      const cTP=port.campToProd||{}
+      // Si es campaña → buscar directo. Si es adset/ad → su parent_id (no siempre en cache, fallback 0.62)
+      const p=cTP[metaId]
+      if(p&&p.pct_confirmacion!=null)pctConfMeta=Number(p.pct_confirmacion)
+    }catch(_){}
     // SINCRONIZACIÓN BADGE ↔ TIRA: si tenemos vivoData y el último estado de la
     // tira difiere del calculado en vivo (badge), sobrescribir el último punto.
     if(vivoData&&vivoData.sem){
@@ -10515,6 +10534,17 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
     }
     if(!eventos.length)return ''
     const cambios=sems.filter(s=>s.cambio_vs_anterior).length
+    // Mapa de fuente legible
+    const FUENTE_LABEL={
+      reporte_dia:'📝 Reporte del día',
+      asignador:'📥 Asignador',
+      reservados:'📦 Reservados',
+      cruce_dropi:'⭐ Cruce Dropi',
+      seguimiento:'🔁 Seguimiento',
+      cambio_presupuesto:'⚙️ Cambio de presupuesto',
+      vivo:'📡 Estado en vivo',
+      manual:'🔧 Manual'
+    }
     // Construir cada punto de la tira
     const puntos=eventos.map((s,i)=>{
       const c=COLOR_MAP[s.semaforo]||COLOR_MAP.sin_ventas
@@ -10528,9 +10558,15 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
       const cFinal=isPresupuesto
         ?{bg:'var(--amber)',bd:'var(--amber)',cssVar:'var(--amber)'}
         :c
+      // Calcular Ventas Efectivas + CPA Efectivo para este punto (al vuelo)
+      const ventasPunto=(s.ventas||0)+(s.pendientes||0)
+      const vEfectPunto=ventasPunto*pctConfMeta
+      const cpaEfectPunto=vEfectPunto>0&&s.gasto>0?s.gasto/vEfectPunto:0
+      const fuenteLbl=FUENTE_LABEL[s.triggered_by]||s.triggered_by||'manual'
+      // Tooltip enriquecido (multilínea con saltos reales)
       const tooltip=isPresupuesto
-        ?`Cambio de presupuesto: $${fmt(s.presupuesto_anterior||0)} → $${fmt(s.presupuesto_nuevo||0)} (${(s.presupuesto_pct_cambio||0)>0?'+':''}${(s.presupuesto_pct_cambio||0).toFixed(0)}%)`
-        :`${s.semaforo_label||s.semaforo} · CPA $${fmt(s.cpa_real||0)} · ${s.pendientes||0}v · gasto $${fmt(s.gasto||0)}`
+        ?`Cambio de presupuesto: $${fmt(s.presupuesto_anterior||0)} → $${fmt(s.presupuesto_nuevo||0)} (${(s.presupuesto_pct_cambio||0)>0?'+':''}${(s.presupuesto_pct_cambio||0).toFixed(0)}%)\nHora: ${hora}`
+        :`${s.semaforo_label||s.semaforo}\n🕐 ${hora}\n💸 Gasto: $${fmt(s.gasto||0)}\n📦 Ventas: ${ventasPunto}\n🟣 V. Efectivas: ${vEfectPunto.toFixed(2)} (${Math.round(pctConfMeta*100)}%)\n🎯 CPA Real: $${fmt(s.cpa_real||0)}\n🟣 CPA Efectivo: $${fmt(cpaEfectPunto)}\n${fuenteLbl}`
       const label=isDropi
         ?`<div style="font-size:8px;color:${cFinal.cssVar};font-weight:700;margin-top:3px;line-height:1.1">Dropi</div><div style="font-size:8px;color:var(--muted);line-height:1.1">${hora}</div>`
         :isPresupuesto

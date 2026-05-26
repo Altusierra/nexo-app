@@ -9764,6 +9764,7 @@ async function renderMetaPortafolio(el,isAdmin){
               <input type="checkbox" ${cuenta.excluir_global?'checked':''} onchange="event.stopPropagation();toggleExcluirGlobal('${cuenta.account_id}',this.checked)"> Excluir global
             </label>`:''}
             <button class="btn-sm btn-outline" onclick="event.stopPropagation();analizarConIA('cuenta','${cuenta.account_id}','${(cuenta.nombre||cuenta.account_id).replace(/'/g,"\\'")}')" title="Analizar con IA" style="padding:6px 10px;font-size:11px">🤖</button>
+            <button class="btn-sm btn-outline" onclick="event.stopPropagation();refrescarSemaforosCuenta('${cuenta.account_id}',this)" title="Refrescar último punto del semáforo de todas las campañas reportadas hoy de esta cuenta" style="padding:6px 10px;font-size:11px;border-color:var(--purple);color:var(--purple)">🔄 Refrescar</button>
             <button class="btn-sm btn-outline" onclick="event.stopPropagation();runMetaSyncAccount('${cuenta.account_id}','${(cuenta.nombre||'').replace(/'/g,"\\'")}',7)" title="Sync 7 días" style="padding:6px 10px;font-size:11px">🔄 7d</button>
             ${isAdmin?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();runMetaSyncAccount('${cuenta.account_id}','${(cuenta.nombre||'').replace(/'/g,"\\'")}','all')" title="Sync completo" style="padding:6px 10px;font-size:11px">📥</button>`:''}
             <span style="font-size:16px;color:var(--muted)" id="meta-chevron-${cuenta.account_id}">▸</span>
@@ -10020,7 +10021,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-camp)">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
         <div style="flex:1;min-width:0;cursor:pointer" onclick="viewCampDetail('${camp.meta_id}')">
-          <div style="font-weight:600;font-size:12px;line-height:1.25"><span class="nexo-hier-pill" style="background:var(--hier-camp-bg);color:var(--hier-camp);border:1px solid var(--hier-camp)">🎯 Campaña</span>${camp.nombre||camp.meta_id}</div>
+          <div style="font-weight:600;font-size:12px;line-height:1.25"><span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:${camp.estado==='ACTIVE'?'#22c55e':'#1a1a1a'};border:1.5px solid ${camp.estado==='ACTIVE'?'#16a34a':'#525252'};${camp.estado==='ACTIVE'?'box-shadow:0 0 6px rgba(34,197,94,.7);':''}vertical-align:middle;margin-right:6px" title="${camp.estado==='ACTIVE'?'🟢 Activa en Meta':'⚫ Inactiva ('+(camp.estado||'desconocido')+')'}"></span><span class="nexo-hier-pill" style="background:var(--hier-camp-bg);color:var(--hier-camp);border:1px solid var(--hier-camp)">🎯 Campaña</span>${camp.nombre||camp.meta_id}</div>
           <div style="font-size:10px;color:var(--muted);margin-top:1px">${camp.objetivo||''} · ${camp.estado}${ctxCamp.esGlobal?' · <span style="color:var(--amber)">⚠️ sin producto</span>':''}</div></div>
         <div style="display:flex;gap:4px;align-items:center;flex-shrink:0">
           ${camp._hasData&&heroVal>0?`<div class="nexo-cpa-hero"><div class="nch-lbl">${heroLbl}</div><div class="nch-val" style="color:${cpaColorCss}" title="${heroTitle}">$${fmt(heroVal)}</div></div>`:''}
@@ -10131,6 +10132,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     campHtml+=`<div style="margin:4px 0 8px 0;display:flex;gap:4px;flex-wrap:wrap">
       <button class="btn-sm btn-primary cs-btn" data-sub="active" onclick="filterCampSubtab('${accountId}','active',this)">🟢 Activas (${_camActivas.length})</button>
       <button class="btn-sm btn-outline cs-btn" data-sub="inactive" onclick="filterCampSubtab('${accountId}','inactive',this)">⚫ Inactivas (${_camInactivas.length})</button>
+      <button class="btn-sm btn-outline cs-btn" data-sub="all" onclick="filterCampSubtab('${accountId}','all',this)">Todas (${conActividad.length})</button>
     </div>`
     campHtml+=conActividad.map(renderCamp).join('')
   }
@@ -10182,7 +10184,8 @@ window.filterCampSubtab=(accountId,sub,btn)=>{
   }
   accEl.querySelectorAll('.meta-camp-item[data-hasdata="1"]').forEach(el=>{
     const isActiva=el.dataset.estado==='ACTIVE'
-    if(sub==='active')el.style.display=isActiva?'':'none'
+    if(sub==='all')el.style.display=''
+    else if(sub==='active')el.style.display=isActiva?'':'none'
     else if(sub==='inactive')el.style.display=!isActiva?'':'none'
   })
 }
@@ -10579,6 +10582,37 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy){
       return
     }
 
+    // ── MODO REFRESH BATCH (disparado desde botón "🔄 Refrescar" de la cuenta) ──
+    // UPDATE puntual de MÚLTIPLES registros indicados en window._semRefreshBatch.
+    // Es un mapa meta_id → {id (puntoId), ...}. Para cada registro recalculado,
+    // si su meta_id está en el mapa, hace UPDATE del punto correspondiente.
+    if(window._semRefreshBatch&&typeof window._semRefreshBatch==='object'){
+      const batch=window._semRefreshBatch
+      let updated=0,skipped=0
+      for(const reg of registros){
+        const target=batch[reg.meta_id]
+        if(!target||!target.id){skipped++;continue}
+        const{error:uErr}=await sb.from('semaforo_historial').update({
+          semaforo:reg.semaforo,
+          semaforo_label:reg.semaforo_label,
+          cpa_real:reg.cpa_real,
+          ventas:reg.ventas,
+          canceladas:reg.canceladas,
+          pendientes:reg.pendientes,
+          gasto:reg.gasto,
+          conv_meta:reg.conv_meta,
+          margenbe_referencia:reg.margenbe_referencia,
+          ventas_efectivas:reg.ventas_efectivas,
+          cpa_real_efectivas:reg.cpa_real_efectivas,
+          hora_calculo:reg.hora_calculo
+        }).eq('id',target.id)
+        if(uErr){console.warn('[SEM-refresh-batch] update falló para',reg.meta_id,':',uErr.message);skipped++}
+        else updated++
+      }
+      console.log(`[SEM-refresh-batch] ✅ ${updated} actualizados, ${skipped} omitidos`)
+      return
+    }
+
     const{error}=await sb.from('semaforo_historial').insert(registros)
     if(error){console.warn('[SEM] inserción falló:',error.message,error);console.warn('[semaforo_historial] inserción falló:',error.message)}
     else{console.log('[SEM] ✅ insertados',registros.length,'registros')}
@@ -10786,30 +10820,10 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
     const footerTxt=esCruceDropi
       ?`<span style="color:${colorUltimo.cssVar};font-weight:600">★ Final (Dropi):</span> ${ultimo.semaforo_label||ultimo.semaforo} · CPA $${fmt(ultimo.cpa_real||0)}`
       :`Actual: <span style="color:${colorUltimo.cssVar};font-weight:600">${ultimo.semaforo_label||ultimo.semaforo}</span> · sin Dropi`
-    // ── Botón "🔄 Refrescar" ──
-    // Solo visible si:
-    // - El último punto REAL (no virtual) es de HOY
-    // - triggered_by === 'reporte_dia' (no toca cruce Dropi ni cambio_presupuesto)
-    // El punto virtual del badge en vivo NO cuenta — buscamos el último real en BD.
-    const _hoyStr=today()
-    // Buscar último punto NO virtual (ignora _esVivo de la sincronización badge↔tira)
-    let _ultimoReal=null
-    for(let i=eventos.length-1;i>=0;i--){
-      if(!eventos[i]._esVivo){_ultimoReal=eventos[i];break}
-    }
-    const _ultimoRefEval=_ultimoReal||ultimo
-    const _ultimoEsHoy=_ultimoRefEval.fecha===_hoyStr||(_ultimoRefEval.hora_calculo&&new Date(_ultimoRefEval.hora_calculo).toLocaleDateString('en-CA',{timeZone:'America/Bogota'})===_hoyStr)
-    const _puedeRefrescar=_ultimoEsHoy&&_ultimoRefEval.triggered_by==='reporte_dia'&&!_ultimoRefEval._esVivo
-    const btnRefrescar=_puedeRefrescar
-      ?`<button class="btn-sm" onclick="event.stopPropagation();refrescarUltimoSemaforo('${metaId}','${nivel}',this)" title="Refrescar el último punto con datos frescos de Meta API" style="padding:2px 7px;font-size:9px;background:transparent;border:1px solid var(--purple);color:var(--purple);border-radius:5px;cursor:pointer">🔄 Refrescar</button>`
-      :''
     return`<div style="margin-top:4px;background:var(--card2);border-radius:5px;padding:6px 10px;border-left:2px solid ${colorUltimo.cssVar}">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;flex-wrap:wrap;gap:6px">
         <span style="font-size:10px;color:var(--muted)">🚦 <strong style="color:var(--text);font-weight:600">Hoy</strong>${cambios>0?` · ${cambios} cambio${cambios>1?'s':''}`:' · sin cambios'}</span>
-        <div style="display:flex;gap:4px;align-items:center">
-          ${btnRefrescar}
-          <button class="btn-sm" onclick="event.stopPropagation();verHistorialSemaforos('${metaId}','${nivel}')" style="padding:2px 7px;font-size:9px;background:transparent;border:1px solid ${colorUltimo.cssVar};color:${colorUltimo.cssVar};border-radius:5px;cursor:pointer">📊 Historial</button>
-        </div>
+        <button class="btn-sm" onclick="event.stopPropagation();verHistorialSemaforos('${metaId}','${nivel}')" style="padding:2px 7px;font-size:9px;background:transparent;border:1px solid ${colorUltimo.cssVar};color:${colorUltimo.cssVar};border-radius:5px;cursor:pointer">📊 Historial</button>
       </div>
       <div style="display:flex;align-items:flex-start;gap:0;padding:2px 0">${tiraHtml}</div>
       <div style="font-size:9px;color:var(--muted);text-align:center;margin-top:4px;line-height:1.3">${footerTxt}</div>
@@ -10891,6 +10905,88 @@ window.refrescarUltimoSemaforo=async(metaId,nivel,btnEl)=>{
   }catch(e){
     console.warn('[SEM-refresh] error:',e.message)
     if(btnEl){btnEl.innerHTML='❌ Error';setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.disabled=false},2000)}
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// REFRESCAR TODOS LOS SEMÁFOROS DE UNA CUENTA (botón en header de cuenta)
+// Para cada campaña/adset/ad de la cuenta que tenga último punto de HOY con
+// triggered_by='reporte_dia', hace UPDATE puntual con datos frescos.
+// Misma lógica de seguridad que refrescarUltimoSemaforo:
+//   - Solo último punto (no toca anteriores)
+//   - Solo HOY
+//   - Solo reporte_dia (no cruce Dropi ni cambio_presupuesto)
+// ─────────────────────────────────────────────────────────────
+window.refrescarSemaforosCuenta=async(accountId,btnEl)=>{
+  if(!accountId)return
+  const origHtml=btnEl?btnEl.innerHTML:''
+  try{
+    if(btnEl){btnEl.disabled=true;btnEl.innerHTML='⏳ Refrescando...'}
+    const hoy=today()
+    // 1) Traer todos los puntos de HOY de esta cuenta con triggered_by='reporte_dia'
+    // Quedarnos con el ÚLTIMO punto por meta_id
+    const{data:puntos}=await sb.from('semaforo_historial')
+      .select('id,meta_id,nivel,hora_calculo')
+      .eq('account_id',accountId).eq('fecha',hoy).eq('triggered_by','reporte_dia')
+      .order('hora_calculo',{ascending:false})
+    if(!puntos||!puntos.length){
+      console.warn('[SEM-refresh-cuenta] No hay puntos reporte_dia hoy en cuenta',accountId)
+      if(btnEl){btnEl.innerHTML='❌ Sin puntos hoy';setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.disabled=false},2200)}
+      return
+    }
+    // Por meta_id quedarnos con el más reciente
+    const ultimoPorMeta={}
+    for(const p of puntos){
+      if(!ultimoPorMeta[p.meta_id])ultimoPorMeta[p.meta_id]=p
+    }
+    const ultimos=Object.values(ultimoPorMeta)
+    console.log('[SEM-refresh-cuenta]',ultimos.length,'puntos a refrescar en cuenta',accountId)
+
+    // 2) Recolectar ad_ids de los reportes de HOY
+    const{data:reportes}=await sb.from('reportes_diarios')
+      .select('ad_ids,updated_at,producto_id,producto_nombre')
+      .eq('fecha',hoy).not('ad_ids','is',null).neq('ad_ids','')
+      .order('updated_at',{ascending:false})
+    if(!reportes||!reportes.length){
+      if(btnEl){btnEl.innerHTML='❌ Sin reportes';setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.disabled=false},2200)}
+      return
+    }
+    const seen=new Set(),uniqRep=[]
+    for(const r of reportes){
+      const k=r.producto_id||r.producto_nombre
+      if(seen.has(k))continue
+      seen.add(k);uniqRep.push(r)
+    }
+    const adIds=[]
+    for(const r of uniqRep){
+      if(!r.ad_ids)continue
+      const ids=r.ad_ids.split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)
+      adIds.push(...ids)
+    }
+    const adIdsUnicos=[...new Set(adIds)]
+    if(!adIdsUnicos.length){
+      if(btnEl){btnEl.innerHTML='❌ Sin ad_ids';setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.disabled=false},2200)}
+      return
+    }
+
+    // 3) Modo "refresh batch": _calcularYGuardarSemaforos hará UPDATE puntual a CADA
+    // meta_id presente en _semRefreshBatch (en vez de INSERT lote)
+    window._semRefreshBatch=ultimoPorMeta // mapa metaId → {id, ...}
+    try{
+      await _calcularYGuardarSemaforos(adIdsUnicos,'reporte_dia')
+    }finally{
+      window._semRefreshBatch=null
+    }
+
+    if(btnEl){
+      btnEl.innerHTML=`✅ ${ultimos.length} refrescados`
+      setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.disabled=false},1800)
+    }
+    // Refrescar visualmente la cuenta
+    setTimeout(()=>{if(window.toggleMetaCuenta)window.toggleMetaCuenta(accountId,true)},400)
+  }catch(e){
+    console.warn('[SEM-refresh-cuenta] error:',e.message)
+    if(btnEl){btnEl.innerHTML='❌ Error';setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.disabled=false},2200)}
   }
 }
 

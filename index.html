@@ -7903,7 +7903,15 @@ window.actualizarEstadosDropi=async()=>{
   try{
     const adIdsAfectados=[...new Set(cruzados.map(r=>r.mapeo?.ad_id).filter(Boolean))]
     if(adIdsAfectados.length){
-      setTimeout(()=>{_calcularYGuardarSemaforos(adIdsAfectados,'cruce_dropi').catch(()=>{})},0)
+      // Detectar la fecha REAL del cruce: la más común entre los mapeos cruzados.
+      // Así el snapshot del semáforo queda anclado al día de los datos (ej: 25), no al día en que se hizo el cruce (ej: 26).
+      const _fechasCruce={}
+      for(const r of cruzados){
+        const f=r.mapeo?.fecha
+        if(f)_fechasCruce[f]=(_fechasCruce[f]||0)+1
+      }
+      const _fechaCruce=Object.keys(_fechasCruce).sort((a,b)=>_fechasCruce[b]-_fechasCruce[a])[0]||null
+      setTimeout(()=>{_calcularYGuardarSemaforos(adIdsAfectados,'cruce_dropi',_fechaCruce).catch(()=>{})},0)
     }
   }catch(_){}
   // Recargar registros del día
@@ -9528,16 +9536,16 @@ function _renderProductoCardResumen(data,ranking){
         `:''}
         ${data.totalPedidos>0?`
         <span style="color:var(--muted)">·</span>
-        <span style="color:var(--muted)">📦 ${data.totalPedidos} pedidos${data.esSoloHoy&&data.pedidosEfectivos>0?` + <span style="color:var(--purple);font-weight:500" title="Estimación: ${data.totalPedidos} × ${Math.round((data.pctConf||0.62)*100)}% confirmación">🟣 P.Efectivos ${data.pedidosEfectivos.toFixed(2)}</span>`:''}</span>
+        <span style="color:var(--muted)" title="${data.esSoloHoy?'Pedidos brutos del día (aún sin cruce Dropi)':'Pedidos REALES = confirmados del cruce Dropi. Pendientes y cancelados no cuentan.'}">📦 ${data.esSoloHoy?data.totalPedidos:data.pedidosConfirmados} pedidos${data.esSoloHoy&&data.pedidosEfectivos>0?` + <span style="color:var(--purple);font-weight:500" title="Estimación: ${data.totalPedidos} × ${Math.round((data.pctConf||0.62)*100)}% confirmación">🟣 P.Efectivos ${data.pedidosEfectivos.toFixed(2)}</span>`:''}</span>
         `:''}
       </div>
     </summary>
     <div style="padding:0 16px 16px;border-top:1px solid ${c.border};margin-top:6px;padding-top:14px">
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px">
         <div style="background:rgba(0,0,0,.2);border-radius:8px;padding:11px 12px">
-          <div style="font-size:10px;color:var(--muted);margin-bottom:3px">📦 PEDIDOS</div>
-          <div style="font-size:19px;font-weight:600">${data.totalPedidos}</div>
-          <div style="font-size:10px;color:var(--muted);margin-top:2px">Conf:${data.pedidosConfirmados} · Pend:${data.pend} · Canc:${data.canc}</div>
+          <div style="font-size:10px;color:var(--muted);margin-bottom:3px">📦 PEDIDOS${data.esSoloHoy?'':' <span style=\"color:var(--green);font-weight:600\">(REAL Dropi)</span>'}</div>
+          <div style="font-size:19px;font-weight:600">${data.esSoloHoy?data.totalPedidos:data.pedidosConfirmados}</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:2px">Conf:${data.pedidosConfirmados} · Pend:${data.pend} · Canc:${data.canc}${data.esSoloHoy?'':` · Bruto: ${data.totalPedidos}`}</div>
         </div>
         <div style="background:rgba(0,0,0,.2);border-radius:8px;padding:11px 12px">
           <div style="font-size:10px;color:var(--muted);margin-bottom:3px">💸 GASTO ADS</div>
@@ -10301,17 +10309,19 @@ async function _insertarEventosCambioPresupuesto(cambios){
 // Cada vez que el auxiliar actualiza ventas, recalcula y guarda el
 // semáforo de las campañas/adsets/ads afectados en `semaforo_historial`.
 // ═══════════════════════════════════════════════════════════════════════
-async function _calcularYGuardarSemaforos(adIds,triggeredBy){
+async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
   try{
-    console.log('[SEM] llamada:',{adIds,triggeredBy})
+    console.log('[SEM] llamada:',{adIds,triggeredBy,fechaOverride})
     if(!adIds||!adIds.length){console.log('[SEM] salida: adIds vacío');return}
     const adIdsUnicos=[...new Set(adIds.filter(Boolean))]
     if(!adIdsUnicos.length){console.log('[SEM] salida: adIdsUnicos vacío');return}
-    const hoy=today()
+    // Si se pasa fechaOverride (ej: cruce Dropi del día anterior), usar esa fecha como
+    // referencia del snapshot — así el registro queda anclado al día de los DATOS, no al de hoy.
+    const hoy=fechaOverride||today()
     // hora_calculo explícito y único para todo el lote — evita colisiones cuando
     // se hacen múltiples inserts en menos de un segundo (lleva milisegundos)
     const _horaAhora=new Date().toISOString()
-    // Rango = SOLO HOY: cada snapshot del semáforo refleja qué pasó hoy hasta este momento.
+    // Rango = SOLO HOY (o fechaOverride): cada snapshot del semáforo refleja qué pasó ese día.
     // Así el "Plata del día" del historial coincide con la realidad del día.
     const desde=hoy
     const hasta=hoy
@@ -10696,8 +10706,22 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
     // Esto evita que un registro creado a las 8:36 pm hora local del 23 (= 1:36 am UTC del 24) aparezca como "Hoy".
     const _localDay=(ts)=>{const d=new Date(ts);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
     const _hoyLocal=_localDay(new Date().toISOString())
-    const sems=semsRaw.filter(s=>s.hora_calculo&&_localDay(s.hora_calculo)===_hoyLocal)
-    if(!sems.length&&!vivoData)return ''
+    // ── Detectar día visualizado en Meta Ads (desde/hasta de la UI) ──
+    // Si es un día único anterior a hoy → mostrar puntos de ese día (por columna 'fecha') + slot final Dropi.
+    // Si es hoy o rango → mantener comportamiento original (por hora_calculo en hoy local) y excluir cruce_dropi.
+    const _desdeUI=document.getElementById('meta-desde')?.value||''
+    const _hastaUI=document.getElementById('meta-hasta')?.value||''
+    const _esDiaUnico=_desdeUI&&_hastaUI&&_desdeUI===_hastaUI
+    const _diaVista=_esDiaUnico?_desdeUI:_hoyLocal
+    const _esVistaHoy=_diaVista===_hoyLocal
+    const _esDiaAnterior=_esDiaUnico&&_diaVista<_hoyLocal
+    // Filtro adaptado según vista:
+    //  - HOY: registros cuya hora_calculo cae en hoy local Y NO sean cruce_dropi (por definición no aplica a hoy)
+    //  - DÍA ANTERIOR: registros cuya columna 'fecha' coincida con el día vista (incluye cruce_dropi como punto final)
+    const sems=_esDiaAnterior
+      ?semsRaw.filter(s=>s.fecha===_diaVista)
+      :semsRaw.filter(s=>s.hora_calculo&&_localDay(s.hora_calculo)===_hoyLocal&&s.triggered_by!=='cruce_dropi')
+    if(!sems.length&&!vivoData&&!_esDiaAnterior)return ''
     const COLOR_MAP=window._semColorMap
     // Mostrar TODOS los registros del día — cada subida de ventas del aux es un punto
     // (antes filtraba solo cambios; ahora cada reporte_dia, asignador, cruce_dropi, etc. cuenta)
@@ -10797,7 +10821,7 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
         ?`Cambio de presupuesto: $${fmt(s.presupuesto_anterior||0)} → $${fmt(s.presupuesto_nuevo||0)} (${(s.presupuesto_pct_cambio||0)>0?'+':''}${(s.presupuesto_pct_cambio||0).toFixed(0)}%)\nHora: ${hora}`
         :`${s.semaforo_label||s.semaforo}\n🕐 ${hora}\n💸 Gasto: $${fmt(s.gasto||0)}\n📦 Ventas: ${ventasPunto}\n🟣 V. Efectivas: ${vEfectPunto.toFixed(2)} (${Math.round(pctConfMeta*100)}%)\n🎯 CPA Real: $${fmt(s.cpa_real||0)}\n🟣 CPA Efectivo: $${fmt(cpaEfectPunto)}\n${fuenteLbl}`
       const label=isDropi
-        ?`<div style="font-size:8px;color:${cFinal.cssVar};font-weight:700;margin-top:3px;line-height:1.1">Dropi</div><div style="font-size:8px;color:var(--muted);line-height:1.1">${hora}</div>`
+        ?`<div style="font-size:8px;color:${cFinal.cssVar};font-weight:700;margin-top:3px;line-height:1.1">REAL · Dropi</div>`
         :isPresupuesto
         ?`<div style="font-size:8px;color:${cFinal.cssVar};font-weight:700;margin-top:3px;line-height:1.1">Budget</div><div style="font-size:8px;color:var(--muted);line-height:1.1">${hora}</div>`
         :`<div style="font-size:8px;color:${isUltimo?'var(--text)':'var(--muted)'};margin-top:3px;font-weight:${isUltimo?'600':'400'}">${hora}</div>`
@@ -10813,16 +10837,34 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
       tiraHtml+=p
       if(i<puntos.length-1)tiraHtml+=`<div style="height:1px;background:var(--border);flex:0.5;margin-top:8px;align-self:flex-start"></div>`
     })
+    // ── Slot "esperando cruce" para día anterior sin cruce_dropi todavía ──
+    // Si la vista es de un día anterior y no hay punto cruce_dropi, mostrar slot vacío con label.
+    const _yaTieneCruce=eventos.some(s=>s.triggered_by==='cruce_dropi')
+    const _mostrarEsperando=_esDiaAnterior&&!_yaTieneCruce
+    if(_mostrarEsperando){
+      if(puntos.length>0)tiraHtml+=`<div style="height:1px;background:var(--border);flex:0.5;margin-top:8px;align-self:flex-start"></div>`
+      tiraHtml+=`<div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0">
+        <div title="Esperando cruce con Dropi para cerrar el día" style="width:16px;height:16px;border-radius:50%;background:transparent;border:2px dashed var(--muted);flex-shrink:0"></div>
+        <div style="font-size:8px;color:var(--muted);font-weight:600;margin-top:3px;line-height:1.1">esperando cruce</div>
+      </div>`
+    }
     // Footer: estado actual o final + botón "Ver historial" con color del semáforo
-    const ultimo=eventos[eventos.length-1]
+    // Caso especial: día anterior sin eventos (solo "esperando cruce") → sin último válido
+    const ultimo=eventos.length?eventos[eventos.length-1]:null
     const esCruceDropi=ultimo&&ultimo.triggered_by==='cruce_dropi'
-    const colorUltimo=COLOR_MAP[ultimo.semaforo]||COLOR_MAP.sin_ventas
-    const footerTxt=esCruceDropi
-      ?`<span style="color:${colorUltimo.cssVar};font-weight:600">★ Final (Dropi):</span> ${ultimo.semaforo_label||ultimo.semaforo} · CPA $${fmt(ultimo.cpa_real||0)}`
-      :`Actual: <span style="color:${colorUltimo.cssVar};font-weight:600">${ultimo.semaforo_label||ultimo.semaforo}</span> · sin Dropi`
+    const colorUltimo=ultimo?(COLOR_MAP[ultimo.semaforo]||COLOR_MAP.sin_ventas):COLOR_MAP.sin_ventas
+    const footerTxt=_mostrarEsperando&&!ultimo
+      ?`<span style="color:var(--muted);font-weight:600">⏳ esperando cruce</span>`
+      :_mostrarEsperando
+      ?`Actual: <span style="color:${colorUltimo.cssVar};font-weight:600">${ultimo.semaforo_label||ultimo.semaforo}</span> · <span style="color:var(--muted)">⏳ esperando cruce</span>`
+      :esCruceDropi
+      ?`<span style="color:${colorUltimo.cssVar};font-weight:600">★ REAL · Dropi:</span> ${ultimo.semaforo_label||ultimo.semaforo} · CPA $${fmt(ultimo.cpa_real||0)}`
+      :`Actual: <span style="color:${colorUltimo.cssVar};font-weight:600">${ultimo.semaforo_label||ultimo.semaforo}</span>${_esVistaHoy?'':' · sin Dropi'}`
+    // Label del wrapper: "Hoy" si es vista de hoy, sino la fecha visualizada
+    const _labelDia=_esVistaHoy?'Hoy':(_diaVista||'Día anterior')
     return`<div style="margin-top:4px;background:var(--card2);border-radius:5px;padding:6px 10px;border-left:2px solid ${colorUltimo.cssVar}">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;flex-wrap:wrap;gap:6px">
-        <span style="font-size:10px;color:var(--muted)">🚦 <strong style="color:var(--text);font-weight:600">Hoy</strong>${cambios>0?` · ${cambios} cambio${cambios>1?'s':''}`:' · sin cambios'}</span>
+        <span style="font-size:10px;color:var(--muted)">🚦 <strong style="color:var(--text);font-weight:600">${_labelDia}</strong>${cambios>0?` · ${cambios} cambio${cambios>1?'s':''}`:' · sin cambios'}</span>
         <button class="btn-sm" onclick="event.stopPropagation();verHistorialSemaforos('${metaId}','${nivel}')" style="padding:2px 7px;font-size:9px;background:transparent;border:1px solid ${colorUltimo.cssVar};color:${colorUltimo.cssVar};border-radius:5px;cursor:pointer">📊 Historial</button>
       </div>
       <div style="display:flex;align-items:flex-start;gap:0;padding:2px 0">${tiraHtml}</div>
@@ -11100,7 +11142,9 @@ window._semRenderTimeline=(data)=>{
   const hoyLocal=localDay(new Date().toISOString())
 
   return dias.map(d=>{
-    const regs=porDia[d].sort((a,b)=>new Date(a.hora_calculo)-new Date(b.hora_calculo))
+    let regs=porDia[d].sort((a,b)=>new Date(a.hora_calculo)-new Date(b.hora_calculo))
+    // Día actual: nunca mostrar cruce_dropi (el cruce real corre al día siguiente)
+    if(d===hoyLocal)regs=regs.filter(r=>r.triggered_by!=='cruce_dropi')
     const fechaStr=new Date(d+'T12:00').toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long'})
     const totalCalc=regs.length
 
@@ -11165,17 +11209,28 @@ window._semRenderTimeline=(data)=>{
         const s=SEM[r.semaforo]||{label:r.semaforo,color:'var(--muted)',emoji:'•'}
         const hora=new Date(r.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
         const esCambio=r.cambio_vs_anterior||i===0||r.triggered_by==='cambio_presupuesto'||r.triggered_by==='cruce_dropi'
+        const isDropi=r.triggered_by==='cruce_dropi'
         const size=esCambio?20:13
         return `<div style="position:relative;z-index:1;text-align:center;flex:1;min-width:0">
           <div style="width:${size}px;height:${size}px;border-radius:50%;background:${s.color};margin:${esCambio?'0':'3.5px'} auto 0;border:3px solid var(--card2);box-sizing:content-box${!esCambio?';opacity:.55':''}"></div>
-          <div style="font-size:10px;margin:4px 0 0;font-family:monospace;color:var(--muted);white-space:nowrap">${hora}</div>
+          <div style="font-size:10px;margin:4px 0 0;font-family:monospace;color:${isDropi?s.color:'var(--muted)'};white-space:nowrap;font-weight:${isDropi?'700':'400'}">${isDropi?'REAL · Dropi':hora}</div>
           <div style="font-size:9px;margin:1px 0 0;color:${esCambio?s.color:'var(--subtle)'};font-weight:${esCambio?'600':'400'}">${esCambio?s.label:'sin cambio'}</div>
         </div>`
       }).join('')
+      // ── Slot "esperando cruce" si es día anterior y aún no hay cruce_dropi ──
+      const _esDiaAnterior=d<hoyLocal
+      const _yaTieneCruce=regs.some(r=>r.triggered_by==='cruce_dropi')
+      const slotEsperando=(_esDiaAnterior&&!_yaTieneCruce)
+        ?`<div style="position:relative;z-index:1;text-align:center;flex:1;min-width:0">
+          <div style="width:16px;height:16px;border-radius:50%;background:transparent;border:2px dashed var(--muted);margin:2px auto 0;box-sizing:content-box"></div>
+          <div style="font-size:10px;margin:4px 0 0;font-family:monospace;color:var(--muted);white-space:nowrap">esperando</div>
+          <div style="font-size:9px;margin:1px 0 0;color:var(--muted);font-weight:600">cruce Dropi</div>
+        </div>`
+        :''
       timelineHtml=`<div style="background:var(--card);border-radius:8px;padding:14px 8px;margin-bottom:14px">
         <div style="position:relative;display:flex;justify-content:space-between;align-items:flex-start;padding:0 4px">
           <div style="position:absolute;left:18px;right:18px;top:11px;height:2px;background:var(--border);z-index:0"></div>
-          ${dots}
+          ${dots}${slotEsperando}
         </div>
         ${estadoActual?`<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border);text-align:center;font-size:12px;color:var(--muted)">Estado actual: <span style="color:${estadoActual.color};font-weight:600;font-size:13px">${estadoActual.emoji} ${estadoActual.label}</span></div>`:''}
       </div>`

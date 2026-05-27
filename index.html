@@ -9343,6 +9343,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
   //    - Si el rango incluye HOY o AYER (datos vivos) → Meta API en tiempo real.
   //    - Si el rango es solo días viejos (≥ 2 días atrás) → BD directamente (ya fijo, no llama Meta).
   //    Fallbacks: por cuenta a BD si Meta falla; completo a BD si no hay token.
+  //    CACHE: el resultado se guarda en window._metaPort.liveGastoByCampId para que el
+  //    header de cuenta (más abajo) lo reuse sin volver a llamar Meta API.
   const gastoByCampId={}
   const todayBogota=new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
   const ayerBg=new Date(todayBogota+'T12:00:00Z');ayerBg.setDate(ayerBg.getDate()-1)
@@ -9384,6 +9386,13 @@ async function _renderResumenProductos(desde,hasta,hoy){
       gastoByCampId[String(i.meta_id)]=(gastoByCampId[String(i.meta_id)]||0)+(i.spend||0)
     }
   }
+  // Cache global: el header de cuenta (más abajo en renderMetaPortafolio) lee de aquí
+  // para no llamar Meta API otra vez. Se setea el flag para saber si los datos son live.
+  try{
+    window._nexoLiveGastoByCampId=gastoByCampId
+    window._nexoLiveGastoIsLive=incluyeVivos
+    window._nexoLiveGastoRango={desde,hasta}
+  }catch(_){}
 
   // 2b. Métricas Meta extra por campaña (clicks/impressions/conversions/CPA Meta) — de BD
   //     Se usa para CTR, CPM, CPA Meta del producto. NO compite con gastoByCampId (sigue siendo el spend canónico).
@@ -9943,16 +9952,86 @@ async function renderMetaPortafolio(el,isAdmin){
     insCountByAcc[c.account_id]=count||0
   }
 
-  // Gasto en RANGO seleccionado por cuenta + tiene campañas ACTIVE (para filtro "Activas")
-  const _defHasta=today()
-  const _defDesde=_defHasta // Meta Ads arranca enfocado en HOY (no rango mensual)
-  const{data:insRango}=await sb.from('meta_insights').select('account_id,meta_id,spend').eq('nivel','campaign').gte('fecha',_defDesde).lte('fecha',_defHasta).limit(20000)
+  // Gasto por campaña en el rango. Lógica idéntica a _renderResumenProductos:
+  //   - Rango incluye HOY o AYER → datos VIVOS desde Meta API (fuente: cache de
+  //     window._nexoLiveGastoByCampId si _renderResumenProductos ya lo pobló, o
+  //     fetch Meta directo en caso contrario). Esto soluciona el caso "BD vacía
+  //     a primera hora cuando nadie sincronizó todavía".
+  //   - Rango solo histórico cerrado → BD directo.
+  // El conteo "Con actividad" del header debe reflejar la realidad de Meta,
+  // igual que lo hace el expand de la cuenta cuando le das click.
+  const _hHasta=document.getElementById('meta-hasta')?.value||today()
+  const _hDesde=document.getElementById('meta-desde')?.value||_hHasta
+  const _hTodayBg=new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
+  const _hAyerBgDt=new Date(_hTodayBg+'T12:00:00Z');_hAyerBgDt.setDate(_hAyerBgDt.getDate()-1)
+  const _hAyerBg=_isoDate(_hAyerBgDt)
+  const _hIncluyeVivos=_hHasta>=_hAyerBg
+
   const gastoRangoByAcc={}
   const gastoRangoByCampId={}
-  for(const i of (insRango||[])){
-    gastoRangoByAcc[i.account_id]=(gastoRangoByAcc[i.account_id]||0)+(i.spend||0)
-    if(i.meta_id)gastoRangoByCampId[String(i.meta_id)]=(gastoRangoByCampId[String(i.meta_id)]||0)+(i.spend||0)
+
+  // Mapa meta_id → account_id para distribuir gasto live por cuenta
+  const _accByCampId={}
+  for(const camp of (campanas||[])){if(camp.meta_id)_accByCampId[String(camp.meta_id)]=camp.account_id}
+
+  // 1) Si _renderResumenProductos ya pobló el cache global con el MISMO rango → reusarlo
+  let _liveListo=false
+  try{
+    const cache=window._nexoLiveGastoByCampId
+    const cacheRng=window._nexoLiveGastoRango
+    if(cache&&cacheRng&&cacheRng.desde===_hDesde&&cacheRng.hasta===_hHasta){
+      for(const cid in cache){
+        const v=cache[cid]||0
+        const accId=_accByCampId[cid]
+        if(!accId)continue
+        gastoRangoByCampId[cid]=v
+        gastoRangoByAcc[accId]=(gastoRangoByAcc[accId]||0)+v
+      }
+      _liveListo=true
+    }
+  }catch(_){}
+
+  // 2) Si no había cache pero el rango incluye hoy/ayer → fetch Meta API ahora
+  if(!_liveListo&&_hIncluyeVivos){
+    try{
+      let token=await getConfig('meta_access_token')
+      if(!token)throw new Error('Sin token')
+      const timeRange=JSON.stringify({since:_hDesde,until:_hHasta})
+      for(const cuenta of cuentas){
+        try{
+          const ins=await metaGet(`/act_${cuenta.account_id}/insights`,token,{fields:'campaign_id,spend',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
+          for(const i of (ins||[])){
+            if(!i.campaign_id)continue
+            const cid=String(i.campaign_id),v=parseFloat(i.spend)||0
+            gastoRangoByCampId[cid]=(gastoRangoByCampId[cid]||0)+v
+            gastoRangoByAcc[cuenta.account_id]=(gastoRangoByAcc[cuenta.account_id]||0)+v
+          }
+        }catch(eCta){
+          console.warn('[header cuenta] Meta API fallo',cuenta.account_id,'→ fallback BD:',eCta.message)
+          const{data:insBD}=await sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').eq('account_id',cuenta.account_id).gte('fecha',_hDesde).lte('fecha',_hHasta)
+          for(const i of (insBD||[])){
+            if(!i.meta_id)continue
+            const v=i.spend||0
+            gastoRangoByCampId[String(i.meta_id)]=(gastoRangoByCampId[String(i.meta_id)]||0)+v
+            gastoRangoByAcc[cuenta.account_id]=(gastoRangoByAcc[cuenta.account_id]||0)+v
+          }
+        }
+      }
+      _liveListo=true
+    }catch(e){
+      console.warn('[header cuenta] sin token o error global, usando BD completa:',e.message)
+    }
   }
+
+  // 3) Fallback: rango histórico cerrado O live falló → leer BD directo
+  if(!_liveListo){
+    const{data:insRango}=await sb.from('meta_insights').select('account_id,meta_id,spend').eq('nivel','campaign').gte('fecha',_hDesde).lte('fecha',_hHasta).limit(20000)
+    for(const i of (insRango||[])){
+      gastoRangoByAcc[i.account_id]=(gastoRangoByAcc[i.account_id]||0)+(i.spend||0)
+      if(i.meta_id)gastoRangoByCampId[String(i.meta_id)]=(gastoRangoByCampId[String(i.meta_id)]||0)+(i.spend||0)
+    }
+  }
+
   // Cuenta es ACTIVA si: tiene campañas ACTIVE registradas Y tiene gasto > 0 en el rango
   const tieneGastoRango={}
   for(const c of cuentas){

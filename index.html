@@ -8783,6 +8783,116 @@ window.runMetaSyncAllAccounts=async(days,btn)=>{
   }
 }
 
+// ── 🔄 REFRESCAR DROPI (admin global, en Meta Ads) ─────────────────────
+// Crea snapshots cruce_dropi para los últimos 3 días (excluye hoy), procesando
+// solo las cuentas con gasto > 0 en el rango. Idempotente: si el punto
+// cruce_dropi ya existe para esa cuenta+fecha, se skipea.
+//
+// Flujo por cuenta:
+//   1. Check BD rápido: ¿tuvo gasto en los últimos 3 días? Si NO → skip
+//   2. Mini-sync Meta API de los 3 días (campaign+adset+ad) → BD fresca
+//   3. Por cada día con mapeos cruzados:
+//      - Si NO existe punto cruce_dropi en BD para esa cuenta+fecha →
+//        llamar _calcularYGuardarSemaforos(adIds, 'cruce_dropi', fecha)
+//
+// Si el mini-sync de Meta falla en una cuenta → skip esa cuenta y sigue.
+window.runRefrescarDropi=async(btn)=>{
+  if(currentRol()!=='admin'){alert('Solo admin');return}
+  if(!btn)return
+  const origText=btn.textContent
+  btn.disabled=true
+  try{
+    const token=await getConfig('meta_access_token')
+    if(!token){alert('Token Meta no configurado');return}
+    // Calcular las 3 fechas (ayer, anteayer, hace 3 días) en zona Bogota
+    const todayBogota=new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
+    const fechas=[]
+    for(let d=1;d<=3;d++){
+      const dt=new Date(todayBogota+'T12:00:00Z');dt.setDate(dt.getDate()-d)
+      fechas.push(_isoDate(dt))
+    }
+    const desdeR=fechas[fechas.length-1],hastaR=fechas[0] // ej: desdeR=hace3, hastaR=ayer
+    // Listar cuentas
+    const{data:cuentas}=await sb.from('meta_cuentas').select('account_id,nombre').order('nombre')
+    if(!cuentas?.length){alert('Sin cuentas');return}
+    // Stats
+    let cuentasConActividad=0,puntosCreados=0,diasOmitidos=0,erroresMeta=0
+    const totalDiasPosibles=cuentas.length*fechas.length // para reporte
+    btn.textContent=`⏳ 0/${cuentas.length}...`
+    for(let ci=0;ci<cuentas.length;ci++){
+      const cuenta=cuentas[ci]
+      btn.textContent=`⏳ ${ci+1}/${cuentas.length} ${cuenta.nombre||cuenta.account_id}...`
+      // 1) Check BD: ¿tuvo gasto en los últimos 3 días?
+      const{data:gastoCheck}=await sb.from('meta_insights').select('spend').eq('account_id',cuenta.account_id).eq('nivel','campaign').gte('fecha',desdeR).lte('fecha',hastaR).gt('spend',0).limit(1)
+      if(!gastoCheck||!gastoCheck.length){console.log('[REFRESH-DROPI] skip cuenta sin gasto:',cuenta.nombre||cuenta.account_id);continue}
+      cuentasConActividad++
+      // 2) Mini-sync Meta API de los 3 días (campaign + adset + ad) → BD fresca
+      try{
+        const actId='act_'+cuenta.account_id
+        const timeRange=JSON.stringify({since:desdeR,until:hastaR})
+        const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
+        for(const i of (cIns||[])){
+          if(!i.campaign_id)continue
+          await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        }
+        const sIns=await metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:timeRange,level:'adset',time_increment:'1',limit:'500'})
+        for(const i of (sIns||[])){
+          if(!i.adset_id)continue
+          await sb.from('meta_insights').upsert({meta_id:i.adset_id,nivel:'adset',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        }
+        const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:timeRange,level:'ad',time_increment:'1',limit:'500'})
+        for(const i of (aIns||[])){
+          if(!i.ad_id)continue
+          await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        }
+      }catch(syncErr){
+        console.warn('[REFRESH-DROPI] mini-sync falló en cuenta',cuenta.nombre||cuenta.account_id,':',syncErr.message)
+        erroresMeta++
+        continue // saltar a la siguiente cuenta
+      }
+      // 3) Por cada día, procesar si NO existe ya punto cruce_dropi
+      for(const f of fechas){
+        // ¿Ya existe algún punto cruce_dropi en esta cuenta+fecha?
+        const{data:yaExiste}=await sb.from('semaforo_historial').select('id').eq('account_id',cuenta.account_id).eq('fecha',f).eq('triggered_by','cruce_dropi').limit(1)
+        if(yaExiste&&yaExiste.length){diasOmitidos++;continue}
+        // Buscar ad_ids con cruce hecho de esta fecha
+        // Cruce hecho = estado_final no NULL Y no es 'PENDIENTE CONFIRMACION'
+        const{data:mapeosCruzados}=await sb.from('mapeos').select('ad_id').eq('fecha',f).not('estado_final','is',null).neq('estado_final','PENDIENTE CONFIRMACION').limit(5000)
+        if(!mapeosCruzados||!mapeosCruzados.length)continue // sin cruce en este día → skip
+        // Filtrar ad_ids que pertenezcan a esta cuenta (vía meta_campanas)
+        const adIdsRaw=[...new Set(mapeosCruzados.map(m=>m.ad_id).filter(Boolean))]
+        if(!adIdsRaw.length)continue
+        const{data:adsCta}=await sb.from('meta_campanas').select('meta_id').eq('account_id',cuenta.account_id).eq('nivel','ad').in('meta_id',adIdsRaw)
+        const adIdsCta=(adsCta||[]).map(a=>a.meta_id)
+        if(!adIdsCta.length)continue // ningún ad_id es de esta cuenta
+        // Disparar el cálculo del semáforo cruce_dropi anclado a esta fecha
+        try{
+          await _calcularYGuardarSemaforos(adIdsCta,'cruce_dropi',f)
+          puntosCreados+=adIdsCta.length // contamos ad_ids (los puntos reales incluyen también adset+campaign)
+        }catch(calcErr){
+          console.warn('[REFRESH-DROPI] cálculo falló para',cuenta.account_id,f,':',calcErr.message)
+        }
+      }
+    }
+    // Reporte final
+    btn.textContent='✅ Procesado completo'
+    btn.title=`Cuentas procesadas: ${cuentasConActividad} de ${cuentas.length} (con actividad)\nCreados: ${puntosCreados} puntos (ad_ids)\nYa existían: ${diasOmitidos} días (omitidos)\nErrores Meta: ${erroresMeta}`
+    console.log(`[REFRESH-DROPI] ✅ Procesado completo
+   Cuentas procesadas: ${cuentasConActividad} de ${cuentas.length} (con actividad)
+   Creados: ${puntosCreados} puntos
+   Ya existían: ${diasOmitidos} días (omitidos)
+   Errores Meta: ${erroresMeta}`)
+    alert(`✅ Procesado completo\n\nCuentas procesadas: ${cuentasConActividad} de ${cuentas.length} (con actividad)\nCreados: ${puntosCreados} puntos\nYa existían: ${diasOmitidos} días (omitidos)\nErrores Meta: ${erroresMeta}`)
+    logAction('refrescar_dropi',{cuentasConActividad,puntosCreados,diasOmitidos,erroresMeta}).catch(()=>{})
+    setTimeout(()=>{btn.textContent=origText;btn.title=btn.getAttribute('data-title-orig')||btn.title;btn.disabled=false},4000)
+  }catch(e){
+    console.error('[REFRESH-DROPI] error fatal:',e)
+    btn.textContent='❌ Error'
+    setTimeout(()=>{btn.textContent=origText;btn.disabled=false},3000)
+    alert('Error: '+e.message)
+  }
+}
+
 window.runMetaSyncAccount=async(accountId,accountName,days)=>{
   const statusEl=document.getElementById('meta-sync-status-'+accountId)
   const _showPct=(pct,msg)=>{if(statusEl)statusEl.innerHTML=pct>=100?'✅':`<span style="font-size:11px">${pct}%</span>`}
@@ -9940,6 +10050,7 @@ async function renderMetaPortafolio(el,isAdmin){
     html+=`<div style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn-sm btn-primary" onclick="runMetaSyncAllAccounts(7,this)">🔄 Sync 7d todas</button>
       <button class="btn-sm btn-green" onclick="runMetaSyncAllAccounts('all',this)">📥 Sync completo todas</button>
+      <button class="btn-sm btn-outline" onclick="runRefrescarDropi(this)" title="Crea snapshots ⭐ Cruce Dropi en el timeline del semáforo para los últimos 3 días (ayer, anteayer, hace 3). Solo procesa cuentas con gasto en el rango y solo crea puntos si no existen ya." style="border-color:var(--purple);color:var(--purple)">🔄 Refrescar Dropi</button>
     </div>`
   }
 

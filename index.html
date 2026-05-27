@@ -11199,6 +11199,49 @@ window.refrescarSemaforosCuenta=async(accountId,btnEl)=>{
       return
     }
 
+    // 2b) MINI-SYNC EN VIVO: traer insights de HOY desde Meta API para esta cuenta
+    //     antes de calcular el semáforo. Así el snapshot guardado refleja el gasto
+    //     en tiempo real (no el del último sync de BD, que puede estar desactualizado).
+    //     Sincroniza niveles campaign + adset + ad — solo el día de HOY.
+    //     Si falla → abortar y avisar (no guardamos snapshot con datos viejos).
+    try{
+      if(btnEl)btnEl.innerHTML='⏳ Trayendo gasto en vivo...'
+      const token=await getConfig('meta_access_token')
+      if(!token)throw new Error('Sin token de Meta configurado')
+      const actId='act_'+accountId
+      const timeRange=JSON.stringify({since:hoy,until:hoy})
+      // Nivel campaign
+      const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
+      for(const i of (cIns||[])){
+        if(!i.campaign_id)continue
+        await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+      }
+      // Nivel adset
+      const sIns=await metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:timeRange,level:'adset',time_increment:'1',limit:'500'})
+      for(const i of (sIns||[])){
+        if(!i.adset_id)continue
+        await sb.from('meta_insights').upsert({meta_id:i.adset_id,nivel:'adset',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+      }
+      // Nivel ad
+      const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:timeRange,level:'ad',time_increment:'1',limit:'500'})
+      for(const i of (aIns||[])){
+        if(!i.ad_id)continue
+        await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+      }
+      console.log('[SEM-refresh-cuenta] ✅ mini-sync HOY:',(cIns?.length||0),'camp,',(sIns?.length||0),'adset,',(aIns?.length||0),'ad')
+    }catch(syncErr){
+      // Sync falló → abortar el refresh, NO guardar snapshot con datos viejos
+      console.warn('[SEM-refresh-cuenta] mini-sync falló, abortando refresh:',syncErr.message)
+      if(btnEl){
+        btnEl.innerHTML='⚠️ Sync falló · Reintentar'
+        btnEl.title='No se pudo traer el gasto en vivo desde Meta. NO se guardó el snapshot. Espicha Refrescar de nuevo.'
+        setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.title='Refrescar último punto del semáforo de todas las campañas reportadas hoy de esta cuenta';btnEl.disabled=false},4000)
+      }
+      return
+    }
+
+    if(btnEl)btnEl.innerHTML='⏳ Refrescando...'
+
     // 3) Modo "refresh batch": _calcularYGuardarSemaforos hará UPDATE puntual a CADA
     // meta_id presente en _semRefreshBatch (en vez de INSERT lote)
     window._semRefreshBatch=ultimoPorMeta // mapa metaId → {id, ...}

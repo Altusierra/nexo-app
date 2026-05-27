@@ -9680,9 +9680,13 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
 
   // ── Métricas técnicas Meta (CTR/CPM/CPA Meta) ponderadas por agregación Σ/Σ ──
   // Activas/pausadas: solo se cuentan campañas del producto CON GASTO > 0 en el rango
-  // (las que realmente tuvieron actividad, coincide con el filtro "Con actividad" del tracker)
+  // (las que realmente tuvieron actividad, coincide con el filtro "Con actividad" del tracker).
+  // El estado se toma del mapa LIVE (window._nexoLiveEstadoByCampId, poblado por el header)
+  // si existe; si no, fallback al estado de BD (estadoByCampId). Así el conteo del producto
+  // coincide con el conteo del expand de la cuenta.
   let _imp=0,_clk=0,_conv=0,_cprSum=0,_cprN=0
   let _activas=0,_pausadas=0
+  const _liveEstadosProd=(typeof window!=='undefined'&&window._nexoLiveEstadoByCampId)?window._nexoLiveEstadoByCampId:null
   if(metricsByCampId&&estadoByCampId){
     for(const cid of campIds){
       const k=String(cid)
@@ -9690,7 +9694,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
       if(m){_imp+=m.impressions||0;_clk+=m.clicks||0;_conv+=m.conversions||0;_cprSum+=m.cprSum||0;_cprN+=m.cprN||0}
       const gastoCamp=gastoByCampId[k]||0
       if(gastoCamp<=0)continue // sin actividad en el rango → no se cuenta
-      const e=estadoByCampId[k]||''
+      const e=(_liveEstadosProd&&_liveEstadosProd[k])||estadoByCampId[k]||''
       if(e==='ACTIVE')_activas++
       else _pausadas++ // con gasto pero estado actual no-ACTIVE (pausada/finalizada/etc.)
     }
@@ -10040,9 +10044,38 @@ async function renderMetaPortafolio(el,isAdmin){
     tieneGastoRango[c.account_id]=tieneCampActiva&&tieneGasto
   }
 
+  // ── Estado LIVE de campañas (effective_status real de Meta API) ──
+  // Solo para cuentas con gasto > 0 (las "con actividad"). Las demás cuentan en 0
+  // de todos modos. Esto hace que el conteo del header coincida con el expand,
+  // que también lee effective_status live (no el estado guardado en BD que puede
+  // estar desactualizado).
+  const liveEstadoByCampId={}
+  if(_hIncluyeVivos){
+    try{
+      let _tk=await getConfig('meta_access_token')
+      if(_tk){
+        for(const c of cuentas){
+          if(!tieneGastoRango[c.account_id])continue // skip cuentas sin actividad
+          try{
+            const camps=await metaGet(`/act_${c.account_id}/campaigns`,_tk,{fields:'id,effective_status,status',limit:'500'})
+            for(const cp of (camps||[])){
+              if(!cp.id)continue
+              liveEstadoByCampId[String(cp.id)]=cp.effective_status||cp.status||''
+            }
+          }catch(eCta){
+            console.warn('[header live estados] fallo cuenta',c.account_id,':',eCta.message)
+          }
+        }
+        // Cache global para que el Resumen por producto también use el estado live
+        try{window._nexoLiveEstadoByCampId=liveEstadoByCampId}catch(_){}
+      }
+    }catch(_){}
+  }
+
   // ── Conteo "Con actividad" por cuenta (misma lógica del expand de cada cuenta) ──
   // Una campaña "tuvo actividad" en el rango si su gasto > 0.
   // De esas, activas = estado actual ACTIVE; pausadas = estado actual ≠ ACTIVE.
+  // El estado se toma del mapa LIVE si existe (Meta API), si no fallback a BD.
   const conActByAcc={}
   for(const c of cuentas){conActByAcc[c.account_id]={con:0,activas:0,pausadas:0}}
   for(const camp of (campanas||[])){
@@ -10051,7 +10084,8 @@ async function renderMetaPortafolio(el,isAdmin){
     const tuvoGasto=(gastoRangoByCampId[String(camp.meta_id)]||0)>0
     if(!tuvoGasto)continue
     conActByAcc[accId].con++
-    if(camp.estado==='ACTIVE')conActByAcc[accId].activas++
+    const estadoReal=liveEstadoByCampId[String(camp.meta_id)]||camp.estado||''
+    if(estadoReal==='ACTIVE')conActByAcc[accId].activas++
     else conActByAcc[accId].pausadas++
   }
 

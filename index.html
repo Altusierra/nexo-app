@@ -9527,10 +9527,13 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
   const _ccvPM=(prod.costo_conversacion||100)*_cvPM
   const margenBE=p2*(1-devPct)-c2-fo-(fd*devPct)-_ccvPM
 
-  // CPA real (solo sobre confirmados — no inflar dividiendo contra cancelados ni pendientes)
-  // Si todavia no hay mapeos sincronizados, caer a reportes manuales del aux (que ya son confirmados).
+  // CPA real:
+  //  - HOY: gasto / pedidos brutos del día (aún sin cruce Dropi → no esperar confirmados)
+  //  - Pasado: gasto / confirmados Dropi (cruce real); si no hay mapeos aún, usa reportes manuales
   const pedidosParaCpa=totalMapeos>0?pConf:pReportados
-  const cpaReal=pedidosParaCpa>0?gasto/pedidosParaCpa:0
+  const cpaReal=esSoloHoy
+    ?(totalPedidos>0?gasto/totalPedidos:0)
+    :(pedidosParaCpa>0?gasto/pedidosParaCpa:0)
 
   // ── Pedidos Efectivos y CPA Real Efectivo (solo HOY, sin cruce Dropi) ──
   // Estimación: total_pedidos × pct_confirmacion del producto (default 0.62)
@@ -9557,6 +9560,8 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
   else semCode='fuego'
 
   // ── Métricas técnicas Meta (CTR/CPM/CPA Meta) ponderadas por agregación Σ/Σ ──
+  // Activas/pausadas: solo se cuentan campañas del producto CON GASTO > 0 en el rango
+  // (las que realmente tuvieron actividad, coincide con el filtro "Con actividad" del tracker)
   let _imp=0,_clk=0,_conv=0,_cprSum=0,_cprN=0
   let _activas=0,_pausadas=0
   if(metricsByCampId&&estadoByCampId){
@@ -9564,9 +9569,11 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
       const k=String(cid)
       const m=metricsByCampId[k]
       if(m){_imp+=m.impressions||0;_clk+=m.clicks||0;_conv+=m.conversions||0;_cprSum+=m.cprSum||0;_cprN+=m.cprN||0}
+      const gastoCamp=gastoByCampId[k]||0
+      if(gastoCamp<=0)continue // sin actividad en el rango → no se cuenta
       const e=estadoByCampId[k]||''
       if(e==='ACTIVE')_activas++
-      else if(e)_pausadas++ // cualquier estado no-ACTIVE definido cuenta como pausada
+      else _pausadas++ // con gasto pero estado actual no-ACTIVE (pausada/finalizada/etc.)
     }
   }
   const ctrProd=_imp>0?(_clk/_imp)*100:0
@@ -9677,14 +9684,6 @@ function _renderProductoCardResumen(data,ranking){
     }
   }
 
-  // Tira técnica con CTR / CPM / CPA Meta / Campañas activas-pausadas
-  const tecHtml=`<div style="margin-top:10px;padding:8px 12px;background:rgba(0,0,0,.18);border-radius:8px;font-size:11px;display:flex;gap:14px;flex-wrap:wrap;align-items:center">
-    <span style="color:var(--muted)" title="Click-through rate ponderado: Σ clicks / Σ impresiones">📊 CTR <strong style="color:var(--text)">${data.ctrProd>0?data.ctrProd.toFixed(2)+'%':'—'}</strong></span>
-    <span style="color:var(--muted)" title="Costo por mil impresiones: Σ gasto / Σ impresiones × 1000">CPM <strong style="color:var(--text)">${data.cpmProd>0?'$'+fmt(Math.round(data.cpmProd)):'—'}</strong></span>
-    <span style="color:var(--muted)" title="CPA reportado por Meta (incluye conversiones brutas antes de filtrar canceladas)">🎯 CPA Meta <strong style="color:var(--text)">${data.cpaMetaProd>0?'$'+fmt(Math.round(data.cpaMetaProd)):'—'}</strong></span>
-    <span style="margin-left:auto;color:var(--muted)" title="Campañas asignadas a este producto">⚙ <strong style="color:var(--green)">${data.activas} activas</strong> / ${data.pausadas} pausadas</span>
-  </div>`
-
   return`
   <details class="rp-card" data-sem-code="${data.semCode}" style="background:${c.bg};border:1px solid ${c.border};border-radius:10px;margin-bottom:8px;overflow:hidden">
     <summary style="list-style:none;cursor:pointer;padding:14px 16px;display:block;outline:none">
@@ -9693,6 +9692,7 @@ function _renderProductoCardResumen(data,ranking){
         <div style="display:flex;align-items:baseline;gap:10px;flex:1;min-width:0;flex-wrap:wrap">
           <span style="font-size:17px;font-weight:600;color:${c.color}">${data.nombre}</span>
           <span style="font-size:10px;padding:2px 8px;background:rgba(255,255,255,.06);border-radius:999px;color:${c.color};font-weight:500">${ranking||'?'}° en ventas</span>
+          ${(data.activas+data.pausadas)>0?`<span style="font-size:10px;padding:2px 8px;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:999px;color:var(--muted);font-weight:500" title="Campañas del producto con gasto en el rango — activas / pausadas"><span style="color:var(--green);font-weight:700">${data.activas}</span> <span style="opacity:.6">activas</span> · ${data.pausadas} <span style="opacity:.6">pausadas</span></span>`:''}
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
           ${badge}
@@ -9751,7 +9751,6 @@ function _renderProductoCardResumen(data,ranking){
         <span>3u: <strong style="color:var(--text)">${data.o3}</strong></span>
         <span>4u: <strong style="color:var(--text)">${data.o4}</strong></span>
       </div>`:''}
-      ${tecHtml}
     </div>
   </details>`
 }

@@ -9500,12 +9500,29 @@ async function _renderResumenProductos(desde,hasta,hoy){
     for(const id of ids)reportesAdIdsByProd[pn].add(id)
   }
 
+  // 6.5 Conversaciones por producto (suma del rango, dedupe por fecha+producto — último gana)
+  // No filtra por ad_ids: queremos las conversaciones aunque el reporte no tenga ad_ids cargados.
+  const{data:reportesConv}=await sb.from('reportes_diarios')
+    .select('conversaciones,producto_id,producto_nombre,fecha,updated_at')
+    .gte('fecha',desde).lte('fecha',hasta)
+    .order('updated_at',{ascending:false})
+  const convSeen=new Set()
+  const conversacionesByProd={}
+  for(const r of (reportesConv||[])){
+    const k=(r.fecha||'')+'|'+(r.producto_id||r.producto_nombre||'')
+    if(convSeen.has(k))continue
+    convSeen.add(k)
+    const pn=resolveProdName(r.producto_nombre||'').nombre||(r.producto_nombre||'')
+    if(!pn)continue
+    conversacionesByProd[pn]=(conversacionesByProd[pn]||0)+(r.conversaciones||0)
+  }
+
   // 7. Calcular metricas por producto
   // esSoloHoy = el rango es exactamente HOY (sin cruce Dropi todavía)
   const esSoloHoy=(desde===hoy&&hasta===hoy)
   const productosResumen=[]
   for(const prod of productos){
-    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango)
+    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd)
     if(data)productosResumen.push(data)
   }
 
@@ -9602,7 +9619,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
 
 // Calcula las metricas consolidadas de un producto en el rango.
 // Devuelve null si no hay actividad relevante (sin gasto y sin pedidos).
-function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango){
+function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd){
   // Gasto desde campaign_ids configurados del producto
   let gasto=0
   const campIds=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
@@ -9742,6 +9759,9 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     }
   }
 
+  // Conversaciones del producto en el rango (manual, suma del rango)
+  const conversaciones=(conversacionesByProd&&conversacionesByProd[prod.nombre])||0
+
   return{
     producto:prod,
     nombre:prod.nombre,
@@ -9751,7 +9771,8 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     cpaReal,margenBE,roas,semCode,
     pedidosEfectivos,cpaRealEfectivo,pctConf,esSoloHoy,
     ctrProd,cpmProd,cpaMetaProd,activas:_activas,pausadas:_pausadas,
-    prevData,nDiasRango:nDiasRango||0
+    prevData,nDiasRango:nDiasRango||0,
+    conversaciones
   }
 }
 
@@ -9883,6 +9904,7 @@ function _renderProductoCardResumen(data,ranking){
         <span>2u: <strong style="color:var(--text)">${data.o2}</strong></span>
         <span>3u: <strong style="color:var(--text)">${data.o3}</strong></span>
         <span>4u: <strong style="color:var(--text)">${data.o4}</strong></span>
+        ${data.conversaciones>0?`<span style="border-left:1px solid var(--border);padding-left:14px;margin-left:0">💬 Conversaciones: <strong style="color:var(--text)">${fmt(data.conversaciones)}</strong></span>`:''}
       </div>`:''}
     </div>
   </details>`

@@ -625,7 +625,7 @@ const _isoDate=(d)=>d.toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
 const _daysAgo=(n)=>{const d=new Date();d.setDate(d.getDate()-n);return _isoDate(d)}
 function _quickDateBtns(desdeId,hastaId,onchangeFn){
   const sets=[
-    ['Hoy',0,0],['Ayer',1,1],['Hoy+Ayer',1,0],['7d',6,0],['14d',13,0],['30d',29,0],
+    ['Hoy',0,0],['Ayer',1,1],['Antier',2,2],['Hoy+Ayer',1,0],['7d',6,0],['14d',13,0],['30d',29,0],
     ['Este mes','cm',0],['Mes pasado','lm','lm']
   ]
   return sets.map(([label,desde,hasta])=>{
@@ -705,18 +705,26 @@ async function loadDash(){
   const hasta=document.getElementById('dash-hasta')?.value||today()
   const hoy=today()
 
-  // 1. Gasto real desde Meta Insights
-  const{data:insData}=await sb.from('meta_insights').select('fecha,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
+  // 1. Gasto real desde Meta Insights (ahora incluye meta_id para atribución por producto)
+  const{data:insData}=await sb.from('meta_insights').select('fecha,spend,meta_id').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
   const gastoByFecha={}
+  const gastoByCampId={}
   let gastoTotal=0
-  for(const i of (insData||[])){gastoByFecha[i.fecha]=(gastoByFecha[i.fecha]||0)+(i.spend||0);gastoTotal+=i.spend||0}
+  for(const i of (insData||[])){
+    gastoByFecha[i.fecha]=(gastoByFecha[i.fecha]||0)+(i.spend||0)
+    if(i.meta_id)gastoByCampId[i.meta_id]=(gastoByCampId[i.meta_id]||0)+(i.spend||0)
+    gastoTotal+=i.spend||0
+  }
 
-  // 2. Órdenes desde mapeos (asignador + Dropi)
-  const{data:mapeos}=await sb.from('mapeos').select('cantidad,producto,estado_final,fecha,ad_id').gte('fecha',desde).lte('fecha',hasta).limit(10000)
+  // 2. Órdenes desde mapeos (ahora también trae precio_dropi para Ventas Netas reales)
+  const{data:mapeos}=await sb.from('mapeos').select('cantidad,producto,estado_final,fecha,ad_id,precio_dropi').gte('fecha',desde).lte('fecha',hasta).limit(10000)
   let tot1=0,tot2=0,tot3=0,tot4=0,conf=0,canc=0,pend=0,conAd=0
   let cConf1=0,cConf2=0,cConf3=0,cConf4=0
   const prodStats={}
   const prodStatsConf={}
+  // NUEVO: tracking ventas netas
+  let ventasNetasReales=0,ventasNetasEstimadas=0
+  let countConPrecioReal=0,countConPrecioEstimado=0
   for(const m of (mapeos||[])){
     const q=m.cantidad||2
     if(q===1)tot1++;else if(q===2)tot2++;else if(q===3)tot3++;else tot4++
@@ -731,10 +739,21 @@ async function loadDash(){
     if(esConf){
       if(!prodStatsConf[pn])prodStatsConf[pn]={o1:0,o2:0,o3:0,o4:0}
       if(q===1){prodStatsConf[pn].o1++;cConf1++}else if(q===2){prodStatsConf[pn].o2++;cConf2++}else if(q===3){prodStatsConf[pn].o3++;cConf3++}else{prodStatsConf[pn].o4++;cConf4++}
+      // Ventas netas: si tiene precio_dropi (pasó cruce) usa eso, si no estima con cantidad × precio_Xu
+      if(m.precio_dropi&&m.precio_dropi>0){
+        ventasNetasReales+=m.precio_dropi
+        countConPrecioReal++
+      }else{
+        const prodTmp=productos.find(p=>p.nombre===pn)||productos[0]||{}
+        const precioEst=q===1?(prodTmp.precio_1u||0):q===2?(prodTmp.precio_2u||0):q===3?(prodTmp.precio_3u||0):(prodTmp.precio_4u||0)
+        ventasNetasEstimadas+=precioEst
+        countConPrecioEstimado++
+      }
     }
   }
   const totalOrds=tot1+tot2+tot3+tot4
   const totalOrdsConf=cConf1+cConf2+cConf3+cConf4
+  const ventasNetasTotal=ventasNetasReales+ventasNetasEstimadas
 
   // 3. Venta por oferta cruzada con precios de producto (solo confirmados)
   let ventaTotal=0,costoProvTotal=0
@@ -762,13 +781,41 @@ async function loadDash(){
   const dias=Math.max(1,Math.round((new Date(hasta)-new Date(desde))/86400000)+1)
   const gastoFijoPeriodo=Math.round(gastoFijoMensual/30*dias)
 
-  // 6. Cálculos estilo tracker
-  const prod0=productos[0]||{}
-  const devPct=prod0.dev_pct||0.19
-  const costoFlete=totalOrdsConf*(prod0.flete_outbound||21000)
-  const costoDevolucion=Math.round(totalOrdsConf*devPct*(prod0.flete_devolucion||18000))
-  const costoConv=conv*(prod0.costo_conversacion||100)
-  const ventaEfectiva=Math.round(ventaTotal*(1-devPct))
+  // 6. Cálculos estilo tracker — POR PRODUCTO ESPECÍFICO (no productos[0])
+  // Itera cada producto que tuvo confirmados y aplica SUS PROPIOS dev_pct, flete, etc.
+  let costoFlete=0,costoDevolucion=0,ventaEfectiva=0
+  let costoConvTotal=0
+  let _devPctPonderado=0,_pesoDev=0
+  // Distribuir conversaciones del rango por producto (mismo dedupe que arriba)
+  const _convByProd={}
+  const _convSeen2={}
+  for(const r of (reps||[])){
+    const resolved=resolveProdName(r.producto_nombre).nombre||(r.producto_nombre||'')
+    const k=(r.fecha||'')+'|'+(r.producto_id||_normProd(resolved))
+    if(_convSeen2[k])continue
+    _convSeen2[k]=true
+    if(!resolved)continue
+    _convByProd[resolved]=(_convByProd[resolved]||0)+(r.conversaciones||0)
+  }
+  for(const[pn,st]of Object.entries(prodStatsConf)){
+    const prod=productos.find(p=>p.nombre===pn)||productos[0]||{}
+    const _dp=prod.dev_pct||0.19
+    const _fo=prod.flete_outbound||21000
+    const _fd=prod.flete_devolucion||18000
+    const confProd=st.o1+st.o2+st.o3+st.o4
+    const ventaProd=(st.o1*(prod.precio_1u||0))+(st.o2*(prod.precio_2u||0))+(st.o3*(prod.precio_3u||0))+(st.o4*(prod.precio_4u||0))
+    costoFlete+=confProd*_fo
+    costoDevolucion+=Math.round(confProd*_dp*_fd)
+    ventaEfectiva+=Math.round(ventaProd*(1-_dp))
+    // Costo de conversación con el costo por conversación PROPIO del producto
+    const _convProd=_convByProd[pn]||0
+    costoConvTotal+=_convProd*(prod.costo_conversacion||100)
+    _devPctPonderado+=_dp*confProd
+    _pesoDev+=confProd
+  }
+  // dev_pct ponderado para mostrar en UI
+  const devPct=_pesoDev>0?(_devPctPonderado/_pesoDev):((productos[0]||{}).dev_pct||0.19)
+  const costoConv=costoConvTotal // mantener nombre original (lo usa la card de UI)
   const ganNeta=ventaEfectiva-costoProvTotal-costoFlete-costoDevolucion-gastoTotal-costoConv-gastoFijoPeriodo
   const roas_bruto=gastoTotal>0?ventaTotal/gastoTotal:0
   const roas_neto=gastoTotal>0?(ganNeta+gastoTotal)/gastoTotal:0
@@ -776,7 +823,8 @@ async function loadDash(){
   const cpr=totalOrdsConf>0?gastoTotal/totalOrdsConf:0
   const tasaCierre=conv>0?totalOrdsConf/conv:0
 
-  // Break-even
+  // Break-even global — sigue usando productos[0] como referencia (es solo para mostrar el BE genérico)
+  const prod0=productos[0]||{}
   const p2=prod0.precio_2u||129900,c2=prod0.costo_2u||36000
   const fo=prod0.flete_outbound||21000,fd=prod0.flete_devolucion||18000
   const dp=prod0.dev_pct||0.19
@@ -785,62 +833,279 @@ async function loadDash(){
   const margenBE=p2*(1-dp)-c2-fo-(fd*dp)-_ccv
   const be_roas=margenBE>0?p2/margenBE:0
 
-  // Semáforo — basado en CPA si solo hay hoy, ROAS si hay data completa
+  // NUEVO: BE ponderado por gasto entre productos (más honesto que productos[0])
+  let _margenBE_ponderado=0,_pesoGastoBE=0
+  for(const[pn,st]of Object.entries(prodStatsConf)){
+    const prod=productos.find(p=>p.nombre===pn)||productos[0]||{}
+    const _p2=prod.precio_2u||p2,_c2=prod.costo_2u||c2
+    const _fo2=prod.flete_outbound||fo,_fd2=prod.flete_devolucion||fd
+    const _dp2=prod.dev_pct||dp
+    const _cv2=prod.conversaciones_por_venta!=null?prod.conversaciones_por_venta:_cv
+    const _ccv2=(prod.costo_conversacion||100)*_cv2
+    const _mbe=_p2*(1-_dp2)-_c2-_fo2-(_fd2*_dp2)-_ccv2
+    let _gastoProd=0
+    for(const cid of (prod.campaign_ids||[])){_gastoProd+=gastoByCampId[cid]||0}
+    if(_gastoProd>0&&_mbe>0){
+      _margenBE_ponderado+=_mbe*_gastoProd
+      _pesoGastoBE+=_gastoProd
+    }
+  }
+  const margenBE_pond=_pesoGastoBE>0?(_margenBE_ponderado/_pesoGastoBE):margenBE
+  const cpaPct=margenBE_pond>0?(cpa/margenBE_pond*100):0
+
+  // NUEVO: Período anterior (mismo length de días) para deltas
+  let deltaGasto=null,deltaVentas=null,deltaCPA=null
+  try{
+    const _hastaAnt=new Date(desde);_hastaAnt.setDate(_hastaAnt.getDate()-1)
+    const _desdeAnt=new Date(_hastaAnt);_desdeAnt.setDate(_desdeAnt.getDate()-(dias-1))
+    const _dA=_isoDate(_desdeAnt),_hA=_isoDate(_hastaAnt)
+    const[{data:insA},{data:mapA}]=await Promise.all([
+      sb.from('meta_insights').select('spend').eq('nivel','campaign').gte('fecha',_dA).lte('fecha',_hA),
+      sb.from('mapeos').select('cantidad,estado_final,precio_dropi').gte('fecha',_dA).lte('fecha',_hA).limit(10000)
+    ])
+    const _gastoA=(insA||[]).reduce((s,i)=>s+(i.spend||0),0)
+    let _confA=0
+    for(const m of (mapA||[])){
+      if(m.estado_final==='CANCELADO')continue
+      if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)continue
+      _confA++
+    }
+    const _cpaA=_confA>0?_gastoA/_confA:0
+    if(_gastoA>0)deltaGasto={pct:Math.round((gastoTotal-_gastoA)/_gastoA*100),prev:_gastoA}
+    deltaVentas={diff:totalOrdsConf-_confA,prev:_confA}
+    if(_cpaA>0)deltaCPA={pct:Math.round((cpa-_cpaA)/_cpaA*100),prev:_cpaA}
+  }catch(e){console.warn('Delta período anterior:',e)}
+
+  // NUEVO: Desglose por producto con semáforo individual
+  const desgloseProductos=[]
+  for(const[pn,st]of Object.entries(prodStatsConf)){
+    const prod=productos.find(p=>p.nombre===pn)||productos[0]||{}
+    const _p2=prod.precio_2u||p2,_c2=prod.costo_2u||c2
+    const _fo2=prod.flete_outbound||fo,_fd2=prod.flete_devolucion||fd
+    const _dp2=prod.dev_pct||dp
+    const _cv2=prod.conversaciones_por_venta!=null?prod.conversaciones_por_venta:_cv
+    const _ccv2=(prod.costo_conversacion||100)*_cv2
+    const _mbe=_p2*(1-_dp2)-_c2-_fo2-(_fd2*_dp2)-_ccv2
+    let _gastoProd=0
+    for(const cid of (prod.campaign_ids||[])){_gastoProd+=gastoByCampId[cid]||0}
+    const _confProd=st.o1+st.o2+st.o3+st.o4
+    const _cpaProd=_confProd>0?_gastoProd/_confProd:0
+    const _pctLim=_mbe>0?(_cpaProd/_mbe*100):0
+    // Reglas del semáforo Nexo (mismas % que el resto del sistema: 45%/70%/100%)
+    let sem='sin_ventas',semTxt='⏳ Esperar',semColor='--muted',semBg='--card2'
+    if(_gastoProd>0&&_confProd>0){
+      if(_cpaProd>_mbe){sem='stop';semTxt='🔴 STOP';semColor='--red';semBg='--red-bg'}
+      else if(_cpaProd>_mbe*0.7){sem='precaucion';semTxt='🟡 Precaución';semColor='--amber';semBg='--amber-bg'}
+      else if(_cpaProd>_mbe*0.45){sem='escalar';semTxt='🟢 Escalar';semColor='--green';semBg='--green-bg'}
+      else{sem='fuego';semTxt='🟣 Fuego';semColor='--purple';semBg='--purple-bg'}
+    }else if(_gastoProd>0){sem='sin_ventas';semTxt='⏳ Sin ventas';semColor='--muted';semBg='--card2'}
+    desgloseProductos.push({nombre:pn,ventas:_confProd,gasto:_gastoProd,cpa:_cpaProd,limite:_mbe,pctLim:_pctLim,sem,semTxt,semColor,semBg})
+  }
+  const _ordenSem={stop:1,precaucion:2,sin_ventas:3,escalar:4,fuego:5}
+  desgloseProductos.sort((a,b)=>(_ordenSem[a.sem]||9)-(_ordenSem[b.sem]||9))
+  const hayStop=desgloseProductos.some(d=>d.sem==='stop')
+
+  // Semáforo global (lógica preservada del original) + estado "día arrancando"
   const tieneOferta=totalOrds>0&&ventaTotal>0
-  let semHtml=''
-  if(gastoTotal===0){
-    semHtml=`<div class="semaforo" style="background:var(--card2);border-color:var(--border)"><div class="sem-dot" style="background:var(--subtle)"></div><div><div class="sem-title" style="color:var(--muted)">Sin gasto en ads en este rango</div><div class="sem-msg" style="color:var(--subtle)">Sincroniza Meta Ads para ver el semáforo</div></div></div>`
-  } else if(tieneOferta){
-    let cls,title,msg
-    if(roas_bruto<be_roas){cls='sem-rojo';title='STOP — Debajo del break-even';msg=`ROAS ${roas_bruto.toFixed(2)}x vs mínimo ${be_roas.toFixed(2)}x`}
-    else if(roas_bruto<be_roas*1.4){cls='sem-amarillo';title='Precaución — Poco colchón';msg=`ROAS ${roas_bruto.toFixed(2)}x. Rentable pero ajustado.`}
-    else if(roas_bruto<be_roas*2.2){cls='sem-verde';title='Verde — Escalar con confianza';msg=`ROAS ${roas_bruto.toFixed(2)}x. Aumentar 20-30%.`}
-    else{cls='sem-fuego';title='🟣 Fuego — Escalar agresivo';msg=`ROAS ${roas_bruto.toFixed(2)}x. Muy por encima del BE.`}
-    semHtml=`<div class="semaforo ${cls}"><div class="sem-dot"></div><div><div class="sem-title">${title}</div><div class="sem-msg">${msg}</div></div></div>`
-  } else if(totalOrds>0){
-    const cpaSem=cpa<=margenBE?'sem-verde':cpa<=margenBE*1.3?'sem-amarillo':'sem-rojo'
-    const cpaTit=cpa<=margenBE?'CPA dentro del límite':'CPA por encima del break-even'
-    semHtml=`<div class="semaforo ${cpaSem}"><div class="sem-dot"></div><div><div class="sem-title">${cpaTit}</div><div class="sem-msg">CPA: $${fmt(cpa)} vs límite: $${fmt(margenBE)} · ROAS pendiente (sin oferta aún)</div></div></div>`
+  const esSoloHoy=(desde===hoy&&hasta===hoy)
+  const diaArrancando=esSoloHoy&&gastoTotal>0&&(gastoTotal<100000||totalOrdsConf<4)
+  let heroBorder='--muted',heroIcono='⏳',heroLabel='Sin datos',heroTitulo='Sin actividad',heroFrase=''
+  const acciones=[]
+
+  if(diaArrancando){
+    heroBorder='--blue';heroIcono='⏳';heroLabel='Día arrancando';heroTitulo='Aún es muy temprano'
+    heroFrase=`Llevas <strong>$${fmt(gastoTotal)}</strong> invertidos y <strong>${totalOrdsConf}</strong> ventas confirmadas. Los CPA y ROAS aún no son confiables. Vuelve más tarde para datos sólidos.`
+  }else if(gastoTotal===0){
+    heroBorder='--muted';heroIcono='⏸️';heroLabel='Sin gasto';heroTitulo='Sin gasto en ads en este rango'
+    heroFrase='Sincroniza Meta Ads para ver el semáforo.'
+  }else if(tieneOferta){
+    if(roas_bruto<be_roas){heroBorder='--red';heroIcono='🔴';heroLabel='STOP';heroTitulo='Estás perdiendo plata';heroFrase=`ROAS ${roas_bruto.toFixed(2)}x vs mínimo ${be_roas.toFixed(2)}x. Por cada peso invertido no recuperas suficiente.`}
+    else if(roas_bruto<be_roas*1.4){heroBorder='--amber';heroIcono='🟡';heroLabel='Precaución';heroTitulo='Vas bien, pero ajustado';heroFrase=`ROAS ${roas_bruto.toFixed(2)}x. Rentable pero con poco colchón.`}
+    else if(roas_bruto<be_roas*2.2){heroBorder='--green';heroIcono='🟢';heroLabel='Escalar';heroTitulo='Buen momento para escalar';heroFrase=`ROAS ${roas_bruto.toFixed(2)}x. Subir presupuesto 20-30%.`}
+    else{heroBorder='--purple';heroIcono='🟣';heroLabel='Fuego';heroTitulo='Está rindiendo brutal';heroFrase=`ROAS ${roas_bruto.toFixed(2)}x. Muy por encima del BE. Doblar presupuesto.`}
+    // Acciones específicas por producto
+    for(const d of desgloseProductos){
+      if(d.sem==='stop')acciones.push(`<strong style="color:var(--red)">Pausa ${d.nombre}</strong> — perdiendo plata (CPA ${Math.round(d.pctLim)}% del límite)`)
+      else if(d.sem==='precaucion')acciones.push(`<strong style="color:var(--amber)">Revisa ${d.nombre}</strong> — al ${Math.round(d.pctLim)}% del límite`)
+      else if(d.sem==='fuego')acciones.push(`<strong style="color:var(--purple)">Escala ${d.nombre}</strong> — está en fuego (CPA solo ${Math.round(d.pctLim)}% del límite)`)
+    }
+    if(roas_bruto<be_roas*1.4&&acciones.length===0)acciones.push('No subas presupuesto global hasta estabilizar.')
+    else if(roas_bruto>=be_roas*2.2&&acciones.length===0)acciones.push('Sube presupuesto global agresivamente.')
+  }else if(totalOrds>0){
+    if(cpa<=margenBE){heroBorder='--green';heroIcono='🟢';heroLabel='OK';heroTitulo='CPA dentro del límite'}
+    else if(cpa<=margenBE*1.3){heroBorder='--amber';heroIcono='🟡';heroLabel='Precaución';heroTitulo='CPA cerca del límite'}
+    else{heroBorder='--red';heroIcono='🔴';heroLabel='STOP';heroTitulo='CPA por encima del break-even'}
+    heroFrase=`CPA $${fmt(cpa)} vs límite $${fmt(margenBE)}. ROAS pendiente (sin oferta aún).`
   }
 
-  el.innerHTML=`
-    ${semHtml}
+  // Helper: render de delta (↑↓ + texto)
+  const _fmtDelta=(d,tipo)=>{
+    if(!d)return ''
+    let val
+    if(d.diff!==undefined)val=d.diff
+    else if(d.pct!==undefined)val=d.pct
+    else return ''
+    const arriba=val>0
+    let color='--muted'
+    if(tipo==='positivo')color=arriba?'--green':val<0?'--red':'--muted'
+    else if(tipo==='negativo')color=arriba?'--red':val<0?'--green':'--muted'
+    const flecha=arriba?'↑':val<0?'↓':'→'
+    const signo=arriba?'+':''
+    const texto=d.diff!==undefined?`${signo}${val} vs ant.`:`${signo}${val}% vs ant.`
+    return `<div style="font-size:11px;color:var(${color});margin:4px 0;font-weight:600">${flecha} ${texto}</div>`
+  }
+
+  // RENDER: HERO con narrativa + bullets
+  const _heroHTML=`
+    <div style="background:var(--card);border:1px solid var(--border);border-left:4px solid var(${heroBorder});border-radius:12px;padding:16px 20px;margin-bottom:20px;display:flex;gap:14px;align-items:flex-start">
+      <div style="font-size:24px;line-height:1;margin-top:2px">${heroIcono}</div>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap">
+          <span style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(${heroBorder})">${heroLabel}</span>
+          <span style="font-size:11px;color:var(--muted)">·</span>
+          <span style="font-size:11px;color:var(--muted)">${esSoloHoy?'Hoy':desde+' a '+hasta}</span>
+        </div>
+        <div style="margin:0 0 10px 0;font-size:18px;font-weight:600">${heroTitulo}</div>
+        ${gastoTotal>0&&tieneOferta?`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 12px;background:var(--card2);border-radius:8px;margin-bottom:12px;font-size:13px">
+          <span style="color:var(--muted)">Invertiste</span>
+          <strong>$${fmt(gastoTotal)}</strong>
+          <span style="color:var(--muted)">→</span>
+          <span style="color:var(--muted)">Vendiste</span>
+          <strong>$${fmt(ventasNetasTotal)}</strong>
+          <span style="color:var(--muted)">→</span>
+          <span style="color:var(--muted)">Ganaste</span>
+          <strong style="color:var(${ganNeta>=0?'--green':'--red'})">${ganNeta>=0?'$'+fmt(ganNeta):'-$'+fmt(Math.abs(ganNeta))}</strong>
+        </div>`:''}
+        ${heroFrase?`<p style="margin:0 0 ${acciones.length>0?'10':'0'}px 0;font-size:13px;color:var(--muted);line-height:1.55">${heroFrase}</p>`:''}
+        ${acciones.length>0?`<div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:4px;letter-spacing:.03em;text-transform:uppercase">✋ Qué hacer ahora:</div>
+        <ul style="margin:0;padding-left:20px;font-size:13px;line-height:1.7;color:var(--text)">
+          ${acciones.map(a=>`<li>${a}</li>`).join('')}
+        </ul>`:''}
+      </div>
+    </div>`
+
+  // RENDER: 4 números rey con deltas
+  const _4reyesHTML=`
+    <div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px">Los 4 números que importan</div>
     <div class="cards-row c4">
-      <div class="card c-blue"><div class="card-label">Órdenes</div><div class="card-val">${totalOrds}</div>
-        <div class="card-sub">1u:${tot1} · 2u:${tot2} · 3u:${tot3} · 4u:${tot4}</div></div>
-      <div class="card c-green"><div class="card-label">Confirmados</div><div class="card-val">${conf}</div>
-        <div class="card-sub">${totalOrds>0?Math.round(conf/totalOrds*100):0}% del total</div></div>
-      <div class="card c-red"><div class="card-label">Cancelados</div><div class="card-val">${canc}</div></div>
-      <div class="card c-amber"><div class="card-label">Pendientes</div><div class="card-val">${pend}</div></div>
-    </div>
-    <div class="cards-row c4">
-      <div class="card c-purple"><div class="card-label">Conversaciones</div><div class="card-val">${conv}</div>
-        <div class="card-sub">Tasa cierre: ${(tasaCierre*100).toFixed(1)}%</div></div>
-      <div class="card"><div class="card-label">Gasto Ads (Meta)</div><div class="card-val">$${fmt(gastoTotal)}</div></div>
-      <div class="card"><div class="card-label">CPA</div><div class="card-val ${cpa>0&&cpa<=margenBE?'c-green':'c-red'}">$${fmt(cpa)}</div>
-        <div class="card-sub">Límite: $${fmt(margenBE)}</div></div>
-      <div class="card ${roas_bruto>=be_roas?'c-green':'c-red'}"><div class="card-label">ROAS Bruto</div>
-        <div class="card-val">${tieneOferta?roas_bruto.toFixed(2)+'x':'—'}</div>
-        <div class="card-sub">BE: ${be_roas.toFixed(2)}x${!tieneOferta?' · Pendiente oferta':''}</div></div>
-    </div>
-    <div class="cards-row c4">
-      <div class="card"><div class="card-label">Venta</div><div class="card-val">${tieneOferta?'$'+fmt(ventaTotal):'—'}</div></div>
-      <div class="card ${roas_neto>=1?'c-green':'c-red'}"><div class="card-label">ROAS Neto</div>
-        <div class="card-val">${tieneOferta?roas_neto.toFixed(2)+'x':'—'}</div>
-        <div class="card-sub">BE neto: 1.00x</div></div>
-      <div class="card ${ganNeta>=0?'c-green':'c-red'}"><div class="card-label">Ganancia Neta</div>
+      <div class="card">
+        <div class="card-label">📡 Gasto Ads</div>
+        <div class="card-val">$${fmt(gastoTotal)}</div>
+        ${_fmtDelta(deltaGasto,'negativo')}
+        <div class="card-sub">Lo que invertiste.</div>
+      </div>
+      <div class="card c-blue">
+        <div class="card-label">🛒 Ventas netas <span style="cursor:help;font-size:11px;opacity:.7;border:1px solid var(--border);border-radius:50%;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted);margin-left:2px;vertical-align:middle;font-weight:400" title="Solo órdenes CONFIRMADAS. La plata real viene de precio_dropi (cruce Dropi). Si la orden aún no pasa cruce, usa estimado: cantidad del asignador × precio_Xu del producto.">ℹ</span></div>
+        <div style="display:flex;align-items:baseline;gap:6px">
+          <div class="card-val" style="color:var(--blue)">${totalOrdsConf}</div>
+          <span style="font-size:12px;color:var(--muted)">· $${fmt(ventasNetasTotal)}</span>
+        </div>
+        ${_fmtDelta(deltaVentas,'positivo')}
+        <div class="card-sub">${countConPrecioReal} reales · ${countConPrecioEstimado} estimadas</div>
+      </div>
+      <div class="card ${ganNeta>=0?'c-green':'c-red'}">
+        <div class="card-label">💰 Ganancia neta ${tieneOferta?`<span style="cursor:help;font-size:11px;opacity:.7;border:1px solid var(--border);border-radius:50%;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted);margin-left:2px;vertical-align:middle;font-weight:400" title="Cómo sale $${fmt(ganNeta)}:&#10;&#10;Venta efectiva (${Math.round(devPct*100)}% dev ponderado): $${fmt(ventaEfectiva)}&#10;− Costo producto: −$${fmt(costoProvTotal)}&#10;− Flete: −$${fmt(costoFlete)}&#10;− Devolución: −$${fmt(costoDevolucion)}&#10;− Gasto ads: −$${fmt(gastoTotal)}&#10;− Costo conversación: −$${fmt(costoConv)}&#10;− Gastos fijos (${dias}d): −$${fmt(gastoFijoPeriodo)}&#10;&#10;= $${fmt(ganNeta)}&#10;&#10;(% devolución calculado por producto específico, no global)">ℹ</span>`:''}</div>
         <div class="card-val">${tieneOferta?'$'+fmt(ganNeta):'—'}</div>
-        <div class="card-sub">${tieneOferta?`Margen: ${(ganNeta/ventaTotal*100).toFixed(1)}%`:''}</div></div>
-      <div class="card"><div class="card-label">Gastos Fijos</div>
-        <div class="card-val">$${fmt(gastoFijoPeriodo)}</div>
-        <div class="card-sub">${dias}d · Mensual: $${fmt(gastoFijoMensual)}</div></div>
+        <div class="card-sub">${tieneOferta?`Margen ${(ganNeta/ventaTotal*100).toFixed(1)}%`:'Sin oferta'}</div>
+      </div>
+      <div class="card" style="border-color:var(${cpaPct>100?'--red':cpaPct>70?'--amber':'--border'})">
+        <div class="card-label">🎯 CPA vs límite</div>
+        <div class="card-val" style="color:var(${cpaPct>100?'--red':cpaPct>70?'--amber':'--green'})">$${fmt(cpa)}</div>
+        ${_fmtDelta(deltaCPA,'negativo')}
+        <div style="height:5px;background:var(--card2);border-radius:3px;overflow:hidden;margin:6px 0 4px 0">
+          <div style="width:${Math.min(100,Math.max(0,cpaPct)).toFixed(0)}%;height:100%;background:var(${cpaPct>100?'--red':cpaPct>70?'--amber':'--green'})"></div>
+        </div>
+        <div class="card-sub">${Math.round(cpaPct)}% de $${fmt(margenBE_pond)}</div>
+      </div>
+    </div>`
+
+  // RENDER: Desglose por producto (auto-abierto si hay STOP)
+  const _desgloseHTML=desgloseProductos.length>0?`
+    <details ${hayStop?'open':''} style="background:var(--card);border:1px solid var(--border);border-radius:12px;margin-bottom:20px;margin-top:16px">
+      <summary style="padding:12px 16px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;list-style:none;gap:8px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="font-size:13px;font-weight:600">📋 Desglose por producto</span>
+          ${hayStop?'<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:10px;background:var(--red-bg);color:var(--red);font-size:10px;font-weight:700">⚠ ABIERTO AUTO · STOP DETECTADO</span>':''}
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)">
+          ${desgloseProductos.map(d=>`<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(${d.semColor})" title="${d.nombre}: ${d.semTxt}"></span>`).join('')}
+          <span style="margin-left:4px">${desgloseProductos.length} prod.</span>
+        </div>
+      </summary>
+      <div style="padding:0 12px 12px 12px;overflow-x:auto">
+        <div style="display:grid;grid-template-columns:1.6fr .5fr .8fr .9fr .9fr 1fr;gap:8px;font-size:10px;color:var(--muted);padding:8px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);text-transform:uppercase;letter-spacing:.05em;font-weight:600;min-width:560px">
+          <div>Producto</div>
+          <div style="text-align:right">Ventas</div>
+          <div style="text-align:right">Gasto</div>
+          <div style="text-align:right">CPA real</div>
+          <div style="text-align:right">% Límite</div>
+          <div style="text-align:right">Semáforo</div>
+        </div>
+        ${desgloseProductos.map(d=>`
+          <div onclick="window.navigate&&window.navigate('admin-meta')" style="display:grid;grid-template-columns:1.6fr .5fr .8fr .9fr .9fr 1fr;gap:8px;font-size:13px;padding:10px 8px;align-items:center;border-bottom:1px solid var(--border);cursor:pointer;border-radius:6px;transition:background .15s;min-width:560px" onmouseover="this.style.background='var(--card2)'" onmouseout="this.style.background=''" title="Ir a Meta Ads">
+            <div style="display:flex;align-items:center;gap:8px">
+              <div style="width:6px;height:6px;border-radius:50%;background:var(${d.semColor});flex-shrink:0"></div>
+              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.nombre}</span>
+            </div>
+            <div style="text-align:right">${d.ventas}</div>
+            <div style="text-align:right">$${fmt(d.gasto)}</div>
+            <div style="text-align:right;color:var(${d.semColor});font-weight:600">${d.cpa>0?'$'+fmt(d.cpa):'—'}</div>
+            <div style="text-align:right;color:var(--muted);font-size:12px">${d.pctLim>0?Math.round(d.pctLim)+'% de $'+fmt(d.limite):'—'}</div>
+            <div style="text-align:right"><span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:10px;background:var(${d.semBg});color:var(${d.semColor});font-size:11px;font-weight:600;white-space:nowrap">${d.semTxt}</span></div>
+          </div>
+        `).join('')}
+      </div>
+    </details>`:''
+
+  // RENDER: 3 bloques agrupados (Ventas/Órdenes, Gastos, Eficiencia)
+  const _bloqueVentasHTML=`
+    <div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;margin-top:16px">📦 Ventas y órdenes</div>
+    <div class="cards-row c4">
+      <div class="card">
+        <div class="card-label">Órdenes totales</div>
+        <div class="card-val">${totalOrds}</div>
+        <div class="card-sub">1u:${tot1} · 2u:${tot2} · 3u:${tot3} · 4u:${tot4}</div>
+      </div>
+      <div class="card c-green">
+        <div class="card-label">Confirmados</div>
+        <div class="card-val">${conf}</div>
+        <div class="card-sub">${totalOrds>0?Math.round(conf/totalOrds*100):0}% del total</div>
+      </div>
+      <div class="card c-red">
+        <div class="card-label">Cancelados</div>
+        <div class="card-val">${canc}</div>
+        <div class="card-sub">${totalOrds>0?Math.round(canc/totalOrds*100):0}% del total</div>
+      </div>
+      <div class="card c-amber">
+        <div class="card-label">Pendientes</div>
+        <div class="card-val">${pend}</div>
+        ${pend>0?'<div class="card-sub" style="margin-top:6px"><a href="javascript:void(0)" onclick="window.navigate&&window.navigate(\'aux-dropi\')" style="color:var(--blue);text-decoration:none;display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:600">→ Abrir cruce Dropi</a></div>':'<div class="card-sub">Sin pendientes</div>'}
+      </div>
     </div>
-    ${tieneOferta?`<div class="cards-row c3">
-      <div class="card"><div class="card-label">Costo Producto</div><div class="card-val">$${fmt(costoProvTotal)}</div></div>
-      <div class="card"><div class="card-label">Flete + Dev</div><div class="card-val">$${fmt(costoFlete+costoDevolucion)}</div></div>
-      <div class="card"><div class="card-label">Costo Conv.</div><div class="card-val">$${fmt(costoConv)}</div>
-        <div class="card-sub">${conv} conv × $${fmt(prod0.costo_conversacion||100)}</div></div>
-    </div>`:''}`
+    <div class="cards-row c4" style="margin-top:12px">
+      <div class="card c-purple"><div class="card-label">Conversaciones</div><div class="card-val">${conv}</div><div class="card-sub">Tasa cierre: ${(tasaCierre*100).toFixed(1)}%</div></div>
+    </div>`
+
+  const _bloqueGastosHTML=tieneOferta?`
+    <div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;margin-top:16px">💸 Gastos desglosados</div>
+    <div class="cards-row c4">
+      <div class="card"><div class="card-label">Costo producto</div><div class="card-val" style="font-size:18px">$${fmt(costoProvTotal)}</div><div class="card-sub">Mercancía</div></div>
+      <div class="card"><div class="card-label">Flete + dev.</div><div class="card-val" style="font-size:18px">$${fmt(costoFlete+costoDevolucion)}</div><div class="card-sub">Envío + devol. (${Math.round(devPct*100)}%)</div></div>
+      <div class="card"><div class="card-label">Costo conv.</div><div class="card-val" style="font-size:18px">$${fmt(costoConv)}</div><div class="card-sub">${conv} conv × $${fmt(prod0.costo_conversacion||100)}</div></div>
+      <div class="card"><div class="card-label">Gastos fijos</div><div class="card-val" style="font-size:18px">$${fmt(gastoFijoPeriodo)}</div><div class="card-sub">${dias}d · Mes $${fmt(gastoFijoMensual)}</div></div>
+    </div>`:''
+
+  const _bloqueEficienciaHTML=`
+    <div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;margin-top:16px">📈 Eficiencia</div>
+    <div class="cards-row c4">
+      <div class="card"><div class="card-label">Venta total bruta</div><div class="card-val" style="font-size:18px">${tieneOferta?'$'+fmt(ventaTotal):'—'}</div><div class="card-sub">Incluye no cruzadas</div></div>
+      <div class="card ${tieneOferta&&roas_bruto>=be_roas?'c-green':'c-red'}"><div class="card-label">ROAS bruto</div><div class="card-val" style="font-size:18px">${tieneOferta?roas_bruto.toFixed(2)+'x':'—'}</div><div class="card-sub">BE: ${be_roas.toFixed(2)}x</div></div>
+      <div class="card ${roas_neto>=1?'c-green':'c-red'}"><div class="card-label">ROAS neto</div><div class="card-val" style="font-size:18px">${tieneOferta?roas_neto.toFixed(2)+'x':'—'}</div><div class="card-sub">BE: 1.00x</div></div>
+      <div class="card"><div class="card-label">Tasa cierre</div><div class="card-val" style="font-size:18px">${(tasaCierre*100).toFixed(1)}%</div><div class="card-sub">${conf} de ${conv} chats</div></div>
+    </div>`
+
+  // RENDER FINAL
+  el.innerHTML=_heroHTML+_4reyesHTML+_desgloseHTML+_bloqueVentasHTML+_bloqueGastosHTML+_bloqueEficienciaHTML
 }
 
 // ── ADMIN: REPORTES ────────────────────────────────────────
@@ -1297,7 +1562,9 @@ async function loadTracker(){
       const cpa=aConf>0?aGasto/aConf:0
       const roasBruto=aGasto>0&&aVenta>0?aVenta/aGasto:0
       const roasReal=aGasto>0&&aEnt>0?ventaRealAprox/aGasto:0
-      accProd[pid]={aGasto,aConf,aCanc,aPend,aEnt,aDev,aConv,aVenta,a1,a2,a3,a4,ganProy,ganReal,cpa,roasBruto,roasReal,promedioPrecio,promedioCosto,fechas,dp,fo,fdN,cc,cv,nombre:prod.nombre}
+      accProd[pid]={aGasto,aConf,aCanc,aPend,aEnt,aDev,aConv,aVenta,a1,a2,a3,a4,ganProy,ganReal,cpa,roasBruto,roasReal,promedioPrecio,promedioCosto,fechas,dp,fo,fdN,cc,cv,nombre:prod.nombre,
+        desgloseGanProy:{ventaProy:Math.round(ventaProy),aCosto,fleteOutProy:Math.round(fleteOutProy),fleteDevProy:Math.round(fleteDevProy),aGasto,costoConv:Math.round(aConv*cc),dp}
+      }
     }
 
     if(!Object.keys(accProd).length&&!gastoSinAtrib){
@@ -1389,7 +1656,7 @@ async function loadTracker(){
         <td data-label="Venta">$${fmt(a.aVenta)}</td>
         <td data-label="CPA" style="${cpaCol}">${a.cpa>0?'$'+fmt(Math.round(a.cpa)):'—'}</td>
         <td data-label="ROAS Bruto" style="${roasCol}">${a.roasBruto>0?a.roasBruto.toFixed(2)+'x':'—'}</td>
-        <td data-label="Gan Proy" style="${ganProyCol}">$${fmt(a.ganProy)}</td>
+        <td data-label="Gan Proy" style="${ganProyCol}">$${fmt(a.ganProy)}${a.desgloseGanProy?` <span style="cursor:help;font-size:11px;opacity:.6;border:1px solid var(--border);border-radius:50%;width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted);vertical-align:middle" title="Cómo sale $${fmt(a.ganProy)}:&#10;&#10;Venta efectiva (${Math.round((a.desgloseGanProy.dp||0.19)*100)}% dev): $${fmt(a.desgloseGanProy.ventaProy)}&#10;− Costo producto: −$${fmt(a.desgloseGanProy.aCosto)}&#10;− Flete: −$${fmt(a.desgloseGanProy.fleteOutProy)}&#10;− Devolución: −$${fmt(a.desgloseGanProy.fleteDevProy)}&#10;− Gasto ads: −$${fmt(a.desgloseGanProy.aGasto)}&#10;− Costo conversación: −$${fmt(a.desgloseGanProy.costoConv)}&#10;&#10;= $${fmt(a.ganProy)}&#10;&#10;(No incluye gastos fijos — esos van en Dashboard)">ℹ</span>`:''}</td>
         <td data-label="Gan Real" style="${ganRealCol}">$${fmt(a.ganReal)}</td>
         <td data-label="ROAS Real" style="${roasRealCol}">${a.roasReal>0?a.roasReal.toFixed(2)+'x':'—'}</td>
       </tr>`
@@ -9661,8 +9928,12 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
   const costoDev=Math.round(pConf*devPct*(prod.flete_devolucion||18000))
   const ventaEfectiva=Math.round(venta*(1-devPct))
 
-  // Ganancia neta del producto (sin gastos fijos)
-  const gananciaNeta=ventaEfectiva-costoProv-costoFlete-costoDev-gasto
+  // Costo de conversación: conversaciones manuales del rango × costo por conversación
+  const _convDelProd=(conversacionesByProd&&conversacionesByProd[prod.nombre])||0
+  const costoConvProd=_convDelProd*(prod.costo_conversacion||100)
+
+  // Ganancia neta del producto (sin gastos fijos, unificado con Tracker)
+  const gananciaNeta=ventaEfectiva-costoProv-costoFlete-costoDev-gasto-costoConvProd
 
   // Break-even del producto (basado en oferta 2u por defecto) — incluye costo conv x venta
   const p2=prod.precio_2u||129900
@@ -9693,8 +9964,19 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
   const roas=gasto>0?venta/gasto:0
 
   // Estado del semaforo (reglas oficiales NEXO, Opcion A: 45/70/100% del BE)
+  // NOVEDAD: si hay gasto pero el producto NO tiene ventas reales aún → SEMÁFORO DE FUGA
+  // (alerta de plata que se va sin convertir). Se calcula por % del BE consumido:
+  //   < 50% BE → esperar (dejar correr)  ·  50-100% → precaucion  ·  >= 100% → stop
   let semCode=''
+  const _ventasReales=esSoloHoy?pedidosEfectivos:pedidosParaCpa
   if(gasto===0&&totalPedidos===0)semCode=''
+  else if(gasto>0&&_ventasReales===0&&margenBE>0){
+    // FUGA: gasto sin ventas reales
+    const pctBE=gasto/margenBE
+    if(pctBE>=1)semCode='stop'
+    else if(pctBE>=0.5)semCode='precaucion'
+    else semCode='esperar'
+  }
   else if(cpaParaSemaforo===0&&totalPedidos===0)semCode='sin_ventas'
   else if(gasto===0&&totalPedidos>0)semCode='pendiente_sync'
   else if(margenBE<=0)semCode='sin_ventas'
@@ -9772,7 +10054,9 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     pedidosEfectivos,cpaRealEfectivo,pctConf,esSoloHoy,
     ctrProd,cpmProd,cpaMetaProd,activas:_activas,pausadas:_pausadas,
     prevData,nDiasRango:nDiasRango||0,
-    conversaciones
+    conversaciones,
+    // Desglose para tooltip de ganancia
+    desgloseGanancia:{ventaEfectiva,costoProv,costoFlete,costoDev,gasto,costoConvProd,devPct}
   }
 }
 
@@ -9785,6 +10069,7 @@ function _renderProductoCardResumen(data,ranking){
     escalar:{bg:'rgba(34,197,94,.08)',color:'var(--green)',border:'rgba(34,197,94,.3)'},
     precaucion:{bg:'rgba(245,158,11,.08)',color:'var(--amber)',border:'rgba(245,158,11,.3)'},
     stop:{bg:'rgba(239,68,68,.08)',color:'var(--red)',border:'rgba(239,68,68,.3)'},
+    esperar:{bg:'rgba(34,197,94,.04)',color:'var(--green)',border:'rgba(34,197,94,.2)'},
     sin_ventas:{bg:'var(--card2)',color:'var(--muted)',border:'var(--border)'},
     '':{bg:'var(--card2)',color:'var(--muted)',border:'var(--border)'}
   }
@@ -9854,8 +10139,9 @@ function _renderProductoCardResumen(data,ranking){
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:12px;margin-top:8px;flex-wrap:wrap;padding-left:46px;font-size:13px">
-        <span style="display:inline-flex;align-items:center;gap:4px;font-size:16px;font-weight:600;color:${plataColor}">
+        <span style="display:inline-flex;align-items:center;gap:6px;font-size:16px;font-weight:600;color:${plataColor}">
           ${plataSign}$${fmt(plataAbs)}
+          ${data.desgloseGanancia?`<span style="cursor:help;font-size:12px;opacity:.7;border:1px solid var(--border);border-radius:50%;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted);font-weight:400" title="Cómo sale ${plataSign}$${fmt(plataAbs)}:&#10;&#10;Venta efectiva (${Math.round((data.desgloseGanancia.devPct||0.19)*100)}% dev): $${fmt(data.desgloseGanancia.ventaEfectiva)}&#10;− Costo producto: −$${fmt(data.desgloseGanancia.costoProv)}&#10;− Flete: −$${fmt(data.desgloseGanancia.costoFlete)}&#10;− Devolución: −$${fmt(data.desgloseGanancia.costoDev)}&#10;− Gasto ads: −$${fmt(data.desgloseGanancia.gasto)}&#10;− Costo conversación: −$${fmt(data.desgloseGanancia.costoConvProd)}&#10;&#10;= ${plataSign}$${fmt(plataAbs)}&#10;&#10;(No incluye gastos fijos — esos van en Dashboard)">ℹ</span>`:''}
         </span>
         <span style="color:var(--muted)">·</span>
         <span style="display:inline-flex;align-items:center;gap:4px;color:${cpaColor}" title="Break-even: $${fmt(data.margenBE)} · ${pctBE>0?pctBE+'% del BE':''}">
@@ -10465,11 +10751,20 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const avgFreq=m.freqs.length?(m.freqs.reduce((a,b)=>a+b,0)/m.freqs.length):0
 
     // Semáforo basado en CPA (Efectivo si HOY, normal si rango con Dropi) vs CPA Break-even
+    // NOVEDAD: si hay gasto pero ventasReales=0 → SEMÁFORO DE FUGA por % del BE consumido.
+    //   < 50% BE → dejar correr  ·  50-100% → cuidado  ·  ≥ 100% → apagar
     let semCls='',semTxt='Sin actividad',semBorder='var(--border)',semCode=''
     if(camp._hasData&&m.spend>0){
-      if(cpaParaSemaforo===0&&ventasReales===0){
-        // Hay gasto pero no hay ventas reales aún
-        semCls='pill-amber';semTxt='⏳ Sin ventas';semBorder='var(--amber)';semCode='sin_ventas'
+      if(ventasReales===0&&ctxCamp.margenBE>0){
+        // FUGA: gasto sin ventas confirmadas
+        const pctBE=m.spend/ctxCamp.margenBE
+        if(pctBE>=1){
+          semCls='pill-red';semTxt='⏳🔴 APAGAR';semBorder='var(--red)';semCode='stop'
+        }else if(pctBE>=0.5){
+          semCls='pill-amber';semTxt='⏳🟡 CUIDADO';semBorder='var(--amber)';semCode='precaucion'
+        }else{
+          semCls='pill-green';semTxt='⏳🟢 DEJAR CORRER';semBorder='var(--green)';semCode='esperar'
+        }
       }else if(cpaParaSemaforo>ctxCamp.margenBE){
         semCls='pill-red';semTxt='🔴 STOP';semBorder='var(--red)';semCode='stop'
       }else if(cpaParaSemaforo>ctxCamp.margenBE*0.7){
@@ -10982,8 +11277,18 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
       const cpaParaSemaforo=cpaRealEfectivas
 
       // Semáforo (mismas 5 reglas que renderCamp + pendiente_sync + reportado)
+      // NOVEDAD: si ventasReales=0 pero hay gasto → SEMÁFORO DE FUGA (alerta de plata
+      // que se va sin convertir). Se basa en % del BE consumido:
+      //   < 50% BE → esperar (dejar correr)  ·  50-100% → precaucion  ·  ≥ 100% → stop
+      // Label con prefijo ⏳ para que se distinga visualmente de un semáforo normal.
       let sem='sin_ventas',semLabel='⏳ Sin ventas'
-      if(gasto>0){
+      if(gasto>0&&ventasReales===0&&margenBE>0){
+        // FUGA
+        const pctBE=gasto/margenBE
+        if(pctBE>=1){sem='stop';semLabel='⏳🔴 APAGAR'}
+        else if(pctBE>=0.5){sem='precaucion';semLabel='⏳🟡 CUIDADO'}
+        else{sem='esperar';semLabel='⏳🟢 DEJAR CORRER'}
+      }else if(gasto>0){
         if(cpaParaSemaforo===0&&ventasReales===0){sem='sin_ventas';semLabel='⏳ Sin ventas'}
         else if(margenBE&&cpaParaSemaforo>margenBE){sem='stop';semLabel='🔴 STOP'}
         else if(margenBE&&cpaParaSemaforo>margenBE*0.7){sem='precaucion';semLabel='🟡 Precaución'}
@@ -11147,6 +11452,7 @@ window.nexoBadgeMega=function(code,size){
     precaucion:{dot:'🟡',state:'CUIDADO',action:'NO TOCAR',color:'var(--amber)',bg:'var(--amber-bg)',pulse:false,tooltip:'CUIDADO — CPA cerca del límite del break-even. NO TOQUES el presupuesto, esperá 1-2 días para ver tendencia.'},
     stop:{dot:'🔴',state:'APAGAR',action:'PAUSAR YA',color:'var(--red)',bg:'var(--red-bg)',pulse:true,tooltip:'APAGAR — CPA por encima del break-even. Estás perdiendo plata en cada peso invertido. PAUSÁ YA.'},
     sin_ventas:{dot:'⏳',state:'ESPERAR',action:'DEJAR CORRER',color:'var(--muted)',bg:'var(--card2)',pulse:false,tooltip:'ESPERAR — Aún sin ventas registradas. DEJÁ CORRER hasta tener datos suficientes para decidir.'},
+    esperar:{dot:'⏳🟢',state:'DEJAR CORRER',action:'SIN VENTAS',color:'var(--green)',bg:'var(--green-bg)',pulse:false,tooltip:'DEJAR CORRER (fuga baja) — Sin ventas aún pero el gasto está por debajo del 50% del break-even. Hay margen para que aparezcan ventas. DEJÁ CORRER.'},
     pendiente_sync:{dot:'⏳',state:'ESPERAR',action:'SIN SYNC',color:'var(--muted)',bg:'var(--card2)',pulse:false,tooltip:'ESPERAR — Falta sincronización con Meta. SIN SYNC todavía, vuelve a chequear después del próximo sync.'},
     reportado:{dot:'📝',state:'REPORTADO',action:'REVISAR',color:'var(--blue)',bg:'var(--blue-bg)',pulse:false,tooltip:'REPORTADO — Se cargaron ventas manualmente desde el reporte del día. REVISÁ que el dato esté correcto.'}
   }
@@ -11163,7 +11469,7 @@ window.nexoBadgeMega=function(code,size){
 // nexoOrdenUrgencia(code): peso numerico para ordenar (menor = mas arriba).
 // APAGAR primero, luego CUIDADO, FUEGO, ESCALAR, ESPERAR.
 window.nexoOrdenUrgencia=function(code){
-  const W={stop:1,precaucion:2,fuego:3,escalar:4,reportado:5,sin_ventas:6,pendiente_sync:6,'':7}
+  const W={stop:1,precaucion:2,fuego:3,escalar:4,esperar:5,reportado:5,sin_ventas:6,pendiente_sync:6,'':7}
   return W[code]==null?7:W[code]
 }
 // nexoCpaColor(cpaReal, margenBE): devuelve var CSS color segun break-even.

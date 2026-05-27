@@ -9275,6 +9275,66 @@ async function _renderResumenProductos(desde,hasta,hoy){
     }
   }
 
+  // 2b. Métricas Meta extra por campaña (clicks/impressions/conversions/CPA Meta) — de BD
+  //     Se usa para CTR, CPM, CPA Meta del producto. NO compite con gastoByCampId (sigue siendo el spend canónico).
+  const metricsByCampId={}
+  {
+    const{data:insExtra}=await sb.from('meta_insights')
+      .select('meta_id,impressions,clicks,conversions,cost_per_result')
+      .eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
+    for(const i of (insExtra||[])){
+      if(!i.meta_id)continue
+      const k=String(i.meta_id)
+      if(!metricsByCampId[k])metricsByCampId[k]={impressions:0,clicks:0,conversions:0,cprSum:0,cprN:0}
+      metricsByCampId[k].impressions+=(i.impressions||0)
+      metricsByCampId[k].clicks+=(i.clicks||0)
+      metricsByCampId[k].conversions+=(i.conversions||0)
+      if(i.cost_per_result&&i.cost_per_result>0){metricsByCampId[k].cprSum+=i.cost_per_result;metricsByCampId[k].cprN++}
+    }
+  }
+
+  // 2c. Estado de cada campaña (activa/pausada) — de BD
+  const estadoByCampId={}
+  {
+    const{data:campsBD}=await sb.from('meta_campanas')
+      .select('meta_id,estado').eq('nivel','campaign')
+    for(const c of (campsBD||[])){
+      if(!c.meta_id)continue
+      estadoByCampId[String(c.meta_id)]=String(c.estado||'').toUpperCase()
+    }
+  }
+
+  // 2d. Período previo (misma duración, justo antes) — solo BD, siempre histórico cerrado.
+  //     Sirve para la tira de comparación ("⏪ AYER" o "⏪ N días previos") en cada card.
+  let desdePrev='',hastaPrev='',nDiasRango=0
+  try{
+    const dDesde=new Date(desde+'T00:00:00')
+    const dHasta=new Date(hasta+'T00:00:00')
+    nDiasRango=Math.round((dHasta-dDesde)/86400000)+1
+    const prevHasta=new Date(dDesde);prevHasta.setDate(prevHasta.getDate()-1)
+    const prevDesde=new Date(prevHasta);prevDesde.setDate(prevDesde.getDate()-(nDiasRango-1))
+    desdePrev=_isoDate(prevDesde);hastaPrev=_isoDate(prevHasta)
+  }catch(_){desdePrev='';hastaPrev='';nDiasRango=0}
+
+  const mapeosPrevByProd={},gastoPrevByCampId={}
+  if(desdePrev&&hastaPrev){
+    const{data:mapeosPrev}=await sb.from('mapeos')
+      .select('cantidad,producto,estado_final,fecha,ad_id')
+      .gte('fecha',desdePrev).lte('fecha',hastaPrev).limit(10000)
+    for(const m of (mapeosPrev||[])){
+      const pn=resolveProdName(m.producto).nombre||(m.producto||'Sin producto')
+      if(!mapeosPrevByProd[pn])mapeosPrevByProd[pn]=[]
+      mapeosPrevByProd[pn].push(m)
+    }
+    const{data:insPrev}=await sb.from('meta_insights')
+      .select('meta_id,spend').eq('nivel','campaign')
+      .gte('fecha',desdePrev).lte('fecha',hastaPrev)
+    for(const i of (insPrev||[])){
+      if(!i.meta_id)continue
+      gastoPrevByCampId[String(i.meta_id)]=(gastoPrevByCampId[String(i.meta_id)]||0)+(i.spend||0)
+    }
+  }
+
   // 3. Traer reportes_diarios con ad_ids manuales (auxiliar)
   const{data:reportes}=await sb.from('reportes_diarios')
     .select('ad_ids,producto_id,producto_nombre,fecha,updated_at')
@@ -9316,7 +9376,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
   const esSoloHoy=(desde===hoy&&hasta===hoy)
   const productosResumen=[]
   for(const prod of productos){
-    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd)
+    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango)
     if(data)productosResumen.push(data)
   }
 
@@ -9347,12 +9407,43 @@ async function _renderResumenProductos(desde,hasta,hoy){
   // 11. Plata neta total del periodo
   const plataNetaTotal=productosResumen.reduce((s,d)=>s+d.gananciaNeta,0)
 
+  // 11b. Semáforo del PORTAFOLIO (mismo cálculo que las cards, aplicado al consolidado)
+  //      HOY → usa CPA Efectivo consolidado (Σ gasto / Σ P.Efectivos)
+  //      Pasado → usa CPA Real consolidado (Σ gasto / Σ pedidos confirmados)
+  //      BE consolidado = promedio ponderado por gasto
+  let _gT=0,_efT=0,_confT=0,_beW=0,_wT=0
+  for(const d of productosResumen){
+    _gT+=d.gasto||0
+    _efT+=d.pedidosEfectivos||0
+    _confT+=d.pedidosConfirmados||0
+    if(d.gasto>0&&d.margenBE>0){_beW+=d.margenBE*d.gasto;_wT+=d.gasto}
+  }
+  const _bePort=_wT>0?(_beW/_wT):0
+  const _cpaPort=esSoloHoy?(_efT>0?_gT/_efT:0):(_confT>0?_gT/_confT:0)
+  let semCodePort=''
+  if(_gT===0)semCodePort=''
+  else if(_cpaPort===0)semCodePort='sin_ventas'
+  else if(_bePort<=0)semCodePort='sin_ventas'
+  else if(_cpaPort>_bePort)semCodePort='stop'
+  else if(_cpaPort>_bePort*0.7)semCodePort='precaucion'
+  else if(_cpaPort>_bePort*0.45)semCodePort='escalar'
+  else semCodePort='fuego'
+  const PORT_COLORS={
+    fuego:{bg:'rgba(167,139,250,.05)',border:'rgba(167,139,250,.35)'},
+    escalar:{bg:'rgba(34,197,94,.05)',border:'rgba(34,197,94,.35)'},
+    precaucion:{bg:'rgba(245,158,11,.05)',border:'rgba(245,158,11,.35)'},
+    stop:{bg:'rgba(239,68,68,.05)',border:'rgba(239,68,68,.35)'},
+    sin_ventas:{bg:'var(--card)',border:'var(--border)'},
+    '':{bg:'var(--card)',border:'var(--border)'}
+  }
+  const portC=PORT_COLORS[semCodePort]||PORT_COLORS['']
+
   // 12. Etiqueta de fecha amigable
   const fechaLabel=_resumenFechaLabel(desde,hasta,hoy)
 
   // 13. HTML final
   return`
-  <div class="resumen-productos" style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin-bottom:16px">
+  <div class="resumen-productos" data-sem-port="${semCodePort}" style="background:${portC.bg};border:1px solid ${portC.border};border-radius:12px;padding:16px 18px;margin-bottom:16px">
     <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:12px;padding-bottom:12px;border-bottom:1px solid var(--border)">
       <div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:4px;letter-spacing:.3px">Resumen por producto</div>
@@ -9382,7 +9473,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
 
 // Calcula las metricas consolidadas de un producto en el rango.
 // Devuelve null si no hay actividad relevante (sin gasto y sin pedidos).
-function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd){
+function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango){
   // Gasto desde campaign_ids configurados del producto
   let gasto=0
   const campIds=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
@@ -9465,6 +9556,52 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
   else if(cpaParaSemaforo>margenBE*0.45)semCode='escalar'
   else semCode='fuego'
 
+  // ── Métricas técnicas Meta (CTR/CPM/CPA Meta) ponderadas por agregación Σ/Σ ──
+  let _imp=0,_clk=0,_conv=0,_cprSum=0,_cprN=0
+  let _activas=0,_pausadas=0
+  if(metricsByCampId&&estadoByCampId){
+    for(const cid of campIds){
+      const k=String(cid)
+      const m=metricsByCampId[k]
+      if(m){_imp+=m.impressions||0;_clk+=m.clicks||0;_conv+=m.conversions||0;_cprSum+=m.cprSum||0;_cprN+=m.cprN||0}
+      const e=estadoByCampId[k]||''
+      if(e==='ACTIVE')_activas++
+      else if(e)_pausadas++ // cualquier estado no-ACTIVE definido cuenta como pausada
+    }
+  }
+  const ctrProd=_imp>0?(_clk/_imp)*100:0
+  const cpmProd=_imp>0?(gasto/_imp)*1000:0
+  // CPA Meta: prioriza Σ gasto / Σ conversiones (Meta agregado); si no hay conversiones, cae al promedio de cost_per_result diario
+  const cpaMetaProd=_conv>0?(gasto/_conv):(_cprN>0?(_cprSum/_cprN):0)
+
+  // ── Período previo (misma duración, justo antes) ──
+  let prevData=null
+  if(mapeosPrevByProd&&gastoPrevByCampId&&nDiasRango>0){
+    let gastoP=0
+    for(const cid of campIds){gastoP+=gastoPrevByCampId[String(cid)]||0}
+    const mpsP=mapeosPrevByProd[prod.nombre]||[]
+    let pConfP=0,o1P=0,o2P=0,o3P=0,o4P=0
+    for(const m of mpsP){
+      const q=m.cantidad||2
+      if(m.estado_final==='CANCELADO')continue
+      if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)continue
+      pConfP++
+      if(q===1)o1P++;else if(q===2)o2P++;else if(q===3)o3P++;else o4P++
+    }
+    const totalMapeosP=mpsP.length
+    if(gastoP>0||totalMapeosP>0){
+      const ventaP=(o1P*(prod.precio_1u||0))+(o2P*(prod.precio_2u||0))+(o3P*(prod.precio_3u||0))+(o4P*(prod.precio_4u||0))
+      const costoProvP=(o1P*(prod.costo_1u||0))+(o2P*(prod.costo_2u||0))+(o3P*(prod.costo_3u||0))+(o4P*(prod.costo_4u||0))
+      const costoFleteP=pConfP*(prod.flete_outbound||21000)
+      const costoDevP=Math.round(pConfP*devPct*(prod.flete_devolucion||18000))
+      const ventaEfP=Math.round(ventaP*(1-devPct))
+      const gananciaP=ventaEfP-costoProvP-costoFleteP-costoDevP-gastoP
+      const cpaP=pConfP>0?gastoP/pConfP:0
+      const roasP=gastoP>0?ventaP/gastoP:0
+      prevData={gasto:gastoP,pedidos:pConfP,ganancia:gananciaP,cpa:cpaP,roas:roasP}
+    }
+  }
+
   return{
     producto:prod,
     nombre:prod.nombre,
@@ -9472,7 +9609,9 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     gasto,totalPedidos,pedidosConfirmados:pConf,canc,pend,
     o1,o2,o3,o4,venta,costoProv,gananciaNeta,
     cpaReal,margenBE,roas,semCode,
-    pedidosEfectivos,cpaRealEfectivo,pctConf,esSoloHoy
+    pedidosEfectivos,cpaRealEfectivo,pctConf,esSoloHoy,
+    ctrProd,cpmProd,cpaMetaProd,activas:_activas,pausadas:_pausadas,
+    prevData,nDiasRango:nDiasRango||0
   }
 }
 
@@ -9511,6 +9650,41 @@ function _renderProductoCardResumen(data,ranking){
   const beRoas=data.margenBE>0?(data.producto.precio_2u||129900)/data.margenBE:0
   const roasColor=data.roas>0?(data.roas>=beRoas?'var(--green)':'var(--red)'):'var(--muted)'
 
+  // Tira de comparación con período previo (misma duración, justo antes del rango actual)
+  let prevHtml=''
+  if(data.nDiasRango>0){
+    let prevLabel=''
+    if(data.nDiasRango===1)prevLabel=data.esSoloHoy?'⏪ AYER':'⏪ Día anterior'
+    else prevLabel=`⏪ ${data.nDiasRango} días previos`
+    if(data.prevData){
+      const p=data.prevData
+      const pSign=p.ganancia>=0?'+':'−'
+      const pCol=p.ganancia>=0?'var(--green)':'var(--red)'
+      prevHtml=`<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:10px 0 0 0;padding:7px 10px 7px 12px;background:rgba(34,197,94,.04);border-left:3px solid var(--green);border-radius:6px;font-size:12px">
+        <span style="color:var(--muted);font-weight:600">${prevLabel}:</span>
+        <span style="font-weight:600;color:${pCol}">${pSign}$${fmt(Math.abs(p.ganancia))}</span>
+        <span style="color:var(--subtle)">·</span>
+        <span style="color:var(--text)">CPA $${fmt(Math.round(p.cpa))}</span>
+        <span style="color:var(--subtle)">·</span>
+        <span style="color:var(--text)">ROAS ${p.roas>0?p.roas.toFixed(2)+'x':'—'}</span>
+        <span style="color:var(--subtle)">·</span>
+        <span style="color:var(--text)">${p.pedidos} ped</span>
+      </div>`
+    }else{
+      prevHtml=`<div style="margin:10px 0 0 0;padding:6px 10px;background:rgba(255,255,255,.02);border-left:2px solid var(--subtle);border-radius:6px;font-size:11px;color:var(--muted);font-style:italic">
+        ${prevLabel}: sin datos previos para comparar
+      </div>`
+    }
+  }
+
+  // Tira técnica con CTR / CPM / CPA Meta / Campañas activas-pausadas
+  const tecHtml=`<div style="margin-top:10px;padding:8px 12px;background:rgba(0,0,0,.18);border-radius:8px;font-size:11px;display:flex;gap:14px;flex-wrap:wrap;align-items:center">
+    <span style="color:var(--muted)" title="Click-through rate ponderado: Σ clicks / Σ impresiones">📊 CTR <strong style="color:var(--text)">${data.ctrProd>0?data.ctrProd.toFixed(2)+'%':'—'}</strong></span>
+    <span style="color:var(--muted)" title="Costo por mil impresiones: Σ gasto / Σ impresiones × 1000">CPM <strong style="color:var(--text)">${data.cpmProd>0?'$'+fmt(Math.round(data.cpmProd)):'—'}</strong></span>
+    <span style="color:var(--muted)" title="CPA reportado por Meta (incluye conversiones brutas antes de filtrar canceladas)">🎯 CPA Meta <strong style="color:var(--text)">${data.cpaMetaProd>0?'$'+fmt(Math.round(data.cpaMetaProd)):'—'}</strong></span>
+    <span style="margin-left:auto;color:var(--muted)" title="Campañas asignadas a este producto">⚙ <strong style="color:var(--green)">${data.activas} activas</strong> / ${data.pausadas} pausadas</span>
+  </div>`
+
   return`
   <details class="rp-card" data-sem-code="${data.semCode}" style="background:${c.bg};border:1px solid ${c.border};border-radius:10px;margin-bottom:8px;overflow:hidden">
     <summary style="list-style:none;cursor:pointer;padding:14px 16px;display:block;outline:none">
@@ -9544,6 +9718,7 @@ function _renderProductoCardResumen(data,ranking){
         <span style="color:var(--muted)" title="${data.esSoloHoy?'Pedidos brutos del día (aún sin cruce Dropi)':'Pedidos REALES = confirmados del cruce Dropi. Pendientes y cancelados no cuentan.'}">📦 ${data.esSoloHoy?data.totalPedidos:data.pedidosConfirmados} pedidos${data.esSoloHoy&&data.pedidosEfectivos>0?` + <span style="color:var(--purple);font-weight:500" title="Estimación: ${data.totalPedidos} × ${Math.round((data.pctConf||0.62)*100)}% confirmación">🟣 P.Efectivos ${data.pedidosEfectivos.toFixed(2)}</span>`:''}</span>
         `:''}
       </div>
+      ${prevHtml}
     </summary>
     <div style="padding:0 16px 16px;border-top:1px solid ${c.border};margin-top:6px;padding-top:14px">
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px">
@@ -9576,6 +9751,7 @@ function _renderProductoCardResumen(data,ranking){
         <span>3u: <strong style="color:var(--text)">${data.o3}</strong></span>
         <span>4u: <strong style="color:var(--text)">${data.o4}</strong></span>
       </div>`:''}
+      ${tecHtml}
     </div>
   </details>`
 }

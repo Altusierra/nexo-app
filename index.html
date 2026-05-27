@@ -9822,12 +9822,32 @@ async function _renderResumenProductos(desde,hasta,hoy){
     conversacionesByProd[pn]=(conversacionesByProd[pn]||0)+(r.conversaciones||0)
   }
 
+  // 6.6 NUEVO: Conversaciones por producto del período PREVIO
+  // Bug fix: la ganancia del "Día anterior" antes no descontaba costo de conversación,
+  // por eso daba más alta que cuando se veía ese día como HOY directo.
+  const conversacionesPrevByProd={}
+  if(desdePrev&&hastaPrev){
+    const{data:reportesConvPrev}=await sb.from('reportes_diarios')
+      .select('conversaciones,producto_id,producto_nombre,fecha,updated_at')
+      .gte('fecha',desdePrev).lte('fecha',hastaPrev)
+      .order('updated_at',{ascending:false})
+    const convSeenPrev=new Set()
+    for(const r of (reportesConvPrev||[])){
+      const k=(r.fecha||'')+'|'+(r.producto_id||r.producto_nombre||'')
+      if(convSeenPrev.has(k))continue
+      convSeenPrev.add(k)
+      const pn=resolveProdName(r.producto_nombre||'').nombre||(r.producto_nombre||'')
+      if(!pn)continue
+      conversacionesPrevByProd[pn]=(conversacionesPrevByProd[pn]||0)+(r.conversaciones||0)
+    }
+  }
+
   // 7. Calcular metricas por producto
   // esSoloHoy = el rango es exactamente HOY (sin cruce Dropi todavía)
   const esSoloHoy=(desde===hoy&&hasta===hoy)
   const productosResumen=[]
   for(const prod of productos){
-    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd)
+    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd)
     if(data)productosResumen.push(data)
   }
 
@@ -9924,7 +9944,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
 
 // Calcula las metricas consolidadas de un producto en el rango.
 // Devuelve null si no hay actividad relevante (sin gasto y sin pedidos).
-function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd){
+function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd){
   // Gasto desde campaign_ids configurados del producto
   let gasto=0
   const campIds=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
@@ -10072,7 +10092,11 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
       const costoFleteP=pConfP*(prod.flete_outbound||21000)
       const costoDevP=Math.round(pConfP*devPct*(prod.flete_devolucion||18000))
       const ventaEfP=Math.round(ventaP*(1-devPct))
-      const gananciaP=ventaEfP-costoProvP-costoFleteP-costoDevP-gastoP
+      // NUEVO: descontar costo de conversación del período previo (bug fix)
+      // Antes: gananciaP no incluía costoConv → daba MÁS alta que la real cuando se veía ese día como HOY
+      const _convPrev=(conversacionesPrevByProd&&conversacionesPrevByProd[prod.nombre])||0
+      const costoConvProdP=_convPrev*(prod.costo_conversacion||100)
+      const gananciaP=ventaEfP-costoProvP-costoFleteP-costoDevP-gastoP-costoConvProdP
       const cpaP=pConfP>0?gastoP/pConfP:0
       const roasP=gastoP>0?ventaP/gastoP:0
       prevData={gasto:gastoP,pedidos:pConfP,ganancia:gananciaP,cpa:cpaP,roas:roasP}
@@ -10138,32 +10162,71 @@ function _renderProductoCardResumen(data,ranking){
   const beRoas=data.margenBE>0?(data.producto.precio_2u||129900)/data.margenBE:0
   const roasColor=data.roas>0?(data.roas>=beRoas?'var(--green)':'var(--red)'):'var(--muted)'
 
-  // Tira de comparación con período previo (misma duración, justo antes del rango actual)
-  let prevHtml=''
-  if(data.nDiasRango>0){
-    let prevLabel=''
-    if(data.nDiasRango===1)prevLabel=data.esSoloHoy?'⏪ AYER':'⏪ Día anterior'
-    else prevLabel=`⏪ ${data.nDiasRango} días previos`
-    if(data.prevData){
-      const p=data.prevData
-      const pSign=p.ganancia>=0?'+':'−'
-      const pCol=p.ganancia>=0?'var(--green)':'var(--red)'
-      prevHtml=`<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:10px 0 0 0;padding:7px 10px 7px 12px;background:rgba(34,197,94,.04);border-left:3px solid var(--green);border-radius:6px;font-size:12px">
-        <span style="color:var(--muted);font-weight:600">${prevLabel}:</span>
-        <span style="font-weight:600;color:${pCol}">${pSign}$${fmt(Math.abs(p.ganancia))}</span>
-        <span style="color:var(--subtle)">·</span>
-        <span style="color:var(--text)">CPA $${fmt(Math.round(p.cpa))}</span>
-        <span style="color:var(--subtle)">·</span>
-        <span style="color:var(--text)">ROAS ${p.roas>0?p.roas.toFixed(2)+'x':'—'}</span>
-        <span style="color:var(--subtle)">·</span>
-        <span style="color:var(--text)">${p.pedidos} ped</span>
-      </div>`
-    }else{
-      prevHtml=`<div style="margin:10px 0 0 0;padding:6px 10px;background:rgba(255,255,255,.02);border-left:2px solid var(--subtle);border-radius:6px;font-size:11px;color:var(--muted);font-style:italic">
-        ${prevLabel}: sin datos previos para comparar
-      </div>`
-    }
+  // Tabla de comparación: fila Hoy + fila Día anterior alineadas en 5 columnas
+  // (Ganancia / CPA real / Pedidos / ROAS / Gasto) para comparar visualmente vertical.
+  const _gridCols='110px 1.1fr 1fr 0.9fr 0.9fr 1fr'
+  const _hoyLabel=data.esSoloHoy?'Hoy':'Periodo'
+  // Tooltip de cómo sale la ganancia (preservado del diseño anterior)
+  const _tooltipGan=data.desgloseGanancia?`Cómo sale ${plataSign}$${fmt(plataAbs)}:&#10;&#10;Venta efectiva (${Math.round((data.desgloseGanancia.devPct||0.19)*100)}% dev): $${fmt(data.desgloseGanancia.ventaEfectiva)}&#10;− Costo producto: −$${fmt(data.desgloseGanancia.costoProv)}&#10;− Flete: −$${fmt(data.desgloseGanancia.costoFlete)}&#10;− Devolución: −$${fmt(data.desgloseGanancia.costoDev)}&#10;− Gasto ads: −$${fmt(data.desgloseGanancia.gasto)}&#10;− Costo conversación: −$${fmt(data.desgloseGanancia.costoConvProd)}&#10;&#10;= ${plataSign}$${fmt(plataAbs)}&#10;&#10;(No incluye gastos fijos — esos van en Dashboard)`:''
+  // Fila previa (si hay datos)
+  let _filaPrev=''
+  if(data.nDiasRango>0&&data.prevData){
+    const p=data.prevData
+    const pSign=p.ganancia>=0?'+':'−'
+    const pCol=p.ganancia>=0?'var(--green)':'var(--red)'
+    const _prevLabel=data.nDiasRango===1?(data.esSoloHoy?'Ayer':'Día ant.'):`${data.nDiasRango}d ant.`
+    _filaPrev=`<div style="display:grid;grid-template-columns:${_gridCols};gap:10px;padding:10px 8px;align-items:center;background:rgba(34,197,94,.04);border-left:3px solid var(--green);border-radius:6px;margin-top:4px">
+      <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);font-weight:500">
+        <span style="font-size:13px">⏪</span>
+        <span>${_prevLabel}</span>
+      </div>
+      <div style="text-align:right;font-size:14px;color:${pCol};font-weight:500">${pSign}$${fmt(Math.abs(p.ganancia))}</div>
+      <div style="text-align:right;font-size:14px;color:var(--muted)">${p.cpa>0?'$'+fmt(Math.round(p.cpa)):'—'}</div>
+      <div style="text-align:right;font-size:14px;color:var(--muted)">${p.pedidos}</div>
+      <div style="text-align:right;font-size:14px;color:var(--muted)">${p.roas>0?p.roas.toFixed(2)+'x':'—'}</div>
+      <div style="text-align:right;font-size:14px;color:var(--muted)">${p.gasto>0?'$'+fmt(p.gasto):'—'}</div>
+    </div>`
+  }else if(data.nDiasRango>0){
+    const _prevLabel=data.nDiasRango===1?(data.esSoloHoy?'Ayer':'Día ant.'):`${data.nDiasRango}d ant.`
+    _filaPrev=`<div style="margin-top:6px;padding:6px 10px;background:rgba(255,255,255,.02);border-left:2px solid var(--subtle);border-radius:6px;font-size:11px;color:var(--muted);font-style:italic">⏪ ${_prevLabel}: sin datos previos para comparar</div>`
   }
+  // Tabla completa: header + fila Hoy + fila Día anterior alineadas
+  const _compGridHtml=`<div style="margin-top:10px;padding-left:46px;overflow-x:auto">
+    <div style="display:grid;grid-template-columns:${_gridCols};gap:10px;padding:4px 8px;font-size:10px;color:var(--subtle);font-weight:600;letter-spacing:.05em;text-transform:uppercase;border-bottom:1px solid var(--border);min-width:560px">
+      <div></div>
+      <div style="text-align:right">Ganancia neta</div>
+      <div style="text-align:right">CPA real</div>
+      <div style="text-align:right">Pedidos</div>
+      <div style="text-align:right">ROAS</div>
+      <div style="text-align:right">Gasto Ads</div>
+    </div>
+    <div style="display:grid;grid-template-columns:${_gridCols};gap:10px;padding:12px 8px;align-items:flex-start;border-bottom:1px solid var(--border);min-width:560px">
+      <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:${c.color};font-weight:600;padding-top:2px">
+        <span style="width:6px;height:6px;border-radius:50%;background:${c.color}"></span>
+        <span>${_hoyLabel}</span>
+        ${_tooltipGan?`<span style="cursor:help;color:var(--muted);font-size:11px;opacity:.7" title="${_tooltipGan}">ℹ</span>`:''}
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:18px;font-weight:600;color:${plataColor};line-height:1.1">${plataSign}$${fmt(plataAbs)}</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:14px;color:${cpaColor};line-height:1.2" title="Break-even: $${fmt(data.margenBE)}${pctBE>0?' · '+pctBE+'% del BE':''}">🎯 $${fmt(data.cpaReal)} ${cpaIcon}</div>
+        ${data.esSoloHoy&&data.cpaRealEfectivo>0?`<div style="font-size:11px;color:var(--purple);margin-top:2px" title="Estimación: gasto / (pedidos × ${Math.round((data.pctConf||0.62)*100)}% confirmación). Solo HOY.">🟣 Ef: $${fmt(data.cpaRealEfectivo)}</div>`:''}
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:14px;color:var(--text);line-height:1.2" title="${data.esSoloHoy?'Pedidos brutos del día (aún sin cruce Dropi)':'Pedidos confirmados del cruce Dropi. Pendientes y cancelados no cuentan.'}">📦 ${data.esSoloHoy?data.totalPedidos:data.pedidosConfirmados}</div>
+        ${data.esSoloHoy&&data.pedidosEfectivos>0?`<div style="font-size:11px;color:var(--purple);margin-top:2px" title="Estimación: ${data.totalPedidos} × ${Math.round((data.pctConf||0.62)*100)}% confirmación">🟣 P.Ef: ${data.pedidosEfectivos.toFixed(2)}</div>`:''}
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:14px;color:${roasColor};font-weight:600;line-height:1.2">${data.roas>0?data.roas.toFixed(2)+'x':'—'}</div>
+        ${beRoas>0?`<div style="font-size:11px;color:var(--muted);margin-top:2px">BE: ${beRoas.toFixed(2)}x</div>`:''}
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:14px;color:var(--text);line-height:1.2">$${fmt(data.gasto)}</div>
+      </div>
+    </div>
+    ${_filaPrev}
+  </div>`
 
   return`
   <details class="rp-card" data-sem-code="${data.semCode}" style="background:${c.bg};border:1px solid ${c.border};border-radius:10px;margin-bottom:8px;overflow:hidden">
@@ -10180,27 +10243,7 @@ function _renderProductoCardResumen(data,ranking){
           <span class="rp-chevron" style="font-size:14px;color:${c.color};opacity:.6">▼</span>
         </div>
       </div>
-      <div style="display:flex;align-items:center;gap:12px;margin-top:8px;flex-wrap:wrap;padding-left:46px;font-size:13px">
-        <span style="display:inline-flex;align-items:center;gap:6px;font-size:16px;font-weight:600;color:${plataColor}">
-          ${plataSign}$${fmt(plataAbs)}
-          ${data.desgloseGanancia?`<span style="cursor:help;font-size:12px;opacity:.7;border:1px solid var(--border);border-radius:50%;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted);font-weight:400" title="Cómo sale ${plataSign}$${fmt(plataAbs)}:&#10;&#10;Venta efectiva (${Math.round((data.desgloseGanancia.devPct||0.19)*100)}% dev): $${fmt(data.desgloseGanancia.ventaEfectiva)}&#10;− Costo producto: −$${fmt(data.desgloseGanancia.costoProv)}&#10;− Flete: −$${fmt(data.desgloseGanancia.costoFlete)}&#10;− Devolución: −$${fmt(data.desgloseGanancia.costoDev)}&#10;− Gasto ads: −$${fmt(data.desgloseGanancia.gasto)}&#10;− Costo conversación: −$${fmt(data.desgloseGanancia.costoConvProd)}&#10;&#10;= ${plataSign}$${fmt(plataAbs)}&#10;&#10;(No incluye gastos fijos — esos van en Dashboard)">ℹ</span>`:''}
-        </span>
-        <span style="color:var(--muted)">·</span>
-        <span style="display:inline-flex;align-items:center;gap:4px;color:${cpaColor}" title="Break-even: $${fmt(data.margenBE)} · ${pctBE>0?pctBE+'% del BE':''}">
-          🎯 CPA real $${fmt(data.cpaReal)} ${cpaIcon}
-        </span>
-        ${data.esSoloHoy&&data.cpaRealEfectivo>0?`
-        <span style="color:var(--muted)">·</span>
-        <span style="display:inline-flex;align-items:center;gap:4px;color:var(--purple);font-weight:500" title="Estimación: gasto / (pedidos × ${Math.round((data.pctConf||0.62)*100)}% confirmación). Solo aplica HOY (sin cruce Dropi).">
-          🟣 CPA Efectivo $${fmt(data.cpaRealEfectivo)}
-        </span>
-        `:''}
-        ${data.totalPedidos>0?`
-        <span style="color:var(--muted)">·</span>
-        <span style="color:var(--muted)" title="${data.esSoloHoy?'Pedidos brutos del día (aún sin cruce Dropi)':'Pedidos REALES = confirmados del cruce Dropi. Pendientes y cancelados no cuentan.'}">📦 ${data.esSoloHoy?data.totalPedidos:data.pedidosConfirmados} pedidos${data.esSoloHoy&&data.pedidosEfectivos>0?` + <span style="color:var(--purple);font-weight:500" title="Estimación: ${data.totalPedidos} × ${Math.round((data.pctConf||0.62)*100)}% confirmación">🟣 P.Efectivos ${data.pedidosEfectivos.toFixed(2)}</span>`:''}</span>
-        `:''}
-      </div>
-      ${prevHtml}
+      ${_compGridHtml}
     </summary>
     <div style="padding:0 16px 16px;border-top:1px solid ${c.border};margin-top:6px;padding-top:14px">
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px">

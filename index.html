@@ -9836,15 +9836,34 @@ async function renderMetaPortafolio(el,isAdmin){
   // Gasto en RANGO seleccionado por cuenta + tiene campañas ACTIVE (para filtro "Activas")
   const _defHasta=today()
   const _defDesde=_defHasta // Meta Ads arranca enfocado en HOY (no rango mensual)
-  const{data:insRango}=await sb.from('meta_insights').select('account_id,spend').eq('nivel','campaign').gte('fecha',_defDesde).lte('fecha',_defHasta).limit(20000)
+  const{data:insRango}=await sb.from('meta_insights').select('account_id,meta_id,spend').eq('nivel','campaign').gte('fecha',_defDesde).lte('fecha',_defHasta).limit(20000)
   const gastoRangoByAcc={}
-  for(const i of (insRango||[])){gastoRangoByAcc[i.account_id]=(gastoRangoByAcc[i.account_id]||0)+(i.spend||0)}
+  const gastoRangoByCampId={}
+  for(const i of (insRango||[])){
+    gastoRangoByAcc[i.account_id]=(gastoRangoByAcc[i.account_id]||0)+(i.spend||0)
+    if(i.meta_id)gastoRangoByCampId[String(i.meta_id)]=(gastoRangoByCampId[String(i.meta_id)]||0)+(i.spend||0)
+  }
   // Cuenta es ACTIVA si: tiene campañas ACTIVE registradas Y tiene gasto > 0 en el rango
   const tieneGastoRango={}
   for(const c of cuentas){
     const tieneCampActiva=(campsByAcc[c.account_id]?.activas||0)>0
     const tieneGasto=(gastoRangoByAcc[c.account_id]||0)>0
     tieneGastoRango[c.account_id]=tieneCampActiva&&tieneGasto
+  }
+
+  // ── Conteo "Con actividad" por cuenta (misma lógica del expand de cada cuenta) ──
+  // Una campaña "tuvo actividad" en el rango si su gasto > 0.
+  // De esas, activas = estado actual ACTIVE; pausadas = estado actual ≠ ACTIVE.
+  const conActByAcc={}
+  for(const c of cuentas){conActByAcc[c.account_id]={con:0,activas:0,pausadas:0}}
+  for(const camp of (campanas||[])){
+    const accId=camp.account_id
+    if(!conActByAcc[accId])continue
+    const tuvoGasto=(gastoRangoByCampId[String(camp.meta_id)]||0)>0
+    if(!tuvoGasto)continue
+    conActByAcc[accId].con++
+    if(camp.estado==='ACTIVE')conActByAcc[accId].activas++
+    else conActByAcc[accId].pausadas++
   }
 
   // Break-even (global, fallback usado solo cuando una campaña no tiene producto asociado)
@@ -9934,6 +9953,10 @@ async function renderMetaPortafolio(el,isAdmin){
     const nIns=insCountByAcc[cuenta.account_id]||0
     const hasData=nIns>0
     const statusIcon=hasData?'✅':'⚠️'
+    const ca=conActByAcc[cuenta.account_id]||{con:0,activas:0,pausadas:0}
+    // Badge dinámico: refleja actividad real en el rango (coincide con el filtro "Con actividad" del expand)
+    const badgeReal=ca.con>0?'ACTIVE':'SIN ACTIVIDAD'
+    const badgeColor=ca.con>0?'green':'red'
 
     html+=`<div class="meta-cuenta-wrap" data-estado="${cuenta.estado}" data-tienegastohoy="${tieneGastoRango[cuenta.account_id]?1:0}" data-nombre="${(cuenta.nombre||cuenta.account_id).toLowerCase()}" data-accid="${cuenta.account_id}" style="margin-bottom:8px">
       <div class="card" style="padding:12px;cursor:pointer;user-select:none;border-left:4px solid var(--hier-cuenta)" onclick="toggleMetaCuenta('${cuenta.account_id}')">
@@ -9943,9 +9966,9 @@ async function renderMetaPortafolio(el,isAdmin){
             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
               <span class="nexo-hier-pill" style="background:var(--hier-cuenta-bg);color:var(--hier-cuenta);border:1px solid var(--hier-cuenta)">🏢 Cuenta</span>
               <span style="font-weight:600;font-size:14px">${cuenta.nombre||cuenta.account_id}</span>
-              <span class="pill pill-${cuenta.estado==='ACTIVE'?'green':'red'}" style="font-size:10px">${cuenta.estado}</span>
+              <span class="pill pill-${badgeColor}" style="font-size:10px" title="Refleja actividad real en el rango seleccionado. Coincide con el filtro 'Con actividad' al expandir la cuenta.">${badgeReal}</span>
             </div>
-            <div style="font-size:11px;color:var(--muted)">${cc.total} campañas · ${cc.activas} activas · ${nIns} métricas</div>
+            <div style="font-size:11px;color:var(--muted)">${cc.total} campañas · ${ca.con} con actividad · <span style="color:var(--green)">${ca.activas} activas</span> · ${ca.pausadas} pausadas</div>
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
             ${isAdmin?`<label onclick="event.stopPropagation()" style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--muted);cursor:pointer" title="Si está marcado, esta cuenta NO suma en el Tracker global">

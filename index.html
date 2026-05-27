@@ -10074,7 +10074,11 @@ function _renderProductoCardResumen(data,ranking){
     '':{bg:'var(--card2)',color:'var(--muted)',border:'var(--border)'}
   }
   const c=SEM_COLORS[data.semCode]||SEM_COLORS['']
-  const badge=window.nexoBadgeMega(data.semCode,'lg')||''
+  // esFuga: gasto > 0 y ventas reales = 0 (alerta de plata sin convertir)
+  // HOY: si pedidosEfectivos=0 (sin estimación). Pasado: si pedidosConfirmados=0.
+  const _ventasRealesP=data.esSoloHoy?(data.pedidosEfectivos||0):(data.pedidosConfirmados||0)
+  const _esFugaProd=data.gasto>0&&_ventasRealesP===0
+  const badge=window.nexoBadgeMega(data.semCode,'lg',_esFugaProd)||''
 
   // Plata (ganancia o perdida)
   const plataColor=data.gananciaNeta>=0?'var(--green)':'var(--red)'
@@ -10787,7 +10791,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       :`title="Producto: ${ctxCamp.nombre} · Break-even: $${fmt(ctxCamp.margenBE)}"`
 
     // Badge MEGA de accion (nuevo) — pulsa en FUEGO y APAGAR
-    const badgeMega=camp._hasData&&semCode?window.nexoBadgeMega(semCode,'lg'):''
+    // esFuga = true cuando hay gasto pero ventas reales = 0 (alerta de plata sin convertir)
+    const _esFuga=camp._hasData&&m.spend>0&&ventasReales===0
+    const badgeMega=camp._hasData&&semCode?window.nexoBadgeMega(semCode,'lg',_esFuga):''
     // Color CPA: si HOY usar cpaRealEfectivas; sino, cpaReal normal
     const cpaColorCss=window.nexoCpaColor(cpaParaSemaforo,ctxCamp.margenBE)
     // Etiqueta y valor del hero grande (cambia según esSoloHoy)
@@ -10795,7 +10801,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const heroVal=esSoloHoy?cpaRealEfectivas:cpaReal
     const heroTitle=esSoloHoy?`Estimado con ${Math.round(pctConf*100)}% confirmación · Break-even: $${fmt(ctxCamp.margenBE)}`:`Break-even: $${fmt(ctxCamp.margenBE)}`
 
-    return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" data-estado="${camp.estado||''}" style="margin-bottom:5px;${opacity}">
+    return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" data-estado="${camp.estado||''}" data-urgencia="${camp._urgenciaCode||''}" style="margin-bottom:5px;${opacity}">
       <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-camp)">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
         <div style="flex:1;min-width:0;cursor:pointer" onclick="viewCampDetail('${camp.meta_id}')">
@@ -10841,6 +10847,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
 
   // ── Pre-calcular semáforo de cada campaña activa para ordenar + contar ──
   // Reutilizamos la misma lógica que renderCamp (sin pintar) para clasificar.
+  // REGLA URGENCIA: si la campaña no tiene ventas reales → siempre va a ESPERAR
+  // (sin_ventas), independiente del color visual del badge (que puede ser fuga
+  // con ⏳🟡 CUIDADO o ⏳🔴 APAGAR para alertar gravedad, pero el filtro las agrupa).
   const _ctxFn=(window._metaPort&&typeof window._metaPort._ctxProductoPorCamp==='function')?window._metaPort._ctxProductoPorCamp:null
   const _clasificar=(camp)=>{
     const m=agg[camp.meta_id]||{spend:0,conv:0}
@@ -10852,7 +10861,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const vrEff=esSoloHoy?(vr*pctC):vr
     const cpaR=vrEff>0?m.spend/vrEff:0
     if(!camp._hasData||m.spend<=0)return ''
-    if(cpaR===0&&vr===0)return 'sin_ventas'
+    // Sin ventas reales → siempre ESPERAR (aunque haya fuga grave, el badge ya muestra color)
+    if(vr===0)return 'sin_ventas'
+    if(cpaR===0)return 'sin_ventas' // defensa extra
     if(cpaR>ctxC.margenBE)return 'stop'
     if(cpaR>ctxC.margenBE*0.7)return 'precaucion'
     if(cpaR>ctxC.margenBE*0.45)return 'escalar'
@@ -10862,6 +10873,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   for(const c of conActividad){
     const code=_clasificar(c)
     c._semCode=code
+    c._urgenciaCode=code // ← usado por el filtro (data-urgencia)
     if(_conta[code]!=null)_conta[code]++
   }
   // Ordenar conActividad por urgencia: APAGAR primero, luego CUIDADO, FUEGO, ESCALAR, ESPERAR
@@ -10981,14 +10993,11 @@ window.nexoFilterByUrgencia=(accountId,code,btn)=>{
   }
   accEl.querySelectorAll('.meta-camp-item').forEach(el=>{
     if(!code){el.style.display='';return}
-    const card=el.querySelector('.card')
-    if(!card){el.style.display='';return}
-    // Buscamos el badge MEGA dentro de la card (state ESTADO en mayusculas)
-    const badge=card.querySelector('.nexo-badge-mega .nbm-state')
-    if(!badge){el.style.display='none';return}
-    const txt=(badge.textContent||'').trim()
-    const MAP={stop:'APAGAR',precaucion:'CUIDADO',fuego:'FUEGO',escalar:'ESCALAR',sin_ventas:'ESPERAR'}
-    el.style.display=(txt===MAP[code])?'':'none'
+    // Filtra por atributo data-urgencia (más confiable que leer texto del badge).
+    // data-urgencia se setea desde _clasificar: campañas sin ventas siempre van a 'sin_ventas',
+    // independiente del color visual del badge (que puede mostrar fuga ⏳🟡 ⏳🔴).
+    const urg=el.getAttribute('data-urgencia')||''
+    el.style.display=(urg===code)?'':'none'
   })
 }
 
@@ -11444,7 +11453,9 @@ window._semColorMap={
 // nexoBadgeMega(code, size): devuelve HTML del badge cuadrado grande con emoji + ESTADO + ACCION.
 // code: 'fuego'|'escalar'|'precaucion'|'stop'|'sin_ventas'|'' (vacio = no badge, no urgente)
 // size: 'lg' (default, para campañas) | 'sm' (para adsets y ads)
-window.nexoBadgeMega=function(code,size){
+// esFuga (opcional): si true → es semáforo por FUGA (gasto sin ventas), muestra ⏳ adelante
+//                    del dot y cambia action a "SIN VENTAS". Solo aplica a precaucion/stop/esperar.
+window.nexoBadgeMega=function(code,size,esFuga){
   if(!code)return ''
   const MAP={
     fuego:{dot:'🟣',state:'FUEGO',action:'DOBLAR 🚀',color:'var(--purple)',bg:'var(--purple-bg)',pulse:true,tooltip:'FUEGO — CPA muy por debajo del break-even. Está rindiendo brutal. DOBLÁ el presupuesto sin miedo.'},
@@ -11456,8 +11467,13 @@ window.nexoBadgeMega=function(code,size){
     pendiente_sync:{dot:'⏳',state:'ESPERAR',action:'SIN SYNC',color:'var(--muted)',bg:'var(--card2)',pulse:false,tooltip:'ESPERAR — Falta sincronización con Meta. SIN SYNC todavía, vuelve a chequear después del próximo sync.'},
     reportado:{dot:'📝',state:'REPORTADO',action:'REVISAR',color:'var(--blue)',bg:'var(--blue-bg)',pulse:false,tooltip:'REPORTADO — Se cargaron ventas manualmente desde el reporte del día. REVISÁ que el dato esté correcto.'}
   }
-  const o=MAP[code]
+  let o=MAP[code]
   if(!o)return ''
+  // Si es semáforo por FUGA (gasto sin ventas) → mostrar ⏳ adelante y action "SIN VENTAS"
+  // Solo aplica a precaucion/stop (el caso esperar ya viene con ⏳🟢 nativo).
+  if(esFuga&&(code==='precaucion'||code==='stop')){
+    o={...o,dot:'⏳'+o.dot,action:'SIN VENTAS',tooltip:o.tooltip+' · FUGA: gasto sin ventas confirmadas todavía.'}
+  }
   const sizeCls=size==='sm'?' nbm-sm':''
   const pulseCls=o.pulse?' nexo-pulse':''
   return `<div class="nexo-badge-mega${sizeCls}${pulseCls}" title="${o.tooltip}" style="background:${o.bg};border-color:${o.color};color:${o.color};cursor:help">
@@ -12401,7 +12417,9 @@ window.toggleCampDesglose=async(campId,accountId)=>{
         const ventasIcon=mr.esSoloHoy?'⏳':'✅'
         // Badge MEGA (chico) basado en código de semáforo
         const semCode=mr.sem?window._semTxtToCode(mr.sem.txt):''
-        const badgeMega=hasSpend&&semCode?window.nexoBadgeMega(semCode,'sm'):''
+        // esFuga: gasto > 0 y ventas reales = 0
+        const _esFugaAS=hasSpend&&((mr.ventas||0)+(mr.pendientes||0))===0
+        const badgeMega=hasSpend&&semCode?window.nexoBadgeMega(semCode,'sm',_esFugaAS):''
         // El hero usa CPA EFECTIVO cuando esSoloHoy
         const heroLbl=mr.esSoloHoy?'CPA Real Efectivas':'CPA Real'
         const heroVal=mr.esSoloHoy?mr.cpaRealEfectivas:mr.cpaReal
@@ -12543,7 +12561,9 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
       const ventasColor=mr.esSoloHoy?'var(--amber)':'var(--green)'
       const ventasIcon=mr.esSoloHoy?'⏳':'✅'
       const semCode=mr.sem?window._semTxtToCode(mr.sem.txt):''
-      const badgeMega=hasSpend&&semCode?window.nexoBadgeMega(semCode,'sm'):''
+      // esFuga: gasto > 0 y ventas reales = 0
+      const _esFugaAd=hasSpend&&((mr.ventas||0)+(mr.pendientes||0))===0
+      const badgeMega=hasSpend&&semCode?window.nexoBadgeMega(semCode,'sm',_esFugaAd):''
       // El hero usa CPA EFECTIVO cuando esSoloHoy
       const heroLbl=mr.esSoloHoy?'CPA Real Efectivas':'CPA Real'
       const heroVal=mr.esSoloHoy?mr.cpaRealEfectivas:mr.cpaReal

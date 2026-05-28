@@ -323,6 +323,14 @@ tr:hover td{background:var(--card2)}
 .aux-today h3{font-size:15px;font-weight:800;margin-top:12px}
 .aux-today p{font-size:12.5px;color:var(--muted);font-weight:500;margin-top:4px;line-height:1.45}
 .aux-today .go{margin-top:13px;font-size:12.5px;font-weight:800;color:var(--accent);display:flex;align-items:center;gap:5px}
+/* barra de progreso "Vas X de 8 hoy" + chip "Hecho hoy" */
+.aux-progress{margin-top:12px}
+.aux-progress-top{display:flex;justify-content:space-between;align-items:center;font-size:13px;font-weight:700;color:var(--muted);margin-bottom:6px;gap:10px;flex-wrap:wrap}
+.aux-progress-top strong{color:var(--text)}
+.aux-progress-bar{height:10px;border-radius:999px;background:var(--card2);border:1px solid var(--border);overflow:hidden}
+.aux-progress-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,var(--accent),var(--purple));transition:width .4s ease;min-width:0}
+.aux-today .aux-done{font-size:13px;font-weight:800;color:var(--green);display:inline-flex;align-items:center;gap:4px;margin-top:13px}
+.aux-today .aux-faltan{font-size:12px;font-weight:700;color:var(--red);margin-top:6px}
 /* buscador universal */
 .aux-search-wrap{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:18px}
 .aux-search-wrap input{flex:1;min-width:200px;background:var(--card);border:1px solid var(--border);border-radius:11px;padding:12px 14px;color:var(--text);font-size:14px;font-family:inherit}
@@ -8202,11 +8210,186 @@ window.auxRefreshCounts=async()=>{
   try{renderNav()}catch(e){}
 }
 
+// "✓ Hecho hoy" de Novedades (SOLO LECTURA). Replica la regla del módulo:
+// hecho = NO queda ninguna novedad URGENTE (cat_idx 1-3) sin contactar,
+// mirando el lote de hoy + arrastradas (lotes de los últimos 14 días).
+// "Atendida" = tiene resolución 'contactada' O 'resuelta' aplicable
+// (created_at >= timestamp de la novedad, igual que renderNovedadesContent).
+window.auxNovedadesHecho=async(force)=>{
+  if(window._auxNovHecho&&!force)return window._auxNovHecho
+  try{
+    const desde=_daysAgo(14)
+    const{data:reps}=await sb.from('novedades_reportes').select('id').gte('fecha_lote',desde)
+    const ids=(reps||[]).map(r=>r.id)
+    if(!ids.length){window._auxNovHecho={hecho:true,faltan:0};return window._auxNovHecho}
+    const{data:items}=await sb.from('novedades_items')
+      .select('telefono,orden_id,prioridad,cat_idx,fecha_novedad,hora_novedad')
+      .in('reporte_id',ids).limit(5000)
+    const{data:resols}=await sb.from('novedades_resoluciones')
+      .select('telefono,orden_id,accion,created_at').order('created_at',{ascending:false}).limit(10000)
+    // Indexar resoluciones por clave telefono|orden_id (misma fórmula que _novKey)
+    const resolByKey={}, contactByKey={}
+    for(const r of (resols||[])){
+      const k=(r.telefono||'')+'|'+(r.orden_id||'')
+      if(r.accion==='contactada'){(contactByKey[k]=contactByKey[k]||[]).push(r)}
+      else if(r.accion==='envio_deshecho'){continue} // legacy: ignorar
+      else{(resolByKey[k]=resolByKey[k]||[]).push(r)} // resuelta o desmarcada
+    }
+    // Timestamp exacto de la novedad (réplica de _novTs del módulo)
+    const _ts=(it)=>{
+      if(!it.fecha_novedad)return null
+      const p=it.fecha_novedad.split('-'); if(p.length!==3)return null
+      let h=0,m=0
+      if(it.hora_novedad){const hm=String(it.hora_novedad).match(/(\d{1,2}):(\d{2})/);if(hm){h=parseInt(hm[1])||0;m=parseInt(hm[2])||0}}
+      const d=new Date(`${p[2]}-${p[1]}-${p[0]}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00`)
+      return isNaN(d)?null:d.getTime()
+    }
+    let faltan=0
+    for(const it of (items||[])){
+      const pri=it.prioridad||(NOV_RULES[(it.cat_idx||1)-1]?.pri)||'NORMAL'
+      if(pri!=='URGENTE')continue
+      const k=(it.telefono||'')+'|'+(it.orden_id||'')
+      const tsNov=_ts(it)
+      // Resolución aplicable (resuelta/desmarcada) más reciente posterior a la novedad
+      let r=null
+      for(const cand of (resolByKey[k]||[])){const tr=new Date(cand.created_at).getTime();if(tsNov===null||tr>=tsNov){r=cand;break}}
+      // Contactada aplicable más reciente posterior a la novedad
+      let ct=null
+      for(const cand of (contactByKey[k]||[])){const tr=new Date(cand.created_at).getTime();if(tsNov===null||tr>=tsNov){ct=cand;break}}
+      const isResuelta=r?.accion==='resuelta'
+      const isContactada=!!ct&&!isResuelta
+      if(!isResuelta&&!isContactada)faltan++
+    }
+    window._auxNovHecho={hecho:faltan===0,faltan}
+  }catch(e){window._auxNovHecho={hecho:false,faltan:null}}
+  return window._auxNovHecho
+}
+
+// "✓ Hecho hoy" de Cargar pedidos / Asignador (SOLO LECTURA).
+// Regla: el asignador se procesó hoy (al menos 1 lote) → audit_log accion
+// 'asignador_procesado' con created_at de hoy (Bogotá, UTC-5). Global, igual
+// que los conteos del tablero (no filtrado por usuario).
+window.auxAsignadorHecho=async(force)=>{
+  if(window._auxAsigHecho&&!force)return window._auxAsigHecho
+  try{
+    const desde=`${today()}T00:00:00-05:00`
+    const{count}=await sb.from('audit_log').select('*',{count:'exact',head:true})
+      .eq('accion','asignador_procesado').gte('created_at',desde)
+    window._auxAsigHecho={hecho:(count||0)>0}
+  }catch(e){window._auxAsigHecho={hecho:false}}
+  return window._auxAsigHecho
+}
+
+// "✓ Hecho hoy" de Cruzar con Dropi (SOLO LECTURA).
+// Regla: se actualizaron estados Dropi hoy → audit_log accion
+// 'dropi_estados_actualizados' con created_at de hoy (Bogotá, UTC-5). Global.
+window.auxDropiHecho=async(force)=>{
+  if(window._auxDropiHecho&&!force)return window._auxDropiHecho
+  try{
+    const desde=`${today()}T00:00:00-05:00`
+    const{count}=await sb.from('audit_log').select('*',{count:'exact',head:true})
+      .eq('accion','dropi_estados_actualizados').gte('created_at',desde)
+    window._auxDropiHecho={hecho:(count||0)>0}
+  }catch(e){window._auxDropiHecho={hecho:false}}
+  return window._auxDropiHecho
+}
+
+// "✓ Hecho hoy" de Reportar el día (SOLO LECTURA).
+// Regla: existe al menos una fila en reportes_diarios con fecha = hoy.
+// 'fecha' es un date (YYYY-MM-DD), se compara directo con today() (Bogotá). Global.
+window.auxReporteHecho=async(force)=>{
+  if(window._auxRepHecho&&!force)return window._auxRepHecho
+  try{
+    const{count}=await sb.from('reportes_diarios').select('*',{count:'exact',head:true})
+      .eq('fecha',today())
+    window._auxRepHecho={hecho:(count||0)>0}
+  }catch(e){window._auxRepHecho={hecho:false}}
+  return window._auxRepHecho
+}
+
+// "✓ Hecho hoy" de Cerrar jornada (SOLO LECTURA).
+// Regla: existe una fila en reportes_diarios con fecha = hoy Y jornada_cerrada = true. Global.
+window.auxCierreHecho=async(force)=>{
+  if(window._auxCierreHecho&&!force)return window._auxCierreHecho
+  try{
+    const{count}=await sb.from('reportes_diarios').select('*',{count:'exact',head:true})
+      .eq('fecha',today()).eq('jornada_cerrada',true)
+    window._auxCierreHecho={hecho:(count||0)>0}
+  }catch(e){window._auxCierreHecho={hecho:false}}
+  return window._auxCierreHecho
+}
+
+// "✓ Hecho hoy" de Ver estado de envíos / Seguimiento (SOLO LECTURA).
+// Regla: se procesó el archivo de seguimiento hoy → audit_log accion
+// 'seguimiento_procesado' con created_at de hoy (Bogotá, UTC-5). Global.
+window.auxSeguimientoHecho=async(force)=>{
+  if(window._auxSegHecho&&!force)return window._auxSegHecho
+  try{
+    const desde=`${today()}T00:00:00-05:00`
+    const{count}=await sb.from('audit_log').select('*',{count:'exact',head:true})
+      .eq('accion','seguimiento_procesado').gte('created_at',desde)
+    window._auxSegHecho={hecho:(count||0)>0}
+  }catch(e){window._auxSegHecho={hecho:false}}
+  return window._auxSegHecho
+}
+
+// "✓ Hecho hoy" de Avisar para recoger en oficina / Reclame (SOLO LECTURA).
+// Replica la regla del módulo: hecho = NO queda ningún reclame (lote de hoy +
+// arrastrados de los últimos 14 días) activo (no resuelto) y SIN AVISO (envios===0).
+// Clave de cruce telefono|guia. 'resuelta' = reclame_envios con nivel_mensaje===99.
+// Para arrastrados se excluyen los mapeos en estado cerrado (igual que el módulo).
+window.auxReclameHecho=async(force)=>{
+  if(window._auxRecHecho&&!force)return window._auxRecHecho
+  try{
+    const hoy=today(), desde=_daysAgo(14)
+    const{data:reps}=await sb.from('reclame_reportes').select('id,fecha_lote').gte('fecha_lote',desde)
+    if(!reps||!reps.length){window._auxRecHecho={hecho:true,faltan:0};return window._auxRecHecho}
+    const repFecha={}; for(const r of reps)repFecha[r.id]=r.fecha_lote
+    const ids=reps.map(r=>r.id)
+    const{data:items}=await sb.from('reclame_items').select('telefono,guia,reporte_id').in('reporte_id',ids).limit(20000)
+    if(!items||!items.length){window._auxRecHecho={hecho:true,faltan:0};return window._auxRecHecho}
+    const tels=[...new Set(items.map(i=>i.telefono).filter(Boolean))]
+    const enviosMap={}, resueltasMap={}, estadosByTel={}
+    const estadosCerrados=new Set(['ENTREGADO','DEVOLUCION','DEVOLUCION_INICIADA','DEVOLUCION INICIADA','EN DEVOLUCION','EN_DEVOLUCION','CANCELADO','DEVUELTA'])
+    for(let i=0;i<tels.length;i+=100){
+      const batch=tels.slice(i,i+100)
+      const{data:ed}=await sb.from('reclame_envios').select('telefono,guia,nivel_mensaje').in('telefono',batch).limit(20000)
+      for(const e of (ed||[])){
+        const k=(e.telefono||'')+'|'+(e.guia||'')
+        if(e.nivel_mensaje===99){resueltasMap[k]=true;continue} // resuelta
+        enviosMap[k]=(enviosMap[k]||0)+1 // aviso real
+      }
+      const{data:mp}=await sb.from('mapeos').select('telefono,estado_final').in('telefono',batch)
+      for(const m of (mp||[])){if(m.telefono&&estadosByTel[m.telefono]===undefined)estadosByTel[m.telefono]=m.estado_final||null}
+    }
+    // Claves del lote de HOY (sin exclusión de estado, igual que el módulo)
+    const enHoy=new Set()
+    for(const it of items){if(repFecha[it.reporte_id]===hoy)enHoy.add((it.telefono||'')+'|'+(it.guia||''))}
+    const vistos=new Set(); let faltan=0
+    for(const it of items){
+      const k=(it.telefono||'')+'|'+(it.guia||'')
+      if(vistos.has(k))continue; vistos.add(k)
+      if(resueltasMap[k])continue          // resuelto
+      if((enviosMap[k]||0)>0)continue       // ya tiene aviso
+      if(!enHoy.has(k)){                     // arrastrado: excluir si mapeo está cerrado
+        const est=String(estadosByTel[it.telefono]||'').toUpperCase().trim()
+        if(est&&estadosCerrados.has(est))continue
+      }
+      faltan++
+    }
+    window._auxRecHecho={hecho:faltan===0,faltan}
+  }catch(e){window._auxRecHecho={hecho:false,faltan:null}}
+  return window._auxRecHecho
+}
+
 async function pageAuxHoy(c){
-  c.innerHTML=`<div class="aux-home-hero"><h1>👋 ¿Qué hago hoy?</h1><p>Haz las cosas en orden, de la 1 a la 8. Los números de colores te dicen cuántos pedidos te esperan.</p></div>
+  c.innerHTML=`<div class="aux-home-hero"><h1>👋 ¿Qué hago hoy?</h1><p>Haz las cosas en orden, de la 1 a la 8. Los números de colores te dicen cuántos pedidos te esperan.</p>
+      <div class="aux-progress" id="aux-hoy-progress"></div></div>
     <div id="aux-hoy-grid"><div class="loading">Cargando…</div></div>`
-  const counts=await auxContarPendientes(true)
+  const [counts,nov,asig,dropi,rep,cierre,seg,rec]=await Promise.all([auxContarPendientes(true),auxNovedadesHecho(true),auxAsignadorHecho(true),auxDropiHecho(true),auxReporteHecho(true),auxCierreHecho(true),auxSeguimientoHecho(true),auxReclameHecho(true)])
   try{renderNav()}catch(e){}
+  // "Tareas hechas hoy": objeto que irá creciendo con los otros flujos.
+  window._auxHechas={novedades:nov.hecho,asignador:asig.hecho,dropi:dropi.hecho,reporte:rep.hecho,cierre:cierre.hecho,seguimiento:seg.hecho,reclame:rec.hecho}
   // 8 tarjetas en orden de flujo de trabajo. tipo 'rutina' = paso fijo (sin conteo); tipo 'pendiente' = muestra número
   const cards=[
     {num:1,tipo:'rutina',  sec:'aux-asignador', cls:'rutina',emoji:'📍',titulo:'Cargar pedidos nuevos',linea:'Pega aquí las órdenes del día.'},
@@ -8223,22 +8406,46 @@ async function pageAuxHoy(c){
   grid.className='aux-today-grid'
   grid.innerHTML=cards.map(k=>{
     if(k.tipo==='rutina'){
+      // El ✓ de rutina lee window._auxHechas[clave] (clave = sec sin 'aux-'). Hoy aporta: asignador.
+      const done=!!(window._auxHechas&&window._auxHechas[k.sec.replace('aux-','')])
       return `<div class="aux-today rutina" onclick="navigate('${k.sec}')">
         <div class="row1"><span class="aux-today-num">${k.num}</span><span class="emoji">${k.emoji}</span></div>
         <h3>${k.titulo}</h3>
         <p>${k.linea}</p>
-        <div class="go">Empezar →</div>
+        ${done?'<div class="aux-done">✓ Hecho hoy</div>':''}
+        <div class="go">${done?'Hecho ✓ · entrar de nuevo →':'Empezar →'}</div>
       </div>`
     }
     const activo=k.n>0
     const cls=activo?k.cls:'green'
+    // Chip "✓ Hecho hoy" en tarjetas pendiente, independiente del badge de conteo.
+    // Lee window._auxHechas[clave] (clave = sec sin 'aux-'). Hoy aportan: novedades, seguimiento.
+    let novFooter=''
+    const doneKeyP=k.sec.replace('aux-','')
+    if(window._auxHechas&&window._auxHechas[doneKeyP]){
+      novFooter=`<div class="aux-done">✓ Hecho hoy</div>`
+    }else if(k.sec==='aux-novedades'&&nov.faltan){
+      novFooter=`<div class="aux-faltan">Faltan ${nov.faltan} 🔴 por contactar</div>`
+    }else if(k.sec==='aux-reclame'&&rec.faltan){
+      novFooter=`<div class="aux-faltan">Faltan ${rec.faltan} 📦 por avisar</div>`
+    }
     return `<div class="aux-today ${cls}" onclick="navigate('${k.sec}')">
       <div class="row1"><span class="aux-today-num">${k.num}</span><span class="emoji">${k.emoji}</span><span class="count ${cls}">${activo?(k.n>99?'99+':k.n):'✓'}</span></div>
       <h3>${k.titulo}</h3>
       <p>${activo?k.linea:'Todo al día aquí 🎉'}</p>
+      ${novFooter}
       <div class="go">${activo?'Ir y resolver →':'Nada pendiente'}</div>
     </div>`
   }).join('')
+  // Barra "Vas X de 8 hoy ✓" — solo cuenta las claves true de window._auxHechas (hoy solo Novedades).
+  const pb=document.getElementById('aux-hoy-progress')
+  if(pb){
+    const hechas=Object.values(window._auxHechas||{}).filter(Boolean).length
+    const pct=Math.round(hechas/8*100)
+    const txt=hechas===8?'🎉 ¡Completaste todo tu día!':`Vas <strong>${hechas}</strong> de 8 hoy ✓`
+    pb.innerHTML=`<div class="aux-progress-top"><span>${txt}</span><span>${pct}%</span></div>
+      <div class="aux-progress-bar"><div class="aux-progress-fill" style="width:${pct}%"></div></div>`
+  }
 }
 
 async function pageAuxDropi(c){

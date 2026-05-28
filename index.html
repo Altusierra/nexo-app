@@ -12451,12 +12451,47 @@ window.refrescarUltimoSemaforo=async(metaId,nivel,btnEl)=>{
       if(btnEl){btnEl.innerHTML='❌ Sin ad_ids';setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.disabled=false},2000)}
       return
     }
-    // 3) Activar el modo "refresh único" → en lugar de INSERT lote, UPDATE solo este punto
-    window._semRefreshOne={metaId,puntoId:ultimo.id}
+    // 3) Resolver descendencia del meta_id apretado (vía meta_campanas.parent_id)
+    //    para refrescar campaña + adsets + ads CON LA MISMA HORA, no solo este punto.
+    const metaIdsAfectados=new Set([metaId])
+    const nivelPunto=nivel||ultimo.nivel
+    try{
+      if(nivelPunto==='campaign'){
+        // adsets hijos de la campaña
+        const{data:adsets}=await sb.from('meta_campanas').select('meta_id').eq('nivel','adset').eq('parent_id',metaId)
+        const adsetIds=(adsets||[]).map(a=>a.meta_id)
+        adsetIds.forEach(id=>metaIdsAfectados.add(id))
+        // ads hijos de esos adsets
+        if(adsetIds.length){
+          const{data:ads}=await sb.from('meta_campanas').select('meta_id').eq('nivel','ad').in('parent_id',adsetIds)
+          ;(ads||[]).forEach(a=>metaIdsAfectados.add(a.meta_id))
+        }
+      }else if(nivelPunto==='adset'){
+        // ads hijos de este adset
+        const{data:ads}=await sb.from('meta_campanas').select('meta_id').eq('nivel','ad').eq('parent_id',metaId)
+        ;(ads||[]).forEach(a=>metaIdsAfectados.add(a.meta_id))
+      }
+      // nivel 'ad' → solo él mismo (ya está en el set)
+    }catch(e){console.warn('[SEM-refresh] no se pudo resolver descendencia, refresco solo el punto:',e?.message||e)}
+
+    // 4) Buscar el ÚLTIMO punto de HOY (reporte_dia) de CADA meta_id afectado
+    const ultimoPorMeta={[metaId]:{id:ultimo.id}}
+    try{
+      const{data:puntos}=await sb.from('semaforo_historial')
+        .select('id,meta_id,hora_calculo')
+        .eq('fecha',hoy).eq('triggered_by','reporte_dia')
+        .in('meta_id',[...metaIdsAfectados])
+        .order('hora_calculo',{ascending:false})
+      ;(puntos||[]).forEach(p=>{if(!ultimoPorMeta[p.meta_id])ultimoPorMeta[p.meta_id]={id:p.id}})
+    }catch(e){console.warn('[SEM-refresh] no se pudieron traer puntos hijos:',e?.message||e)}
+
+    // 5) Modo "refresh batch" → UPDATE puntual a cada meta_id (campaña + adsets + ads)
+    //    con la MISMA hora_calculo nueva. Reusa el mecanismo ya probado del refresh de cuenta.
+    window._semRefreshBatch=ultimoPorMeta
     try{
       await _calcularYGuardarSemaforos(adIdsUnicos,'reporte_dia')
     }finally{
-      window._semRefreshOne=null
+      window._semRefreshBatch=null
     }
     if(btnEl){
       btnEl.innerHTML='✅ Refrescado'

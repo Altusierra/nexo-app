@@ -11144,6 +11144,99 @@ async function renderMetaPortafolio(el,isAdmin){
   _actualizarResumenMetaProductos()
 }
 
+// ── Asignar / Cambiar producto de una campaña desde el propio portafolio Meta ──
+// Toda campaña debe tener un producto. Este modal permite asignarlo o moverlo
+// sin tener que ir a la sección Productos. Al confirmar, quita el campaign_id de
+// cualquier producto que lo tuviera y lo agrega al elegido (sin doble atribución).
+window.modalAsignarProductoCamp=(campId,campNombre,accountId)=>{
+  if(!productos||!productos.length){alert('No hay productos configurados');return}
+  const actual=productos.find(p=>(Array.isArray(p.campaign_ids)?p.campaign_ids:[]).includes(campId))
+  window._selProdCampId=null
+  window._selProdCampActualId=actual?actual.id:null
+  const lista=[...productos].sort((a,b)=>{
+    if(actual){if(a.id===actual.id)return -1;if(b.id===actual.id)return 1}
+    return (a.nombre||'').localeCompare(b.nombre||'')
+  })
+  const items=lista.map(p=>{
+    const esActual=actual&&p.id===actual.id
+    const nom=(p.nombre||'(sin nombre)')
+    return `<div class="bp-item" data-id="${p.id}" data-nombre="${_normProd(nom)}" onclick="_selProdCampItem('${p.id}')" style="padding:9px 11px;border:1px solid ${esActual?'var(--green)':'var(--border)'};border-radius:8px;margin-bottom:5px;cursor:pointer;background:${esActual?'var(--green-bg)':'var(--card2)'};display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <span style="font-size:13px;color:var(--text)">📦 ${nom}</span>
+      ${esActual?'<span style="font-size:10px;color:var(--green);font-weight:600;white-space:nowrap">✓ Actual</span>':''}
+    </div>`
+  }).join('')
+  openModal(`
+    <div class="modal-title">${actual?'Cambiar producto de la campaña':'Asignar producto a la campaña'}</div>
+    <div class="modal-sub">🎯 ${(campNombre||campId)}</div>
+    ${actual?`<div style="font-size:11px;color:var(--muted);margin-bottom:8px">Actualmente: <span style="color:var(--green)">📦 ${actual.nombre}</span></div>`:''}
+    <input id="bp-search" type="text" placeholder="🔍 Buscar producto..." oninput="_filtrarProdCamp()" style="width:100%;padding:9px 11px;margin-bottom:10px;background:var(--card);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px" autocomplete="off">
+    <div id="bp-list" style="max-height:340px;overflow-y:auto">${items}</div>
+    <div id="bp-empty" style="display:none;text-align:center;color:var(--muted);font-size:12px;padding:14px">Sin resultados</div>
+    <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end">
+      <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
+      <button id="bp-confirm" class="btn-sm btn-blue" disabled onclick="_confirmarProdCamp('${campId}','${accountId}')" style="opacity:.5">Selecciona un producto</button>
+    </div>
+  `)
+  setTimeout(()=>{const s=document.getElementById('bp-search');if(s)s.focus()},80)
+}
+
+window._filtrarProdCamp=()=>{
+  const q=_normProd(document.getElementById('bp-search')?.value||'')
+  const items=document.querySelectorAll('#bp-list .bp-item')
+  let visibles=0
+  items.forEach(it=>{
+    const match=!q||(it.dataset.nombre||'').includes(q)
+    it.style.display=match?'flex':'none'
+    if(match)visibles++
+  })
+  const empty=document.getElementById('bp-empty')
+  if(empty)empty.style.display=visibles===0?'block':'none'
+}
+
+window._selProdCampItem=(id)=>{
+  window._selProdCampId=id
+  document.querySelectorAll('#bp-list .bp-item').forEach(it=>{
+    it.style.outline=(it.dataset.id===id)?'2px solid var(--accent)':'none'
+  })
+  const prod=productos.find(p=>p.id===id)
+  const btn=document.getElementById('bp-confirm')
+  if(btn&&prod){
+    btn.disabled=false
+    btn.style.opacity='1'
+    const esActual=window._selProdCampActualId===id
+    btn.textContent=esActual?('Mantener '+prod.nombre):((window._selProdCampActualId?'Cambiar a ':'Asignar a ')+prod.nombre)
+  }
+}
+
+window._confirmarProdCamp=async(campId,accountId)=>{
+  const prodId=window._selProdCampId
+  if(!prodId)return
+  const prodNuevo=productos.find(p=>p.id===prodId)
+  if(!prodNuevo){alert('Producto no encontrado');return}
+  const yaLaTiene=(Array.isArray(prodNuevo.campaign_ids)?prodNuevo.campaign_ids:[]).includes(campId)
+  if(yaLaTiene){closeModal();return}
+  const btn=document.getElementById('bp-confirm')
+  if(btn){btn.disabled=true;btn.textContent='Guardando...'}
+  // Mover la campaña vía RPC (la quita de cualquier otro producto y la agrega al elegido).
+  // Se usa RPC para que trafficker y admin puedan atribuir sin permiso de escritura directa en productos.
+  const previos=productos.filter(p=>p.id!==prodId&&(Array.isArray(p.campaign_ids)?p.campaign_ids:[]).includes(campId))
+  const{error}=await sb.rpc('asignar_campana_producto',{p_campaign_id:campId,p_producto_id:prodId})
+  if(error){alert(error.message);if(btn){btn.disabled=false;btn.style.opacity='1'}return}
+  // 3. Refrescar productos en memoria + el mapa campToProd del portafolio (misma referencia que el closure)
+  await loadProductos()
+  if(window._metaPort&&window._metaPort.campToProd){
+    const m=window._metaPort.campToProd
+    for(const k in m)delete m[k]
+    for(const p of (productos||[])){
+      for(const cid of (Array.isArray(p.campaign_ids)?p.campaign_ids:[])){if(cid&&!m[cid])m[cid]=p}
+    }
+  }
+  logAction('campana_producto_asignado',{campaign_id:campId,producto_id:prodId,producto_nombre:prodNuevo.nombre,previos:previos.map(x=>x.id)}).catch(()=>{})
+  closeModal()
+  alert('✅ Campaña movida a '+prodNuevo.nombre)
+  if(window.toggleMetaCuenta)window.toggleMetaCuenta(accountId,true)
+}
+
 window.toggleMetaCuenta=async(accountId,forceReload)=>{
   const accEl=document.getElementById('meta-acc-'+accountId)
   const chevron=document.getElementById('meta-chevron-'+accountId)
@@ -11398,6 +11491,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
           <div style="display:flex;flex-direction:column;gap:3px;align-items:flex-end">
             ${camp._hasData?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();toggleCampDesglose('${camp.meta_id}','${accountId}')" style="padding:3px 7px;font-size:9px" title="Ver conjuntos y anuncios">📊 Desglose</button>`:''}
             <div style="display:flex;gap:3px">
+              <button class="btn-sm btn-outline" onclick="event.stopPropagation();modalAsignarProductoCamp('${camp.meta_id}','${(camp.nombre||'').replace(/'/g,"\\'")}','${accountId}')" style="padding:2px 6px;font-size:9px;${ctxCamp.esGlobal?'border-color:var(--amber);color:var(--amber)':'border-color:var(--green);color:var(--green)'}" title="${ctxCamp.esGlobal?'⚠️ Sin producto · clic para asignar':'Producto: '+ctxCamp.nombre+' · clic para cambiar'}">${ctxCamp.esGlobal?'⚠️ Producto':'📦 Cambiar'}</button>
               <button class="btn-sm btn-outline" onclick="event.stopPropagation();copyMetaId('${camp.meta_id}',this)" style="padding:2px 5px;font-size:9px" title="Copiar ID de campaña">📋</button>
               <button class="btn-sm btn-outline" onclick="event.stopPropagation();analizarConIA('campana','${camp.meta_id}','${(camp.nombre||'').replace(/'/g,"\\'")}','${desde}','${hasta}')" style="padding:2px 5px;font-size:9px" title="Analizar con IA">🤖</button>
             </div>

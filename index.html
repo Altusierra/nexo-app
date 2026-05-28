@@ -329,6 +329,8 @@ tr:hover td{background:var(--card2)}
 .aux-progress-top strong{color:var(--text)}
 .aux-progress-bar{height:10px;border-radius:999px;background:var(--card2);border:1px solid var(--border);overflow:hidden}
 .aux-progress-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,var(--accent),var(--purple));transition:width .4s ease;min-width:0}
+/* barra de progreso fija arriba (visible en todas las secciones del auxiliar) */
+.aux-sticky-progress{position:sticky;top:0;z-index:30;background:var(--bg);padding:10px 0 12px;margin:0 0 14px;border-bottom:1px solid var(--border)}
 .aux-today .aux-done{font-size:13px;font-weight:800;color:var(--green);display:inline-flex;align-items:center;gap:4px;margin-top:13px}
 .aux-today .aux-faltan{font-size:12px;font-weight:700;color:var(--red);margin-top:6px}
 /* buscador universal */
@@ -627,6 +629,10 @@ function render(page){
   // Buscador universal: solo para auxiliar y solo en sus páginas de operación
   if(currentRol()==='auxiliar' && page.startsWith('aux-') && page!=='aux-hoy'){
     setTimeout(()=>{try{auxInjectSearchBar()}catch(e){}},0)
+  }
+  // Barra de progreso fija arriba: en las páginas del auxiliar menos el tablero (que ya la tiene en su hero)
+  if(currentRol()==='auxiliar' && page.startsWith('aux-') && page!=='aux-hoy'){
+    setTimeout(()=>{try{auxInjectProgressBar()}catch(e){}},0)
   }
   if(currentRol()==='auxiliar' && !window._auxCounts){
     setTimeout(()=>{try{auxRefreshCounts&&auxRefreshCounts()}catch(e){}},0)
@@ -8219,10 +8225,38 @@ async function pageAuxCierre(c){
       <div class="sem-msg">Cerraste tu jornada hoy. ¡Buen trabajo!</div></div></div>`;return
   }
 
+  // GATE: las 7 actividades del tablero deben estar en "✓ Hecho hoy" para poder cerrar.
+  // [clave, funciónHecho, emoji, título, sección, qué hacer]. Solo lectura.
+  const _act7def=[
+    ['asignador',  auxAsignadorHecho,  '📍','Cargar pedidos nuevos',          'aux-asignador', 'Pega las órdenes del día en el Asignador.'],
+    ['dropi',      auxDropiHecho,      '📊','Cruzar con Dropi',               'aux-dropi',     'Sube el Excel de Dropi y actualiza los estados.'],
+    ['reservado',  auxReservadoHecho,  '🔍','Confirmar y recuperar pedidos',  'aux-reservado', 'Manda los 2 mensajes del día a los que salen a envío pronto.'],
+    ['novedades',  auxNovedadesHecho,  '⚠️','Resolver problemas de entrega',  'aux-novedades', 'Sube el Excel de novedades y contacta a todos los urgentes 🔴.'],
+    ['reclame',    auxReclameHecho,    '📦','Avisar para recoger en oficina', 'aux-reclame',   'Sube el Excel de reclame y avísale a cada cliente.'],
+    ['seguimiento',auxSeguimientoHecho,'🚚','Ver estado de los envíos',       'aux-seguimiento','Sube el Excel de Dropi en Seguimiento.'],
+    ['reporte',    auxReporteHecho,    '📝','Reportar el día',                'aux-reporte',   'Guarda el reporte del día.'],
+  ]
+  const _act7res=await Promise.all(_act7def.map(a=>(typeof a[1]==='function'?a[1](true):Promise.resolve({hecho:false})).catch(()=>({hecho:false}))))
+  const _faltan7=_act7def.filter((a,i)=>!(_act7res[i]&&_act7res[i].hecho))
+
   let checks={novedades:rep.ch_novedades||false,guias:rep.ch_guias_reclame||false,
                pendientes:rep.ch_pendientes||false,etiquetas:rep.ch_etiquetas_meta||false}
 
   const renderCierre=()=>{
+    // Si falta alguna de las 7 actividades → bloqueo total: no se muestra el checklist ni el botón.
+    if(_faltan7.length){
+      card.innerHTML=`
+        <div class="alert alert-amber" style="background:var(--amber-bg);color:var(--amber);border:1px solid #78350f;margin-bottom:14px"><b>⛔ Todavía no puedes cerrar la jornada.</b><br>Te ${_faltan7.length===1?'falta':'faltan'} <b>${_faltan7.length}</b> ${_faltan7.length===1?'actividad':'actividades'} por terminar hoy. Toca cada una para ir a hacerla.</div>
+        <div class="checklist">
+          ${_faltan7.map(a=>`
+            <div class="check-item" onclick="navigate('${a[4]}')" style="cursor:pointer">
+              <div class="check-box" style="color:var(--red);border-color:var(--red)">✗</div>
+              <div class="check-label"><b>${a[2]} ${a[3]}</b><br><span style="color:var(--muted);font-size:13px">👉 ${a[5]}</span></div>
+            </div>`).join('')}
+        </div>
+        <div style="margin-top:14px;font-size:13px;color:var(--muted)">Cuando las 7 tareas digan <b style="color:var(--green)">✓ Hecho hoy</b> en el tablero «¿Qué hago hoy?», aquí se va a habilitar el botón para cerrar.</div>`
+      return
+    }
     const all=Object.values(checks).every(Boolean)
     card.innerHTML=`
       <div class="section-title" style="margin-bottom:12px">Checklist de cierre</div>
@@ -8354,6 +8388,34 @@ window.auxInjectSearchBar=()=>{
     </div>
     <div id="aux-buscar-res"></div>`
   c.insertBefore(bar,c.firstChild)
+}
+
+// Barra de progreso fija arriba ("Vas X de 8 hoy ✓"), visible en todas las
+// secciones del auxiliar. SOLO LECTURA: recalcula las 8 actividades del día.
+window.auxInjectProgressBar=async()=>{
+  const c=document.getElementById('content')
+  if(!c)return
+  if(c.querySelector('#aux-sticky-progress'))return // ya está
+  const wrap=document.createElement('div')
+  wrap.id='aux-sticky-progress'
+  wrap.className='aux-sticky-progress'
+  c.insertBefore(wrap,c.firstChild)
+  const paint=(hechas)=>{
+    const pct=Math.round(hechas/8*100)
+    const txt=hechas>=8?'🎉 ¡Completaste todo tu día!':`Vas <strong>${hechas}</strong> de 8 hoy ✓`
+    wrap.innerHTML=`<div class="aux-progress-top"><span>${txt}</span><span>${pct}%</span></div>
+      <div class="aux-progress-bar"><div class="aux-progress-fill" style="width:${pct}%"></div></div>`
+  }
+  // Pinta de inmediato con el último valor conocido para que aparezca sin esperar.
+  paint(window._auxHechas?Object.values(window._auxHechas).filter(Boolean).length:0)
+  try{
+    const defs=[auxAsignadorHecho,auxDropiHecho,auxReservadoHecho,auxNovedadesHecho,auxReclameHecho,auxSeguimientoHecho,auxReporteHecho,auxCierreHecho]
+    const keys=['asignador','dropi','reservado','novedades','reclame','seguimiento','reporte','cierre']
+    const res=await Promise.all(defs.map(f=>(typeof f==='function'?f(true):Promise.resolve({hecho:false})).catch(()=>({hecho:false}))))
+    const h={}; keys.forEach((k,i)=>h[k]=!!(res[i]&&res[i].hecho))
+    window._auxHechas=h
+    if(document.getElementById('aux-sticky-progress'))paint(Object.values(h).filter(Boolean).length)
+  }catch(e){}
 }
 
 // ════════ CONTEOS DE PENDIENTES + TABLERO "¿QUÉ HAGO HOY?" (auxiliar · solo lectura) ════════
@@ -9081,12 +9143,24 @@ window.deleteGasto=async(id,concepto)=>{
 
 // ── AUXILIAR: SEGUIMIENTO DE ENTREGAS ─────────────────────
 async function pageAuxSeguimiento(c){
+  // Fechas que el aux debe seleccionar en Dropi: DESDE = hoy-16, HASTA = hoy (Bogotá).
+  const _segHasta=today(), _segDesde=_daysAgo(16)
+  const _segFmt=(f)=>{try{return new Date(f+'T00:00:00').toLocaleDateString('es-CO',{day:'numeric',month:'long'})}catch(e){return f}}
+  const _segDesdeTxt=_segFmt(_segDesde), _segHastaTxt=_segFmt(_segHasta)
   c.innerHTML=`<div class="page-title">🚚 Ver estado de los envíos</div>
     <div class="page-sub">Mira en qué va cada lote y qué pedidos hay que empujar para que no se devuelvan.</div>
     <div class="aux-steps">
       <div class="aux-step"><span class="n">1</span><span class="st">Sube el archivo de Dropi<small>El reporte de órdenes</small></span></div>
       <div class="aux-step"><span class="n">2</span><span class="st">Mira "En tránsito" y "Pendientes"<small>Esos son los que importan</small></span></div>
       <div class="aux-step"><span class="n">3</span><span class="st">Contáctalos<small>Para que no se devuelvan</small></span></div>
+    </div>
+    <div style="background:linear-gradient(135deg,var(--blue-bg),var(--purple-bg));border:2px solid var(--accent);border-radius:14px;padding:16px 18px;margin:0 0 16px">
+      <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:8px">📅 ¿Qué fechas pongo en Dropi?</div>
+      <div style="font-size:14px;color:var(--text);line-height:1.7">Cuando descargues el Excel en Dropi, elige <strong>exactamente</strong> estas dos fechas:<br>
+        <span style="display:inline-block;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:7px 13px;margin:7px 7px 0 0;font-weight:800">DESDE: ${_segDesdeTxt}</span>
+        <span style="display:inline-block;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:7px 13px;margin:7px 0 0 0;font-weight:800">HASTA: ${_segHastaTxt}</span>
+      </div>
+      <div style="font-size:12.5px;color:var(--muted);margin-top:11px">👉 Copia esas dos fechas tal cual en Dropi, descarga el Excel y súbelo aquí abajo.</div>
     </div>
     <div class="aux-upload">
       <div class="aux-upload-badge">PASO 1 · EMPIEZA AQUÍ</div>

@@ -8554,14 +8554,45 @@ window.auxReclameHecho=async(force)=>{
   return window._auxRecHecho
 }
 
+// "✓ Hecho hoy" de Confirmar y recuperar pedidos / Reservado (SOLO LECTURA).
+// Regla (confirmada por el owner): hecho = TODOS los pedidos que salen a envío
+// en ≤2 días (dias_falta 0..2) ya tienen sus 2 mensajes del día enviados
+// (envios_hoy >= 2). Si a alguno le falta uno o los dos → no está hecho.
+// Replica _confDiasFalta y el conteo envios_hoy de cargarPendientesConfirmacion.
+window.auxReservadoHecho=async(force)=>{
+  if(window._auxResvHecho&&!force)return window._auxResvHecho
+  try{
+    const{data:progs}=await sb.from('programaciones_envio')
+      .select('id,fecha_envio_programada').eq('estado','programado').limit(2000)
+    if(!progs||!progs.length){window._auxResvHecho={hecho:true,faltan:0};return window._auxResvHecho}
+    // Próximos: salen a envío en ≤2 días (hoy, mañana, pasado). Replica _confDiasFalta.
+    const proximos=progs.filter(p=>{const d=_confDiasFalta(p.fecha_envio_programada);return d!=null&&d>=0&&d<=2})
+    if(!proximos.length){window._auxResvHecho={hecho:true,faltan:0};return window._auxResvHecho}
+    const hoyStr=today()
+    const enviosHoyByProg={}
+    const ids=proximos.map(p=>p.id)
+    for(let i=0;i<ids.length;i+=100){
+      const batch=ids.slice(i,i+100)
+      const{data}=await sb.from('confirmacion_envios').select('programacion_id,created_at').in('programacion_id',batch).limit(10000)
+      for(const e of (data||[])){
+        if((e.created_at||'').split('T')[0]===hoyStr)enviosHoyByProg[e.programacion_id]=(enviosHoyByProg[e.programacion_id]||0)+1
+      }
+    }
+    // Falta confirmar: próximos con menos de 2 mensajes enviados hoy.
+    const faltan=proximos.filter(p=>(enviosHoyByProg[p.id]||0)<2).length
+    window._auxResvHecho={hecho:faltan===0,faltan}
+  }catch(e){window._auxResvHecho={hecho:false,faltan:null}}
+  return window._auxResvHecho
+}
+
 async function pageAuxHoy(c){
   c.innerHTML=`<div class="aux-home-hero"><h1>👋 ¿Qué hago hoy?</h1><p>Haz las cosas en orden, de la 1 a la 8. Los números de colores te dicen cuántos pedidos te esperan.</p>
       <div class="aux-progress" id="aux-hoy-progress"></div></div>
     <div id="aux-hoy-grid"><div class="loading">Cargando…</div></div>`
-  const [counts,nov,asig,dropi,rep,cierre,seg,rec]=await Promise.all([auxContarPendientes(true),auxNovedadesHecho(true),auxAsignadorHecho(true),auxDropiHecho(true),auxReporteHecho(true),auxCierreHecho(true),auxSeguimientoHecho(true),auxReclameHecho(true)])
+  const [counts,nov,asig,dropi,rep,cierre,seg,rec,resv]=await Promise.all([auxContarPendientes(true),auxNovedadesHecho(true),auxAsignadorHecho(true),auxDropiHecho(true),auxReporteHecho(true),auxCierreHecho(true),auxSeguimientoHecho(true),auxReclameHecho(true),auxReservadoHecho(true)])
   try{renderNav()}catch(e){}
   // "Tareas hechas hoy": objeto que irá creciendo con los otros flujos.
-  window._auxHechas={novedades:nov.hecho,asignador:asig.hecho,dropi:dropi.hecho,reporte:rep.hecho,cierre:cierre.hecho,seguimiento:seg.hecho,reclame:rec.hecho}
+  window._auxHechas={novedades:nov.hecho,asignador:asig.hecho,dropi:dropi.hecho,reporte:rep.hecho,cierre:cierre.hecho,seguimiento:seg.hecho,reclame:rec.hecho,reservado:resv.hecho}
   // 8 tarjetas en orden de flujo de trabajo. tipo 'rutina' = paso fijo (sin conteo); tipo 'pendiente' = muestra número
   const cards=[
     {num:1,tipo:'rutina',  sec:'aux-asignador', cls:'rutina',emoji:'📍',titulo:'Cargar pedidos nuevos',linea:'Pega aquí las órdenes del día.'},
@@ -8600,6 +8631,8 @@ async function pageAuxHoy(c){
       novFooter=`<div class="aux-faltan">Faltan ${nov.faltan} 🔴 por contactar</div>`
     }else if(k.sec==='aux-reclame'&&rec.faltan){
       novFooter=`<div class="aux-faltan">Faltan ${rec.faltan} 📦 por avisar</div>`
+    }else if(k.sec==='aux-reservado'&&resv.faltan){
+      novFooter=`<div class="aux-faltan">Faltan ${resv.faltan} 🔍 por confirmar</div>`
     }
     return `<div class="aux-today ${cls}" onclick="navigate('${k.sec}')">
       <div class="row1"><span class="aux-today-num">${k.num}</span><span class="emoji">${k.emoji}</span><span class="count ${cls}">${activo?(k.n>99?'99+':k.n):'✓'}</span></div>

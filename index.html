@@ -8507,11 +8507,33 @@ async function cargarRegistrosDia(){
   const canc=data.filter(m=>m.estado_final==='CANCELADO')
   const conf=data.filter(m=>m.estado_final!=='PENDIENTE CONFIRMACION'&&m.estado_final!=='CANCELADO')
   const esHoy=fecha===today()&&tipo==='compra'
-  const _card=(m)=>`<div class="card" style="margin-bottom:8px;padding:12px">
-    <div style="font-size:14px;font-weight:600;font-family:monospace">${m.telefono}</div>
-    <div style="font-size:13px;color:var(--text);margin-top:2px">${m.nombre_cliente||'—'}</div>
-    <div style="font-size:11px;color:var(--muted)">${m.producto||'—'} · ${m.ciudad||'—'}</div>
-  </div>`
+  // ── Copiados persistentes (telefono + fecha_dropi) desde Supabase ──
+  let copiadosSet=new Set()
+  try{
+    const fechasDropi=[...new Set([...pend,...canc].map(m=>m.fecha_dropi).filter(Boolean))]
+    if(fechasDropi.length){
+      const{data:cps}=await sb.from('dropi_copiados').select('telefono,fecha_dropi').in('fecha_dropi',fechasDropi)
+      if(cps)cps.forEach(r=>copiadosSet.add(r.telefono+'|'+r.fecha_dropi))
+    }
+  }catch(e){console.warn('[DROPI_COPIADOS] no disponible:',e?.message||e)}
+  const _esCopiado=(m)=>m.fecha_dropi&&copiadosSet.has(m.telefono+'|'+m.fecha_dropi)
+  // Tarjeta accionable (pendientes/cancelados): numero grande + boton copiar + circulo numerado
+  const _cardAccion=(m,i,tono)=>{
+    const cop=_esCopiado(m)
+    const ac=tono==='amber'?'var(--amber)':'var(--red)'
+    const tel=(m.telefono||'').replace(/'/g,'')
+    const fd=m.fecha_dropi||''
+    return `<div class="card" data-tel="${tel}" data-fd="${fd}" style="margin-bottom:10px;padding:14px;border-left:4px solid ${ac};opacity:${cop?'.6':'1'};transition:opacity .2s">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div class="dropi-num" style="flex:0 0 auto;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;background:${cop?'var(--green)':ac};color:#0F1117">${cop?'✓':i}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:22px;font-weight:800;font-family:monospace;letter-spacing:.5px;color:var(--text)">${m.telefono}</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px">${m.nombre_cliente||'—'} · ${m.ciudad||'—'}</div>
+        </div>
+      </div>
+      <button class="dropi-copy-btn" onclick="copiarTelDropi(this,'${tel}','${fd}')" style="width:100%;margin-top:10px;padding:11px;border:none;border-radius:8px;background:var(--accent);color:#fff;font-weight:700;font-size:14px;cursor:pointer">📋 Copiar número</button>
+    </div>`
+  }
   el.innerHTML=`
     <div class="cards-row c3" style="margin-bottom:14px">
       <div class="card c-green"><div class="card-label">Confirmados</div><div class="card-val">${conf.length}</div></div>
@@ -8519,25 +8541,45 @@ async function cargarRegistrosDia(){
       <div class="card c-red"><div class="card-label">Cancelados</div><div class="card-val">${canc.length}</div></div>
     </div>
     ${!esHoy?'<div class="alert alert-blue" style="margin-bottom:14px">📅 Fecha anterior — solo lectura. Para confirmar un reservado, ve a la sección "Confirmar reservado" e ingresa el número.</div>':''}
-    <div style="margin-bottom:18px">
-      <div class="section-title">✅ Confirmados (${conf.length})</div>
-      ${conf.length===0?'<div class="alert alert-green">Sin confirmados</div>':
-      `<div class="form-grid g3">${conf.map(_card).join('')}</div>`}
-    </div>
     <div class="form-grid g2">
       <div>
         <div class="section-title">⏳ Pendientes por confirmar (${pend.length})</div>
         ${pend.length===0?'<div class="alert alert-green">Sin pendientes</div>':
-        pend.map(_card).join('')}
+        pend.map((m,idx)=>_cardAccion(m,idx+1,'amber')).join('')}
       </div>
       <div>
         <div class="section-title">❌ Cancelados (${canc.length})</div>
         ${canc.length===0?'<div class="alert alert-green">Sin cancelados</div>':
-        canc.map(_card).join('')}
+        canc.map((m,idx)=>_cardAccion(m,idx+1,'red')).join('')}
       </div>
     </div>`
 }
 window.cargarRegistrosDia=cargarRegistrosDia
+
+// ── Copiar teléfono de Cruce Dropi: copia al portapapeles + persiste (telefono+fecha_dropi) ──
+window.copiarTelDropi=async function(btn,tel,fechaDropi){
+  try{await navigator.clipboard.writeText(tel)}
+  catch(e){try{const ta=document.createElement('textarea');ta.value=tel;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta)}catch(_){}}
+  // feedback visual del boton
+  const orig=btn.innerHTML
+  btn.innerHTML='✓ ¡Copiado!'
+  btn.style.background='var(--green)'
+  setTimeout(()=>{btn.innerHTML=orig;btn.style.background='var(--accent)'},1500)
+  // marca la tarjeta como copiada (circulo verde + atenuada)
+  const card=btn.closest('.card')
+  if(card){
+    card.style.opacity='.6'
+    const num=card.querySelector('.dropi-num')
+    if(num){num.textContent='✓';num.style.background='var(--green)'}
+  }
+  // persistir en Supabase (si la tabla existe)
+  if(fechaDropi){
+    try{
+      let uid=null;try{uid=(await sb.auth.getUser())?.data?.user?.id||null}catch(_){}
+      await sb.from('dropi_copiados').upsert({telefono:tel,fecha_dropi:fechaDropi,usuario_id:uid},{onConflict:'telefono,fecha_dropi'})
+    }catch(e){console.warn('[DROPI_COPIADOS] no se pudo guardar:',e?.message||e)}
+  }
+}
 
 window.procesarDropi=async()=>{
   const fileInput=document.getElementById('dropi-file')

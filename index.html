@@ -1504,10 +1504,11 @@ async function cargarResumenSemanal(){
   const desde=document.getElementById('rs-desde')?.value||'2024-01-01'
   const hasta=document.getElementById('rs-hasta')?.value||today()
 
-  // Traer mapeos con estado_final
-  let query=sb.from('mapeos').select('*').not('estado_final','is',null).gte('fecha',desde).lte('fecha',hasta)
-  if(filtroProd)query=query.eq('producto',filtroProd)
-  const{data:mapeos}=await query.limit(10000)
+  // Traer TODOS los mapeos por fecha de compra (mismo criterio que el Dashboard).
+  // El filtro por producto se aplica en JS dentro del loop (con resolveProdName: captura
+  // variantes de texto y producto_id). Las órdenes sin estado_final NO se descartan:
+  // se cuentan como pendientes, igual que en el Dashboard.
+  const{data:mapeos}=await sb.from('mapeos').select('*').gte('fecha',desde).lte('fecha',hasta).limit(10000)
 
   // Producto seleccionado (para filtrar gasto y conversaciones por producto)
   const prodSel=filtroProd?productos.find(p=>p.nombre===filtroProd):null
@@ -1551,10 +1552,17 @@ async function cargarResumenSemanal(){
   // Agrupar mapeos por semana + acumular ventas/costos por estado
   const semanas={}
   for(const m of (mapeos||[])){
+    // Filtro por producto seleccionado en JS (robusto, igual que el Dashboard:
+    // resuelve variantes de texto por nombre/alias y también matchea por producto_id)
+    if(prodSel){
+      const _r=resolveProdName(m.producto)
+      if(!((m.producto_id&&m.producto_id===prodSel.id)||_r.id===prodSel.id||_normProd(_r.nombre)===_normProd(prodSel.nombre)))continue
+    }
     const w=_weekKey(_weekMonday(m.fecha||m.fecha_dropi))
     if(!semanas[w])semanas[w]={env:0,ent:0,dev:0,canc:0,pend:0,trans:0,total:0,ventaTot:0,costoTot:0,ventaEnt:0,costoEnt:0,fleteOutTot:0,fleteDevTeorico:0,fleteDevReal:0,ventaEfTeorica:0,costoEfTeorico:0,perdidaDev:0,ventaCanc:0,ventaPend:0,almacenEnt:0,almacenTeorico:0}
     semanas[w].total++;semanas[w].env++
-    const st=DROPI_STATUS[m.estado_final]?.cat||'otro'
+    // Sin estado_final (aún no cruzada en Dropi) = pendiente, igual que el Dashboard
+    const st=(!m.estado_final)?'pendiente':(DROPI_STATUS[m.estado_final]?.cat||'otro')
     if(st==='entregado'||st==='novedad_ok')semanas[w].ent++
     else if(st==='devuelto')semanas[w].dev++
     else if(st==='cancelado')semanas[w].canc++

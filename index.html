@@ -1613,6 +1613,24 @@ async function cargarResumenSemanal(){
     }
   }
 
+  // ── Lente DROPI: órdenes por fecha de SUBIDA a Dropi (eje despacho, igual que el Dashboard) ──
+  // Conjunto distinto al de compra: una orden subida esta semana pudo comprarse otra semana.
+  // Agrupa por semana de fecha_dropi y cuenta subidas / confirmadas / entregadas.
+  const semanasDropi={}
+  const{data:mapeosDropiRS}=await sb.from('mapeos').select('producto,producto_id,estado_final,fecha_dropi').gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).limit(10000)
+  for(const m of (mapeosDropiRS||[])){
+    if(prodSel){
+      const _r=resolveProdName(m.producto)
+      if(!((m.producto_id&&m.producto_id===prodSel.id)||_r.id===prodSel.id||_normProd(_r.nombre)===_normProd(prodSel.nombre)))continue
+    }
+    const w=_weekKey(_weekMonday(m.fecha_dropi))
+    if(!semanasDropi[w])semanasDropi[w]={sub:0,conf:0,ent:0}
+    semanasDropi[w].sub++
+    const stD=DROPI_STATUS[m.estado_final]?.cat||'otro'
+    if(stD==='entregado'||stD==='novedad_ok')semanasDropi[w].ent++
+    if(stD!=='cancelado'&&stD!=='pendiente')semanasDropi[w].conf++
+  }
+
   // Generar todas las semanas en el rango
   const allWeeks=_generateAllWeeks(desde,hasta).reverse()
   if(!allWeeks.length){el.innerHTML='<div class="alert alert-blue">Sin semanas en este rango</div>';return}
@@ -1684,7 +1702,7 @@ async function cargarResumenSemanal(){
   const headHtml=`<thead>
     <tr>
       <th colspan="2" style="background:var(--card2)"></th>
-      <th colspan="8" style="background:rgba(59,130,246,.14);color:var(--blue);text-align:center;font-weight:700">🔵 ¿CUÁNTO VENDÍ?</th>
+      <th colspan="12" style="background:rgba(59,130,246,.14);color:var(--blue);text-align:center;font-weight:700">🔵 ¿CUÁNTO VENDÍ?</th>
       <th colspan="8" style="background:rgba(245,158,11,.14);color:var(--amber);text-align:center;font-weight:700">🟠 ¿CUÁNTO ME COSTÓ?</th>
       <th colspan="4" style="background:rgba(34,197,94,.14);color:var(--green);text-align:center;font-weight:700">🟢 ¿CUÁNTO ME QUEDÓ?</th>
     </tr>
@@ -1694,7 +1712,11 @@ async function cargarResumenSemanal(){
       ${_th('Órdenes','total tomadas','background:rgba(59,130,246,.05)','Total de órdenes de esa semana que ya tienen estado en Dropi. Incluye entregadas, en camino, pendientes y canceladas.')}
       ${_th('Confirmadas','dijeron que sí','background:rgba(59,130,246,.05)','Órdenes que el cliente confirmó y salieron al flujo = Órdenes − Canceladas − Pendientes. De estas salen las entregadas.')}
       ${_th('Entregadas','llegaron y pagaron','background:rgba(59,130,246,.05)','Pedidos que llegaron al cliente y te pagaron. Incluye los de novedad ya solucionada.')}
-      ${_th('% Ent.','% que llegó','background:rgba(59,130,246,.05)','De todo lo que se hizo esa semana, qué % llegó y se cobró = Entregadas ÷ Total.')}
+      ${_th('% Ent.','% que llegó','background:rgba(59,130,246,.05)','De todo lo que se hizo esa semana, qué % llegó y se cobró = Entregadas ÷ Total. (Lente VENTAS: por fecha de compra.)')}
+      ${_th('📦 Subidas Dropi','despaché esta sem.','background:rgba(59,130,246,.12)','LENTE DROPI (por fecha de subida a Dropi): cuántas órdenes despaché esta semana, sin importar cuándo se compraron. Es el otro lente, distinto al de ventas.')}
+      ${_th('📦 Conf. Dropi','de lo despachado','background:rgba(59,130,246,.12)','De lo que despaché esta semana, cuántas están confirmadas (no canceladas ni pendientes).')}
+      ${_th('📦 Entreg. Dropi','de lo despachado','background:rgba(59,130,246,.12)','De lo que despaché esta semana, cuántas ya se entregaron y cobraron. Suele ser más alto que la entrega por ventas porque lleva más días rodando.')}
+      ${_th('📦 % Ent. Dropi','% de lo despach.','background:rgba(59,130,246,.12)','De lo despachado esta semana, qué % ya se entregó = Entreg. Dropi ÷ Subidas Dropi.')}
       ${_th('Pend. Conf.','falta confirmar','background:rgba(59,130,246,.05)','Pedidos que todavía no se confirman ni se cancelan. Están esperando que tu equipo los cierre.')}
       ${_th('$ Recuperable','aún puedo cerrar','background:rgba(59,130,246,.05)','Plata que aún puedes cobrar si confirmas esos pendientes = precio × pedidos pendientes.')}
       ${_th('En tránsito','en proceso','background:rgba(59,130,246,.05)','Pedidos en proceso: en camino, en bodega o con novedad por resolver. Es todo lo que no es entregado, devuelto, cancelado ni pendiente.')}
@@ -1717,6 +1739,8 @@ async function cargarResumenSemanal(){
   // Render de una fila/semana
   const _rowHtml=(w)=>{
     const d=semanas[w.key]||{env:0,ent:0,dev:0,canc:0,pend:0,trans:0,total:0,ventaEnt:0}
+    const dD=semanasDropi[w.key]||{sub:0,conf:0,ent:0}
+    const pctEntD=dD.sub>0?Math.round(dD.ent/dD.sub*100):0
     const gasto=gastoByWeek[w.key]||0
     const conv=convByWeek[w.key]||0
     const g=ganByWeek[w.key]||{ganEst:0,ganReal:0,costoConv:0,ganLogist:0}
@@ -1740,6 +1764,10 @@ async function cargarResumenSemanal(){
       <td data-label="Confirmadas">${Math.max(0,(d.total||0)-(d.canc||0)-(d.pend||0))}</td>
       <td data-label="Entregadas">${d.ent||0}</td>
       <td data-label="% Ent." style="color:var(--green)">${d.total>0?pctEnt+'%':'—'}</td>
+      <td data-label="📦 Subidas Dropi" style="background:rgba(59,130,246,.04)">${dD.sub||0}</td>
+      <td data-label="📦 Conf. Dropi" style="background:rgba(59,130,246,.04)">${dD.conf||0}</td>
+      <td data-label="📦 Entreg. Dropi" style="background:rgba(59,130,246,.04);color:var(--green)">${dD.ent||0}</td>
+      <td data-label="📦 % Ent. Dropi" style="background:rgba(59,130,246,.04);color:var(--green)">${dD.sub>0?pctEntD+'%':'—'}</td>
       <td data-label="Pend. Conf.">${d.pend||0}</td>
       <td data-label="$ Recuperable" style="color:var(--blue)">${d.ventaPend?'$'+fmt(d.ventaPend):'—'}</td>
       <td data-label="En tránsito">${d.trans||0}</td>
@@ -1787,8 +1815,9 @@ async function cargarResumenSemanal(){
   // Fila de TOTALES (barra abajo). Suma SOLO semanas con actividad (igual que las tarjetas
   // y la franja del año), y RECALCULA los % (no se suman). Si el año no tuvo actividad, no se muestra.
   const _totalRow=(weeks)=>{
-    let env=0,conf=0,ent=0,pend=0,recup=0,trans=0,vCob=0,gasto=0,conv=0,cConv=0,dev=0,pDev=0,canc=0,mesa=0,logist=0,est=0,real=0,total=0,activos=0
+    let env=0,conf=0,ent=0,pend=0,recup=0,trans=0,vCob=0,gasto=0,conv=0,cConv=0,dev=0,pDev=0,canc=0,mesa=0,logist=0,est=0,real=0,total=0,activos=0,subD=0,confD=0,entD=0
     for(const w of weeks){
+      const dDt=semanasDropi[w.key]||{};subD+=dDt.sub||0;confD+=dDt.conf||0;entD+=dDt.ent||0
       const d=semanas[w.key]||{}
       const gw=gastoByWeek[w.key]||0,cw=convByWeek[w.key]||0
       if(!((d.total||0)>0||gw>0||cw>0))continue
@@ -1804,6 +1833,7 @@ async function cargarResumenSemanal(){
     if(!activos)return ''
     const pctEnt=total>0?Math.round(ent/total*100):0
     const pctDev=total>0?Math.round(dev/total*100):0
+    const pctEntDT=subD>0?Math.round(entD/subD*100):0
     const ganOrden=ent>0?Math.round(real/ent):null
     const cR=real>0?'var(--green)':real<0?'var(--red)':'var(--muted)'
     const cE=est>0?'var(--green)':est<0?'var(--red)':'var(--muted)'
@@ -1818,6 +1848,10 @@ async function cargarResumenSemanal(){
       <td data-label="Confirmadas" style="${b}">${conf}</td>
       <td data-label="Entregadas" style="${b}">${ent}</td>
       <td data-label="% Ent." style="${b};color:var(--green)">${total>0?pctEnt+'%':'—'}</td>
+      <td data-label="📦 Subidas Dropi" style="${b};background:rgba(59,130,246,.08)">${subD}</td>
+      <td data-label="📦 Conf. Dropi" style="${b};background:rgba(59,130,246,.08)">${confD}</td>
+      <td data-label="📦 Entreg. Dropi" style="${b};background:rgba(59,130,246,.08);color:var(--green)">${entD}</td>
+      <td data-label="📦 % Ent. Dropi" style="${b};background:rgba(59,130,246,.08);color:var(--green)">${subD>0?pctEntDT+'%':'—'}</td>
       <td data-label="Pend. Conf." style="${b}">${pend}</td>
       <td data-label="$ Recuperable" style="${b};color:var(--blue)">${recup?'$'+fmt(recup):'—'}</td>
       <td data-label="En tránsito" style="${b}">${trans}</td>
@@ -1845,12 +1879,14 @@ async function cargarResumenSemanal(){
   }
 
   // ── Tarjetas resumen (totales del periodo, solo semanas con actividad: ventas o gasto o chats) ──
-  let tEntro=0,tCostoEnt=0,tFleteOut=0,tFleteDevReal=0,tGasto=0,tConv=0,tEnt=0,tPerdidaDev=0,tEnMesa=0,tRecup=0,tCanc=0,tPend=0,tAlmacen=0,semActivas=0
+  let tEntro=0,tCostoEnt=0,tFleteOut=0,tFleteDevReal=0,tGasto=0,tConv=0,tEnt=0,tPerdidaDev=0,tEnMesa=0,tRecup=0,tCanc=0,tPend=0,tAlmacen=0,semActivas=0,tOrd=0,tSubD=0,tEntD=0
   for(const w of allWeeks){
+    const dDc=semanasDropi[w.key]||{};tSubD+=dDc.sub||0;tEntD+=dDc.ent||0
     const d=semanas[w.key]||{}
     const gw=gastoByWeek[w.key]||0,cw=convByWeek[w.key]||0
     if(!((d.total||0)>0||gw>0||cw>0))continue
     semActivas++
+    tOrd+=d.env||0
     tEntro+=d.ventaEnt||0
     tCostoEnt+=d.costoEnt||0
     tFleteOut+=d.fleteOutTot||0
@@ -1869,6 +1905,8 @@ async function cargarResumenSemanal(){
   const tFijos=fijosSemana*semActivas
   const tSalio=tCostoEnt+tFleteOut+tFleteDevReal+tAlmacen+tGasto+tCostoConv+tFijos
   const tQuedo=tEntro-tSalio
+  const pctEntV=tOrd>0?Math.round(tEnt/tOrd*100):0
+  const pctEntDrp=tSubD>0?Math.round(tEntD/tSubD*100):0
   const cpaR=tEnt>0?Math.round(tGasto/tEnt):null
   const roasR=tGasto>0?(tEntro/tGasto):null
   const ticketR=tEnt>0?Math.round(tEntro/tEnt):null
@@ -1878,6 +1916,11 @@ async function cargarResumenSemanal(){
     <div style="font-size:19px;font-weight:700;color:${color};margin-top:4px">${big}</div>
   </div>`
   const cardsHtml=`
+    <div style="font-size:12px;font-weight:700;color:var(--muted);margin:4px 0 6px;text-transform:uppercase;letter-spacing:.04em">🚚 Cuánto se entregó (dos lentes)</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      ${_card('🛒',pctEntV+'%','Entregado de mis VENTAS ('+tEnt+'/'+tOrd+')','var(--blue)','LENTE VENTAS (por fecha de compra): de las '+tOrd+' órdenes compradas en el rango, ya se entregaron '+tEnt+'. Va bajo si el rango es reciente, porque muchas siguen en la calle.')}
+      ${_card('📦',pctEntDrp+'%','Entregado de lo DESPACHADO ('+tEntD+'/'+tSubD+')','var(--blue)','LENTE DROPI (por fecha de subida a Dropi): de las '+tSubD+' órdenes que subí a Dropi en el rango, ya se entregaron '+tEntD+'. Más maduro, llevan más días rodando.')}
+    </div>
     <div style="font-size:12px;font-weight:700;color:var(--muted);margin:4px 0 6px;text-transform:uppercase;letter-spacing:.04em">💵 Flujo de plata</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
       ${_card('💰','$'+fmt(tEntro),'Entró (venta cobrada)','var(--green)','Suma de las ventas ENTREGADAS y cobradas (precio × pedidos entregados). Aquí: '+tEnt+' entregas = $'+fmt(tEntro)+'.')}

@@ -9319,9 +9319,11 @@ async function pageAdminGastosFijos(c){
       <button class="btn-sm btn-primary" onclick="modalAddGasto()">➕ Agregar gasto</button>
     </div>
     <div id="gf-total" style="margin-bottom:14px"></div>
+    <div id="gf-equilibrio" style="margin-bottom:18px"></div>
     <div id="gf-list"><div class="loading">Cargando...</div></div>
     <div id="gf-modal-area"></div>`
   loadGastosFijos()
+  loadPuntoEquilibrio()
 }
 
 async function loadGastosFijos(){
@@ -9344,6 +9346,127 @@ async function loadGastosFijos(){
       </td>
     </tr>`).join('')}
   </table></div>`
+}
+
+// ── PUNTO DE EQUILIBRIO (cartel simple para Gastos Fijos) ──
+// Calcula cuántas órdenes se necesitan al mes/día para no perder plata.
+// Ganancia por orden = ganNeta / órdenes confirmadas (mismo cálculo que el Dashboard),
+// tomada de los últimos 30 días.
+async function loadPuntoEquilibrio(){
+  const el=document.getElementById('gf-equilibrio')
+  if(!el)return
+  try{
+    // 1. Gastos fijos mensuales (mismo total que la tabla de arriba)
+    const{data:gfData}=await sb.from('gastos_fijos').select('monto')
+    const gastoFijoMensual=(gfData||[]).reduce((s,g)=>s+(g.monto||0),0)
+
+    // 2. Rango: últimos 30 días (hora Bogotá)
+    const desde=_daysAgo(30),hasta=today()
+    const dias=30
+
+    // 3. Gasto ads (meta_insights, nivel campaign)
+    const{data:insData}=await sb.from('meta_insights').select('spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
+    let gastoTotal=0
+    for(const i of (insData||[]))gastoTotal+=i.spend||0
+
+    // 4. Órdenes confirmadas por producto (mismo criterio que el Dashboard)
+    const{data:mapeos}=await sb.from('mapeos').select('cantidad,producto,estado_final').gte('fecha',desde).lte('fecha',hasta).limit(10000)
+    const prodStatsConf={}
+    let totalOrdsConf=0
+    for(const m of (mapeos||[])){
+      if(m.estado_final==='CANCELADO')continue
+      if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)continue
+      const q=m.cantidad||2
+      const pn=resolveProdName(m.producto).nombre||'Sin producto'
+      if(!prodStatsConf[pn])prodStatsConf[pn]={o1:0,o2:0,o3:0,o4:0}
+      if(q===1)prodStatsConf[pn].o1++;else if(q===2)prodStatsConf[pn].o2++;else if(q===3)prodStatsConf[pn].o3++;else prodStatsConf[pn].o4++
+      totalOrdsConf++
+    }
+
+    // 5. Conversaciones por producto (dedupe: fecha+producto, último gana)
+    const{data:reps}=await sb.from('reportes_diarios').select('conversaciones,fecha,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
+    const _convByProd={},_seen={}
+    for(const r of (reps||[])){
+      const resolved=resolveProdName(r.producto_nombre).nombre||(r.producto_nombre||'')
+      const k=(r.fecha||'')+'|'+(r.producto_id||_normProd(resolved))
+      if(_seen[k])continue
+      _seen[k]=true
+      if(!resolved)continue
+      _convByProd[resolved]=(_convByProd[resolved]||0)+(r.conversaciones||0)
+    }
+
+    // 6. Cálculo de ganancia neta (idéntico al Dashboard) por producto
+    let ventaTotal=0,costoProvTotal=0,costoFlete=0,costoDevolucion=0,ventaEfectiva=0,costoConv=0
+    for(const[pn,st]of Object.entries(prodStatsConf)){
+      const prod=productos.find(p=>p.nombre===pn)||productos[0]||{}
+      const _dp=prod.dev_pct||0.19
+      const _fo=prod.flete_outbound||21000
+      const _fd=prod.flete_devolucion||18000
+      const confProd=st.o1+st.o2+st.o3+st.o4
+      const ventaProd=(st.o1*(prod.precio_1u||0))+(st.o2*(prod.precio_2u||0))+(st.o3*(prod.precio_3u||0))+(st.o4*(prod.precio_4u||0))
+      ventaTotal+=ventaProd
+      costoProvTotal+=(st.o1*(prod.costo_1u||0))+(st.o2*(prod.costo_2u||0))+(st.o3*(prod.costo_3u||0))+(st.o4*(prod.costo_4u||0))
+      costoFlete+=confProd*_fo
+      costoDevolucion+=Math.round(confProd*_dp*_fd)
+      ventaEfectiva+=Math.round(ventaProd*(1-_dp))
+      costoConv+=(_convByProd[pn]||0)*(prod.costo_conversacion||100)
+    }
+    const gastoFijoPeriodo=Math.round(gastoFijoMensual/30*dias)
+    const ganNeta=ventaEfectiva-costoProvTotal-costoFlete-costoDevolucion-gastoTotal-costoConv-gastoFijoPeriodo
+    const gananciaPorOrden=totalOrdsConf>0?(ganNeta/totalOrdsConf):0
+
+    // 7. Si no hay datos suficientes o la ganancia es <=0, mostrar aviso honesto (no inventar números)
+    if(totalOrdsConf<1||gananciaPorOrden<=0){
+      const motivo=totalOrdsConf<1
+        ?'Aún no hay órdenes confirmadas en los últimos 30 días para calcularlo.'
+        :'En los últimos 30 días la ganancia por orden es $0 o negativa, así que no se puede calcular un punto de equilibrio positivo. Revisa precios, costos o gasto en ads.'
+      el.innerHTML=`<div class="card" style="background:var(--card2);text-align:center;padding:18px">
+        <div style="font-size:15px;font-weight:600;margin-bottom:6px">🎯 Punto de equilibrio</div>
+        <div style="color:var(--muted);font-size:14px">${motivo}</div>
+      </div>`
+      return
+    }
+
+    // 8. Mínimos para no perder plata
+    const minOrdMes=Math.ceil(gastoFijoMensual/gananciaPorOrden)
+    const minOrdDia=Math.ceil(minOrdMes/30)
+
+    // 9. Cartel
+    el.innerHTML=`<div class="card" style="background:var(--card2);padding:20px;max-width:560px">
+      <div style="text-align:center;margin-bottom:16px;font-size:16px;font-weight:600">🎯 ¿Cuánto tengo que vender para no perder plata? <span title="Este es tu número clave. Es la cantidad de ventas que necesitas para no perder plata.&#10;&#10;Si vendes esa cantidad, cubres todos tus gastos.&#10;Si vendes MÁS, ganas.&#10;Si vendes MENOS, pierdes." style="cursor:help;font-size:13px;opacity:0.65">ℹ️</span></div>
+
+      <div style="background:#0D2818;border:1px solid var(--green);border-radius:12px;padding:20px 12px;text-align:center;margin-bottom:14px">
+        <div style="font-size:14px;color:var(--green);font-weight:600;margin-bottom:4px">Tengo que vender mínimo</div>
+        <div style="font-size:60px;font-weight:700;color:var(--green);line-height:1">${minOrdDia}</div>
+        <div style="font-size:18px;color:var(--green);font-weight:600;margin-top:4px">órdenes cada día <span title="Tu meta de CADA día.&#10;&#10;Se saca así: las órdenes que necesitas al mes, divididas entre 30 días.&#10;&#10;Vende al menos esta cantidad cada día y vas bien." style="cursor:help;font-size:12px;opacity:0.65">ℹ️</span></div>
+      </div>
+
+      <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+        <div style="flex:1;min-width:120px;background:var(--card);border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Al mes mínimo <span title="Cuántas ventas necesitas en TODO el mes para cubrir tus gastos fijos.&#10;&#10;Se saca dividiendo lo que pagas fijo al mes entre lo que ganas por cada orden." style="cursor:help;opacity:0.65">ℹ️</span></div>
+          <div style="font-size:22px;font-weight:600">${minOrdMes}</div>
+          <div style="font-size:12px;color:var(--muted)">órdenes</div>
+        </div>
+        <div style="flex:1;min-width:120px;background:var(--card);border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Gano por orden <span title="Lo que te queda LIMPIO por cada venta.&#10;&#10;Ya le restamos: producto, envío, devoluciones, publicidad y gastos.&#10;&#10;Es el promedio de los últimos 30 días." style="cursor:help;opacity:0.65">ℹ️</span></div>
+          <div style="font-size:22px;font-weight:600">$${fmt(gananciaPorOrden)}</div>
+          <div style="font-size:12px;color:var(--muted)">en promedio</div>
+        </div>
+        <div style="flex:1;min-width:120px;background:var(--card);border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Pago fijo al mes <span title="La suma de TODOS los gastos de la lista de abajo (Canva, SellerChat, etc.).&#10;&#10;Es lo que pagas cada mes pase lo que pase, vendas o no vendas." style="cursor:help;opacity:0.65">ℹ️</span></div>
+          <div style="font-size:22px;font-weight:600">$${fmt(gastoFijoMensual)}</div>
+          <div style="font-size:12px;color:var(--muted)">gastos fijos</div>
+        </div>
+      </div>
+
+      <div style="background:#2D1010;border-radius:8px;padding:10px 14px;text-align:center;color:#FCA5A5;font-size:14px">
+        ⚠️ Vendes menos de ${minOrdDia} al día = <b>pierdes plata</b>. Más = ganas.
+      </div>
+    </div>`
+  }catch(e){
+    console.warn('[EQUILIBRIO]',e)
+    el.innerHTML=`<div class="card" style="background:var(--card2);text-align:center;padding:14px;color:var(--muted);font-size:13px">No se pudo calcular el punto de equilibrio ahora.</div>`
+  }
 }
 
 window.modalAddGasto=()=>{

@@ -1840,6 +1840,7 @@ async function cargarResumenSemanal(){
   el.innerHTML=`
     <div style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <button class="btn-sm btn-blue" onclick="exportarResumen()">📥 Exportar a Excel</button>
+      <button class="btn-sm btn-primary" onclick="syncGastoResumen(this)" title="Trae el gasto de Meta para el rango de fechas que tengas puesto y lo guarda, aunque el sync normal no lo haya bajado">🔄 Sincronizar gasto de este rango</button>
       <span style="font-size:11px;color:var(--muted)">Gastos fijos prorrateados: $${fmt(fijosSemana)}/semana ($${fmt(gastoFijoMensual)}/mes ÷ 30 × 7)</span>
     </div>
     ${cardsHtml}
@@ -1849,6 +1850,46 @@ async function cargarResumenSemanal(){
     ${bodyHtml}`
 }
 window.cargarResumenSemanal=cargarResumenSemanal
+
+// 🔄 Trae el GASTO del rango visible directo desde la API de Meta (nivel campaña) y lo
+// guarda en meta_insights, para que el Resumen lo muestre aunque el sync normal
+// (incremental) no haya bajado ese rango. Mismo formato de upsert que _syncOneAccount.
+// Solo admin. Al terminar recarga el Resumen.
+window.syncGastoResumen=async(btn)=>{
+  if(currentRol()!=='admin'){alert('Solo el admin puede sincronizar el gasto');return}
+  const desde=document.getElementById('rs-desde')?.value||'2024-01-01'
+  const hasta=document.getElementById('rs-hasta')?.value||today()
+  const orig=btn?btn.textContent:''
+  if(btn){btn.disabled=true;btn.textContent='⏳ Trayendo gasto de Meta...'}
+  try{
+    const token=await getConfig('meta_access_token')
+    if(!token){alert('Token de Meta no configurado');if(btn){btn.disabled=false;btn.textContent=orig}return}
+    const{data:cuentas}=await sb.from('meta_cuentas').select('account_id,nombre')
+    if(!cuentas||!cuentas.length){alert('No hay cuentas de Meta');if(btn){btn.disabled=false;btn.textContent=orig}return}
+    const chunks=metaDateChunks(desde,hasta,90)
+    let filas=0,fail=0
+    for(let ci=0;ci<cuentas.length;ci++){
+      const cuenta=cuentas[ci]
+      if(btn)btn.textContent=`⏳ ${ci+1}/${cuentas.length} cuentas...`
+      try{
+        for(const ch of chunks){
+          const ins=await metaGet(`/act_${cuenta.account_id}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values',time_range:JSON.stringify(ch),level:'campaign',time_increment:'1',limit:'500'})
+          for(const i of (ins||[])){
+            if(!i.campaign_id)continue
+            await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+            filas++
+          }
+        }
+      }catch(e){console.warn('[syncGastoResumen] cuenta '+cuenta.account_id,e.message);fail++}
+    }
+    logAction('resumen_sync_gasto',{desde,hasta,filas,fail}).catch(()=>{})
+    if(btn)btn.textContent='✅ '+filas+' filas. Recargando...'
+    await cargarResumenSemanal()
+  }catch(e){
+    alert('Error sincronizando gasto: '+(e.message||e))
+    if(btn){btn.disabled=false;btn.textContent=orig}
+  }
+}
 
 window.exportarResumen=()=>{
   const data=window._resumenData

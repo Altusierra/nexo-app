@@ -1509,10 +1509,17 @@ async function cargarResumenSemanal(){
   if(filtroProd)query=query.eq('producto',filtroProd)
   const{data:mapeos}=await query.limit(10000)
 
-  // Gasto desde meta_insights (por semana)
-  const{data:insData}=await sb.from('meta_insights').select('fecha,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
+  // Producto seleccionado (para filtrar gasto y conversaciones por producto)
+  const prodSel=filtroProd?productos.find(p=>p.nombre===filtroProd):null
+  const prodCampSet=prodSel?new Set((prodSel.campaign_ids||[]).map(String)):null
+
+  // Gasto desde meta_insights (por semana). Si hay producto, solo sus campañas.
+  const{data:insData}=await sb.from('meta_insights').select('fecha,spend,meta_id').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
   const gastoByWeek={}
-  for(const i of (insData||[])){const wk=_weekKey(_weekMonday(i.fecha));gastoByWeek[wk]=(gastoByWeek[wk]||0)+(i.spend||0)}
+  for(const i of (insData||[])){
+    if(prodCampSet&&!prodCampSet.has(String(i.meta_id)))continue
+    const wk=_weekKey(_weekMonday(i.fecha));gastoByWeek[wk]=(gastoByWeek[wk]||0)+(i.spend||0)
+  }
 
   // Conversaciones desde reportes_diarios (por semana, dedupe por fecha+producto, último gana)
   const{data:reportesConv}=await sb.from('reportes_diarios').select('fecha,conversaciones,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
@@ -1520,6 +1527,7 @@ async function cargarResumenSemanal(){
   const _convSemSeen={}
   for(const r of (reportesConv||[])){
     const resolved=resolveProdName(r.producto_nombre).nombre||(r.producto_nombre||'')
+    if(prodSel&&!((r.producto_id&&r.producto_id===prodSel.id)||_normProd(resolved)===_normProd(prodSel.nombre)))continue
     const k=(r.fecha||'')+'|'+(r.producto_id||_normProd(resolved))
     if(_convSemSeen[k])continue
     _convSemSeen[k]=true
@@ -1667,14 +1675,14 @@ async function cargarResumenSemanal(){
       <th colspan="4" style="background:rgba(34,197,94,.14);color:var(--green);text-align:center;font-weight:700">🟢 ¿CUÁNTO ME QUEDÓ?</th>
     </tr>
     <tr>
-      ${_th('','¿cómo va?','text-align:center','Verde = ganaste esa semana. Rojo = perdiste. Blanco = no hubo movimiento.')}
+      ${_th('','¿cómo va?','text-align:center','Verde = ganaste. Rojo = perdiste. Amarillo = quedaste igual. Blanco = no hubo ninguna actividad (ni ventas ni gasto).')}
       ${_th('Semana','Lun-Dom','','Rango de la semana, de lunes a domingo.')}
-      ${_th('Enviadas','paquetes que mandé','background:rgba(59,130,246,.05)','Total de pedidos que despachaste esa semana.')}
+      ${_th('Órdenes','total tomadas','background:rgba(59,130,246,.05)','Total de órdenes de esa semana que ya tienen estado en Dropi. Incluye entregadas, en camino, pendientes y canceladas.')}
       ${_th('Entregadas','llegaron y pagaron','background:rgba(59,130,246,.05)','Pedidos que llegaron al cliente y te pagaron. Incluye los de novedad ya solucionada.')}
       ${_th('% Ent.','% que llegó','background:rgba(59,130,246,.05)','De todo lo que se hizo esa semana, qué % llegó y se cobró = Entregadas ÷ Total.')}
       ${_th('Pend. Conf.','falta confirmar','background:rgba(59,130,246,.05)','Pedidos que todavía no se confirman ni se cancelan. Están esperando que tu equipo los cierre.')}
       ${_th('$ Recuperable','aún puedo cerrar','background:rgba(59,130,246,.05)','Plata que aún puedes cobrar si confirmas esos pendientes = precio × pedidos pendientes.')}
-      ${_th('En tránsito','van en camino','background:rgba(59,130,246,.05)','Pedidos que ya van en camino pero todavía no se entregan.')}
+      ${_th('En tránsito','en proceso','background:rgba(59,130,246,.05)','Pedidos en proceso: en camino, en bodega o con novedad por resolver. Es todo lo que no es entregado, devuelto, cancelado ni pendiente.')}
       ${_th('Venta Cobrada','plata que entró','background:rgba(59,130,246,.05)','Plata que entró esa semana = precio × pedidos entregados.')}
       ${_th('Gasto Ads','gasté en publi','background:rgba(245,158,11,.05)','Lo que gastaste en publicidad de Meta esa semana.')}
       ${_th('Conversac.','chats totales','background:rgba(245,158,11,.05)','Total de chats o conversaciones que reportó tu equipo esa semana.')}
@@ -1700,7 +1708,7 @@ async function cargarResumenSemanal(){
     const pctEnt=d.total>0?Math.round(d.ent/d.total*100):0
     const pctDev=d.total>0?Math.round(d.dev/d.total*100):0
     const devColor=pctDev>20?'color:var(--red)':pctDev>15?'color:var(--amber)':d.total>0?'color:var(--green)':'color:var(--muted)'
-    const isEmpty=d.total===0
+    const isEmpty=!((d.total||0)>0||gasto>0||conv>0)
     const rowStyle=isEmpty?'opacity:0.35':''
     const ganEstColor=g.ganEst>0?'color:var(--green)':g.ganEst<0?'color:var(--red)':'color:var(--muted)'
     const ganRealColor=g.ganReal>0?'color:var(--green)':g.ganReal<0?'color:var(--red)':'color:var(--muted)'
@@ -1713,7 +1721,7 @@ async function cargarResumenSemanal(){
     return `<tr style="${rowStyle}">
       <td data-label="Semáforo" style="font-size:16px;text-align:center">${sem}</td>
       <td data-label="Semana" style="font-family:monospace;font-size:12px;white-space:nowrap">${w.key}</td>
-      <td data-label="Enviadas"><strong>${d.env||0}</strong></td>
+      <td data-label="Órdenes"><strong>${d.env||0}</strong></td>
       <td data-label="Entregadas">${d.ent||0}</td>
       <td data-label="% Ent." style="color:var(--green)">${d.total>0?pctEnt+'%':'—'}</td>
       <td data-label="Pend. Conf.">${d.pend||0}</td>
@@ -1747,6 +1755,8 @@ async function cargarResumenSemanal(){
     let env=0,ent=0,ganR=0
     for(const w of byYear[y]){
       const d=semanas[w.key]||{}
+      const gw=gastoByWeek[w.key]||0,cw=convByWeek[w.key]||0
+      if(!((d.total||0)>0||gw>0||cw>0))continue
       const g=ganByWeek[w.key]||{ganReal:0}
       env+=d.env||0;ent+=d.ent||0;ganR+=g.ganReal||0
     }
@@ -1754,7 +1764,7 @@ async function cargarResumenSemanal(){
     const verbo=ganR>=0?'te quedaron limpios':'perdiste'
     return `<div style="margin:18px 0 8px;padding:12px 16px;background:var(--card2);border-left:4px solid ${col};border-radius:8px">
       <div style="font-size:15px;font-weight:700;color:var(--text)">📅 ${y}</div>
-      <div style="font-size:13px;color:var(--muted);margin-top:2px">Enviaste <strong style="color:var(--text)">${fmt(env)}</strong> paquetes · entregaste <strong style="color:var(--text)">${fmt(ent)}</strong> · <strong style="color:${col}">${verbo} $${fmt(Math.abs(ganR))}</strong></div>
+      <div style="font-size:13px;color:var(--muted);margin-top:2px">Tomaste <strong style="color:var(--text)">${fmt(env)}</strong> órdenes · entregaste <strong style="color:var(--text)">${fmt(ent)}</strong> · <strong style="color:${col}">${verbo} $${fmt(Math.abs(ganR))}</strong></div>
     </div>`
   }
 
@@ -1765,18 +1775,19 @@ async function cargarResumenSemanal(){
     bodyHtml+=`<div class="table-wrap"><table>${headHtml}<tbody>${byYear[y].map(_rowHtml).join('')}</tbody></table></div>`
   }
 
-  // ── Tarjetas resumen (totales del periodo, solo semanas con ventas) ──
-  let tEntro=0,tCostoEnt=0,tFleteOut=0,tFleteDevReal=0,tGasto=0,tConv=0,tEnt=0,tPerdidaDev=0,tEnMesa=0,tRecup=0,tCanc=0,tPend=0,semConVentas=0
+  // ── Tarjetas resumen (totales del periodo, solo semanas con actividad: ventas o gasto o chats) ──
+  let tEntro=0,tCostoEnt=0,tFleteOut=0,tFleteDevReal=0,tGasto=0,tConv=0,tEnt=0,tPerdidaDev=0,tEnMesa=0,tRecup=0,tCanc=0,tPend=0,semActivas=0
   for(const w of allWeeks){
     const d=semanas[w.key]||{}
-    if((d.total||0)<=0)continue
-    semConVentas++
+    const gw=gastoByWeek[w.key]||0,cw=convByWeek[w.key]||0
+    if(!((d.total||0)>0||gw>0||cw>0))continue
+    semActivas++
     tEntro+=d.ventaEnt||0
     tCostoEnt+=d.costoEnt||0
     tFleteOut+=d.fleteOutTot||0
     tFleteDevReal+=d.fleteDevReal||0
-    tGasto+=gastoByWeek[w.key]||0
-    tConv+=convByWeek[w.key]||0
+    tGasto+=gw
+    tConv+=cw
     tEnt+=d.ent||0
     tPerdidaDev+=d.perdidaDev||0
     tEnMesa+=d.ventaCanc||0
@@ -1785,7 +1796,7 @@ async function cargarResumenSemanal(){
     tPend+=d.pend||0
   }
   const tCostoConv=tConv*ccDefault
-  const tFijos=fijosSemana*semConVentas
+  const tFijos=fijosSemana*semActivas
   const tSalio=tCostoEnt+tFleteOut+tFleteDevReal+tGasto+tCostoConv+tFijos
   const tQuedo=tEntro-tSalio
   const cpaR=tEnt>0?Math.round(tGasto/tEnt):null
@@ -1815,7 +1826,7 @@ async function cargarResumenSemanal(){
       ${_card('📈',roasR===null?'—':roasR.toFixed(2)+'x','ROAS (x cada $1 de publi)','var(--accent)','Por cada $1 en publicidad, cuántos pesos entraron = Venta cobrada ($'+fmt(tEntro)+') ÷ Gasto en ads ($'+fmt(tGasto)+') = '+(roasR?roasR.toFixed(2):'0')+'x.')}
       ${_card('🎟️',ticketR===null?'—':'$'+fmt(ticketR),'Ticket promedio','var(--accent)','Cuánto vale en promedio cada venta entregada = Venta cobrada ($'+fmt(tEntro)+') ÷ '+tEnt+' entregas = $'+fmt(ticketR||0)+'.')}
     </div>
-    <div style="font-size:10px;color:var(--subtle);margin-bottom:14px">📌 Totales de las ${semConVentas} semanas con ventas en el rango. CPA y ticket se calculan sobre pedidos ENTREGADOS. Pasa el cursor sobre cada ℹ️ para ver cómo salió cada dato.</div>`
+    <div style="font-size:10px;color:var(--subtle);margin-bottom:14px">📌 Totales de las ${semActivas} semanas con actividad (ventas o gasto) en el rango. Incluye las semanas que gastaron en publi aunque no vendieran. CPA y ticket se calculan sobre pedidos ENTREGADOS. Pasa el cursor sobre cada ℹ️ para ver cómo salió cada dato.</div>`
 
   el.innerHTML=`
     <div style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -1824,7 +1835,7 @@ async function cargarResumenSemanal(){
     </div>
     ${cardsHtml}
     <div style="margin-bottom:10px;padding:8px 12px;background:var(--card);border:1px solid var(--border);border-radius:8px;font-size:11px;color:var(--muted);display:flex;gap:16px;flex-wrap:wrap">
-      <span>🟢 ganaste</span><span>🔴 perdiste</span><span>⚪ sin movimiento</span><span>▲ mejor que la semana pasada</span><span>▼ peor que la semana pasada</span>
+      <span>🟢 ganaste</span><span>🔴 perdiste</span><span>🟡 quedaste igual</span><span>⚪ sin movimiento</span><span>▲ mejor que la semana pasada</span><span>▼ peor que la semana pasada</span>
     </div>
     ${bodyHtml}`
 }

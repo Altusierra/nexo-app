@@ -1453,62 +1453,163 @@ async function cargarResumenSemanal(){
     const ganEst=Math.round((d.ventaEfTeorica||0)-(d.costoEfTeorico||0)-(d.fleteOutTot||0)-(d.fleteDevTeorico||0)-gasto-costoConv-fijosSemana)
     // Real
     const ganReal=Math.round((d.ventaEnt||0)-(d.costoEnt||0)-(d.fleteOutTot||0)-(d.fleteDevReal||0)-gasto-costoConv-fijosSemana)
-    ganByWeek[w.key]={ganEst,ganReal}
+    // Ganancia neta logística: solo producto + fletes (SIN ads, SIN conversación, SIN fijos)
+    const ganLogist=Math.round((d.ventaEnt||0)-(d.costoEnt||0)-(d.fleteOutTot||0)-(d.fleteDevReal||0))
+    ganByWeek[w.key]={ganEst,ganReal,costoConv,ganLogist}
+  }
+
+  // Tendencia vs semana anterior (allWeeks va de la más reciente a la más vieja → la anterior es i+1)
+  const trendByWeek={}
+  for(let i=0;i<allWeeks.length;i++){
+    const cur=allWeeks[i],prev=allWeeks[i+1]
+    if(!prev)continue
+    const dCur=semanas[cur.key],dPrev=semanas[prev.key]
+    if(!dCur||!dPrev||dCur.total===0||dPrev.total===0)continue
+    const gCur=(ganByWeek[cur.key]||{}).ganReal||0
+    const gPrev=(ganByWeek[prev.key]||{}).ganReal||0
+    trendByWeek[cur.key]=gCur>gPrev?'up':gCur<gPrev?'down':'eq'
   }
 
   // Export data
   window._resumenData=allWeeks.map(w=>{
     const d=semanas[w.key]||{}
-    const g=ganByWeek[w.key]||{ganEst:0,ganReal:0}
+    const g=ganByWeek[w.key]||{ganEst:0,ganReal:0,costoConv:0,ganLogist:0}
+    const ganOrden=(d.ent>0)?Math.round(g.ganReal/d.ent):0
     return{
       semana:w.key,
       enviadas:d.env||0,
       entregadas:d.ent||0,
+      pendientes_confirmacion:d.pend||0,
+      en_transito:d.trans||0,
       devueltas:d.dev||0,
       canceladas:d.canc||0,
-      en_transito:d.trans||0,
       pct_entrega:d.total>0?Math.round((d.ent||0)/d.total*100):0,
       pct_devolucion:d.total>0?Math.round((d.dev||0)/d.total*100):0,
+      venta_cobrada:d.ventaEnt||0,
       gasto_ads:gastoByWeek[w.key]||0,
       conversaciones:convByWeek[w.key]||0,
+      costo_conversaciones:g.costoConv||0,
+      ganancia_logistica:g.ganLogist||0,
       ganancia_estimada:g.ganEst,
-      ganancia_real:g.ganReal
+      ganancia_real:g.ganReal,
+      ganancia_por_orden:ganOrden
     }
   })
+
+  // ── Helpers de render ──────────────────────────────────────
+  // th con nombre técnico arriba + lenguaje humano abajo
+  const _th=(tec,hum,st='')=>`<th style="${st}"><div style="font-weight:600;color:var(--text)">${tec}</div><div style="font-size:9px;color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">${hum}</div></th>`
+
+  // Encabezado: fila de grupos por colores + fila de columnas (técnico/humano)
+  const headHtml=`<thead>
+    <tr>
+      <th colspan="2" style="background:var(--card2)"></th>
+      <th colspan="6" style="background:rgba(59,130,246,.14);color:var(--blue);text-align:center;font-weight:700">🔵 ¿CUÁNTO VENDÍ?</th>
+      <th colspan="6" style="background:rgba(245,158,11,.14);color:var(--amber);text-align:center;font-weight:700">🟠 ¿CUÁNTO ME COSTÓ?</th>
+      <th colspan="4" style="background:rgba(34,197,94,.14);color:var(--green);text-align:center;font-weight:700">🟢 ¿CUÁNTO ME QUEDÓ?</th>
+    </tr>
+    <tr>
+      ${_th('','¿cómo va?','text-align:center')}
+      ${_th('Semana','Lun-Dom')}
+      ${_th('Enviadas','paquetes que mandé','background:rgba(59,130,246,.05)')}
+      ${_th('Entregadas','llegaron y pagaron','background:rgba(59,130,246,.05)')}
+      ${_th('% Ent.','% que llegó','background:rgba(59,130,246,.05)')}
+      ${_th('Pend. Conf.','falta confirmar','background:rgba(59,130,246,.05)')}
+      ${_th('En tránsito','van en camino','background:rgba(59,130,246,.05)')}
+      ${_th('Venta Cobrada','plata que entró','background:rgba(59,130,246,.05)')}
+      ${_th('Gasto Ads','gasté en publi','background:rgba(245,158,11,.05)')}
+      ${_th('Conversac.','chats totales','background:rgba(245,158,11,.05)')}
+      ${_th('Costo Conv.','costo de chats','background:rgba(245,158,11,.05)')}
+      ${_th('Devueltas','me las devolvieron','background:rgba(245,158,11,.05)')}
+      ${_th('% Dev.','% devuelto','background:rgba(245,158,11,.05)')}
+      ${_th('Canceladas','se cayeron','background:rgba(245,158,11,.05)')}
+      ${_th('Gan. Logíst.','deja sin publi','background:rgba(34,197,94,.05)')}
+      ${_th('Gan. Estimada','debería quedarme','background:rgba(34,197,94,.05)')}
+      ${_th('Gan. Real','lo que me quedó','background:rgba(34,197,94,.05)')}
+      ${_th('Gan/Orden','por cada entrega','background:rgba(34,197,94,.05)')}
+    </tr>
+  </thead>`
+
+  // Render de una fila/semana
+  const _rowHtml=(w)=>{
+    const d=semanas[w.key]||{env:0,ent:0,dev:0,canc:0,pend:0,trans:0,total:0,ventaEnt:0}
+    const gasto=gastoByWeek[w.key]||0
+    const conv=convByWeek[w.key]||0
+    const g=ganByWeek[w.key]||{ganEst:0,ganReal:0,costoConv:0,ganLogist:0}
+    const pctEnt=d.total>0?Math.round(d.ent/d.total*100):0
+    const pctDev=d.total>0?Math.round(d.dev/d.total*100):0
+    const devColor=pctDev>20?'color:var(--red)':pctDev>15?'color:var(--amber)':d.total>0?'color:var(--green)':'color:var(--muted)'
+    const isEmpty=d.total===0
+    const rowStyle=isEmpty?'opacity:0.35':''
+    const ganEstColor=g.ganEst>0?'color:var(--green)':g.ganEst<0?'color:var(--red)':'color:var(--muted)'
+    const ganRealColor=g.ganReal>0?'color:var(--green)':g.ganReal<0?'color:var(--red)':'color:var(--muted)'
+    const ganLogColor=g.ganLogist>0?'color:var(--green)':g.ganLogist<0?'color:var(--red)':'color:var(--muted)'
+    const ganOrden=(d.ent>0)?Math.round(g.ganReal/d.ent):null
+    const ganOrdenColor=ganOrden===null?'color:var(--muted)':ganOrden>0?'color:var(--green)':'color:var(--red)'
+    const sem=isEmpty?'⚪':g.ganReal>0?'🟢':g.ganReal<0?'🔴':'🟡'
+    const tr=trendByWeek[w.key]||''
+    const flecha=tr==='up'?' <span style="color:var(--green)">▲</span>':tr==='down'?' <span style="color:var(--red)">▼</span>':tr==='eq'?' <span style="color:var(--muted)">＝</span>':''
+    return `<tr style="${rowStyle}">
+      <td data-label="Semáforo" style="font-size:16px;text-align:center">${sem}</td>
+      <td data-label="Semana" style="font-family:monospace;font-size:12px;white-space:nowrap">${w.key}</td>
+      <td data-label="Enviadas"><strong>${d.env||0}</strong></td>
+      <td data-label="Entregadas">${d.ent||0}</td>
+      <td data-label="% Ent." style="color:var(--green)">${d.total>0?pctEnt+'%':'—'}</td>
+      <td data-label="Pend. Conf.">${d.pend||0}</td>
+      <td data-label="En tránsito">${d.trans||0}</td>
+      <td data-label="Venta Cobrada" style="font-weight:600">${d.ventaEnt?'$'+fmt(d.ventaEnt):'—'}</td>
+      <td data-label="Gasto Ads">${gasto?'$'+fmt(gasto):'—'}</td>
+      <td data-label="Conversac.">${conv||0}</td>
+      <td data-label="Costo Conv.">${g.costoConv?'$'+fmt(g.costoConv):'—'}</td>
+      <td data-label="Devueltas">${d.dev||0}</td>
+      <td data-label="% Dev." style="${devColor}"><strong>${d.total>0?pctDev+'%':'—'}</strong></td>
+      <td data-label="Canceladas">${d.canc||0}</td>
+      <td data-label="Gan. Logíst." style="${ganLogColor};font-weight:600">${isEmpty?'—':'$'+fmt(g.ganLogist)}</td>
+      <td data-label="Gan. Estimada" style="${ganEstColor};font-weight:600">${isEmpty?'—':'$'+fmt(g.ganEst)}</td>
+      <td data-label="Gan. Real" style="${ganRealColor};font-weight:700">${isEmpty?'—':'$'+fmt(g.ganReal)+flecha}</td>
+      <td data-label="Gan/Orden" style="${ganOrdenColor};font-weight:600">${ganOrden===null?'—':'$'+fmt(ganOrden)}</td>
+    </tr>`
+  }
+
+  // Agrupar semanas por año (mantiene el orden: más reciente primero)
+  const byYear={}
+  const yearOrder=[]
+  for(const w of allWeeks){
+    const y=w.mon.getFullYear()
+    if(!byYear[y]){byYear[y]=[];yearOrder.push(y)}
+    byYear[y].push(w)
+  }
+  const _yearBanner=(y)=>{
+    let env=0,ent=0,ganR=0
+    for(const w of byYear[y]){
+      const d=semanas[w.key]||{}
+      const g=ganByWeek[w.key]||{ganReal:0}
+      env+=d.env||0;ent+=d.ent||0;ganR+=g.ganReal||0
+    }
+    const col=ganR>0?'var(--green)':ganR<0?'var(--red)':'var(--muted)'
+    const verbo=ganR>=0?'te quedaron limpios':'perdiste'
+    return `<div style="margin:18px 0 8px;padding:12px 16px;background:var(--card2);border-left:4px solid ${col};border-radius:8px">
+      <div style="font-size:15px;font-weight:700;color:var(--text)">📅 ${y}</div>
+      <div style="font-size:13px;color:var(--muted);margin-top:2px">Enviaste <strong style="color:var(--text)">${fmt(env)}</strong> paquetes · entregaste <strong style="color:var(--text)">${fmt(ent)}</strong> · <strong style="color:${col}">${verbo} $${fmt(Math.abs(ganR))}</strong></div>
+    </div>`
+  }
+
+  // Una tabla (con su encabezado) por cada año
+  let bodyHtml=''
+  for(const y of yearOrder){
+    bodyHtml+=_yearBanner(y)
+    bodyHtml+=`<div class="table-wrap"><table>${headHtml}<tbody>${byYear[y].map(_rowHtml).join('')}</tbody></table></div>`
+  }
 
   el.innerHTML=`
     <div style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <button class="btn-sm btn-blue" onclick="exportarResumen()">📥 Exportar a Excel</button>
       <span style="font-size:11px;color:var(--muted)">Gastos fijos prorrateados: $${fmt(fijosSemana)}/semana ($${fmt(gastoFijoMensual)}/mes ÷ 30 × 7)</span>
     </div>
-    <div class="table-wrap"><table>
-      <tr><th>Semana (Lun-Dom)</th><th>Enviadas</th><th>Entregadas</th><th>Devueltas</th><th>% Ent.</th><th>% Dev.</th><th>Canceladas</th><th>En tránsito</th><th>Gasto Ads</th><th>Gan. Estimada</th><th>Gan. Real</th></tr>
-      ${allWeeks.map(w=>{
-        const d=semanas[w.key]||{env:0,ent:0,dev:0,canc:0,trans:0,total:0}
-        const gasto=gastoByWeek[w.key]||0
-        const g=ganByWeek[w.key]||{ganEst:0,ganReal:0}
-        const pctEnt=d.total>0?Math.round(d.ent/d.total*100):0
-        const pctDev=d.total>0?Math.round(d.dev/d.total*100):0
-        const devColor=pctDev>20?'color:var(--red)':pctDev>15?'color:var(--amber)':d.total>0?'color:var(--green)':'color:var(--muted)'
-        const isEmpty=d.total===0
-        const rowStyle=isEmpty?'opacity:0.4':''
-        const ganEstColor=g.ganEst>0?'color:var(--green)':g.ganEst<0?'color:var(--red)':'color:var(--muted)'
-        const ganRealColor=g.ganReal>0?'color:var(--green)':g.ganReal<0?'color:var(--red)':'color:var(--muted)'
-        return`<tr style="${rowStyle}">
-          <td data-label="Semana" style="font-family:monospace;font-size:12px;white-space:nowrap">${w.key}</td>
-          <td data-label="Enviadas"><strong>${d.env||0}</strong></td>
-          <td data-label="Entregadas">${d.ent||0}</td>
-          <td data-label="Devueltas">${d.dev||0}</td>
-          <td data-label="% Ent." style="color:var(--green)">${d.total>0?pctEnt+'%':'—'}</td>
-          <td data-label="% Dev." style="${devColor}"><strong>${d.total>0?pctDev+'%':'—'}</strong></td>
-          <td data-label="Canceladas">${d.canc||0}</td>
-          <td data-label="En tránsito">${d.trans||0}</td>
-          <td data-label="Gasto">${gasto?'$'+fmt(gasto):'—'}</td>
-          <td data-label="Gan. Estimada" style="${ganEstColor};font-weight:600">${isEmpty?'—':'$'+fmt(g.ganEst)}</td>
-          <td data-label="Gan. Real" style="${ganRealColor};font-weight:600">${isEmpty?'—':'$'+fmt(g.ganReal)}</td>
-        </tr>`
-      }).join('')}
-    </table></div>`
+    <div style="margin-bottom:10px;padding:8px 12px;background:var(--card);border:1px solid var(--border);border-radius:8px;font-size:11px;color:var(--muted);display:flex;gap:16px;flex-wrap:wrap">
+      <span>🟢 ganaste</span><span>🔴 perdiste</span><span>⚪ sin movimiento</span><span>▲ mejor que la semana pasada</span><span>▼ peor que la semana pasada</span>
+    </div>
+    ${bodyHtml}`
 }
 window.cargarResumenSemanal=cargarResumenSemanal
 

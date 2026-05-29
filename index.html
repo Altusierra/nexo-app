@@ -1282,10 +1282,10 @@ async function pageAdminReportes(c){
 
     // Mapeos por fecha
     const{data:mapeos}=await sb.from('mapeos').select('fecha,cantidad,producto,estado_final,ad_id').gte('fecha',desde).lte('fecha',hasta).limit(10000)
-    // Gasto Meta por fecha
-    const{data:insData}=await sb.from('meta_insights').select('fecha,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
-    // Conversaciones desde reportes
-    const{data:reps}=await sb.from('reportes_diarios').select('fecha,conversaciones,producto_nombre,usuarios(nombre),jornada_cerrada').gte('fecha',desde).lte('fecha',hasta)
+    // Gasto Meta por fecha (con meta_id para atribuir por producto)
+    const{data:insData}=await sb.from('meta_insights').select('fecha,spend,meta_id').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
+    // Conversaciones desde reportes (con producto_id para desglose por producto)
+    const{data:reps}=await sb.from('reportes_diarios').select('fecha,conversaciones,producto_id,producto_nombre,updated_at,usuarios(nombre),jornada_cerrada').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
 
     const byFecha={}
     for(const m of (mapeos||[])){
@@ -1309,8 +1309,88 @@ async function pageAdminReportes(c){
     const _ccvR=(prod0.costo_conversacion||100)*_cvR
     const margenBE=(prod0.precio_2u||129900)*(1-(prod0.dev_pct||0.19))-(prod0.costo_2u||36000)-(prod0.flete_outbound||21000)-((prod0.flete_devolucion||18000)*(prod0.dev_pct||0.19))-_ccvR
 
+    // ── DESGLOSE POR PRODUCTO (cada producto con SU break-even) ──
+    // Mapas de atribución (igual que el Tracker)
+    const cidsToProd={},prodById={},prodByNorm={}
+    for(const p of productos){
+      prodById[p.id]=p
+      prodByNorm[_normProd(p.nombre)]=p.id
+      if(Array.isArray(p.aliases))for(const a of p.aliases)prodByNorm[_normProd(a)]=p.id
+      const cids=Array.isArray(p.campaign_ids)?p.campaign_ids:[]
+      for(const cid of cids)cidsToProd[cid]=p.id
+    }
+    // Órdenes por fecha+producto
+    const byFechaProd={}
+    const _ensureFP=(f,pid)=>{if(!byFechaProd[f])byFechaProd[f]={};if(!byFechaProd[f][pid])byFechaProd[f][pid]={o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,gasto:0,conv:0};return byFechaProd[f][pid]}
+    for(const m of (mapeos||[])){
+      const f=m.fecha||'sin-fecha'
+      const pid=prodByNorm[_normProd(m.producto||'')]||'_sin'
+      const r=_ensureFP(f,pid),q=m.cantidad||2
+      if(q===1)r.o1++;else if(q===2)r.o2++;else if(q===3)r.o3++;else r.o4++
+      if(m.estado_final==='CANCELADO')r.canc++
+      else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)r.pend++
+      else r.conf++
+    }
+    // Gasto por fecha+producto (campañas no atribuidas → '_sin')
+    for(const i of (insData||[])){
+      const pid=cidsToProd[i.meta_id]||'_sin'
+      _ensureFP(i.fecha,pid).gasto+=(i.spend||0)
+    }
+    // Conversaciones por fecha+producto (último gana por fecha+producto)
+    const _convFPSeen={}
+    for(const r of (reps||[])){
+      const pid=r.producto_id||prodByNorm[_normProd(r.producto_nombre||'')]||'_sin'
+      const k=(r.fecha||'')+'|'+pid
+      if(_convFPSeen[k])continue
+      _convFPSeen[k]=true
+      if(byFechaProd[r.fecha]&&byFechaProd[r.fecha][pid])byFechaProd[r.fecha][pid].conv+=(r.conversaciones||0)
+    }
+    // Break-even de un producto (misma fórmula del sistema)
+    const _beProd=(p)=>{
+      if(!p)return 0
+      const dp=p.dev_pct||0.19,cv=p.conversaciones_por_venta!=null?p.conversaciones_por_venta:25
+      return (p.precio_2u||0)*(1-dp)-(p.costo_2u||0)-(p.flete_outbound||21000)-((p.flete_devolucion||18000)*dp)-((p.costo_conversacion||100)*cv)
+    }
+    // Semáforo (mismos cortes oficiales 0.45 / 0.70)
+    const _semDia=(cpa,be)=>{
+      if(!(cpa>0)||!(be>0))return{e:'⚪',w:'—',c:'sin'}
+      if(cpa>be)return{e:'🔴',w:'MALO',c:'malo'}
+      if(cpa>be*0.7)return{e:'🟡',w:'REGULAR',c:'regular'}
+      if(cpa>be*0.45)return{e:'🟢',w:'BUENO',c:'bueno'}
+      return{e:'🟣',w:'BRUTAL',c:'brutal'}
+    }
+    const _pesoSem=(c)=>c==='malo'?1:c==='regular'?2:c==='bueno'?3:c==='brutal'?4:5
+    // Precomputar filas de producto + conteo por fecha
+    const detalleByFecha={}
+    for(const f of fechas){
+      const prodsDia=byFechaProd[f]||{}
+      const filas=Object.keys(prodsDia).map(pid=>{
+        const r=prodsDia[pid],prod=prodById[pid]
+        const esSin=pid==='_sin'
+        const totP=r.o1+r.o2+r.o3+r.o4
+        const be=esSin?0:_beProd(prod)
+        const cpaP=totP>0?r.gasto/totP:0
+        const sem=_semDia(cpaP,be)
+        const nombre=esSin?'⚠️ Sin asignar a producto':(prod?prod.nombre:'?')
+        return{nombre,totP,conf:r.conf,canc:r.canc,pend:r.pend,gasto:r.gasto,cpaP,be,sem,esSin}
+      }).sort((a,b)=>_pesoSem(a.sem.c)-_pesoSem(b.sem.c)||b.gasto-a.gasto)
+      let nBueno=0,nReg=0,nMalo=0,nSin=0
+      for(const x of filas){
+        if(x.sem.c==='brutal'||x.sem.c==='bueno')nBueno++
+        else if(x.sem.c==='regular')nReg++
+        else if(x.sem.c==='malo')nMalo++
+        else nSin++
+      }
+      const partes=[]
+      if(nBueno)partes.push(`<span style="color:var(--green)">🟢 ${nBueno}</span>`)
+      if(nReg)partes.push(`<span style="color:var(--amber)">🟡 ${nReg}</span>`)
+      if(nMalo)partes.push(`<span style="color:var(--red)">🔴 ${nMalo}</span>`)
+      if(!partes.length&&nSin)partes.push(`<span style="opacity:0.6">⚪ ${nSin}</span>`)
+      detalleByFecha[f]={filas,conteoHtml:partes.length?partes.join(' · '):'—'}
+    }
+
     el.innerHTML=`<div class="table-wrap"><table>
-      <tr><th>Fecha</th><th>1u</th><th>2u</th><th>3u</th><th>4u</th><th>Total</th><th>Conf.</th><th>Canc.</th><th>Pend.</th><th>Conv.</th><th>Gasto</th><th>CPA</th><th>ROAS</th></tr>
+      <tr><th>Fecha <span title="El día de la venta. Las órdenes se cuentan por el día que el cliente compró." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>1u <span title="Órdenes donde el cliente pidió 1 unidad del producto." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>2u <span title="Órdenes donde el cliente pidió 2 unidades." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>3u <span title="Órdenes donde el cliente pidió 3 unidades." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>4u <span title="Órdenes donde el cliente pidió 4 o más unidades." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Total <span title="Todas las órdenes del día sumadas (1u + 2u + 3u + 4u)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Conf. <span title="Confirmadas: las ventas que SÍ se concretaron. El cliente dijo que sí quiere el pedido." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Canc. <span title="Canceladas: las que se cayeron. El cliente dijo que no, o no se pudo completar." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Pend. <span title="Pendientes: todavía no se sabe si se confirman o se caen. Están en espera." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Conv. <span title="Conversaciones: cuántos chats hubo ese día (de lo que reportó el auxiliar)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Gasto <span title="Lo que se gastó en publicidad (Meta / Facebook) ese día." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>CPA <span title="Cuánto te costó conseguir cada venta. Se saca: gasto ÷ órdenes.&#10;&#10;VERDE = barato (bien). ROJO = caro (mal)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>ROAS <span title="Cuántas veces recuperas lo que invertiste en ads.&#10;&#10;Ejemplo: 7x = por cada $1 en publicidad, vendiste $7.&#10;Más alto = mejor." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>¿Cómo fue? <span title="Resumen del día en un color, para no leer números:&#10;&#10;🟣 BRUTAL = ganaste muchísimo&#10;🟢 BUENO = ganaste bien&#10;🟡 REGULAR = ganaste poquito (cuidado)&#10;🔴 MALO = perdiste plata&#10;⚪ = sin datos (sin gasto o sin órdenes ese día)&#10;&#10;Se calcula comparando el CPA contra tu punto de equilibrio, igual que el semáforo de Meta Ads." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th></tr>
       ${fechas.map(f=>{
         const d=byFecha[f],tot=d.o1+d.o2+d.o3+d.o4
         const venta=(d.o1*(prod0.precio_1u||0))+(d.o2*(prod0.precio_2u||0))+(d.o3*(prod0.precio_3u||0))+(d.o4*(prod0.precio_4u||0))
@@ -1318,8 +1398,23 @@ async function pageAdminReportes(c){
         const roas=d.gasto>0?venta/d.gasto:0
         const tieneOferta=venta>0
         const cpaCls=cpa>0&&cpa<=margenBE?'color:var(--green)':cpa>0?'color:var(--red)':''
-        return`<tr>
-          <td data-label="Fecha" style="font-family:monospace;font-size:12px">${f}</td>
+        const det=detalleByFecha[f]||{filas:[],conteoHtml:'—'}
+        const detalleHtml=det.filas.map(x=>{
+          const cpaColP=x.cpaP>0&&x.be>0?(x.cpaP<=x.be?'color:var(--green)':'color:var(--red)'):''
+          const tip=x.esSin?'Gasto de campanas sin asignar a un producto, o ventas sin producto reconocido. Asigna las campanas en Productos para que cuente aqui.':(x.be<=0?'Este producto no tiene precio configurado, no se puede calcular el break-even.':(x.cpaP<=0?'Este producto no tuvo gasto en ads asignado este dia (revisa que tenga sus campanas asignadas).':'Cada venta costo $'+fmt(x.cpaP)+' y tu limite para ganar (break-even) es $'+fmt(x.be)+'. Si el costo es menor al limite, ganas.'))
+          return '<tr>'
+            +'<td data-label="Producto" style="font-weight:500">'+x.nombre+'</td>'
+            +'<td data-label="Ordenes">'+x.totP+'</td>'
+            +'<td data-label="Conf." style="color:var(--green)">'+x.conf+'</td>'
+            +'<td data-label="Gasto">'+(x.gasto?'$'+fmt(x.gasto):'—')+'</td>'
+            +'<td data-label="CPA" style="'+cpaColP+'">'+(x.cpaP>0?'$'+fmt(x.cpaP):'—')+'</td>'
+            +'<td data-label="Break-even">'+(x.be>0?'$'+fmt(x.be):'—')+'</td>'
+            +'<td data-label="Como fue" title="'+tip+'" style="cursor:help;white-space:nowrap"><span style="font-size:15px">'+x.sem.e+'</span> <span style="font-size:11px;opacity:0.85">'+x.sem.w+'</span></td>'
+            +'</tr>'
+        }).join('')
+        const detalleFinal=detalleHtml||'<tr><td colspan="7" style="color:var(--muted);text-align:center">Sin productos ese día</td></tr>'
+        return`<tr style="cursor:pointer" onclick="toggleReporteDia('${f}')">
+          <td data-label="Fecha" style="font-family:monospace;font-size:12px"><span id="reparrow-${f}" style="display:inline-block;width:14px;color:var(--muted)">▶</span>${f}</td>
           <td data-label="1u">${d.o1}</td><td data-label="2u">${d.o2}</td><td data-label="3u">${d.o3}</td><td data-label="4u">${d.o4}</td>
           <td data-label="Total"><strong>${tot}</strong></td>
           <td data-label="Conf." style="color:var(--green)">${d.conf}</td>
@@ -1329,11 +1424,28 @@ async function pageAdminReportes(c){
           <td data-label="Gasto">${d.gasto?'$'+fmt(d.gasto):'—'}</td>
           <td data-label="CPA" style="${cpaCls}">${cpa>0?'$'+fmt(cpa):'—'}</td>
           <td data-label="ROAS" style="${tieneOferta&&roas>0?(roas>=(prod0.precio_2u||129900)/margenBE?'color:var(--green)':'color:var(--red)'):''}">${tieneOferta&&roas>0?roas.toFixed(2)+'x':'—'}</td>
-        </tr>`
+          <td data-label="¿Cómo fue?" title="Cuantos productos ganaron o perdieron ese dia. Click en la fila para ver el detalle por producto.&#10;&#10;🟢 = ganaron · 🟡 = justos · 🔴 = perdieron" style="cursor:help;white-space:nowrap;font-size:13px">${det.conteoHtml}</td>
+        </tr>
+        <tr id="repdet-${f}" style="display:none"><td colspan="14" style="background:var(--card2);padding:10px 14px">
+          <div style="font-size:12px;color:var(--muted);margin-bottom:8px">📦 Detalle por producto del ${f}:</div>
+          <div class="table-wrap"><table style="font-size:12px">
+            <tr><th>Producto <span title="El producto que se vendió ese día." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Órdenes <span title="Total de órdenes de este producto ese día (vendidas, sin importar si se confirmaron)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Conf. <span title="De esas órdenes, cuántas se confirmaron (el cliente dijo que sí)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Gasto <span title="Cuánto se gastó en publicidad para este producto ese día, según las campañas que tiene asignadas." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>CPA <span title="Cuánto costó cada venta de ESTE producto. Se saca: gasto del producto ÷ sus órdenes.&#10;&#10;VERDE = barato (bien). ROJO = caro (mal)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Break-even <span title="El máximo que puedes pagar por venta de ESTE producto y todavía ganar.&#10;&#10;Cada producto tiene el suyo (depende de su precio, costo, envío y devoluciones).&#10;&#10;Si el CPA es menor que esto, ganas. Si es mayor, pierdes." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>¿Cómo fue? <span title="El semáforo de ESTE producto: su CPA contra su propio break-even.&#10;&#10;🟣 BRUTAL = ganaste muchísimo&#10;🟢 BUENO = ganaste bien&#10;🟡 REGULAR = ganaste poquito (cuidado)&#10;🔴 MALO = perdiste plata&#10;⚪ = sin datos" style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th></tr>
+            ${detalleFinal}
+          </table></div>
+        </td></tr>`
       }).join('')}
     </table></div>`
   }
   loadReportesAdmin()
+}
+
+window.toggleReporteDia=(f)=>{
+  const row=document.getElementById('repdet-'+f)
+  const arrow=document.getElementById('reparrow-'+f)
+  if(!row)return
+  const open=row.style.display!=='none'
+  row.style.display=open?'none':''
+  if(arrow)arrow.textContent=open?'▶':'▼'
 }
 
 // ── ADMIN: RESUMEN SEMANAL ─────────────────────────────────

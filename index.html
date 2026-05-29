@@ -1552,7 +1552,7 @@ async function cargarResumenSemanal(){
   const semanas={}
   for(const m of (mapeos||[])){
     const w=_weekKey(_weekMonday(m.fecha||m.fecha_dropi))
-    if(!semanas[w])semanas[w]={env:0,ent:0,dev:0,canc:0,pend:0,trans:0,total:0,ventaTot:0,costoTot:0,ventaEnt:0,costoEnt:0,fleteOutTot:0,fleteDevTeorico:0,fleteDevReal:0,ventaEfTeorica:0,costoEfTeorico:0,perdidaDev:0,ventaCanc:0,ventaPend:0}
+    if(!semanas[w])semanas[w]={env:0,ent:0,dev:0,canc:0,pend:0,trans:0,total:0,ventaTot:0,costoTot:0,ventaEnt:0,costoEnt:0,fleteOutTot:0,fleteDevTeorico:0,fleteDevReal:0,ventaEfTeorica:0,costoEfTeorico:0,perdidaDev:0,ventaCanc:0,ventaPend:0,almacenEnt:0,almacenTeorico:0}
     semanas[w].total++;semanas[w].env++
     const st=DROPI_STATUS[m.estado_final]?.cat||'otro'
     if(st==='entregado'||st==='novedad_ok')semanas[w].ent++
@@ -1570,6 +1570,8 @@ async function cargarResumenSemanal(){
     const fo=m.flete_snapshot||prod.flete_outbound||21000
     const fd=m.flete_dev_snapshot||prod.flete_devolucion||18000
     const dp=prod.dev_pct||0.19
+    // Almacenamiento: SOLO marca propia tiene costo de bodega por orden; dropshipping = 0
+    const alm=(prod.tipo_producto==='marca_propia')?(prod.almacenamiento||0):0
 
     // Estimada (teórica): aplica % devolución del producto
     semanas[w].ventaTot+=precio
@@ -1577,6 +1579,7 @@ async function cargarResumenSemanal(){
     semanas[w].ventaEfTeorica+=precio*(1-dp)
     semanas[w].costoEfTeorico+=costo*(1-dp)
     semanas[w].fleteDevTeorico+=fd*dp
+    semanas[w].almacenTeorico+=alm*(1-dp)
     // Flete outbound: solo si físicamente se envió (no canceladas)
     if(st!=='cancelado'){
       semanas[w].fleteOutTot+=fo
@@ -1585,6 +1588,7 @@ async function cargarResumenSemanal(){
     if(st==='entregado'||st==='novedad_ok'){
       semanas[w].ventaEnt+=precio
       semanas[w].costoEnt+=costo
+      semanas[w].almacenEnt+=alm
     }
     // Flete devolución real: solo de las devueltas
     if(st==='devuelto'){
@@ -1613,11 +1617,11 @@ async function cargarResumenSemanal(){
     const conv=convByWeek[w.key]||0
     const costoConv=conv*ccDefault
     // Estimada
-    const ganEst=Math.round((d.ventaEfTeorica||0)-(d.costoEfTeorico||0)-(d.fleteOutTot||0)-(d.fleteDevTeorico||0)-gasto-costoConv-fijosSemana)
+    const ganEst=Math.round((d.ventaEfTeorica||0)-(d.costoEfTeorico||0)-(d.fleteOutTot||0)-(d.fleteDevTeorico||0)-(d.almacenTeorico||0)-gasto-costoConv-fijosSemana)
     // Real
-    const ganReal=Math.round((d.ventaEnt||0)-(d.costoEnt||0)-(d.fleteOutTot||0)-(d.fleteDevReal||0)-gasto-costoConv-fijosSemana)
-    // Ganancia neta logística: solo producto + fletes (SIN ads, SIN conversación, SIN fijos)
-    const ganLogist=Math.round((d.ventaEnt||0)-(d.costoEnt||0)-(d.fleteOutTot||0)-(d.fleteDevReal||0))
+    const ganReal=Math.round((d.ventaEnt||0)-(d.costoEnt||0)-(d.fleteOutTot||0)-(d.fleteDevReal||0)-(d.almacenEnt||0)-gasto-costoConv-fijosSemana)
+    // Ganancia neta logística: solo producto + fletes + almacenamiento (SIN ads, SIN conversación, SIN fijos)
+    const ganLogist=Math.round((d.ventaEnt||0)-(d.costoEnt||0)-(d.fleteOutTot||0)-(d.fleteDevReal||0)-(d.almacenEnt||0))
     ganByWeek[w.key]={ganEst,ganReal,costoConv,ganLogist}
   }
 
@@ -1652,6 +1656,7 @@ async function cargarResumenSemanal(){
       recuperable_pendientes:d.ventaPend||0,
       en_la_mesa_cancelados:d.ventaCanc||0,
       perdida_devoluciones:d.perdidaDev||0,
+      almacenamiento_marca_propia:d.almacenEnt||0,
       gasto_ads:gastoByWeek[w.key]||0,
       conversaciones:convByWeek[w.key]||0,
       costo_conversaciones:g.costoConv||0,
@@ -1692,9 +1697,9 @@ async function cargarResumenSemanal(){
       ${_th('% Dev.','% devuelto','background:rgba(245,158,11,.05)','Qué % de lo que se hizo se devolvió = Devueltas ÷ Total.')}
       ${_th('Canceladas','se cayeron','background:rgba(245,158,11,.05)','Pedidos que se cayeron antes de despachar.')}
       ${_th('$ En la Mesa','venta que perdí','background:rgba(245,158,11,.05)','Venta que perdiste por cancelaciones = precio × pedidos cancelados. No salió de tu bolsillo, pero es plata que dejaste de ganar.')}
-      ${_th('Gan. Logíst.','deja sin publi','background:rgba(34,197,94,.05)','Lo que deja solo la logística, SIN contar publi ni chats ni fijos = venta cobrada − producto − fletes.')}
-      ${_th('Gan. Estimada','debería quedarme','background:rgba(34,197,94,.05)','Ganancia teórica del total, descontando el % de devolución esperado y todos los costos (producto, fletes, publi, chats, fijos).')}
-      ${_th('Gan. Real','lo que me quedó','background:rgba(34,197,94,.05)','Lo que de verdad te quedó = venta cobrada − producto − fletes − publi − chats − fijos. La flecha compara con la semana anterior.')}
+      ${_th('Gan. Logíst.','deja sin publi','background:rgba(34,197,94,.05)','Lo que deja solo la logística, SIN contar publi ni chats ni fijos = venta cobrada − producto − fletes − almacenamiento (solo marca propia).')}
+      ${_th('Gan. Estimada','debería quedarme','background:rgba(34,197,94,.05)','Ganancia teórica del total, descontando el % de devolución esperado y todos los costos (producto, fletes, almacenamiento de marca propia, publi, chats, fijos).')}
+      ${_th('Gan. Real','lo que me quedó','background:rgba(34,197,94,.05)','Lo que de verdad te quedó = venta cobrada − producto − fletes − almacenamiento (marca propia) − publi − chats − fijos. La flecha compara con la semana anterior.')}
       ${_th('Gan/Orden','por cada entrega','background:rgba(34,197,94,.05)','Cuánto te quedó limpio por cada pedido entregado = Ganancia Real ÷ Entregadas.')}
     </tr>
   </thead>`
@@ -1776,7 +1781,7 @@ async function cargarResumenSemanal(){
   }
 
   // ── Tarjetas resumen (totales del periodo, solo semanas con actividad: ventas o gasto o chats) ──
-  let tEntro=0,tCostoEnt=0,tFleteOut=0,tFleteDevReal=0,tGasto=0,tConv=0,tEnt=0,tPerdidaDev=0,tEnMesa=0,tRecup=0,tCanc=0,tPend=0,semActivas=0
+  let tEntro=0,tCostoEnt=0,tFleteOut=0,tFleteDevReal=0,tGasto=0,tConv=0,tEnt=0,tPerdidaDev=0,tEnMesa=0,tRecup=0,tCanc=0,tPend=0,tAlmacen=0,semActivas=0
   for(const w of allWeeks){
     const d=semanas[w.key]||{}
     const gw=gastoByWeek[w.key]||0,cw=convByWeek[w.key]||0
@@ -1794,10 +1799,11 @@ async function cargarResumenSemanal(){
     tRecup+=d.ventaPend||0
     tCanc+=d.canc||0
     tPend+=d.pend||0
+    tAlmacen+=d.almacenEnt||0
   }
   const tCostoConv=tConv*ccDefault
   const tFijos=fijosSemana*semActivas
-  const tSalio=tCostoEnt+tFleteOut+tFleteDevReal+tGasto+tCostoConv+tFijos
+  const tSalio=tCostoEnt+tFleteOut+tFleteDevReal+tAlmacen+tGasto+tCostoConv+tFijos
   const tQuedo=tEntro-tSalio
   const cpaR=tEnt>0?Math.round(tGasto/tEnt):null
   const roasR=tGasto>0?(tEntro/tGasto):null
@@ -1811,7 +1817,7 @@ async function cargarResumenSemanal(){
     <div style="font-size:12px;font-weight:700;color:var(--muted);margin:4px 0 6px;text-transform:uppercase;letter-spacing:.04em">💵 Flujo de plata</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
       ${_card('💰','$'+fmt(tEntro),'Entró (venta cobrada)','var(--green)','Suma de las ventas ENTREGADAS y cobradas (precio × pedidos entregados). Aquí: '+tEnt+' entregas = $'+fmt(tEntro)+'.')}
-      ${_card('🔥','$'+fmt(tSalio),'Salió (todo lo que costó)','var(--red)','Todo lo que costó: producto entregado + fletes (ida y vuelta) + publicidad + chats + gastos fijos. Suma $'+fmt(tSalio)+'.')}
+      ${_card('🔥','$'+fmt(tSalio),'Salió (todo lo que costó)','var(--red)','Todo lo que costó: producto entregado + fletes (ida y vuelta) + almacenamiento (solo marca propia) + publicidad + chats + gastos fijos. Suma $'+fmt(tSalio)+'.')}
       ${_card('✅','$'+fmt(tQuedo),'Me quedó limpio',_qColor,'Lo que entró ($'+fmt(tEntro)+') menos lo que salió ($'+fmt(tSalio)+') = $'+fmt(tQuedo)+'. Si es rojo, perdiste plata.')}
     </div>
     <div style="font-size:12px;font-weight:700;color:var(--muted);margin:4px 0 6px;text-transform:uppercase;letter-spacing:.04em">🎲 Plata en juego</div>

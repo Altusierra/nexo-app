@@ -860,7 +860,7 @@ async function loadDash(){
   }
 
   // 2. Órdenes desde mapeos (ahora también trae precio_dropi para Ventas Netas reales)
-  const{data:mapeos}=await sb.from('mapeos').select('cantidad,producto,producto_id,estado_final,fecha,ad_id,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi').gte('fecha',desde).lte('fecha',hasta).limit(10000)
+  const{data:mapeos}=await sb.from('mapeos').select('cantidad,producto,producto_id,estado_final,fecha,ad_id,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi').gte('fecha',desde).lte('fecha',hasta).limit(10000)
   let tot1=0,tot2=0,tot3=0,tot4=0,conf=0,canc=0,pend=0,conAd=0,ent=0,dev=0
   let cConf1=0,cConf2=0,cConf3=0,cConf4=0
   const prodStats={}
@@ -868,6 +868,8 @@ async function loadDash(){
   // NUEVO: tracking ventas netas
   let ventasNetasReales=0,ventasNetasEstimadas=0
   let countConPrecioReal=0,countConPrecioEstimado=0
+  // NUEVO: listas de detalle para desplegables (fecha de venta)
+  const _listConf=[],_listCanc=[],_listPend=[],_listDev=[]
   for(const m of (mapeos||[])){
     const q=m.cantidad||2
     if(q===1)tot1++;else if(q===2)tot2++;else if(q===3)tot3++;else tot4++
@@ -879,6 +881,17 @@ async function loadDash(){
     const _catO=DROPI_STATUS[m.estado_final]?.cat
     if(_catO==='entregado'||_catO==='novedad_ok')ent++
     else if(_catO==='devuelto')dev++
+    // NUEVO: detalle para desplegables (no altera los contadores de arriba)
+    const _telV=m.telefono||'—'
+    const _prodV=resolveProdName(m.producto).nombre||m.producto||'Sin producto'
+    if(m.estado_final==='CANCELADO')_listCanc.push({tel:_telV,prod:_prodV})
+    else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)_listPend.push({tel:_telV,prod:_prodV})
+    else _listConf.push({tel:_telV,prod:_prodV})
+    if(_catO==='devuelto'){
+      const _prodD=productos.find(p=>p.nombre===_prodV)||productos[0]||{}
+      const _fdV=m.flete_dev_snapshot||_prodD.flete_devolucion||18000
+      _listDev.push({tel:_telV,prod:_prodV,fd:_fdV})
+    }
     const pn=resolveProdName(m.producto).nombre||'Sin producto'
     if(!prodStats[pn])prodStats[pn]={o1:0,o2:0,o3:0,o4:0}
     if(q===1)prodStats[pn].o1++;else if(q===2)prodStats[pn].o2++;else if(q===3)prodStats[pn].o3++;else prodStats[pn].o4++
@@ -902,15 +915,23 @@ async function loadDash(){
   const ventasNetasTotal=ventasNetasReales+ventasNetasEstimadas
 
   // 2b. NUEVO: Órdenes por FECHA DROPI (cuándo se subieron a Dropi, no cuándo se vendieron en chat)
-  const{data:mapeosDropi}=await sb.from('mapeos').select('cantidad,estado_final,producto,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi').gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).limit(10000)
+  const{data:mapeosDropi}=await sb.from('mapeos').select('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi').gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).limit(10000)
   let totD1=0,totD2=0,totD3=0,totD4=0,confD=0,cancD=0,pendD=0,entD=0,devD=0
   let _grdGanD=0,_grdFDevD=0,_grdConDatoD=0
+  // NUEVO: listas de detalle para desplegables (fecha de subida Dropi)
+  const _listConfD=[],_listCancD=[],_listPendD=[],_listDevD=[]
   for(const m of (mapeosDropi||[])){
     const q=m.cantidad||2
     if(q===1)totD1++;else if(q===2)totD2++;else if(q===3)totD3++;else totD4++
     if(m.estado_final==='CANCELADO')cancD++
     else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)pendD++
     else confD++
+    // NUEVO: detalle para desplegables (no altera los contadores de arriba)
+    const _telD=m.telefono||'—'
+    const _prodDD=resolveProdName(m.producto).nombre||m.producto||'Sin producto'
+    if(m.estado_final==='CANCELADO')_listCancD.push({tel:_telD,prod:_prodDD})
+    else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)_listPendD.push({tel:_telD,prod:_prodDD})
+    else _listConfD.push({tel:_telD,prod:_prodDD})
     const _stD=DROPI_STATUS[m.estado_final]?.cat
     if(_stD==='entregado'||_stD==='novedad_ok'){
       entD++
@@ -930,6 +951,7 @@ async function loadDash(){
       const _prod=productos.find(p=>p.nombre===_pn)||productos[0]||{}
       const _fd=m.flete_dev_snapshot||_prod.flete_devolucion||18000
       _grdFDevD+=_fd
+      _listDevD.push({tel:m.telefono||'—',prod:_pn||m.producto||'Sin producto',fd:_fd})
     }
   }
   const totalOrdsDropi=totD1+totD2+totD3+totD4
@@ -1302,6 +1324,67 @@ async function loadDash(){
       </div>
     </details>`:''
 
+  // ── NUEVO: detalle desplegable de cards de estado (Conf/Canc/Pend/Dev) ──
+  // Registramos las 8 listas en un objeto global indexado por key, para que los onclick inline las lean.
+  window._dashDetalle=window._dashDetalle||{}
+  window._dashDetalle.conf=_listConf
+  window._dashDetalle.canc=_listCanc
+  window._dashDetalle.pend=_listPend
+  window._dashDetalle.dev=_listDev
+  window._dashDetalle.confD=_listConfD
+  window._dashDetalle.cancD=_listCancD
+  window._dashDetalle.pendD=_listPendD
+  window._dashDetalle.devD=_listDevD
+  // _dashVis guarda cuántas filas se muestran por key (arranca en 3, +10 por "Ver más")
+  window._dashVis=window._dashVis||{}
+  // Genera el HTML de la lista para una key dada. esDev=true agrega la columna Costo dev.
+  window._dashRenderLista=function(key,esDev){
+    const lista=(window._dashDetalle&&window._dashDetalle[key])||[]
+    if(!lista.length)return '<div style="padding:10px 4px;color:var(--subtle);font-size:12px">Sin órdenes en este estado.</div>'
+    const vis=window._dashVis[key]||3
+    const _esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    const filas=lista.slice(0,vis).map(it=>{
+      const colDev=esDev?`<span style="margin-left:auto;color:var(--red);font-weight:600;white-space:nowrap">$${fmt(Math.round(it.fd||0))}</span>`:''
+      return `<div style="display:flex;align-items:center;gap:8px;padding:6px 4px;border-bottom:1px solid var(--border);font-size:12px">
+        <span style="color:var(--text);font-variant-numeric:tabular-nums;min-width:92px">${_esc(it.tel)}</span>
+        <span style="color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_esc(it.prod)}</span>
+        ${colDev}
+      </div>`
+    }).join('')
+    let btns=''
+    const hayMas=vis<lista.length
+    const hayMenos=vis>3
+    if(hayMas||hayMenos){
+      btns='<div style="display:flex;gap:8px;margin-top:8px">'
+      if(hayMas)btns+=`<a href="javascript:void(0)" onclick="window._dashVerMas('${key}',${esDev?1:0})" style="color:var(--blue);font-size:11px;font-weight:600;text-decoration:none">+ Ver 10 más (${lista.length-vis} restantes)</a>`
+      if(hayMenos)btns+=`<a href="javascript:void(0)" onclick="window._dashVerMenos('${key}',${esDev?1:0})" style="color:var(--subtle);font-size:11px;font-weight:600;text-decoration:none">Ver menos</a>`
+      btns+='</div>'
+    }
+    return `<div style="margin-top:6px">${filas}${btns}</div>`
+  }
+  // Abrir/cerrar el detalle de una card
+  window._dashToggle=function(key,esDev){
+    const box=document.getElementById('dashdet-'+key)
+    if(!box)return
+    if(box.style.display==='none'||!box.style.display){
+      window._dashVis[key]=window._dashVis[key]||3
+      box.innerHTML=window._dashRenderLista(key,!!esDev)
+      box.style.display='block'
+    }else{
+      box.style.display='none'
+    }
+  }
+  window._dashVerMas=function(key,esDev){
+    window._dashVis[key]=(window._dashVis[key]||3)+10
+    const box=document.getElementById('dashdet-'+key)
+    if(box)box.innerHTML=window._dashRenderLista(key,!!esDev)
+  }
+  window._dashVerMenos=function(key,esDev){
+    window._dashVis[key]=3
+    const box=document.getElementById('dashdet-'+key)
+    if(box)box.innerHTML=window._dashRenderLista(key,!!esDev)
+  }
+
   // RENDER: 3 bloques agrupados (Ventas/Órdenes, Gastos, Eficiencia)
   // RENDER: Ventas y órdenes DROPI (por fecha_dropi)
   const _bloqueVentasDropiHTML=`
@@ -1312,8 +1395,8 @@ async function loadDash(){
         <div class="card-val">${totalOrdsDropi}</div>
         <div class="card-sub">1u:${totD1} · 2u:${totD2} · 3u:${totD3} · 4u:${totD4}</div>
       </div>
-      <div class="card c-green">
-        <div class="card-label">Confirmados</div>
+      <div class="card c-green" style="cursor:pointer" onclick="window._dashToggle('confD',0)" title="Ver detalle">
+        <div class="card-label">Confirmados ▾</div>
         <div class="card-val">${confD}</div>
         <div class="card-sub">${totalOrdsDropi>0?Math.round(confD/totalOrdsDropi*100):0}% del total</div>
       </div>
@@ -1322,22 +1405,26 @@ async function loadDash(){
         <div class="card-val">${entD}</div>
         <div class="card-sub">${confD>0?Math.round(entD/confD*100):0}% de confirmados</div>
       </div>
-      <div class="card c-red">
-        <div class="card-label">Devueltos</div>
+      <div class="card c-red" style="cursor:pointer" onclick="window._dashToggle('devD',1)" title="Ver detalle">
+        <div class="card-label">Devueltos ▾</div>
         <div class="card-val">${devD}</div>
         <div class="card-sub">${confD>0?Math.round(devD/confD*100):0}% de confirmados</div>
       </div>
-      <div class="card c-red">
-        <div class="card-label">Cancelados</div>
+      <div class="card c-red" style="cursor:pointer" onclick="window._dashToggle('cancD',0)" title="Ver detalle">
+        <div class="card-label">Cancelados ▾</div>
         <div class="card-val">${cancD}</div>
         <div class="card-sub">${totalOrdsDropi>0?Math.round(cancD/totalOrdsDropi*100):0}% del total</div>
       </div>
-      <div class="card c-amber">
-        <div class="card-label">Pendientes</div>
+      <div class="card c-amber" style="cursor:pointer" onclick="window._dashToggle('pendD',0)" title="Ver detalle">
+        <div class="card-label">Pendientes ▾</div>
         <div class="card-val">${pendD}</div>
         <div class="card-sub">${totalOrdsDropi>0?Math.round(pendD/totalOrdsDropi*100):0}% del total</div>
       </div>
-    </div>`
+    </div>
+    <div id="dashdet-confD" style="display:none"></div>
+    <div id="dashdet-devD" style="display:none"></div>
+    <div id="dashdet-cancD" style="display:none"></div>
+    <div id="dashdet-pendD" style="display:none"></div>`
 
   const _bloqueVentasHTML=`
     <div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;margin-top:16px">📦 Ventas y órdenes</div>
@@ -1347,8 +1434,8 @@ async function loadDash(){
         <div class="card-val">${totalOrds}</div>
         <div class="card-sub">1u:${tot1} · 2u:${tot2} · 3u:${tot3} · 4u:${tot4}</div>
       </div>
-      <div class="card c-green">
-        <div class="card-label">Confirmados</div>
+      <div class="card c-green" style="cursor:pointer" onclick="window._dashToggle('conf',0)" title="Ver detalle">
+        <div class="card-label">Confirmados ▾</div>
         <div class="card-val">${conf}</div>
         <div class="card-sub">${totalOrds>0?Math.round(conf/totalOrds*100):0}% del total</div>
       </div>
@@ -1357,22 +1444,26 @@ async function loadDash(){
         <div class="card-val">${ent}</div>
         <div class="card-sub">${conf>0?Math.round(ent/conf*100):0}% de confirmados</div>
       </div>
-      <div class="card c-red">
-        <div class="card-label">Devueltos</div>
+      <div class="card c-red" style="cursor:pointer" onclick="window._dashToggle('dev',1)" title="Ver detalle">
+        <div class="card-label">Devueltos ▾</div>
         <div class="card-val">${dev}</div>
         <div class="card-sub">${conf>0?Math.round(dev/conf*100):0}% de confirmados</div>
       </div>
-      <div class="card c-red">
-        <div class="card-label">Cancelados</div>
+      <div class="card c-red" style="cursor:pointer" onclick="window._dashToggle('canc',0)" title="Ver detalle">
+        <div class="card-label">Cancelados ▾</div>
         <div class="card-val">${canc}</div>
         <div class="card-sub">${totalOrds>0?Math.round(canc/totalOrds*100):0}% del total</div>
       </div>
       <div class="card c-amber">
-        <div class="card-label">Pendientes</div>
-        <div class="card-val">${pend}</div>
+        <div class="card-label" style="cursor:pointer" onclick="window._dashToggle('pend',0)" title="Ver detalle">Pendientes ▾</div>
+        <div class="card-val" style="cursor:pointer" onclick="window._dashToggle('pend',0)">${pend}</div>
         ${pend>0?'<div class="card-sub" style="margin-top:6px"><a href="javascript:void(0)" onclick="window.navigate&&window.navigate(\'aux-dropi\')" style="color:var(--blue);text-decoration:none;display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:600">→ Abrir cruce Dropi</a></div>':'<div class="card-sub">Sin pendientes</div>'}
       </div>
     </div>
+    <div id="dashdet-conf" style="display:none"></div>
+    <div id="dashdet-dev" style="display:none"></div>
+    <div id="dashdet-canc" style="display:none"></div>
+    <div id="dashdet-pend" style="display:none"></div>
     <div class="cards-row c4" style="margin-top:12px">
       <div class="card c-purple"><div class="card-label">Conversaciones</div><div class="card-val">${conv}</div><div class="card-sub">Tasa cierre: ${(tasaCierre*100).toFixed(1)}%</div></div>
     </div>`

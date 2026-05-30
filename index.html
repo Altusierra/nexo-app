@@ -348,6 +348,19 @@ tr:hover td{background:var(--card2)}
 .nfo .nfo-tip{position:fixed;top:0;left:0;width:260px;max-width:90vw;background:#0B0D14;color:var(--text);border:1px solid var(--border);border-radius:12px;padding:11px 13px;font-size:12.5px;font-weight:400;line-height:1.5;text-align:left;letter-spacing:0;box-shadow:0 12px 30px rgba(0,0,0,.6);opacity:0;visibility:hidden;pointer-events:none;transition:opacity .12s ease;z-index:99999;white-space:normal}
 .nfo .nfo-tip b{color:#fff} .nfo .nfo-tip .pos{color:var(--green);font-weight:700} .nfo .nfo-tip .neg{color:var(--red);font-weight:700} .nfo .nfo-tip .war{color:var(--amber);font-weight:700}
 .nfo:hover .nfo-tip,.nfo.open .nfo-tip{opacity:1;visibility:visible;pointer-events:auto}
+/* ── Cruce Dropi · Etapas del semáforo (grid 3×3 + ℹ️ reusan el motor .nfo) ── */
+.dropi-etapas-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
+@media(max-width:768px){.dropi-etapas-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:430px){.dropi-etapas-grid{grid-template-columns:1fr}}
+.dropi-etapa{position:relative;background:var(--card2);border:1px solid var(--border);border-left:4px solid var(--de-c,var(--muted));border-radius:12px;padding:11px 13px}
+.dropi-etapa .de-top{display:flex;align-items:flex-start;justify-content:space-between;gap:6px}
+.dropi-etapa .de-emoji{font-size:19px;line-height:1}
+.dropi-etapa .de-num{font-size:26px;font-weight:800;line-height:1.05;margin-top:4px;color:var(--de-c,var(--text))}
+.dropi-etapa .de-name{font-size:12px;font-weight:600;color:var(--muted);margin-top:2px}
+.nfo.ei{width:auto;height:auto;border:0;border-radius:0;font-size:15px;font-weight:400}
+.dropi-health{border-radius:10px;padding:10px 13px;font-size:13px;font-weight:600;margin-bottom:14px;line-height:1.45}
+.dropi-health.ok{background:var(--green-bg);border:1px solid var(--green);color:var(--green)}
+.dropi-health.bad{background:var(--red-bg);border:1px solid var(--red);color:#fff}
 </style>
 </head>
 <body>
@@ -8917,6 +8930,52 @@ const DROPI_STATUS={
 }
 window.DROPI_STATUS=DROPI_STATUS
 
+// ════════ ETAPAS DEL SEMÁFORO DE ÓRDENES (capa de SOLO visualización · Cruce Dropi) ════════
+// Agrupa los estados crudos de Dropi en 9 etapas del viaje de una orden (nace → entrega/pierde).
+// NO modifica DROPI_STATUS ni la lógica de cat/costos existente. Cubre TODOS los estados vistos.
+const DROPI_ETAPAS=[
+  {id:'nace',emoji:'🔵',nombre:'1. Nace la orden',sem:'AZUL — sin riesgo, sin costo',nfoC:'b',color:'var(--blue)',
+   estados:['PENDIENTE CONFIRMACION','PENDIENTE','CONFIRMADO','EN PROCESAMIENTO','GUIA_GENERADA'],
+   det:['PENDIENTE CONFIRMACION → orden entró, espera que la confirmen','PENDIENTE → igual, esperando definición','CONFIRMADO → ya la validaron, lista para procesar','EN PROCESAMIENTO → proveedor alistando el paquete en bodega','GUIA_GENERADA → ya hay guía impresa pero el paquete NO ha salido'],
+   tip:'Si una orden se queda aquí mucho tiempo = problema con el proveedor.'},
+  {id:'basura',emoji:'⚪',nombre:'2. Se van (no salieron)',sem:'GRIS — orden muerta, sin pérdida de plata',nfoC:'n',color:'var(--muted)',
+   estados:['CANCELADO','RECHAZADO','GUIA_ANULADA'],
+   det:['CANCELADO → se canceló antes de enviar (nunca salió)','RECHAZADO → bodega lo rechazó (peso, dirección, cobertura). NO genera costo. Hay que volver a subirla.','GUIA_ANULADA → la guía se anuló antes de despachar'],
+   tip:'Estos 3 NO cuentan como venta perdida porque nunca generaron flete.'},
+  {id:'salio',emoji:'🟡',nombre:'3. Ya salió el paquete',sem:'AMARILLO — flete ya está corriendo',nfoC:'a',color:'var(--amber)',
+   estados:['DESPACHADA','ADMITIDA'],
+   det:['DESPACHADA → salió de la bodega del proveedor','ADMITIDA → llegó a la bodega matriz de la transportadora'],
+   tip:'Desde aquí ya hay flete comprometido.'},
+  {id:'camino',emoji:'🟡',nombre:'4. De camino',sem:'AMARILLO — viajando entre ciudades',nfoC:'a',color:'var(--amber)',
+   estados:['EN BODEGA TRANSPORTADORA','EN ESPERA DE RUTA DOMESTICA','EN REEXPEDICION','EN TERMINAL DESTINO','EN TERMINAL ORIGEN','EN BODEGA DESTINO','EN TRANSPORTE','EN PUNTO DROOP','EN PUNTO DROPI'],
+   det:['EN BODEGA TRANSPORTADORA → hub intermedio','EN ESPERA DE RUTA DOMESTICA → esperando que armen la ruta','EN REEXPEDICION → cambio de ruta','EN TERMINAL DESTINO → llegó al terminal de la ciudad destino','EN BODEGA DESTINO → ya está en la bodega de la ciudad del cliente','EN PUNTO DROOP → en un punto de recogida Dropi'],
+   tip:'Va viajando. Vigílalo para que no se devuelva.'},
+  {id:'ultimo',emoji:'🟡',nombre:'5. Último kilómetro',sem:'AMARILLO INTENSO — cerca del cliente',nfoC:'a',color:'var(--amber)',
+   estados:['EN REPARTO','TELEMERCADEO'],
+   det:['EN REPARTO → mensajero ya salió con el paquete a entregar','TELEMERCADEO → la transportadora está llamando al cliente para coordinar entrega'],
+   tip:'Está a punto de entregarse.'},
+  {id:'problemas',emoji:'🟠',nombre:'6. Problemas (novedad)',sem:'NARANJA — hay que actuar o se pierde',nfoC:'a',color:'#F97316',
+   estados:['NOVEDAD','INTENTO DE ENTREGA','SIN MOVIMIENTOS','RECLAME EN OFICINA','RECOGIDA FALLIDA','NOVEDAD SOLUCIONADA'],
+   det:['NOVEDAD → problema general de entrega','INTENTO DE ENTREGA → fueron pero no pudieron entregar','SIN MOVIMIENTOS → guía estancada, sin actualización por días','RECLAME EN OFICINA → cliente debe ir a recoger a la oficina','RECOGIDA FALLIDA → fueron a recoger devolución pero no pudieron','NOVEDAD SOLUCIONADA → el auxiliar la resolvió, pero NO garantiza entrega (hay que esperar)'],
+   tip:'Acá decide tu plata: si actúas rápido se entrega, si no se devuelve.'},
+  {id:'feliz',emoji:'🟢',nombre:'7. Entregado',sem:'VERDE — venta confirmada',nfoC:'g',color:'var(--green)',
+   estados:['ENTREGADO'],
+   det:['ENTREGADO → cliente recibió y pagó. ✅ ESTA es la única venta real.'],
+   tip:'La única venta real. Aquí entra la plata de verdad.'},
+  {id:'triste',emoji:'🔴',nombre:'8. Devuelto',sem:'ROJO — pagas flete ida + flete devolución',nfoC:'r',color:'var(--red)',
+   estados:['DEVOLUCION','REENVÍO','REENVIO','RECOGIDO POR DROPI','EN BODEGA DROPI'],
+   det:['DEVOLUCION → cliente devolvió. Pagas flete completo (usa COSTO DEVOLUCION FLETE)','REENVÍO → se está reenviando (puede terminar entregado o devolución)','RECOGIDO POR DROPI → Dropi recogió el paquete devuelto','EN BODEGA DROPI → el paquete volvió a bodega Dropi'],
+   tip:'Cada uno cuesta DOS fletes (ida + vuelta). Más = peor.'},
+  {id:'desastre',emoji:'⚫',nombre:'9. Desastre (perdida)',sem:'NEGRO — paquete perdido o destruido',nfoC:'n',color:'var(--subtle)',
+   estados:['LOST','EN PROCESO DE INDEMNIZACION','INDEMNIZADA','INDEMNIZADA POR DROPI','DESTRUCCION - SALVAMENTO - DONACION'],
+   det:['LOST → paquete perdido en el camino','EN PROCESO DE INDEMNIZACION → Dropi evaluando si te paga la pérdida','INDEMNIZADA / INDEMNIZADA POR DROPI → te pagaron la indemnización (recuperas algo)','DESTRUCCION - SALVAMENTO - DONACION → paquete irrecuperable, se destruyó o donó'],
+   tip:'Paquete perdido. Si Dropi indemniza, recuperas parte.'},
+]
+const _ETAPA_DE={}
+DROPI_ETAPAS.forEach(e=>e.estados.forEach(s=>{_ETAPA_DE[s]=e.id}))
+window.DROPI_ETAPAS=DROPI_ETAPAS
+window._etapaDeEstado=(estatus)=>_ETAPA_DE[(estatus||'').toString().trim().toUpperCase()]||null
+
 // ════════ BUSCADOR UNIVERSAL POR TELÉFONO (solo auxiliar · solo lectura) ════════
 window._auxSecInfo=(m)=>{
   // Devuelve {sec,label,color,que} según estado_final/categoría DROPI_STATUS
@@ -9521,11 +9580,24 @@ window.procesarDropi=async()=>{
       🔗 ${cruzados} cruzadas con asignador · ${sinCruce} sin cruce
     </div>`
 
-    const catItems=[['entregado','pill-green','✅ Entregados'],['cancelado','pill-red','❌ Cancelados'],
-      ['devuelto','pill-red','↩️ Devueltos'],['pendiente','pill-amber','⏳ Pendientes'],
-      ['en_proceso','pill-blue','📦 En proceso'],['en_transito','pill-blue','🚚 En tránsito'],
-      ['en_bodega','pill-amber','📍 En bodega'],['novedad','pill-amber','⚠️ Novedad']]
-    const catHtml=catItems.filter(([k])=>porCat[k]).map(([k,cls,l])=>`<span class="pill ${cls}" style="margin-right:6px">${l}: ${porCat[k]}</span>`).join('')
+    // Conteo por ETAPA del semáforo (capa de SOLO visualización; no toca porCat ni la lógica de costos)
+    const porEtapa={};DROPI_ETAPAS.forEach(e=>{porEtapa[e.id]=0})
+    const sinClasif=[]
+    for(const r of resultados){
+      const eid=window._etapaDeEstado(r.estatus)
+      if(eid)porEtapa[eid]++;else sinClasif.push(r.estatus||'(vacío)')
+    }
+    const sumEtapas=Object.values(porEtapa).reduce((a,b)=>a+b,0)
+    const etapasGridHtml=`<div class="dropi-etapas-grid">`+DROPI_ETAPAS.map(e=>{
+      const n=porEtapa[e.id]||0
+      const tipHtml=`<b>${e.emoji} ${e.nombre.toUpperCase()}</b><br><span class="war">Semáforo: ${e.sem}</span><br><br>${e.det.join('<br>')}<br><br>💡 ${e.tip}`
+      const info=`<span class="nfo ei ${e.nfoC}" onmouseenter="_nfoPlace(this)" onclick="this.classList.toggle('open');if(this.classList.contains('open'))_nfoPlace(this);event.stopPropagation()"><span class="nfo-tip">${tipHtml}</span>ℹ️</span>`
+      return `<div class="dropi-etapa" style="--de-c:${e.color}"><div class="de-top"><span class="de-emoji">${e.emoji}</span>${info}</div><div class="de-num">${n}</div><div class="de-name">${e.nombre}</div></div>`
+    }).join('')+`</div>`
+    const sinList=[...new Set(sinClasif)].join(', ')
+    const healthHtml=(sumEtapas===total&&sinClasif.length===0)
+      ?`<div class="dropi-health ok">✅ Cuadre perfecto: las 9 etapas suman ${sumEtapas} = ${total} órdenes totales.</div>`
+      :`<div class="dropi-health bad">⚠️ Hay ${total-sumEtapas} orden(es) sin clasificar. Estados nuevos de Dropi que NEXO no conoce: <b>${sinList||'(ninguno)'}</b>. Avísale al admin para agregarlos al semáforo.</div>`
 
     resEl.innerHTML=`
       <div class="cards-row c4">
@@ -9536,7 +9608,8 @@ window.procesarDropi=async()=>{
         <div class="card c-green"><div class="card-label">Entregados</div><div class="card-val">${porCat.entregado||0}</div>
           <div class="card-sub">${total>0?Math.round((porCat.entregado||0)/total*100):0}%</div></div>
       </div>
-      <div style="margin-bottom:14px">${catHtml}</div>
+      ${etapasGridHtml}
+      ${healthHtml}
       ${cruzados>0?`<div style="margin-bottom:14px">
         <button class="btn-sm btn-green" onclick="actualizarEstadosDropi()">💾 Actualizar estados en sistema (${cruzados} órdenes)</button>
         <span id="dropi-upd-msg" style="margin-left:10px"></span>

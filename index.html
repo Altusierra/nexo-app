@@ -860,7 +860,7 @@ async function loadDash(){
   }
 
   // 2. Órdenes desde mapeos (ahora también trae precio_dropi para Ventas Netas reales)
-  const{data:mapeos}=await sb.from('mapeos').select('cantidad,producto,producto_id,estado_final,fecha,ad_id,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot').gte('fecha',desde).lte('fecha',hasta).limit(10000)
+  const{data:mapeos}=await sb.from('mapeos').select('cantidad,producto,producto_id,estado_final,fecha,ad_id,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi').gte('fecha',desde).lte('fecha',hasta).limit(10000)
   let tot1=0,tot2=0,tot3=0,tot4=0,conf=0,canc=0,pend=0,conAd=0
   let cConf1=0,cConf2=0,cConf3=0,cConf4=0
   const prodStats={}
@@ -993,6 +993,39 @@ async function loadDash(){
     if(_st==='devuelto')_grFDev+=_fd
   }
   const ganReal=Math.round(_grVEnt-_grCEnt-_grFOut-_grFDev-_grAlm-gastoTotal-costoConv-gastoFijoPeriodo)
+  // ── #5 GANANCIA REAL con datos REALES de Dropi ──
+  // Por cada ENTREGADO: usa ganancia_dropi si Dropi ya la liquidó; si la orden no tiene dato (NULL/0),
+  // cae al teórico de ESA orden (venta − costo − flete out − almacenamiento). Devueltos restan su flete real.
+  // Luego: − Gasto Ads − Costo Conversaciones − Gastos Fijos (÷30 × días).
+  // Fallback global: si NINGÚN entregado tiene ganancia_dropi real, se usa el cálculo teórico actual (ganReal).
+  let _grdGan=0,_grdFDev=0,_grdConDato=0
+  for(const m of (mapeos||[])){
+    const _st=(!m.estado_final)?'pendiente':(DROPI_STATUS[m.estado_final]?.cat||'otro')
+    if(_st==='entregado'||_st==='novedad_ok'){
+      if(m.ganancia_dropi&&m.ganancia_dropi>0){_grdGan+=m.ganancia_dropi;_grdConDato++}
+      else{
+        const _pn=resolveProdName(m.producto).nombre
+        const _prod=productos.find(p=>p.nombre===_pn)||productos[0]||{}
+        const _q=m.cantidad||2
+        const _precio=m.precio_dropi||[0,_prod.precio_1u||0,_prod.precio_2u||0,_prod.precio_3u||0,_prod.precio_4u||0][_q]||(_prod.precio_2u||0)
+        const _costo=m.costo_snapshot||[0,_prod.costo_1u||0,_prod.costo_2u||0,_prod.costo_3u||0,_prod.costo_4u||0][_q]||(_prod.costo_2u||0)
+        const _fo=m.flete_snapshot||_prod.flete_outbound||21000
+        const _alm=(_prod.tipo_producto==='marca_propia')?(_prod.almacenamiento||0):0
+        _grdGan+=(_precio-_costo-_fo-_alm)
+      }
+    }else if(_st==='devuelto'){
+      const _pn=resolveProdName(m.producto).nombre
+      const _prod=productos.find(p=>p.nombre===_pn)||productos[0]||{}
+      const _fd=m.flete_dev_snapshot||_prod.flete_devolucion||18000
+      _grdFDev+=_fd
+    }
+  }
+  const ganRealDropi=Math.round(_grdGan-_grdFDev-gastoTotal-costoConv-gastoFijoPeriodo)
+  const _usaDropi=_grdConDato>0
+  const ganRealUsada=_usaDropi?ganRealDropi:ganReal
+  const _tipGanReal=_usaDropi
+    ?`REAL (datos de Dropi): la ganancia que Dropi YA liquidó de lo entregado, menos lo devuelto y tus gastos.&#10;&#10;Ganancia Dropi (entregadas): $${fmt(Math.round(_grdGan))}&#10;− Costo devolución (devueltas): −$${fmt(Math.round(_grdFDev))}&#10;− Gasto ads: −$${fmt(gastoTotal)}&#10;− Costo conversación: −$${fmt(costoConv)}&#10;− Gastos fijos (${dias}d): −$${fmt(gastoFijoPeriodo)}&#10;&#10;= $${fmt(ganRealDropi)}&#10;&#10;Para las entregadas que Dropi aún no liquidó se usa el cálculo teórico de esa orden.`
+    :`REAL: solo lo que YA se entregó y cobró (${_grEnt} entregadas), menos TODOS los costos ya gastados (incluido el gasto de ads completo).&#10;&#10;Venta cobrada: $${fmt(Math.round(_grVEnt))}&#10;− Costo producto: −$${fmt(Math.round(_grCEnt))}&#10;− Flete: −$${fmt(Math.round(_grFOut))}&#10;− Devolución: −$${fmt(Math.round(_grFDev))}&#10;− Gasto ads: −$${fmt(gastoTotal)}&#10;− Costo conversación: −$${fmt(costoConv)}&#10;− Gastos fijos (${dias}d): −$${fmt(gastoFijoPeriodo)}&#10;&#10;= $${fmt(ganReal)}&#10;&#10;Suele ir más abajo (o negativa) en rangos recientes: ya gastaste en ads pero muchas ventas siguen en la calle sin cobrarse. Es el mismo número del 'Me quedó limpio' del Resumen Semanal.`
   const roas_bruto=gastoTotal>0?ventaTotal/gastoTotal:0
   const roas_neto=gastoTotal>0?(ganNeta+gastoTotal)/gastoTotal:0
   const cpa=totalOrdsConf>0?gastoTotal/totalOrdsConf:0
@@ -1184,9 +1217,9 @@ async function loadDash(){
         <div class="card-val">${tieneOferta?'$'+fmt(ganNeta):'—'}</div>
         <div class="card-sub">${tieneOferta?`Margen ${(ganNeta/ventaTotal*100).toFixed(1)}%`:'Sin oferta'}</div>
         ${tieneOferta?`<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
-          <div class="card-label" style="margin:0">✅ Ganancia real <span style="cursor:help;font-size:11px;opacity:.7;border:1px solid var(--border);border-radius:50%;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted);margin-left:2px;vertical-align:middle;font-weight:400" title="REAL: solo lo que YA se entregó y cobró (${_grEnt} entregadas), menos TODOS los costos ya gastados (incluido el gasto de ads completo).&#10;&#10;Venta cobrada: $${fmt(Math.round(_grVEnt))}&#10;− Costo producto: −$${fmt(Math.round(_grCEnt))}&#10;− Flete: −$${fmt(Math.round(_grFOut))}&#10;− Devolución: −$${fmt(Math.round(_grFDev))}&#10;− Gasto ads: −$${fmt(gastoTotal)}&#10;− Costo conversación: −$${fmt(costoConv)}&#10;− Gastos fijos (${dias}d): −$${fmt(gastoFijoPeriodo)}&#10;&#10;= $${fmt(ganReal)}&#10;&#10;Suele ir más abajo (o negativa) en rangos recientes: ya gastaste en ads pero muchas ventas siguen en la calle sin cobrarse. Es el mismo número del 'Me quedó limpio' del Resumen Semanal.">ℹ</span></div>
-          <div style="font-size:18px;font-weight:700;color:var(${ganReal>=0?'--green':'--red'})">${ganReal>=0?'$'+fmt(ganReal):'-$'+fmt(Math.abs(ganReal))}</div>
-          <div class="card-sub">Ya cobrado · ${_grEnt} entregadas</div>
+          <div class="card-label" style="margin:0">✅ Ganancia real <span style="cursor:help;font-size:11px;opacity:.7;border:1px solid var(--border);border-radius:50%;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted);margin-left:2px;vertical-align:middle;font-weight:400" title="${_tipGanReal}">ℹ</span></div>
+          <div style="font-size:18px;font-weight:700;color:var(${ganRealUsada>=0?'--green':'--red'})">${ganRealUsada>=0?'$'+fmt(ganRealUsada):'-$'+fmt(Math.abs(ganRealUsada))}</div>
+          <div class="card-sub">${_usaDropi?'Dato real Dropi · ':'Ya cobrado · '}${_grEnt} entregadas</div>
         </div>`:''}
       </div>
       <div class="card" style="border-color:var(${cpaPct>100?'--red':cpaPct>70?'--amber':'--border'})">
@@ -1604,7 +1637,7 @@ async function cargarResumenSemanal(){
       if(!((m.producto_id&&m.producto_id===prodSel.id)||_r.id===prodSel.id||_normProd(_r.nombre)===_normProd(prodSel.nombre)))continue
     }
     const w=_weekKey(_weekMonday(m.fecha||m.fecha_dropi))
-    if(!semanas[w])semanas[w]={env:0,ent:0,dev:0,canc:0,pend:0,trans:0,total:0,ventaTot:0,costoTot:0,ventaEnt:0,costoEnt:0,fleteOutTot:0,fleteDevTeorico:0,fleteDevReal:0,ventaEfTeorica:0,costoEfTeorico:0,perdidaDev:0,ventaCanc:0,ventaPend:0,almacenEnt:0,almacenTeorico:0}
+    if(!semanas[w])semanas[w]={env:0,ent:0,dev:0,canc:0,pend:0,trans:0,total:0,ventaTot:0,costoTot:0,ventaEnt:0,costoEnt:0,fleteOutTot:0,fleteDevTeorico:0,fleteDevReal:0,ventaEfTeorica:0,costoEfTeorico:0,perdidaDev:0,ventaCanc:0,ventaPend:0,almacenEnt:0,almacenTeorico:0,ganDropi:0,ganDropiConDato:0}
     semanas[w].total++;semanas[w].env++
     // Sin estado_final (aún no cruzada en Dropi) = pendiente, igual que el Dashboard
     const st=(!m.estado_final)?'pendiente':(DROPI_STATUS[m.estado_final]?.cat||'otro')
@@ -1642,6 +1675,9 @@ async function cargarResumenSemanal(){
       semanas[w].ventaEnt+=precio
       semanas[w].costoEnt+=costo
       semanas[w].almacenEnt+=alm
+      // #6 Ganancia real de Dropi: si la orden ya fue liquidada usa ganancia_dropi; si no, teórico de esa orden
+      if(m.ganancia_dropi&&m.ganancia_dropi>0){semanas[w].ganDropi+=m.ganancia_dropi;semanas[w].ganDropiConDato++}
+      else{semanas[w].ganDropi+=(precio-costo-fo-alm)}
     }
     // Flete devolución real: solo de las devueltas
     if(st==='devuelto'){
@@ -1689,8 +1725,11 @@ async function cargarResumenSemanal(){
     const costoConv=conv*ccDefault
     // Estimada
     const ganEst=Math.round((d.ventaEfTeorica||0)-(d.costoEfTeorico||0)-(d.fleteOutTot||0)-(d.fleteDevTeorico||0)-(d.almacenTeorico||0)-gasto-costoConv-fijosSemana)
-    // Real
-    const ganReal=Math.round((d.ventaEnt||0)-(d.costoEnt||0)-(d.fleteOutTot||0)-(d.fleteDevReal||0)-(d.almacenEnt||0)-gasto-costoConv-fijosSemana)
+    // Real teórico (fallback): cálculo de siempre con teóricos
+    const ganRealTeorico=Math.round((d.ventaEnt||0)-(d.costoEnt||0)-(d.fleteOutTot||0)-(d.fleteDevReal||0)-(d.almacenEnt||0)-gasto-costoConv-fijosSemana)
+    // #6 Real con datos reales de Dropi: ganancia liquidada de entregados − devolución real − ads − conv − fijos (÷30×7)
+    const ganRealDropi=Math.round((d.ganDropi||0)-(d.fleteDevReal||0)-gasto-costoConv-fijosSemana)
+    const ganReal=(d.ganDropiConDato>0)?ganRealDropi:ganRealTeorico
     // Ganancia neta logística: solo producto + fletes + almacenamiento (SIN ads, SIN conversación, SIN fijos)
     const ganLogist=Math.round((d.ventaEnt||0)-(d.costoEnt||0)-(d.fleteOutTot||0)-(d.fleteDevReal||0)-(d.almacenEnt||0))
     ganByWeek[w.key]={ganEst,ganReal,costoConv,ganLogist}
@@ -1776,7 +1815,7 @@ async function cargarResumenSemanal(){
       ${_th('$ En la Mesa','venta que perdí','background:rgba(245,158,11,.05)','Venta que perdiste por cancelaciones = precio × pedidos cancelados. No salió de tu bolsillo, pero es plata que dejaste de ganar.')}
       ${_th('Gan. Logíst.','deja sin publi','background:rgba(34,197,94,.05)','Lo que deja solo la logística, SIN contar publi ni chats ni fijos = venta cobrada − producto − fletes − almacenamiento (solo marca propia).')}
       ${_th('Gan. Estimada','debería quedarme','background:rgba(34,197,94,.05)','Ganancia teórica del total, descontando el % de devolución esperado y todos los costos (producto, fletes, almacenamiento de marca propia, publi, chats, fijos).')}
-      ${_th('Gan. Real','lo que me quedó','background:rgba(34,197,94,.05)','Lo que de verdad te quedó = venta cobrada − producto − fletes − almacenamiento (marca propia) − publi − chats − fijos. La flecha compara con la semana anterior.')}
+      ${_th('Gan. Real','lo que me quedó','background:rgba(34,197,94,.05)','Lo que de verdad te quedó. Usa la ganancia REAL que Dropi liquidó de lo entregado − costo de devolución de lo devuelto − publi − chats − fijos (÷30×7). Si Dropi aún no liquidó esa semana, usa el cálculo teórico. La flecha compara con la semana anterior.')}
       ${_th('Gan/Orden','por cada entrega','background:rgba(34,197,94,.05)','Cuánto te quedó limpio por cada pedido entregado = Ganancia Real ÷ Entregadas.')}
     </tr>
   </thead>`
@@ -2110,7 +2149,7 @@ async function loadTracker(){
     }
 
     // 4. Mapeos del rango (cruzar con campañas vía ad_id → campaign)
-    const{data:mapeos}=await sb.from('mapeos').select('fecha,cantidad,producto,estado_final,ad_id').gte('fecha',desde).lte('fecha',hasta).limit(20000)
+    const{data:mapeos}=await sb.from('mapeos').select('fecha,cantidad,producto,estado_final,ad_id,ganancia_dropi').gte('fecha',desde).lte('fecha',hasta).limit(20000)
 
     // 5. Conversaciones (reportes_diarios) — último gana por fecha+producto
     const{data:reps}=await sb.from('reportes_diarios').select('fecha,producto_id,conversaciones,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
@@ -2164,7 +2203,7 @@ async function loadTracker(){
       if(!pid)continue
       if(!dataPorProd[pid])dataPorProd[pid]={}
       const f=m.fecha||'?'
-      if(!dataPorProd[pid][f])dataPorProd[pid][f]={o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,ent:0,dev:0,conv:0}
+      if(!dataPorProd[pid][f])dataPorProd[pid][f]={o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,ent:0,dev:0,conv:0,ganDropi:0,entConDato:0}
       const d=dataPorProd[pid][f]
       const q=m.cantidad||2
       const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
@@ -2172,7 +2211,7 @@ async function loadTracker(){
       if(cat==='pendiente'||!m.estado_final){d.pend++;continue}
       d.conf++
       if(q===1)d.o1++;else if(q===2)d.o2++;else if(q===3)d.o3++;else d.o4++
-      if(cat==='entregado'||cat==='novedad_ok')d.ent++
+      if(cat==='entregado'||cat==='novedad_ok'){d.ent++;if(m.ganancia_dropi&&m.ganancia_dropi>0){d.ganDropi+=m.ganancia_dropi;d.entConDato++}}
       else if(cat==='devuelto')d.dev++
     }
     // Conversaciones por producto + fecha (último gana, dedupe por fecha+producto_id)
@@ -2183,7 +2222,7 @@ async function loadTracker(){
       if(_convTrkSeen[k])continue
       _convTrkSeen[k]=true
       if(!dataPorProd[r.producto_id])dataPorProd[r.producto_id]={}
-      if(!dataPorProd[r.producto_id][r.fecha])dataPorProd[r.producto_id][r.fecha]={o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,ent:0,dev:0,conv:0}
+      if(!dataPorProd[r.producto_id][r.fecha])dataPorProd[r.producto_id][r.fecha]={o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,ent:0,dev:0,conv:0,ganDropi:0,entConDato:0}
       dataPorProd[r.producto_id][r.fecha].conv+=(r.conversaciones||0)
     }
 
@@ -2198,18 +2237,19 @@ async function loadTracker(){
       const cv=prod.conversaciones_por_venta!=null?prod.conversaciones_por_venta:25
       const fo=prod.flete_outbound||21000
       const fdN=prod.flete_devolucion||18000
-      let aGasto=0,aConf=0,aCanc=0,aPend=0,aEnt=0,aDev=0,aConv=0,aVenta=0,aCosto=0,a1=0,a2=0,a3=0,a4=0
+      let aGasto=0,aConf=0,aCanc=0,aPend=0,aEnt=0,aDev=0,aConv=0,aVenta=0,aCosto=0,a1=0,a2=0,a3=0,a4=0,aGanDropi=0,aEntConDato=0
       // unión de fechas
       const fechas=new Set([...Object.keys(gastoPorProd[pid]||{}),...Object.keys(dataPorProd[pid]||{})])
       for(const f of fechas){
         if(f==='?')continue
         fechasSet.add(f)
-        const dMap=(dataPorProd[pid]||{})[f]||{o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,ent:0,dev:0,conv:0}
+        const dMap=(dataPorProd[pid]||{})[f]||{o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,ent:0,dev:0,conv:0,ganDropi:0,entConDato:0}
         const dGas=(gastoPorProd[pid]||{})[f]||{gasto:0}
         aGasto+=dGas.gasto
         aConf+=dMap.conf;aCanc+=dMap.canc;aPend+=dMap.pend
         aEnt+=dMap.ent;aDev+=dMap.dev;aConv+=dMap.conv
         a1+=dMap.o1;a2+=dMap.o2;a3+=dMap.o3;a4+=dMap.o4
+        aGanDropi+=(dMap.ganDropi||0);aEntConDato+=(dMap.entConDato||0)
         aVenta+=(dMap.o1*(prod.precio_1u||0))+(dMap.o2*(prod.precio_2u||0))+(dMap.o3*(prod.precio_3u||0))+(dMap.o4*(prod.precio_4u||0))
         aCosto+=(dMap.o1*(prod.costo_1u||0))+(dMap.o2*(prod.costo_2u||0))+(dMap.o3*(prod.costo_3u||0))+(dMap.o4*(prod.costo_4u||0))
       }
@@ -2227,12 +2267,20 @@ async function loadTracker(){
       const costoEntAprox=aEnt*promedioCosto
       const fleteOutReal=aConf*fo // todas las despachadas pagan flete
       const fleteDevReal=aDev*fdN
-      const ganReal=Math.round(ventaRealAprox-costoEntAprox-fleteOutReal-fleteDevReal-aGasto-aConv*cc)
+      // Real teórico (fallback): cálculo de siempre con promedios
+      const ganRealTeorico=Math.round(ventaRealAprox-costoEntAprox-fleteOutReal-fleteDevReal-aGasto-aConv*cc)
+      // #7 Real con datos reales de Dropi (SIN gastos fijos): ganancia liquidada de entregadas
+      //   + teórico de las entregadas que Dropi aún no liquidó − costo devolución − ads − conv.
+      const _ganTeoricaPorEnt=promedioPrecio-promedioCosto-fo
+      const _aEntSinDato=Math.max(0,aEnt-aEntConDato)
+      const ganRealDropi=Math.round(aGanDropi+_aEntSinDato*_ganTeoricaPorEnt-fleteDevReal-aGasto-aConv*cc)
+      const ganReal=(aEntConDato>0)?ganRealDropi:ganRealTeorico
+      const _usaDropiTrk=aEntConDato>0
       // CPA y ROAS sobre confirmados
       const cpa=aConf>0?aGasto/aConf:0
       const roasBruto=aGasto>0&&aVenta>0?aVenta/aGasto:0
       const roasReal=aGasto>0&&aEnt>0?ventaRealAprox/aGasto:0
-      accProd[pid]={aGasto,aConf,aCanc,aPend,aEnt,aDev,aConv,aVenta,a1,a2,a3,a4,ganProy,ganReal,cpa,roasBruto,roasReal,promedioPrecio,promedioCosto,fechas,dp,fo,fdN,cc,cv,nombre:prod.nombre,
+      accProd[pid]={aGasto,aConf,aCanc,aPend,aEnt,aDev,aConv,aVenta,a1,a2,a3,a4,ganProy,ganReal,cpa,roasBruto,roasReal,promedioPrecio,promedioCosto,fechas,dp,fo,fdN,cc,cv,nombre:prod.nombre,usaDropiTrk:_usaDropiTrk,
         desgloseGanProy:{ventaProy:Math.round(ventaProy),aCosto,fleteOutProy:Math.round(fleteOutProy),fleteDevProy:Math.round(fleteDevProy),aGasto,costoConv:Math.round(aConv*cc),dp}
       }
     }
@@ -2270,7 +2318,7 @@ async function loadTracker(){
     <div class="cards-row c2" style="margin-bottom:14px">
       <div class="card ${gGanProy>=0?'c-green':'c-red'}"><div class="card-label">Ganancia Proyectada${nfo(gGanProy>=0?'g':'r',`<b>Lo que GANARÍAS si todo sale como siempre.</b> 🔮<br><br>Es un cálculo optimista: imagina que se entrega el % de pedidos de siempre. <b>Todavía NO es plata real.</b><br><br>👉 Para saber lo de verdad, mira la "Ganancia Real" de al lado.`)}</div><div class="card-val">$${fmt(gGanProy)}</div>
         <div class="card-sub">Con % dev teórico</div></div>
-      <div class="card ${gGanReal>=0?'c-green':'c-red'}"><div class="card-label">Ganancia Real${nfo(gGanReal>=0?'g':'r',`<b>Esta es LA DE VERDAD.</b> 💵<br><br>Suma solo la venta de lo que Dropi <b>YA entregó y cobró</b>. Pero le resta el flete de <b>TODO lo que se despachó</b> (ese flete se paga aunque el paquete no llegue), más el costo del producto entregado, lo pagado a Facebook y las conversaciones.<br><br>👉 Por eso, si despachas mucho pero entregas poco, da <span class="neg">rojo</span> (pierdes) aunque las pocas entregas se vean bien. <span class="pos">Verde</span> = ganas.`)}</div><div class="card-val">$${fmt(gGanReal)}</div>
+      <div class="card ${gGanReal>=0?'c-green':'c-red'}"><div class="card-label">Ganancia Real${nfo(gGanReal>=0?'g':'r',`<b>Esta es LA DE VERDAD.</b> 💵<br><br>Usa la <b>ganancia REAL que Dropi liquidó</b> de cada pedido entregado, menos el costo de devolución de lo devuelto, lo pagado a Facebook y las conversaciones. <b>No incluye gastos fijos.</b><br><br>Si un pedido entregado aún no fue liquidado por Dropi, se usa el cálculo teórico de esa orden.<br><br>👉 <span class="neg">Rojo</span> = pierdes. <span class="pos">Verde</span> = ganas.`)}</div><div class="card-val">$${fmt(gGanReal)}</div>
         <div class="card-sub">ROAS real: ${gRoasReal>0?gRoasReal.toFixed(2)+'x':'—'} · Con entregas Dropi</div></div>
     </div>`
 
@@ -2304,7 +2352,7 @@ async function loadTracker(){
     // 13. Tabla por producto
     html+=`<div class="section-title">Por producto</div>
       <div class="table-wrap"><table style="font-size:12px">
-        <tr><th>Producto${nfo('n',`<b>El nombre del producto.</b><br><br>Cada fila resume las ventas y la plata de UN producto en las fechas que elegiste.`)}</th><th>Gasto${nfo('b',`<b>Plata pagada a Facebook</b> por los anuncios de ESTE producto en estas fechas.`)}</th><th>Conf${nfo('g',`<b>Pedidos confirmados:</b> el cliente dijo "sí, lo quiero".<br><br>👉 Más = mejor.`)}</th><th>Canc${nfo('r',`<b>Pedidos cancelados:</b> el cliente dijo "no".<br><br>👉 Más = peor.`)}</th><th>Pend${nfo('a',`<b>Pendientes:</b> todavía sin respuesta del cliente.<br><br>👉 Se pueden volver venta si los llamas a tiempo.`)}</th><th>Ent${nfo('g',`<b>Entregados:</b> Dropi YA los llevó y cobró.<br><br>👉 Aquí es donde entra la plata de verdad.`)}</th><th>Dev${nfo('r',`<b>Devueltos:</b> el cliente no recibió y el paquete volvió a bodega.<br><br>👉 Cada uno cuesta flete. Más = peor.`)}</th><th>Venta${nfo('g',`<b>Plata total de los pedidos confirmados</b> (precio × cantidad).<br><br>👉 Todavía NO le resta costos.`)}</th><th>CPA${nfo('r',`<b>Cuánto te costó conseguir CADA venta.</b><br><br>Se saca: gasto ÷ ventas.<br><br>👉 <span class="pos">Verde</span> = barato (vas ganando). <span class="neg">Rojo</span> = caro (vas perdiendo).`)}</th><th>ROAS Bruto${nfo('g',`<b>Por cada $1 de anuncio, cuánta venta entró.</b><br><br>👉 Más alto = mejor. Es venta, todavía no es ganancia.`)}</th><th>Gan Proy${nfo('a',`<b>Ganancia soñada</b> 🔮 si se entrega el % de siempre.<br><br>👉 NO es plata real todavía.`)}</th><th>Gan Real${nfo('g',`<b>Ganancia DE VERDAD.</b> Suma solo la venta de lo entregado, pero resta el flete de <b>TODO lo despachado</b> (se paga aunque no llegue) + costo del producto, Facebook y conversaciones.<br><br>👉 <span class="neg">Rojo</span> = pierdes. <span class="pos">Verde</span> = ganas.`)}</th><th>ROAS Real${nfo('g',`<b>Lo mismo que ROAS pero con la plata REAL</b> (solo lo entregado).<br><br>👉 Mayor a 1x = ya recuperaste lo que invertiste.`)}</th></tr>`
+        <tr><th>Producto${nfo('n',`<b>El nombre del producto.</b><br><br>Cada fila resume las ventas y la plata de UN producto en las fechas que elegiste.`)}</th><th>Gasto${nfo('b',`<b>Plata pagada a Facebook</b> por los anuncios de ESTE producto en estas fechas.`)}</th><th>Conf${nfo('g',`<b>Pedidos confirmados:</b> el cliente dijo "sí, lo quiero".<br><br>👉 Más = mejor.`)}</th><th>Canc${nfo('r',`<b>Pedidos cancelados:</b> el cliente dijo "no".<br><br>👉 Más = peor.`)}</th><th>Pend${nfo('a',`<b>Pendientes:</b> todavía sin respuesta del cliente.<br><br>👉 Se pueden volver venta si los llamas a tiempo.`)}</th><th>Ent${nfo('g',`<b>Entregados:</b> Dropi YA los llevó y cobró.<br><br>👉 Aquí es donde entra la plata de verdad.`)}</th><th>Dev${nfo('r',`<b>Devueltos:</b> el cliente no recibió y el paquete volvió a bodega.<br><br>👉 Cada uno cuesta flete. Más = peor.`)}</th><th>Venta${nfo('g',`<b>Plata total de los pedidos confirmados</b> (precio × cantidad).<br><br>👉 Todavía NO le resta costos.`)}</th><th>CPA${nfo('r',`<b>Cuánto te costó conseguir CADA venta.</b><br><br>Se saca: gasto ÷ ventas.<br><br>👉 <span class="pos">Verde</span> = barato (vas ganando). <span class="neg">Rojo</span> = caro (vas perdiendo).`)}</th><th>ROAS Bruto${nfo('g',`<b>Por cada $1 de anuncio, cuánta venta entró.</b><br><br>👉 Más alto = mejor. Es venta, todavía no es ganancia.`)}</th><th>Gan Proy${nfo('a',`<b>Ganancia soñada</b> 🔮 si se entrega el % de siempre.<br><br>👉 NO es plata real todavía.`)}</th><th>Gan Real${nfo('g',`<b>Ganancia DE VERDAD.</b> Usa la ganancia REAL que Dropi liquidó de lo entregado, menos el costo de devolución de lo devuelto, Facebook y conversaciones. <b>Sin gastos fijos.</b><br><br>Lo que Dropi aún no liquida se calcula con el teórico de esa orden.<br><br>👉 <span class="neg">Rojo</span> = pierdes. <span class="pos">Verde</span> = ganas.`)}</th><th>ROAS Real${nfo('g',`<b>Lo mismo que ROAS pero con la plata REAL</b> (solo lo entregado).<br><br>👉 Mayor a 1x = ya recuperaste lo que invertiste.`)}</th></tr>`
     const prodIds=Object.keys(accProd).sort((a,b)=>accProd[b].aGasto-accProd[a].aGasto)
     for(const pid of prodIds){
       const a=accProd[pid]
@@ -4079,7 +4127,7 @@ async function refreshProdResumen(id){
       if(cat==='pendiente'||!m.estado_final){pend++;continue}
       conf++
       if(cat==='entregado'||cat==='novedad_ok')ent++
-      else if(cat==='devuelto')dev++ // incluye DEVOLUCION + RECHAZADO
+      else if(cat==='devuelto')dev++ // solo DEVOLUCION (RECHAZADO ya cuenta como cancelado: nunca salió)
     }
 
     // CPA Real (siempre = Gasto / Confirmados, igual que Meta)
@@ -8908,7 +8956,7 @@ const DROPI_STATUS={
   'ENTREGADO':{cat:'entregado',emoji:'✅',pill:'pill-green',label:'Entregado'},
   'CANCELADO':{cat:'cancelado',emoji:'❌',pill:'pill-red',label:'Cancelado'},
   'DEVOLUCION':{cat:'devuelto',emoji:'↩️',pill:'pill-red',label:'Devuelto'},
-  'RECHAZADO':{cat:'devuelto',emoji:'🚫',pill:'pill-red',label:'Rechazado'},
+  'RECHAZADO':{cat:'cancelado',emoji:'🚫',pill:'pill-red',label:'Rechazado'},
   'PENDIENTE CONFIRMACION':{cat:'pendiente',emoji:'⏳',pill:'pill-amber',label:'Pendiente'},
   'PENDIENTE':{cat:'pendiente',emoji:'⏳',pill:'pill-amber',label:'Pendiente'},
   'DESPACHADA':{cat:'en_proceso',emoji:'📦',pill:'pill-blue',label:'Despachada'},
@@ -8927,6 +8975,22 @@ const DROPI_STATUS={
   'INTENTO DE ENTREGA':{cat:'novedad',emoji:'⚠️',pill:'pill-amber',label:'Intento entrega'},
   'SIN MOVIMIENTOS':{cat:'novedad',emoji:'⚠️',pill:'pill-amber',label:'Sin movimiento'},
   'NOVEDAD SOLUCIONADA':{cat:'novedad_ok',emoji:'✅',pill:'pill-green',label:'Novedad resuelta'},
+  'CONFIRMADO':{cat:'pendiente',emoji:'⏳',pill:'pill-amber',label:'Confirmado'},
+  'TELEMERCADEO':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'Telemercadeo'},
+  'ADMITIDA':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'Admitida'},
+  'REENVÍO':{cat:'en_transito',emoji:'↩️',pill:'pill-blue',label:'Reenvío'},
+  'REENVIO':{cat:'en_transito',emoji:'↩️',pill:'pill-blue',label:'Reenvío'},
+  'EN PUNTO DROOP':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'En punto'},
+  'EN PUNTO DROPI':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'En punto'},
+  'EN BODEGA DROPI':{cat:'en_transito',emoji:'↩️',pill:'pill-blue',label:'Bodega Dropi'},
+  'GUIA_ANULADA':{cat:'cancelado',emoji:'❌',pill:'pill-red',label:'Guía anulada'},
+  'RECOGIDO POR DROPI':{cat:'en_transito',emoji:'↩️',pill:'pill-blue',label:'Recogido Dropi'},
+  'INDEMNIZADA':{cat:'novedad',emoji:'💸',pill:'pill-amber',label:'Indemnizada'},
+  'INDEMNIZADA POR DROPI':{cat:'novedad',emoji:'💸',pill:'pill-amber',label:'Indemnizada Dropi'},
+  'DESTRUCCION - SALVAMENTO - DONACION':{cat:'novedad',emoji:'🗑️',pill:'pill-amber',label:'Destrucción/Donación'},
+  'LOST':{cat:'novedad',emoji:'⚫',pill:'pill-amber',label:'Perdido'},
+  'EN PROCESO DE INDEMNIZACION':{cat:'novedad',emoji:'💸',pill:'pill-amber',label:'Proc. indemnización'},
+  'RECOGIDA FALLIDA':{cat:'novedad',emoji:'⚠️',pill:'pill-amber',label:'Recogida fallida'},
 }
 window.DROPI_STATUS=DROPI_STATUS
 
@@ -9542,6 +9606,9 @@ window.procesarDropi=async()=>{
       ciudad:String(r['CIUDAD DESTINO']||''),
       nombre:String(r['NOMBRE CLIENTE']||''),
       id_dropi:String(r['ID']||''),
+      ganancia_dropi:parseFloat(r['GANANCIA'])||0,
+      costo_proveedor_dropi:parseFloat(r['PRECIO PROVEEDOR X CANTIDAD'])||0,
+      comision_dropi:parseFloat(r['COMISION'])||0,
     })).filter(o=>o.telefono.length>=7)
 
     // 3. Buscar en mapeos por teléfono (paginado)
@@ -9662,6 +9729,10 @@ window.actualizarEstadosDropi=async()=>{
     if(r.flete>0)updatePayload.flete_snapshot=r.flete
     // flete_dev solo se sobreescribe si Dropi lo tiene (devolución real); si no, preserva estimación
     if(r.flete_dev>0)updatePayload.flete_dev_snapshot=r.flete_dev
+    // Ganancia real de Dropi: solo si viene >0, para no sobreescribir un dato real con un vacío
+    if(r.ganancia_dropi>0)updatePayload.ganancia_dropi=r.ganancia_dropi
+    if(r.costo_proveedor_dropi>0)updatePayload.costo_proveedor_dropi=r.costo_proveedor_dropi
+    if(r.comision_dropi>0)updatePayload.comision_dropi=r.comision_dropi
     const{error}=await sb.from('mapeos').update(updatePayload).eq('id',r.mapeo.id)
     if(error){fail++}
     else{
@@ -10214,6 +10285,9 @@ window.procesarSeguimiento=async()=>{
       transportadora:String(r['TRANSPORTADORA']||''),
       novedad:String(r['NOVEDAD']||''),
       ciudad:String(r['CIUDAD DESTINO']||''),
+      ganancia_dropi:parseFloat(r['GANANCIA'])||0,
+      costo_proveedor_dropi:parseFloat(r['PRECIO PROVEEDOR X CANTIDAD'])||0,
+      comision_dropi:parseFloat(r['COMISION'])||0,
     })).filter(o=>o.telefono.length>=7)
 
     // Cruzar con mapeos
@@ -10309,7 +10383,12 @@ window.procesarSeguimiento=async()=>{
       if(r.mapeo){
         let fd=null
         if(r.fecha_dropi){const p=r.fecha_dropi.split('-');if(p.length===3)fd=`${p[2]}-${p[1]}-${p[0]}`}
-        const{error}=await sb.from('mapeos').update({estado_final:r.estatus,fecha_dropi:fd||r.mapeo.fecha_dropi,nombre_cliente:r.ciudad||r.mapeo.nombre_cliente,novedad_texto:r.novedad||r.mapeo.novedad_texto||null,transportadora:r.transportadora||r.mapeo.transportadora||null}).eq('id',r.mapeo.id)
+        const segPayload={estado_final:r.estatus,fecha_dropi:fd||r.mapeo.fecha_dropi,nombre_cliente:r.ciudad||r.mapeo.nombre_cliente,novedad_texto:r.novedad||r.mapeo.novedad_texto||null,transportadora:r.transportadora||r.mapeo.transportadora||null}
+        // Ganancia real de Dropi: solo si viene >0, para no sobreescribir un dato real con un vacío
+        if(r.ganancia_dropi>0)segPayload.ganancia_dropi=r.ganancia_dropi
+        if(r.costo_proveedor_dropi>0)segPayload.costo_proveedor_dropi=r.costo_proveedor_dropi
+        if(r.comision_dropi>0)segPayload.comision_dropi=r.comision_dropi
+        const{error}=await sb.from('mapeos').update(segPayload).eq('id',r.mapeo.id)
         if(!error){
           updated++
           // ── Fase 3 paso 3: registrar evento en mapeo_eventos si cambió el estado ──

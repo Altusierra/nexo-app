@@ -97,6 +97,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .cards-row.c2{grid-template-columns:1fr 1fr}
 .cards-row.c3{grid-template-columns:1fr 1fr 1fr}
 .cards-row.c4{grid-template-columns:1fr 1fr 1fr 1fr}
+.cards-row.c5{grid-template-columns:repeat(5,1fr)}
 .cards-row.c6{grid-template-columns:repeat(6,1fr)}
 .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
 .card-label{font-size:10px;font-weight:600;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px}
@@ -240,7 +241,7 @@ tr:hover td{background:var(--card2)}
   .content{padding:14px}
   .page-title{font-size:18px}
   .page-sub{font-size:12px;margin-bottom:12px}
-  .cards-row.c6,.cards-row.c4,.cards-row.c3,.cards-row.c2{grid-template-columns:1fr 1fr;gap:8px}
+  .cards-row.c6,.cards-row.c5,.cards-row.c4,.cards-row.c3,.cards-row.c2{grid-template-columns:1fr 1fr;gap:8px}
   .card{padding:12px}
   .form-grid.g4,.form-grid.g3,.form-grid.g2{grid-template-columns:1fr;gap:10px}
   .modal-box{max-width:100%;padding:18px}
@@ -846,7 +847,7 @@ async function loadDash(){
   }
 
   // 2. Órdenes desde mapeos (ahora también trae precio_dropi para Ventas Netas reales)
-  const{data:mapeos}=await sb.from('mapeos').select('cantidad,producto,estado_final,fecha,ad_id,precio_dropi').gte('fecha',desde).lte('fecha',hasta).limit(10000)
+  const{data:mapeos}=await sb.from('mapeos').select('cantidad,producto,producto_id,estado_final,fecha,ad_id,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot').gte('fecha',desde).lte('fecha',hasta).limit(10000)
   let tot1=0,tot2=0,tot3=0,tot4=0,conf=0,canc=0,pend=0,conAd=0
   let cConf1=0,cConf2=0,cConf3=0,cConf4=0
   const prodStats={}
@@ -886,13 +887,15 @@ async function loadDash(){
 
   // 2b. NUEVO: Órdenes por FECHA DROPI (cuándo se subieron a Dropi, no cuándo se vendieron en chat)
   const{data:mapeosDropi}=await sb.from('mapeos').select('cantidad,estado_final').gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).limit(10000)
-  let totD1=0,totD2=0,totD3=0,totD4=0,confD=0,cancD=0,pendD=0
+  let totD1=0,totD2=0,totD3=0,totD4=0,confD=0,cancD=0,pendD=0,entD=0
   for(const m of (mapeosDropi||[])){
     const q=m.cantidad||2
     if(q===1)totD1++;else if(q===2)totD2++;else if(q===3)totD3++;else totD4++
     if(m.estado_final==='CANCELADO')cancD++
     else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)pendD++
     else confD++
+    const _stD=DROPI_STATUS[m.estado_final]?.cat
+    if(_stD==='entregado'||_stD==='novedad_ok')entD++
   }
   const totalOrdsDropi=totD1+totD2+totD3+totD4
 
@@ -958,6 +961,25 @@ async function loadDash(){
   const devPct=_pesoDev>0?(_devPctPonderado/_pesoDev):((productos[0]||{}).dev_pct||0.19)
   const costoConv=costoConvTotal // mantener nombre original (lo usa la card de UI)
   const ganNeta=ventaEfectiva-costoProvTotal-costoFlete-costoDevolucion-gastoTotal-costoConv-gastoFijoPeriodo
+  // GANANCIA REAL (espejo del Resumen Semanal "Me quedó limpio"): solo cuenta la venta
+  // YA entregada y cobrada, menos TODOS los costos ya incurridos (incluido el gasto de ads
+  // completo). Usa snapshots por orden. Loop aparte para no tocar el loop de arriba.
+  let _grVEnt=0,_grCEnt=0,_grFOut=0,_grFDev=0,_grAlm=0,_grEnt=0
+  for(const m of (mapeos||[])){
+    const _st=(!m.estado_final)?'pendiente':(DROPI_STATUS[m.estado_final]?.cat||'otro')
+    const _pn=resolveProdName(m.producto).nombre
+    const _prod=productos.find(p=>p.nombre===_pn)||productos[0]||{}
+    const _q=m.cantidad||2
+    const _precio=m.precio_dropi||[0,_prod.precio_1u||0,_prod.precio_2u||0,_prod.precio_3u||0,_prod.precio_4u||0][_q]||(_prod.precio_2u||0)
+    const _costo=m.costo_snapshot||[0,_prod.costo_1u||0,_prod.costo_2u||0,_prod.costo_3u||0,_prod.costo_4u||0][_q]||(_prod.costo_2u||0)
+    const _fo=m.flete_snapshot||_prod.flete_outbound||21000
+    const _fd=m.flete_dev_snapshot||_prod.flete_devolucion||18000
+    const _alm=(_prod.tipo_producto==='marca_propia')?(_prod.almacenamiento||0):0
+    if(_st!=='cancelado')_grFOut+=_fo
+    if(_st==='entregado'||_st==='novedad_ok'){_grVEnt+=_precio;_grCEnt+=_costo;_grAlm+=_alm;_grEnt++}
+    if(_st==='devuelto')_grFDev+=_fd
+  }
+  const ganReal=Math.round(_grVEnt-_grCEnt-_grFOut-_grFDev-_grAlm-gastoTotal-costoConv-gastoFijoPeriodo)
   const roas_bruto=gastoTotal>0?ventaTotal/gastoTotal:0
   const roas_neto=gastoTotal>0?(ganNeta+gastoTotal)/gastoTotal:0
   const cpa=totalOrdsConf>0?gastoTotal/totalOrdsConf:0
@@ -1145,9 +1167,14 @@ async function loadDash(){
         <div class="card-sub">${countConPrecioReal} reales · ${countConPrecioEstimado} estimadas</div>
       </div>
       <div class="card ${ganNeta>=0?'c-green':'c-red'}">
-        <div class="card-label">💰 Ganancia neta ${tieneOferta?`<span style="cursor:help;font-size:11px;opacity:.7;border:1px solid var(--border);border-radius:50%;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted);margin-left:2px;vertical-align:middle;font-weight:400" title="Cómo sale $${fmt(ganNeta)}:&#10;&#10;Venta efectiva (${Math.round(devPct*100)}% dev ponderado): $${fmt(ventaEfectiva)}&#10;− Costo producto: −$${fmt(costoProvTotal)}&#10;− Flete: −$${fmt(costoFlete)}&#10;− Devolución: −$${fmt(costoDevolucion)}&#10;− Gasto ads: −$${fmt(gastoTotal)}&#10;− Costo conversación: −$${fmt(costoConv)}&#10;− Gastos fijos (${dias}d): −$${fmt(gastoFijoPeriodo)}&#10;&#10;= $${fmt(ganNeta)}&#10;&#10;(% devolución calculado por producto específico, no global)">ℹ</span>`:''}</div>
+        <div class="card-label">💰 Ganancia neta (proyectada) ${tieneOferta?`<span style="cursor:help;font-size:11px;opacity:.7;border:1px solid var(--border);border-radius:50%;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted);margin-left:2px;vertical-align:middle;font-weight:400" title="PROYECTADA: sobre las ${totalOrdsConf} confirmadas, asumiendo que se entregan al ${100-Math.round(devPct*100)}%.&#10;&#10;Venta efectiva (${Math.round(devPct*100)}% dev ponderado): $${fmt(ventaEfectiva)}&#10;− Costo producto: −$${fmt(costoProvTotal)}&#10;− Flete: −$${fmt(costoFlete)}&#10;− Devolución: −$${fmt(costoDevolucion)}&#10;− Gasto ads: −$${fmt(gastoTotal)}&#10;− Costo conversación: −$${fmt(costoConv)}&#10;− Gastos fijos (${dias}d): −$${fmt(gastoFijoPeriodo)}&#10;&#10;= $${fmt(ganNeta)}&#10;&#10;(% devolución por producto específico)">ℹ</span>`:''}</div>
         <div class="card-val">${tieneOferta?'$'+fmt(ganNeta):'—'}</div>
         <div class="card-sub">${tieneOferta?`Margen ${(ganNeta/ventaTotal*100).toFixed(1)}%`:'Sin oferta'}</div>
+        ${tieneOferta?`<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+          <div class="card-label" style="margin:0">✅ Ganancia real <span style="cursor:help;font-size:11px;opacity:.7;border:1px solid var(--border);border-radius:50%;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted);margin-left:2px;vertical-align:middle;font-weight:400" title="REAL: solo lo que YA se entregó y cobró (${_grEnt} entregadas), menos TODOS los costos ya gastados (incluido el gasto de ads completo).&#10;&#10;Venta cobrada: $${fmt(Math.round(_grVEnt))}&#10;− Costo producto: −$${fmt(Math.round(_grCEnt))}&#10;− Flete: −$${fmt(Math.round(_grFOut))}&#10;− Devolución: −$${fmt(Math.round(_grFDev))}&#10;− Gasto ads: −$${fmt(gastoTotal)}&#10;− Costo conversación: −$${fmt(costoConv)}&#10;− Gastos fijos (${dias}d): −$${fmt(gastoFijoPeriodo)}&#10;&#10;= $${fmt(ganReal)}&#10;&#10;Suele ir más abajo (o negativa) en rangos recientes: ya gastaste en ads pero muchas ventas siguen en la calle sin cobrarse. Es el mismo número del 'Me quedó limpio' del Resumen Semanal.">ℹ</span></div>
+          <div style="font-size:18px;font-weight:700;color:var(${ganReal>=0?'--green':'--red'})">${ganReal>=0?'$'+fmt(ganReal):'-$'+fmt(Math.abs(ganReal))}</div>
+          <div class="card-sub">Ya cobrado · ${_grEnt} entregadas</div>
+        </div>`:''}
       </div>
       <div class="card" style="border-color:var(${cpaPct>100?'--red':cpaPct>70?'--amber':'--border'})">
         <div class="card-label">🎯 CPA vs límite</div>
@@ -1202,7 +1229,7 @@ async function loadDash(){
   // RENDER: Ventas y órdenes DROPI (por fecha_dropi)
   const _bloqueVentasDropiHTML=`
     <div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;margin-top:16px">📦 Ventas y órdenes DROPI <span style="color:var(--subtle);font-weight:500;text-transform:none;letter-spacing:0;font-size:11px">· por fecha de subida a Dropi</span></div>
-    <div class="cards-row c4">
+    <div class="cards-row c5">
       <div class="card">
         <div class="card-label">Órdenes totales</div>
         <div class="card-val">${totalOrdsDropi}</div>
@@ -1212,6 +1239,11 @@ async function loadDash(){
         <div class="card-label">Confirmados</div>
         <div class="card-val">${confD}</div>
         <div class="card-sub">${totalOrdsDropi>0?Math.round(confD/totalOrdsDropi*100):0}% del total</div>
+      </div>
+      <div class="card c-green">
+        <div class="card-label">Entregados</div>
+        <div class="card-val">${entD}</div>
+        <div class="card-sub">${confD>0?Math.round(entD/confD*100):0}% de confirmados</div>
       </div>
       <div class="card c-red">
         <div class="card-label">Cancelados</div>

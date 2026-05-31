@@ -9800,6 +9800,59 @@ window.copiarTelDropi=async function(btn,tel,fechaDropi){
   }
 }
 
+// ── EMPAREJAMIENTO ROBUSTO ORDEN DROPI → MAPEO ──────────────
+// Soluciona de raíz el "bug del primer mapeo": antes todas las filas de un
+// mismo teléfono caían en mByTel[tel][0], duplicando/moviendo órdenes.
+// Ahora cada fila del xlsx consume UN mapeo distinto, con jerarquía de match:
+//   1) ID de orden de Dropi (único e inmutable) → match perfecto en recruces.
+//   2) Número de guía (único) → match en recruces sin ID guardado.
+//   3) Teléfono + producto + cantidad → primer cruce preciso.
+//   4) Teléfono (consumo 1 a 1) → fallback que evita colisiones.
+// Devuelve un Map: índice de la orden en el array → mapeo asignado.
+window._emparejarDropi=(ordenes,mapeos)=>{
+  const usados=new Set()
+  const byDropiId={},byGuia={},byTel={}
+  for(const m of (mapeos||[])){
+    const oid=String(m.dropi_order_id||'').trim()
+    const g=String(m.numero_guia||'').trim()
+    const t=String(m.telefono||'').replace(/\D/g,'')
+    if(oid&&!byDropiId[oid])byDropiId[oid]=m
+    if(g&&!byGuia[g])byGuia[g]=m
+    if(t){if(!byTel[t])byTel[t]=[];byTel[t].push(m)}
+  }
+  const _n=s=>String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()
+  const res=new Map()
+  // PASE 1: ID de orden de Dropi exacto
+  ordenes.forEach((o,idx)=>{
+    const oid=String(o.id_dropi||'').trim()
+    if(oid&&byDropiId[oid]&&!usados.has(byDropiId[oid].id)){res.set(idx,byDropiId[oid]);usados.add(byDropiId[oid].id)}
+  })
+  // PASE 2: número de guía exacto
+  ordenes.forEach((o,idx)=>{
+    if(res.has(idx))return
+    const g=String(o.numero_guia||'').trim()
+    if(g&&byGuia[g]&&!usados.has(byGuia[g].id)){res.set(idx,byGuia[g]);usados.add(byGuia[g].id)}
+  })
+  // PASE 3: teléfono + producto + cantidad
+  ordenes.forEach((o,idx)=>{
+    if(res.has(idx))return
+    const t=String(o.telefono||'').replace(/\D/g,'')
+    const cand=(byTel[t]||[]).filter(m=>!usados.has(m.id))
+    if(!cand.length)return
+    const prodO=_n(o.producto||o.producto_dropi)
+    const match=cand.find(m=>_n(m.producto)===prodO&&(m.cantidad||0)===(o.cantidad||0))||cand.find(m=>_n(m.producto)===prodO)
+    if(match){res.set(idx,match);usados.add(match.id)}
+  })
+  // PASE 4: teléfono (consumo 1 a 1)
+  ordenes.forEach((o,idx)=>{
+    if(res.has(idx))return
+    const t=String(o.telefono||'').replace(/\D/g,'')
+    const cand=(byTel[t]||[]).find(m=>!usados.has(m.id))
+    if(cand){res.set(idx,cand);usados.add(cand.id)}
+  })
+  return res
+}
+
 window.procesarDropi=async()=>{
   const fileInput=document.getElementById('dropi-file')
   const msg=document.getElementById('dropi-msg')
@@ -9860,9 +9913,10 @@ window.procesarDropi=async()=>{
     const mByTel={}
     for(const m of mapeos){if(!mByTel[m.telefono])mByTel[m.telefono]=[];mByTel[m.telefono].push(m)}
 
-    // 4. Cruzar
-    const resultados=ordenes.map(o=>{
-      const mapeo=mByTel[o.telefono]?.[0]||null
+    // 4. Cruzar (emparejamiento robusto 1 a 1, no por primer mapeo)
+    const _pares=_emparejarDropi(ordenes,mapeos)
+    const resultados=ordenes.map((o,idx)=>{
+      const mapeo=_pares.get(idx)||null
       const si=DROPI_STATUS[o.estatus]||{cat:'otro',emoji:'❓',pill:'pill-blue',label:o.estatus}
       return{...o,mapeo,cruzado:!!mapeo,ad_id:mapeo?.ad_id||null,fecha_venta:mapeo?.fecha||null,si,
         producto:mapeo?.producto||o.producto}
@@ -9979,6 +10033,7 @@ window.actualizarEstadosDropi=async()=>{
       // si esas columnas aún no existen en Supabase, este update falla en silencio y NO afecta lo demás.
       try{
         const extra={}
+        if(r.id_dropi)extra.dropi_order_id=r.id_dropi
         if(r.numero_guia)extra.numero_guia=r.numero_guia
         if(r.fecha_guia)extra.fecha_guia=r.fecha_guia
         if(r.ultimo_mov)extra.ultimo_movimiento=r.ultimo_mov
@@ -10539,6 +10594,7 @@ window.procesarSeguimiento=async()=>{
       estatus:String(r['ESTATUS']||'').trim().toUpperCase(),
       fecha_dropi:String(r['FECHA']||''),
       producto_dropi:String(r['PRODUCTO']||''),
+      id_dropi:String(r['ID']||'').trim(),
       transportadora:String(r['TRANSPORTADORA']||''),
       novedad:String(r['NOVEDAD']||''),
       ciudad:String(r['CIUDAD DESTINO']||''),
@@ -10576,9 +10632,10 @@ window.procesarSeguimiento=async()=>{
     const mByTel={}
     for(const m of mapeos){if(!mByTel[m.telefono])mByTel[m.telefono]=[];mByTel[m.telefono].push(m)}
 
-    // Cruzar y clasificar
-    const resultados=ordenes.map(o=>{
-      const mapeo=mByTel[o.telefono]?.[0]||null
+    // Cruzar y clasificar (emparejamiento robusto 1 a 1, no por primer mapeo)
+    const _paresSeg=_emparejarDropi(ordenes,mapeos)
+    const resultados=ordenes.map((o,idx)=>{
+      const mapeo=_paresSeg.get(idx)||null
       const producto=mapeo?.producto||o.producto_dropi
       const si=DROPI_STATUS[o.estatus]||{cat:'otro',emoji:'❓',pill:'pill-blue',label:o.estatus}
       return{...o,mapeo,producto,si,fecha_lote:mapeo?.fecha_dropi||null}
@@ -10676,6 +10733,7 @@ window.procesarSeguimiento=async()=>{
           // Columnas extra de Dropi. Update aparte y tolerante: si aún no existen en Supabase, falla en silencio.
           try{
             const extra={}
+            if(r.id_dropi)extra.dropi_order_id=r.id_dropi
             if(r.numero_guia)extra.numero_guia=r.numero_guia
             if(r.fecha_guia)extra.fecha_guia=r.fecha_guia
             if(r.ultimo_mov)extra.ultimo_movimiento=r.ultimo_mov

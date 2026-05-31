@@ -1509,32 +1509,48 @@ window.auditarFantasmasDropi=async()=>{
   try{
     const desde=document.getElementById('dash-desde')?.value||_daysAgo(7)
     const hasta=document.getElementById('dash-hasta')?.value||today()
-    // 1. Teléfonos presentes en el xlsx de Dropi
+    // 1. Contar OCURRENCIAS de cada teléfono en el xlsx de Dropi (no solo presencia)
     const buf=await fileInput.files[0].arrayBuffer()
     fileInput.value='' // permite re-auditar el mismo archivo
     const wbook=XLSX.read(buf,{type:'array'})
     const rows=XLSX.utils.sheet_to_json(wbook.Sheets[wbook.SheetNames[0]],{defval:''})
-    const telsXlsx=new Set()
+    const xlsxCount={}
+    let filasXlsx=0
     for(const r of rows){
       const t=String(r['TELÉFONO']||r['TELEFONO']||'').replace(/\D/g,'')
-      if(t.length>=7)telsXlsx.add(t)
+      if(t.length>=7){xlsxCount[t]=(xlsxCount[t]||0)+1;filasXlsx++}
     }
     // 2. Mapeos de Nexo con fecha_dropi dentro del rango del Dashboard
     const{data:mapeosDropi}=await sb.from('mapeos')
       .select('telefono,fecha_dropi,fecha,producto,estado_final,ad_id,nombre_cliente,transportadora,cantidad')
       .gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).limit(10000)
     const totalNexo=(mapeosDropi||[]).length
-    // 3. Huérfanas: en Nexo con fecha_dropi en rango pero el teléfono NO está en el xlsx
-    const huerfanas=(mapeosDropi||[]).filter(m=>{
+    // 3. Agrupar mapeos de Nexo por teléfono
+    const nexoByTel={}
+    for(const m of (mapeosDropi||[])){
       const t=String(m.telefono||'').replace(/\D/g,'')
-      return !telsXlsx.has(t)
-    })
-    // 4. Render
-    if(!huerfanas.length){
-      resEl.innerHTML=`<div class="alert alert-green">✅ Sin fantasmas. Las ${totalNexo} órdenes de Nexo (${desde} → ${hasta}) coinciden con el xlsx de Dropi (${telsXlsx.size} teléfonos).</div>`
+      if(!nexoByTel[t])nexoByTel[t]=[]
+      nexoByTel[t].push(m)
+    }
+    // 4. Fantasmas por OCURRENCIAS (no por presencia):
+    //    - Ausente: el teléfono está en Nexo pero 0 veces en el xlsx.
+    //    - Duplicado: el teléfono aparece MÁS veces en Nexo que en el xlsx
+    //      (mismo cliente con varios pedidos; el cruce solo casa el primero).
+    const fantasmas=[]
+    for(const[tel,lista]of Object.entries(nexoByTel)){
+      const enXlsx=xlsxCount[tel]||0
+      if(enXlsx===0){
+        lista.forEach(m=>fantasmas.push({...m,_motivo:'Ausente en Dropi'}))
+      }else if(lista.length>enXlsx){
+        lista.slice(enXlsx).forEach(m=>fantasmas.push({...m,_motivo:`Duplicado (${lista.length} en Nexo · ${enXlsx} en Dropi)`}))
+      }
+    }
+    // 5. Render
+    if(!fantasmas.length){
+      resEl.innerHTML=`<div class="alert alert-green">✅ Sin fantasmas. Las ${totalNexo} órdenes de Nexo (${desde} → ${hasta}) cuadran 1 a 1 con las ${filasXlsx} filas del xlsx de Dropi.</div>`
       return
     }
-    const filas=huerfanas.map(m=>`<tr>
+    const filas=fantasmas.map(m=>`<tr>
       <td>${m.telefono||'—'}</td>
       <td>${m.fecha_dropi||'—'}</td>
       <td>${m.fecha||'—'}</td>
@@ -1542,18 +1558,19 @@ window.auditarFantasmasDropi=async()=>{
       <td>${m.estado_final||'(sin estado)'}</td>
       <td>${m.transportadora||'—'}</td>
       <td>${m.ad_id||'orgánica'}</td>
+      <td style="font-size:11px;color:var(--amber)">${m._motivo}</td>
     </tr>`).join('')
     resEl.innerHTML=`
       <div class="card" style="border:2px solid var(--amber)">
-        <div style="font-weight:800;font-size:15px;color:var(--amber);margin-bottom:6px">👻 Fantasmas detectadas: ${huerfanas.length}</div>
-        <div style="font-size:13px;color:var(--muted);margin-bottom:4px">Nexo tiene <b>${totalNexo}</b> órdenes con fecha de subida en el rango (${desde} → ${hasta}). El xlsx de Dropi trae <b>${telsXlsx.size}</b> teléfonos. Estas <b>${huerfanas.length}</b> están en Nexo pero <b>NO</b> en el xlsx.</div>
-        <div style="font-size:12.5px;color:var(--subtle);margin-bottom:10px">Causas típicas: anuladas/archivadas/fusionadas en Dropi, o un mismo cliente con varios pedidos (el cruce solo toma el primero). Mira el patrón: ¿mismo carrier? ¿todas canceladas? ¿mismo teléfono repetido?</div>
+        <div style="font-weight:800;font-size:15px;color:var(--amber);margin-bottom:6px">👻 Fantasmas detectadas: ${fantasmas.length}</div>
+        <div style="font-size:13px;color:var(--muted);margin-bottom:4px">Nexo tiene <b>${totalNexo}</b> órdenes con fecha de subida en el rango (${desde} → ${hasta}). El xlsx de Dropi trae <b>${filasXlsx}</b> filas. Sobran <b>${fantasmas.length}</b> en Nexo (${totalNexo} − ${totalNexo-fantasmas.length} que cuadran = ${fantasmas.length}).</div>
+        <div style="font-size:12.5px;color:var(--subtle);margin-bottom:10px"><b>Ausente en Dropi</b> = la orden ya no está en el xlsx (anulada/archivada/fusionada). <b>Duplicado</b> = mismo cliente con varios pedidos; el cruce solo casa el primero y los demás quedan flotando.</div>
         <div class="table-wrap"><table style="font-size:12px">
-          <thead><tr><th>Teléfono</th><th>Fecha Dropi</th><th>Fecha compra</th><th>Producto</th><th>Estado en Nexo</th><th>Carrier</th><th>Ad ID</th></tr></thead>
+          <thead><tr><th>Teléfono</th><th>Fecha Dropi</th><th>Fecha compra</th><th>Producto</th><th>Estado en Nexo</th><th>Carrier</th><th>Ad ID</th><th>Motivo</th></tr></thead>
           <tbody>${filas}</tbody>
         </table></div>
       </div>`
-    logAction('auditoria_fantasmas',{rango:desde+'/'+hasta,total_nexo:totalNexo,tels_xlsx:telsXlsx.size,fantasmas:huerfanas.length}).catch(()=>{})
+    logAction('auditoria_fantasmas',{rango:desde+'/'+hasta,total_nexo:totalNexo,filas_xlsx:filasXlsx,fantasmas:fantasmas.length}).catch(()=>{})
   }catch(e){
     resEl.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
   }

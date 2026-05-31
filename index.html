@@ -332,6 +332,13 @@ tr:hover td{background:var(--card2)}
 .aux-progress-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,var(--accent),var(--purple));transition:width .4s ease;min-width:0}
 /* barra de progreso fija arriba (visible en todas las secciones del auxiliar) */
 .aux-sticky-progress{position:sticky;top:0;z-index:30;background:var(--bg);padding:10px 0 12px;margin:0 0 14px;border-bottom:1px solid var(--border)}
+/* botón flotante Dropi (auxiliar) — siempre visible aunque haga scroll */
+.dropi-fab{position:fixed;right:20px;bottom:20px;z-index:60;display:inline-flex;align-items:center;gap:8px;background:linear-gradient(135deg,var(--accent),var(--purple));color:#fff;border:none;border-radius:999px;padding:13px 20px;font-size:14px;font-weight:800;font-family:inherit;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,.45)}
+.dropi-fab:hover{transform:translateY(-2px);box-shadow:0 12px 30px rgba(0,0,0,.5)}
+.dropi-fab .emoji{font-size:17px}
+.dropi-cred-row{display:flex;align-items:center;gap:10px;background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:10px 12px;margin-top:10px}
+.dropi-cred-row .lbl{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;min-width:78px}
+.dropi-cred-row .val{flex:1;font-size:14px;color:var(--text);font-weight:600;word-break:break-all}
 .aux-today .aux-done{font-size:13px;font-weight:800;color:var(--green);display:inline-flex;align-items:center;gap:4px;margin-top:13px}
 .aux-today .aux-faltan{font-size:12px;font-weight:700;color:var(--red);margin-top:6px}
 /* buscador universal */
@@ -482,6 +489,12 @@ async function loadMe(uid){
     if(!dentroDeHorario(bData?.rol,bData?.hora_inicio,bData?.hora_fin)){console.warn('Fuera de horario');return false}
     me=data
     me.modo_historico=bData?.modo_historico||false
+    // Credenciales Dropi (solo auxiliar las usa). Tolerante si las columnas aún no existen.
+    try{
+      const{data:dData}=await sb.from('usuarios').select('dropi_email,dropi_password').eq('id',data.id).maybeSingle()
+      me.dropi_email=dData?.dropi_email||''
+      me.dropi_password=dData?.dropi_password||''
+    }catch(e){me.dropi_email='';me.dropi_password=''}
     return true
   }catch(e){console.error('loadMe exception:',e);return false}
 }
@@ -497,6 +510,7 @@ async function loadProductos(){
 sb.auth.onAuthStateChange((ev,sess)=>{
   if(!sess){
     me=null
+    const fab=document.getElementById('dropi-fab');if(fab)fab.remove()
     document.getElementById('login-wrap').style.display='flex'
     document.getElementById('app').style.display='none'
   }
@@ -676,6 +690,8 @@ function render(page){
   if(currentRol()==='auxiliar' && !window._auxCounts){
     setTimeout(()=>{try{auxRefreshCounts&&auxRefreshCounts()}catch(e){}},0)
   }
+  // Botón flotante Dropi: siempre visible para el auxiliar en todas sus secciones
+  setTimeout(()=>{try{auxInjectDropiBtn()}catch(e){}},0)
 }
 
 // ── UTILS ──────────────────────────────────────────────────
@@ -4629,6 +4645,14 @@ window.modalUserEdit=(u)=>{
         </label>
         <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-left:24px">Activa esta opción solo cuando necesites cargar datos viejos. Desactiva al terminar.</div>
       </div>
+      <div id="eu-dropi-wrap" style="${u.rol==='auxiliar'?'':'display:none'}">
+        <div style="font-size:13px;font-weight:800;color:var(--text);margin-bottom:6px">🔑 Acceso Dropi (para el botón rápido)</div>
+        <div class="form-grid g2">
+          <div class="fld"><label>Correo Dropi</label><input type="text" id="eu-dropi-email" value="${(u.dropi_email||'').replace(/"/g,'&quot;')}" placeholder="correo@dropi.co" autocapitalize="off"></div>
+          <div class="fld"><label>Contraseña Dropi</label><input type="text" id="eu-dropi-pwd" value="${(u.dropi_password||'').replace(/"/g,'&quot;')}" placeholder="contraseña"></div>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">El auxiliar verá un botón "Dropi" que copia estos datos. No se rellena solo en Dropi (lo bloquea el navegador): copia y pega.</div>
+      </div>
     </div>
     <div id="eu-msg" style="margin-top:10px"></div>
     <div class="modal-actions">
@@ -4640,6 +4664,8 @@ window.modalUserEdit=(u)=>{
   if(rolSel)rolSel.addEventListener('change',()=>{
     const w=document.getElementById('eu-modo-hist-wrap')
     if(w)w.style.display=rolSel.value==='auxiliar'?'':'none'
+    const wd=document.getElementById('eu-dropi-wrap')
+    if(wd)wd.style.display=rolSel.value==='auxiliar'?'':'none'
   })
 }
 
@@ -4675,6 +4701,13 @@ window.doEditUser=async(user_id)=>{
       btn.disabled=false;btn.textContent='Guardar cambios'
       return
     }
+    // 3. Credenciales Dropi directo en la tabla (tolerante: si las columnas no existen, no bloquea)
+    try{
+      const dEmail=document.getElementById('eu-dropi-email')?.value.trim()||null
+      const dPwd=document.getElementById('eu-dropi-pwd')?.value||null
+      const{error:dErr}=await sb.from('usuarios').update({dropi_email:dEmail,dropi_password:dPwd}).eq('id',user_id)
+      if(dErr)console.warn('No se guardaron credenciales Dropi (¿faltan columnas dropi_email/dropi_password?):',dErr.message)
+    }catch(e){console.warn('Dropi update excepción:',e)}
     logAction('usuario_editado',{user_id,modo_historico:modoHistorico}).catch(()=>{})
     closeModal();loadUsuarios()
   }catch(e){
@@ -9348,6 +9381,52 @@ window.auxInjectProgressBar=async()=>{
     window._auxHechas=h
     if(document.getElementById('aux-sticky-progress'))paint(Object.values(h).filter(Boolean).length)
   }catch(e){}
+}
+
+// Botón flotante "Dropi" (solo auxiliar): siempre visible en todas las secciones,
+// fijo en pantalla aunque se haga scroll. Al click abre Dropi y muestra correo/contraseña
+// con botones de copiar (el navegador NO permite rellenar el formulario de Dropi solo).
+const DROPI_LOGIN_URL='https://app.dropi.co/auth/login'
+window.auxInjectDropiBtn=()=>{
+  if(currentRol()!=='auxiliar'){const ex=document.getElementById('dropi-fab');if(ex)ex.remove();return}
+  if(document.getElementById('dropi-fab'))return // ya está
+  const b=document.createElement('button')
+  b.id='dropi-fab'
+  b.className='dropi-fab'
+  b.innerHTML='<span class="emoji">📦</span> Dropi'
+  b.onclick=openDropiPopup
+  document.body.appendChild(b)
+}
+window.openDropiPopup=()=>{
+  const u=currentMe()||{}
+  const email=u.dropi_email||''
+  const pwd=u.dropi_password||''
+  // Abre Dropi en pestaña nueva de inmediato (gesto del usuario, no lo bloquea el navegador)
+  try{window.open(DROPI_LOGIN_URL,'_blank')}catch(e){}
+  if(!email&&!pwd){
+    openModal(`
+      <div class="modal-title">📦 Dropi</div>
+      <div class="modal-sub">Aún no tienes tus datos de Dropi configurados.</div>
+      <div class="alert alert-amber" style="margin-top:10px">Pídele a tu administrador que cargue tu correo y contraseña de Dropi en <b>Equipo → Editar</b>.</div>
+      <div class="modal-actions"><button class="btn-sm btn-primary" onclick="closeModal()">Entendido</button></div>`)
+    return
+  }
+  const esc=s=>(s||'').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
+  openModal(`
+    <div class="modal-title">📦 Entrar a Dropi</div>
+    <div class="modal-sub">Dropi se abrió en otra pestaña. Copia y pega tus datos:</div>
+    <div class="dropi-cred-row">
+      <span class="lbl">Correo</span>
+      <span class="val">${esc(email)}</span>
+      <button class="btn-sm btn-primary" onclick="copiarTextoBtn('${esc(email)}',this)">📋 Copiar</button>
+    </div>
+    <div class="dropi-cred-row">
+      <span class="lbl">Contraseña</span>
+      <span class="val">${esc(pwd)}</span>
+      <button class="btn-sm btn-primary" onclick="copiarTextoBtn('${esc(pwd)}',this)">📋 Copiar</button>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-top:10px">Copia el correo, pégalo en Dropi, vuelve aquí y copia la contraseña.</div>
+    <div class="modal-actions"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>`)
 }
 
 // ════════ CONTEOS DE PENDIENTES + TABLERO "¿QUÉ HAGO HOY?" (auxiliar · solo lectura) ════════

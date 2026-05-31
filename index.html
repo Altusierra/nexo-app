@@ -9900,6 +9900,31 @@ window.procesarDropi=async()=>{
       fecha_reporte:String(r['FECHA DE REPORTE']||'').trim(),
     })).filter(o=>o.telefono.length>=7)
 
+    // ── DEDUP: el aux a veces cancela y resube una orden el mismo día → mismo teléfono aparece 2+ veces.
+    // Nos quedamos con la subida MÁS RECIENTE (FECHA col D + HORA col C). Aplica a preview y guardado.
+    const _tsDropi=(o)=>{
+      const p=String(o.fecha_dropi||'').split(/[-/]/)
+      if(p.length<3)return 0
+      // FECHA viene DD-MM-YYYY
+      const d=+p[0],m=+p[1],y=+p[2]
+      const hp=String(o.hora_orden||'00:00').split(':')
+      const hh=+hp[0]||0,mm=+hp[1]||0
+      const t=new Date(y,(m||1)-1,d||1,hh,mm).getTime()
+      return isNaN(t)?0:t
+    }
+    const _ordenadas=[...ordenes].sort((a,b)=>_tsDropi(b)-_tsDropi(a))
+    const _vistos=new Set()
+    const _dedupOrdenes=[]
+    for(const o of _ordenadas){
+      if(_vistos.has(o.telefono))continue
+      _vistos.add(o.telefono)
+      _dedupOrdenes.push(o)
+    }
+    const _eliminadasDup=ordenes.length-_dedupOrdenes.length
+    window._dropiDedupInfo={total:ordenes.length,unicas:_dedupOrdenes.length,eliminadas:_eliminadasDup}
+    ordenes.length=0
+    ordenes.push(..._dedupOrdenes)
+
     // 3. Buscar en mapeos por teléfono (paginado)
     const telefonos=[...new Set(ordenes.map(o=>o.telefono))]
     let mapeos=[]
@@ -9935,7 +9960,7 @@ window.procesarDropi=async()=>{
     msg.innerHTML=`<div class="alert alert-green">
       ✅ ${total} órdenes procesadas del reporte Dropi<br>
       🔗 ${cruzados} cruzadas con asignador · ${sinCruce} sin cruce
-    </div>`
+    </div>${(window._dropiDedupInfo&&window._dropiDedupInfo.eliminadas>0)?`<div class="alert alert-blue" style="margin-top:8px">♻️ ${window._dropiDedupInfo.eliminadas} fila(s) duplicada(s) por teléfono eliminadas — se conservó la subida más reciente (de ${window._dropiDedupInfo.total} filas del archivo).</div>`:''}`
 
     // Conteo por ETAPA del semáforo (capa de SOLO visualización; no toca porCat ni la lógica de costos)
     const porEtapa={};DROPI_ETAPAS.forEach(e=>{porEtapa[e.id]=0})
@@ -10000,6 +10025,44 @@ window.actualizarEstadosDropi=async()=>{
   const cruzados=res.filter(r=>r.cruzado&&r.mapeo)
   const msgEl=document.getElementById('dropi-upd-msg')
   if(!cruzados.length){msgEl.innerHTML='<span style="color:var(--amber)">Sin órdenes para actualizar</span>';return}
+
+  // ── VALIDACIÓN 1: Total = Cruzadas. Todo lo que está en Dropi debe estar en el asignador.
+  // (res ya viene deduplicado por teléfono desde el preview).
+  const _noCruzadas=res.filter(r=>!(r.cruzado&&r.mapeo))
+  if(_noCruzadas.length>0){
+    const _tels=_noCruzadas.map(r=>r.telefono).slice(0,15).join(', ')
+    const _extra=_noCruzadas.length>15?` y ${_noCruzadas.length-15} más`:''
+    msgEl.innerHTML=`<div class="alert alert-red" style="margin-top:6px">
+      🚫 No se puede guardar: hay <b>${_noCruzadas.length}</b> orden(es) en el archivo que NO están en el Asignador.<br>
+      Cárgalas primero en el <b>Asignador</b> y vuelve a procesar este archivo.<br>
+      <span style="color:var(--muted);font-size:11px">Teléfonos sin cruzar: ${_tels}${_extra}</span>
+    </div>`
+    return
+  }
+
+  // ── VALIDACIÓN 2: fecha de subida (FECHA col D) máximo 4 días atrás.
+  // Escape: si el usuario tiene modo_historico=true (lo activa un admin en Equipo), no se valida.
+  const _modoHist=currentMe()?.modo_historico===true
+  if(!_modoHist){
+    const _limite=_daysAgo(4) // YYYY-MM-DD, hora Bogotá
+    const _viejas=cruzados.filter(r=>{
+      const p=String(r.fecha_dropi||'').split('-')
+      if(p.length!==3)return false
+      const iso=`${p[2]}-${p[1]}-${p[0]}` // DD-MM-YYYY → YYYY-MM-DD
+      return iso<_limite
+    })
+    if(_viejas.length>0){
+      const _tels=_viejas.map(r=>r.telefono).slice(0,15).join(', ')
+      const _extra=_viejas.length>15?` y ${_viejas.length-15} más`:''
+      msgEl.innerHTML=`<div class="alert alert-red" style="margin-top:6px">
+        🚫 No se puede guardar: hay <b>${_viejas.length}</b> orden(es) con fecha de subida mayor a <b>4 días</b>.<br>
+        Pídele a un administrador que te active el <b>modo histórico</b> para poder cruzarlas.<br>
+        <span style="color:var(--muted);font-size:11px">Teléfonos: ${_tels}${_extra}</span>
+      </div>`
+      return
+    }
+  }
+
   msgEl.innerHTML='<span style="color:var(--blue)">Actualizando...</span>'
   let ok=0,fail=0
   for(const r of cruzados){

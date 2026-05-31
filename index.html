@@ -1388,7 +1388,10 @@ async function loadDash(){
   // RENDER: 3 bloques agrupados (Ventas/Órdenes, Gastos, Eficiencia)
   // RENDER: Ventas y órdenes DROPI (por fecha_dropi)
   const _bloqueVentasDropiHTML=`
-    <div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;margin-top:16px">📦 Ventas y órdenes DROPI <span style="color:var(--subtle);font-weight:500;text-transform:none;letter-spacing:0;font-size:11px">· por fecha de subida a Dropi</span></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px;margin-top:16px">
+      <div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)">📦 Ventas y órdenes DROPI <span style="color:var(--subtle);font-weight:500;text-transform:none;letter-spacing:0;font-size:11px">· por fecha de subida a Dropi</span></div>
+      <button onclick="document.getElementById('dash-fantasmas-file').click()" style="background:var(--card2);border:1px solid var(--amber);color:var(--amber);border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer">🕵️ Auditar fantasmas</button>
+    </div>
     <div class="cards-row c6">
       <div class="card">
         <div class="card-label">Órdenes totales</div>
@@ -1424,7 +1427,9 @@ async function loadDash(){
     <div id="dashdet-confD" style="display:none"></div>
     <div id="dashdet-devD" style="display:none"></div>
     <div id="dashdet-cancD" style="display:none"></div>
-    <div id="dashdet-pendD" style="display:none"></div>`
+    <div id="dashdet-pendD" style="display:none"></div>
+    <input type="file" id="dash-fantasmas-file" accept=".xlsx,.xls" style="display:none" onchange="auditarFantasmasDropi()">
+    <div id="dash-fantasmas-result" style="margin-top:12px"></div>`
 
   const _bloqueVentasHTML=`
     <div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;margin-top:16px">📦 Ventas y órdenes</div>
@@ -1488,6 +1493,70 @@ async function loadDash(){
 
   // RENDER FINAL
   el.innerHTML=_heroHTML+_4reyesHTML+_desgloseHTML+_bloqueVentasHTML+_bloqueVentasDropiHTML+_bloqueGastosHTML+_bloqueEficienciaHTML
+}
+
+// ── ADMIN: AUDITORÍA DE FANTASMAS DROPI (huérfanas) ─────────
+// Compara los mapeos con fecha_dropi en el rango del Dashboard contra los
+// teléfonos del xlsx de Dropi recién subido. Las que están en Nexo pero NO
+// en el xlsx son "fantasmas" (anuladas/archivadas/fusionadas en Dropi, o
+// duplicados de un mismo cliente). SOLO LECTURA: no modifica ningún mapeo.
+window.auditarFantasmasDropi=async()=>{
+  const fileInput=document.getElementById('dash-fantasmas-file')
+  const resEl=document.getElementById('dash-fantasmas-result')
+  if(!fileInput||!resEl)return
+  if(!fileInput.files.length){resEl.innerHTML='<div class="alert alert-red">Selecciona el archivo .xlsx de Dropi</div>';return}
+  resEl.innerHTML='<div class="alert alert-blue">🕵️ Buscando fantasmas...</div>'
+  try{
+    const desde=document.getElementById('dash-desde')?.value||_daysAgo(7)
+    const hasta=document.getElementById('dash-hasta')?.value||today()
+    // 1. Teléfonos presentes en el xlsx de Dropi
+    const buf=await fileInput.files[0].arrayBuffer()
+    fileInput.value='' // permite re-auditar el mismo archivo
+    const wbook=XLSX.read(buf,{type:'array'})
+    const rows=XLSX.utils.sheet_to_json(wbook.Sheets[wbook.SheetNames[0]],{defval:''})
+    const telsXlsx=new Set()
+    for(const r of rows){
+      const t=String(r['TELÉFONO']||r['TELEFONO']||'').replace(/\D/g,'')
+      if(t.length>=7)telsXlsx.add(t)
+    }
+    // 2. Mapeos de Nexo con fecha_dropi dentro del rango del Dashboard
+    const{data:mapeosDropi}=await sb.from('mapeos')
+      .select('telefono,fecha_dropi,fecha,producto,estado_final,ad_id,nombre_cliente,transportadora,cantidad')
+      .gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).limit(10000)
+    const totalNexo=(mapeosDropi||[]).length
+    // 3. Huérfanas: en Nexo con fecha_dropi en rango pero el teléfono NO está en el xlsx
+    const huerfanas=(mapeosDropi||[]).filter(m=>{
+      const t=String(m.telefono||'').replace(/\D/g,'')
+      return !telsXlsx.has(t)
+    })
+    // 4. Render
+    if(!huerfanas.length){
+      resEl.innerHTML=`<div class="alert alert-green">✅ Sin fantasmas. Las ${totalNexo} órdenes de Nexo (${desde} → ${hasta}) coinciden con el xlsx de Dropi (${telsXlsx.size} teléfonos).</div>`
+      return
+    }
+    const filas=huerfanas.map(m=>`<tr>
+      <td>${m.telefono||'—'}</td>
+      <td>${m.fecha_dropi||'—'}</td>
+      <td>${m.fecha||'—'}</td>
+      <td>${resolveProdName(m.producto).nombre||m.producto||'—'}</td>
+      <td>${m.estado_final||'(sin estado)'}</td>
+      <td>${m.transportadora||'—'}</td>
+      <td>${m.ad_id||'orgánica'}</td>
+    </tr>`).join('')
+    resEl.innerHTML=`
+      <div class="card" style="border:2px solid var(--amber)">
+        <div style="font-weight:800;font-size:15px;color:var(--amber);margin-bottom:6px">👻 Fantasmas detectadas: ${huerfanas.length}</div>
+        <div style="font-size:13px;color:var(--muted);margin-bottom:4px">Nexo tiene <b>${totalNexo}</b> órdenes con fecha de subida en el rango (${desde} → ${hasta}). El xlsx de Dropi trae <b>${telsXlsx.size}</b> teléfonos. Estas <b>${huerfanas.length}</b> están en Nexo pero <b>NO</b> en el xlsx.</div>
+        <div style="font-size:12.5px;color:var(--subtle);margin-bottom:10px">Causas típicas: anuladas/archivadas/fusionadas en Dropi, o un mismo cliente con varios pedidos (el cruce solo toma el primero). Mira el patrón: ¿mismo carrier? ¿todas canceladas? ¿mismo teléfono repetido?</div>
+        <div class="table-wrap"><table style="font-size:12px">
+          <thead><tr><th>Teléfono</th><th>Fecha Dropi</th><th>Fecha compra</th><th>Producto</th><th>Estado en Nexo</th><th>Carrier</th><th>Ad ID</th></tr></thead>
+          <tbody>${filas}</tbody>
+        </table></div>
+      </div>`
+    logAction('auditoria_fantasmas',{rango:desde+'/'+hasta,total_nexo:totalNexo,tels_xlsx:telsXlsx.size,fantasmas:huerfanas.length}).catch(()=>{})
+  }catch(e){
+    resEl.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
+  }
 }
 
 // ── ADMIN: REPORTES ────────────────────────────────────────

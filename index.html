@@ -9222,17 +9222,17 @@ window.DROPI_STATUS=DROPI_STATUS
 // NO modifica DROPI_STATUS ni la lógica de cat/costos existente. Cubre TODOS los estados vistos.
 const DROPI_ETAPAS=[
   {id:'nace',emoji:'🔵',nombre:'1. Nace la orden',sem:'AZUL — sin riesgo, sin costo',nfoC:'b',color:'var(--blue)',
-   estados:['PENDIENTE CONFIRMACION','PENDIENTE','CONFIRMADO','EN PROCESAMIENTO','GUIA_GENERADA'],
-   det:['PENDIENTE CONFIRMACION → orden entró, espera que la confirmen','PENDIENTE → igual, esperando definición','CONFIRMADO → ya la validaron, lista para procesar','EN PROCESAMIENTO → proveedor alistando el paquete en bodega','GUIA_GENERADA → ya hay guía impresa pero el paquete NO ha salido'],
+   estados:['PENDIENTE','GUIA_GENERADA'],
+   det:['PENDIENTE → orden entró, esperando definición','GUIA_GENERADA → ya hay guía impresa pero el paquete NO ha salido'],
    tip:'Si una orden se queda aquí mucho tiempo = problema con el proveedor.'},
   {id:'basura',emoji:'⚪',nombre:'2. Se van (no salieron)',sem:'GRIS — orden muerta, sin pérdida de plata',nfoC:'n',color:'var(--muted)',
-   estados:['CANCELADO','RECHAZADO','GUIA_ANULADA'],
-   det:['CANCELADO → se canceló antes de enviar (nunca salió)','RECHAZADO → bodega lo rechazó (peso, dirección, cobertura). NO genera costo. Hay que volver a subirla.','GUIA_ANULADA → la guía se anuló antes de despachar'],
-   tip:'Estos 3 NO cuentan como venta perdida porque nunca generaron flete.'},
+   estados:['PENDIENTE CONFIRMACION','CANCELADO','RECHAZADO','GUIA_ANULADA'],
+   det:['PENDIENTE CONFIRMACION → orden entró pero aún no se confirma; mientras tanto no sale','CANCELADO → se canceló antes de enviar (nunca salió)','RECHAZADO → bodega lo rechazó (peso, dirección, cobertura). NO genera costo. Hay que volver a subirla.','GUIA_ANULADA → la guía se anuló antes de despachar'],
+   tip:'Ninguno generó flete: o no se confirmó o nunca salió.'},
   {id:'salio',emoji:'🟡',nombre:'3. Ya salió el paquete',sem:'AMARILLO — flete ya está corriendo',nfoC:'a',color:'var(--amber)',
-   estados:['DESPACHADA','ADMITIDA'],
-   det:['DESPACHADA → salió de la bodega del proveedor','ADMITIDA → llegó a la bodega matriz de la transportadora'],
-   tip:'Desde aquí ya hay flete comprometido.'},
+   estados:['CONFIRMADO','EN PROCESAMIENTO','DESPACHADA','ADMITIDA'],
+   det:['CONFIRMADO → ya la validaron, lista para procesar','EN PROCESAMIENTO → proveedor alistando el paquete en bodega','DESPACHADA → salió de la bodega del proveedor','ADMITIDA → llegó a la bodega matriz de la transportadora'],
+   tip:'Confirmada y en preparación o ya despachada: el flete está por comprometerse o ya corre.'},
   {id:'camino',emoji:'🟡',nombre:'4. De camino',sem:'AMARILLO — viajando entre ciudades',nfoC:'a',color:'var(--amber)',
    estados:['EN BODEGA TRANSPORTADORA','EN ESPERA DE RUTA DOMESTICA','EN REEXPEDICION','EN TERMINAL DESTINO','EN TERMINAL ORIGEN','EN BODEGA DESTINO','EN TRANSPORTE','EN PUNTO DROOP','EN PUNTO DROPI'],
    det:['EN BODEGA TRANSPORTADORA → hub intermedio','EN ESPERA DE RUTA DOMESTICA → esperando que armen la ruta','EN REEXPEDICION → cambio de ruta','EN TERMINAL DESTINO → llegó al terminal de la ciudad destino','EN BODEGA DESTINO → ya está en la bodega de la ciudad del cliente','EN PUNTO DROOP → en un punto de recogida Dropi'],
@@ -9977,9 +9977,23 @@ window.procesarDropi=async()=>{
       return `<div class="dropi-etapa" style="--de-c:${e.color}"><div class="de-top"><span class="de-emoji">${e.emoji}</span>${info}</div><div class="de-num">${n}</div><div class="de-name">${e.nombre}</div></div>`
     }).join('')+`</div>`
     const sinList=[...new Set(sinClasif)].join(', ')
-    const healthHtml=(sumEtapas===total&&sinClasif.length===0)
-      ?`<div class="dropi-health ok">✅ Cuadre perfecto: las 9 etapas suman ${sumEtapas} = ${total} órdenes totales.</div>`
-      :`<div class="dropi-health bad">⚠️ Hay ${total-sumEtapas} orden(es) sin clasificar. Estados nuevos de Dropi que NEXO no conoce: <b>${sinList||'(ninguno)'}</b>. Avísale al admin para agregarlos al semáforo.</div>`
+    // Diagnóstico separado: (1) ESTADOS de Dropi (¿NEXO los reconoce?) y (2) CRUCE con asignador (¿la orden existe en el asignador?)
+    const _estadosOk=(sumEtapas===total&&sinClasif.length===0)
+    const _cruceOk=(sinCruce===0)
+    let healthHtml=''
+    if(_estadosOk&&_cruceOk){
+      healthHtml=`<div class="dropi-health ok">✅ <b>Estados de Dropi:</b> las 9 etapas suman ${sumEtapas} = ${total} órdenes (NEXO reconoce todos los estados).<br>✅ <b>Cruce con asignador:</b> las ${total} órdenes están en el asignador.</div>`
+    }else{
+      // Bloque de estados
+      const estadoBox=_estadosOk
+        ?`<div class="dropi-health ok">✅ <b>Estados de Dropi:</b> las 9 etapas suman ${sumEtapas} = ${total} (todos reconocidos).</div>`
+        :`<div class="dropi-health bad">⚠️ <b>Problema de ESTADOS de Dropi:</b> hay ${total-sumEtapas} orden(es) con un estado que NEXO no conoce: <b>${sinList||'(ninguno)'}</b>. Avísale al admin para agregarlo al semáforo.</div>`
+      // Bloque de cruce
+      const cruceBox=_cruceOk
+        ?`<div class="dropi-health ok">✅ <b>Cruce con asignador:</b> todas las órdenes están en el asignador.</div>`
+        :`<div class="dropi-health bad" style="border-color:var(--amber)">🔗 <b>Problema de CRUCE:</b> ${sinCruce} orden(es) NO están en el asignador. No podrás guardar hasta cargarlas en el <b>Asignador</b>.</div>`
+      healthHtml=estadoBox+cruceBox
+    }
 
     resEl.innerHTML=`
       <div class="cards-row c4">

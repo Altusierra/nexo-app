@@ -7501,22 +7501,39 @@ function _pendColaItems(tipo){
   }
 }
 
+window._pendColaTimerId=null
+function _pendColaIniciarTimer(){
+  if(window._pendColaTimerId){clearInterval(window._pendColaTimerId);window._pendColaTimerId=null}
+  window._pendColaTimerId=setInterval(()=>{
+    const st=window._pendColaState
+    const t=document.getElementById('pend-cola-timer')
+    if(!st||!st.inicio||!t){return}
+    t.textContent=_colaFmtTime(Date.now()-st.inicio)
+  },1000)
+}
+function _pendColaPararTimer(){
+  if(window._pendColaTimerId){clearInterval(window._pendColaTimerId);window._pendColaTimerId=null}
+}
+
 window.iniciarPendColaPsf=()=>{
   const lista=_pendColaItems('psf')
   if(!lista.length){alert('No hay pedidos pendientes con cupo disponible para enviar ahora.');return}
-  window._pendColaState={tipo:'psf',idx:0,enviando:false}
+  window._pendColaState={tipo:'psf',idx:0,enviando:false,inicio:Date.now()}
+  _pendColaIniciarTimer()
   _pendColaRender()
 }
 window.iniciarPendColaConf=()=>{
   const lista=_pendColaItems('conf')
   if(!lista.length){alert('No hay pedidos pendientes con cupo disponible para confirmar ahora.');return}
-  window._pendColaState={tipo:'conf',idx:0,enviando:false}
+  window._pendColaState={tipo:'conf',idx:0,enviando:false,inicio:Date.now()}
+  _pendColaIniciarTimer()
   _pendColaRender()
 }
 window.iniciarPendColaCanc=()=>{
   const lista=_pendColaItems('canc')
   if(!lista.length){alert('No hay cancelados con cupo disponible para enviar ahora.');return}
-  window._pendColaState={tipo:'canc',idx:0,enviando:false}
+  window._pendColaState={tipo:'canc',idx:0,enviando:false,inicio:Date.now()}
+  _pendColaIniciarTimer()
   _pendColaRender()
 }
 
@@ -7526,6 +7543,7 @@ function _pendColaRender(){
   const lista=_pendColaItems(st.tipo)
   const total=lista.length
   if(!total){
+    _pendColaPararTimer()
     openModal(`<div style="text-align:center;padding:30px 14px">
       <div style="font-size:46px;margin-bottom:10px">🎉</div>
       <div style="font-size:18px;font-weight:700;margin-bottom:6px">¡Cola terminada!</div>
@@ -7585,7 +7603,8 @@ function _pendColaRender(){
 
   openModal(`<div style="max-width:440px;margin:0 auto;text-align:center">
     <div style="font-size:12px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin-bottom:4px">${tituloModo}</div>
-    <div style="font-size:13px;font-weight:700;color:${acento};margin-bottom:14px">Pedido ${st.idx+1} de ${total} &nbsp; ${typeof _waPillHTML==='function'?_waPillHTML(st.tipo):''}</div>
+    <div style="font-size:13px;font-weight:700;color:${acento};margin-bottom:6px">Pedido ${st.idx+1} de ${total} &nbsp; ${typeof _waPillHTML==='function'?_waPillHTML(st.tipo):''}</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:14px">⏱ <span id="pend-cola-timer">${_colaFmtTime(Date.now()-(st.inicio||Date.now()))}</span></div>
 
     <div class="card" style="padding:18px;border:2px solid ${acento};margin-bottom:16px">
       <div style="font-size:30px;font-weight:800;font-family:monospace;letter-spacing:1px;color:var(--text)">${tel}</div>
@@ -7599,6 +7618,10 @@ function _pendColaRender(){
       ${btnEnviando?'⏳ Registrando...':`📩 Enviar ${etiqueta} y siguiente ▶`}
     </button>
 
+    <div style="display:flex;gap:6px;margin-bottom:8px">
+      <input type="tel" inputmode="numeric" id="pend-cola-buscar" placeholder="🔍 Buscar teléfono…" style="flex:1;padding:9px 11px;border-radius:8px;border:1px solid var(--border);background:var(--card2);color:var(--text);font-size:13px" onkeydown="if(event.key==='Enter'){event.preventDefault();_pendColaSaltarATel(this.value)}">
+      <button class="btn-sm btn-outline" onclick="_pendColaSaltarATel(document.getElementById('pend-cola-buscar').value)">Ir</button>
+    </div>
     <div style="display:flex;gap:8px;justify-content:center">
       <button class="btn-sm btn-outline" onclick="_pendColaRegresar()" ${st.idx===0?'disabled style="opacity:.4;cursor:not-allowed"':''}>⬅️ Regresar</button>
       <button class="btn-sm btn-outline" onclick="_pendColaSaltar()" ${st.idx>=total-1?'disabled style="opacity:.4;cursor:not-allowed"':''}>⏭️ Saltar</button>
@@ -7652,6 +7675,7 @@ window._pendColaSaltar=()=>{
   _pendColaRender()
 }
 window._pendColaSalir=()=>{
+  _pendColaPararTimer()
   window._pendColaState=null
   closeModal()
 }
@@ -8435,6 +8459,66 @@ window.mostrarProtocolo=(idx,nombre,tel,producto,carrier,direccion)=>{
   document.body.appendChild(div)
 }
 
+// ── BUSCADOR DE TELÉFONO DENTRO DEL MODO COLA (3 secciones) ──
+// Normaliza a solo dígitos para comparar teléfonos (ignora +57, espacios, guiones)
+window._colaNormTel=(t)=>String(t||'').replace(/\D/g,'')
+// Busca un teléfono en una lista de items. campoTel = 'tel' o 'telefono'.
+// Devuelve el índice (match exacto preferido, sino el primero que contenga) o -1.
+window._colaBuscarEnLista=(telBuscado,lista,campoTel)=>{
+  const q=window._colaNormTel(telBuscado)
+  if(!q||!Array.isArray(lista))return -1
+  let parcial=-1
+  for(let i=0;i<lista.length;i++){
+    const t=window._colaNormTel(lista[i]&&lista[i][campoTel])
+    if(!t)continue
+    if(t===q)return i           // match exacto gana
+    if(parcial===-1&&t.includes(q))parcial=i
+  }
+  return parcial
+}
+// Mira en las OTRAS 2 colas cargadas en memoria y arma un texto de "está en X"
+window._colaDondeEsta=(telBuscado,excluir)=>{
+  const fuentes=[
+    {key:'nov', label:'⚠️ Novedades', lista:(window._colaState&&window._colaState.items)||[], campo:'tel'},
+    {key:'rec', label:'📦 Reclame',   lista:(window._recColaState&&window._recColaState.items)||[], campo:'tel'},
+    {key:'psf', label:'📍 Pendientes (sin fecha)', lista:(window._psfCache&&window._psfCache.items)||[], campo:'telefono'},
+    {key:'conf',label:'📍 Pendientes (con fecha)', lista:(window._confCache&&window._confCache.items)||[], campo:'telefono'},
+    {key:'canc',label:'📍 Cancelados', lista:(window._cancCache&&window._cancCache.items)||[], campo:'telefono'}
+  ]
+  const hits=[]
+  for(const f of fuentes){
+    if(f.key===excluir)continue
+    if(window._colaBuscarEnLista(telBuscado,f.lista,f.campo)>=0)hits.push(f.label)
+  }
+  return hits
+}
+// Acción del input en cada cola: salta al índice si está aquí, sino informa dónde está
+window._colaSaltarATel=(telBuscado)=>{
+  const st=window._colaState
+  if(!st||!st.items)return
+  const i=window._colaBuscarEnLista(telBuscado,st.items,'tel')
+  if(i>=0){st.idx=i;_colaRender();return}
+  const otras=window._colaDondeEsta(telBuscado,'nov')
+  alert(otras.length?`Ese número no está en esta cola (Novedades).\nEstá en: ${otras.join(', ')}`:'Ese número no está en ninguna cola cargada.')
+}
+window._recColaSaltarATel=(telBuscado)=>{
+  const st=window._recColaState
+  if(!st||!st.items)return
+  const i=window._colaBuscarEnLista(telBuscado,st.items,'tel')
+  if(i>=0){st.idx=i;_recColaRender();return}
+  const otras=window._colaDondeEsta(telBuscado,'rec')
+  alert(otras.length?`Ese número no está en esta cola (Reclame).\nEstá en: ${otras.join(', ')}`:'Ese número no está en ninguna cola cargada.')
+}
+window._pendColaSaltarATel=(telBuscado)=>{
+  const st=window._pendColaState
+  if(!st)return
+  const lista=_pendColaItems(st.tipo)
+  const i=window._colaBuscarEnLista(telBuscado,lista,'telefono')
+  if(i>=0){st.idx=i;_pendColaRender();return}
+  const otras=window._colaDondeEsta(telBuscado,st.tipo)
+  alert(otras.length?`Ese número no está en esta cola.\nEstá en: ${otras.join(', ')}`:'Ese número no está en ninguna cola cargada.')
+}
+
 // ── COLA DE PROTOCOLOS (modo cola secuencial) ──────────────
 window._colaState={items:[],idx:0,inicio:null,fin:null,timerId:null,contactadasEnSesion:0,saltadas:0}
 
@@ -8493,7 +8577,7 @@ function _colaRender(){
   const body=document.getElementById('cola-body')
   if(!body)return
   const total=st.items.length
-  if(st.idx>=total){
+  if(total===0){
     if(!st.fin)st.fin=Date.now()
     const dur=st.fin-st.inicio
     const prom=st.contactadasEnSesion>0?Math.round(dur/st.contactadasEnSesion/1000):0
@@ -8512,6 +8596,8 @@ function _colaRender(){
     if(st.timerId){clearInterval(st.timerId);st.timerId=null}
     return
   }
+  if(st.idx>=total)st.idx=total-1
+  if(st.idx<0)st.idx=0
   const m=st.items[st.idx]
   const armado=_colaArmarMensaje(m)
   const pct=Math.round(((st.idx)/total)*100)
@@ -8551,10 +8637,14 @@ function _colaRender(){
 
       <button style="width:100%;padding:16px;border:none;border-radius:10px;background:#25D366;color:#fff;font-weight:800;font-size:16px;cursor:pointer;margin-bottom:10px" onclick="_colaAbrirWa()">💬 Abrir WhatsApp${cuentaEnvios>0?` · 📨 ${cuentaEnvios} enviado${cuentaEnvios>1?'s':''}`:''}</button>
 
+      <div style="display:flex;gap:6px;margin-bottom:8px">
+        <input type="tel" inputmode="numeric" id="cola-buscar" placeholder="🔍 Buscar teléfono…" style="flex:1;padding:9px 11px;border-radius:8px;border:1px solid var(--border);background:var(--card2);color:var(--text);font-size:13px" onkeydown="if(event.key==='Enter'){event.preventDefault();_colaSaltarATel(this.value)}">
+        <button class="btn-sm btn-outline" onclick="_colaSaltarATel(document.getElementById('cola-buscar').value)">Ir</button>
+      </div>
       <div style="display:flex;gap:8px;justify-content:center;margin-bottom:8px">
         <button class="btn-sm btn-outline" onclick="_colaAnterior()" ${st.idx===0?'disabled style="opacity:.4;cursor:not-allowed"':''}>⏮️ Anterior</button>
-        <button class="btn-sm btn-outline" onclick="_colaSaltar()">⏩ Saltar</button>
-        <button class="btn-sm btn-outline" onclick="_colaSiguiente()">⏭️ Siguiente</button>
+        <button class="btn-sm btn-outline" onclick="_colaSaltar()" ${st.idx>=total-1?'disabled style="opacity:.4;cursor:not-allowed"':''}>⏩ Saltar</button>
+        <button class="btn-sm btn-outline" onclick="_colaSiguiente()" ${st.idx>=total-1?'disabled style="opacity:.4;cursor:not-allowed"':''}>⏭️ Siguiente</button>
       </div>
       <button style="width:100%;padding:12px;border:none;border-radius:10px;background:var(--green);color:#fff;font-weight:700;font-size:14px;cursor:pointer;margin-bottom:10px" onclick="_colaMarcarResuelta()">✅ Marcar resuelta</button>
 
@@ -8562,7 +8652,7 @@ function _colaRender(){
         1. Abre WhatsApp (se marca contactada en automático) · 2. Marca Resuelta si se resolvió · 3. Siguiente<br>
         Saltar si no se resolvió · Atrás para volver a una anterior
       </div>
-      <div style="margin-top:14px;text-align:center"><button class="btn-sm btn-outline" onclick="_colaConfirmarCerrar()">⏸️ Pausar cola</button></div>
+      <div style="margin-top:14px;text-align:center"><button class="btn-sm btn-outline" onclick="_colaConfirmarCerrar()" style="border-color:var(--red);color:var(--red)">✖️ Salir</button></div>
     </div>`
 }
 
@@ -8577,19 +8667,20 @@ window._colaAbrirWa=async()=>{
   const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(armado.msg)}`
   window.open(url,'_blank','noopener')
   waThrottleRegistrar('novedades')
-  // Auto-registrar como contactada (no bloquea la apertura de WhatsApp si falla)
+  // El contador SIEMPRE sube al abrir WhatsApp (no depende de que la BD acepte el insert)
+  if(!m.contact)m.contact={cuando:new Date().toISOString(),usuario:me?.nombre||''}
+  m.contactCount=(m.contactCount||0)+1
+  st.contactadasEnSesion++
+  _colaRender()
+  // Auto-registrar como contactada en BD (si falla, el contador ya subió igual)
   try{
     const{error}=await sb.from('novedades_resoluciones').insert({
       telefono:m.tel,orden_id:m.orden_id||null,accion:'contactada',motivo:null,
       usuario_id:me?.id||null,usuario_nombre:me?.nombre||null
     })
-    if(error){console.error('No se pudo registrar contactada:',error);return}
-    if(!m.contact)m.contact={cuando:new Date().toISOString(),usuario:me?.nombre||''}
-    m.contactCount=(m.contactCount||0)+1
-    st.contactadasEnSesion++
-    logAction('novedad_contactada_cola',{tel:m.tel,orden_id:m.orden_id,auto:true}).catch(()=>{})
-    _colaRender()
-  }catch(e){console.error('No se pudo registrar contactada:',e)}
+    if(error){console.error('No se pudo registrar contactada en BD:',error)}
+    else{logAction('novedad_contactada_cola',{tel:m.tel,orden_id:m.orden_id,auto:true}).catch(()=>{})}
+  }catch(e){console.error('No se pudo registrar contactada en BD:',e)}
 }
 
 // Mantiene compatibilidad si alguna parte del UI antiguo aún la llama
@@ -9377,7 +9468,7 @@ function _recColaRender(){
   const body=document.getElementById('rec-cola-body')
   if(!body)return
   const total=st.items.length
-  if(st.idx>=total){
+  if(total===0){
     if(!st.fin)st.fin=Date.now()
     const dur=st.fin-st.inicio
     const prom=st.enviadosEnSesion>0?Math.round(dur/st.enviadosEnSesion/1000):0
@@ -9396,6 +9487,8 @@ function _recColaRender(){
     if(st.timerId){clearInterval(st.timerId);st.timerId=null}
     return
   }
+  if(st.idx>=total)st.idx=total-1
+  if(st.idx<0)st.idx=0
   const m=st.items[st.idx]
   const nivel=getNivelMensajeReclame(m.envios)
   const mensaje=armarMensajeReclame(m,nivel)
@@ -9430,10 +9523,14 @@ function _recColaRender(){
         <button class="btn-sm btn-outline" onclick="_recColaCopiarMsg(this)">📋 Copiar mensaje</button>
       </div>
 
+      <div style="display:flex;gap:6px;margin-bottom:8px">
+        <input type="tel" inputmode="numeric" id="rec-cola-buscar" placeholder="🔍 Buscar teléfono…" style="flex:1;padding:9px 11px;border-radius:8px;border:1px solid var(--border);background:var(--card2);color:var(--text);font-size:13px" onkeydown="if(event.key==='Enter'){event.preventDefault();_recColaSaltarATel(this.value)}">
+        <button class="btn-sm btn-outline" onclick="_recColaSaltarATel(document.getElementById('rec-cola-buscar').value)">Ir</button>
+      </div>
       <div style="display:flex;gap:8px;justify-content:center;margin-bottom:8px">
         <button class="btn-sm btn-outline" onclick="_recColaAnterior()" ${st.idx===0?'disabled style="opacity:.4;cursor:not-allowed"':''}>⏮️ Anterior</button>
-        <button class="btn-sm btn-outline" onclick="_recColaSaltar()">⏩ Saltar</button>
-        <button class="btn-sm btn-outline" onclick="_recColaSiguiente()">⏭️ Siguiente</button>
+        <button class="btn-sm btn-outline" onclick="_recColaSaltar()" ${st.idx>=total-1?'disabled style="opacity:.4;cursor:not-allowed"':''}>⏩ Saltar</button>
+        <button class="btn-sm btn-outline" onclick="_recColaSiguiente()" ${st.idx>=total-1?'disabled style="opacity:.4;cursor:not-allowed"':''}>⏭️ Siguiente</button>
       </div>
       <button style="width:100%;padding:12px;border:none;border-radius:10px;background:var(--green);color:#fff;font-weight:700;font-size:14px;cursor:pointer;margin-bottom:10px" onclick="_recColaMarcarResuelta()">✅ Marcar resuelta</button>
 
@@ -9441,7 +9538,7 @@ function _recColaRender(){
         1. Abre WhatsApp (registra envío y sube nivel) · 2. Marca Resuelta si reclamó el paquete · 3. Siguiente<br>
         Saltar si no contactaste · Atrás para volver · Deshacer si fue clic accidental (vuelve al nivel anterior)
       </div>
-      <div style="margin-top:14px;text-align:center"><button class="btn-sm btn-outline" onclick="_recColaConfirmarCerrar()">⏸️ Pausar cola</button></div>
+      <div style="margin-top:14px;text-align:center"><button class="btn-sm btn-outline" onclick="_recColaConfirmarCerrar()" style="border-color:var(--red);color:var(--red)">✖️ Salir</button></div>
     </div>`
 }
 

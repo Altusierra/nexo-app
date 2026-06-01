@@ -6015,6 +6015,16 @@ async function pageAuxReservado(c){
       <div class="page-sub" style="margin-bottom:14px">Pedidos en estado pendiente (desde el cruce Dropi) que aún no tienen fecha programada. Búscalos por teléfono arriba para asignarles una.</div>
       <div style="margin-bottom:14px"><button class="btn-sm btn-primary" onclick="iniciarPendColaPsf()" style="font-weight:700;padding:9px 16px">▶️ Modo envío rápido</button></div>
       <div id="psf-content"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div></div>
+    </div>
+
+    <div style="margin-top:28px;padding-top:18px;border-top:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <span style="font-size:20px">🔴</span>
+        <div style="font-size:18px;font-weight:700">PASO 3 — Recuperar los CANCELADOS</div>
+      </div>
+      <div class="page-sub" style="margin-bottom:14px">Pedidos cancelados por el cruce Dropi. Ofréceles asegurar el envío con un adelanto (se descuenta del total) para recuperarlos. Al confirmarlos o agendarles fecha, salen de aquí.</div>
+      <div style="margin-bottom:14px"><button class="btn-sm btn-primary" onclick="iniciarPendColaCanc()" style="font-weight:700;padding:9px 16px">▶️ Modo envío rápido</button></div>
+      <div id="canc-content"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div></div>
     </div>`
 
   // Cargar lista de pendientes de confirmación al entrar
@@ -6024,6 +6034,10 @@ async function pageAuxReservado(c){
   // Cargar lista de pendientes sin fecha al entrar
   if(typeof cargarPendientesSinFecha==='function'){
     setTimeout(()=>cargarPendientesSinFecha(),80)
+  }
+  // Cargar lista de cancelados (PASO 3) al entrar
+  if(typeof cargarCancelados==='function'){
+    setTimeout(()=>cargarCancelados(),110)
   }
 
   // Estados reconocidos para clasificar la orden
@@ -6368,6 +6382,7 @@ async function pageAuxReservado(c){
     window._resOrden=null
     if(typeof cargarPendientesConfirmacion==='function')cargarPendientesConfirmacion()
     if(typeof cargarPendientesSinFecha==='function')cargarPendientesSinFecha()
+    if(typeof cargarCancelados==='function')cargarCancelados()
     const _msgTxt={confirmar:'✅ Pedido confirmado (ya se envió)',cancelar:'❌ Pedido cancelado',reactivar:'✅ Pedido reactivado'}[accion]||'✅ Listo'
     const _t=document.createElement('div')
     _t.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--green);color:#fff;padding:12px 18px;border-radius:8px;font-weight:600;z-index:9999;box-shadow:0 4px 14px rgba(0,0,0,.3)'
@@ -6470,6 +6485,15 @@ async function pageAuxReservado(c){
       if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
     }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
 
+    // Si el pedido estaba CANCELADO (recuperación desde el PASO 3), al agendarle fecha
+    // lo reactivamos a CONFIRMADO para que salga de "Cancelados" y entre a "los que ya tienen fecha".
+    if(m.estado_final==='CANCELADO'){
+      try{
+        await sb.from('mapeos').update({estado_final:'CONFIRMADO'}).eq('id',m.id)
+        await sb.from('mapeo_eventos').insert({mapeo_id:m.id,evento:'reactivado',fuente:'auxiliar_manual',usuario_id:me?.id||null,detalle:{desde:'cancelado',via:'agendar_fecha',estado_anterior:'CANCELADO',estado_nuevo:'CONFIRMADO',fecha_envio:fecha}})
+      }catch(e2){console.warn('[canc] recuperar al agendar falló:',e2.message)}
+    }
+
     closeModal()
     // No se reabre el buscador (popup); el auxiliar queda donde iba. Solo se refrescan las listas.
     const _resP=document.getElementById('res-result');if(_resP)_resP.innerHTML=''
@@ -6479,6 +6503,8 @@ async function pageAuxReservado(c){
       if(typeof cargarPendientesConfirmacion==='function'){cargarPendientesConfirmacion()}
       // Refrescar pendientes sin fecha — el pedido recién programado debe desaparecer de ahí
       if(typeof cargarPendientesSinFecha==='function'){cargarPendientesSinFecha()}
+      // Refrescar cancelados — si era un cancelado recuperado, debe desaparecer de ahí
+      if(typeof cargarCancelados==='function'){cargarCancelados()}
       const toast=document.createElement('div')
       toast.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--green);color:#fff;padding:12px 18px;border-radius:8px;font-weight:600;z-index:9999;box-shadow:0 4px 14px rgba(0,0,0,.3)'
       toast.textContent='✅ Pedido programado para '+fecha
@@ -6572,6 +6598,69 @@ function armarMensajePsf(m,idxTpl){
     .replace(/\[PRODUCTO\]/g,prodNom)
     .replace(/\[CANTIDAD\]/g,cantTxt)
     .replace(/\[CIUDAD\]/g,m.ciudad||'[CIUDAD]')
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PASO 3 — RECUPERAR CANCELADOS (solo los del cruce Dropi)
+// 5 niveles de persuasión. Cliente con mal historial COD → se le ofrece pagar
+// $15.000 del envío por adelantado (se descuentan del total). Transportadora
+// dinámica (ENVIA por defecto). El número de Nequi lo pasa el auxiliar al aceptar.
+// ════════════════════════════════════════════════════════════════════════════
+const CANC_MSGS=[
+  // NIVEL 1 — Reactivación + reframe del descuento
+  `Hola [NOMBRE] 👋 Te escribo por tu pedido de *[PRODUCTO]* 🙌\n\nTu envío lo entrega *[TRANSPORTADORA]*, y en tu zona ([CIUDAD]) [TRANSPORTADORA] no recibe el pago contra entrega. Por eso, para poder despacharlo, aseguramos el envío con un adelanto de *$15.000 por Nequi*.\n\nOjo 👉 no es plata de más: esos $15.000 son del envío y se te *descuentan del total*. Al recibir pagas solo *[SALDO]* en tu casa. ¿Te lo mando hoy? 📦`,
+  // NIVEL 2 — Confianza + garantía
+  `Hola otra vez [NOMBRE] 🙂 Sé que adelantar un pago da algo de cosa, te explico cómo nos cuidamos los dos:\n\nApenas confirmas el Nequi, te paso la *guía del envío* para que rastrees tu pedido a toda hora 🚚 Y tu [PRODUCTO] va con *90 días de garantía* y envío asegurado ✅\n\nSon $15.000 por Nequi (se descuentan del total) y queda en camino. ¿Lo aseguramos?`,
+  // NIVEL 3 — Prueba social + cómo funciona
+  `[NOMBRE], así reciben muchos clientes de [CIUDAD] 📦\n\nEs sencillo: adelantas los $15.000 del envío por Nequi → te paso la guía → recibes en casa y pagas el resto (*[SALDO]*).\n\nEs la forma segura de que te llegue, porque por tu zona no hay pago contra entrega. ¿Te aparto el despacho?`,
+  // NIVEL 4 — Urgencia / escasez
+  `[NOMBRE], el cupo de despacho de hoy ya casi se cierra y me quedan pocas unidades de [PRODUCTO] 😬 No quiero que te quedes sin el tuyo.\n\nCon $15.000 por Nequi lo dejo asegurado y *sale hoy mismo*. ¿Lo mandamos antes de que se cierre? ⏳`,
+  // NIVEL 5 — Último intento + puerta abierta
+  `[NOMBRE], este es mi último mensaje para no molestarte más 🙏 Tu [PRODUCTO] sigue disponible si lo aseguras con $15.000 por Nequi (se descuentan del total, pagas solo *[SALDO]* al recibir).\n\nSi ahora no puedes, tranqui — cuando quieras me escribes y con gusto te lo despacho. ¡Un abrazo! 🙌`
+]
+
+// Nivel según envíos previos. Cuota: 2 mensajes por día por pedido.
+function getNivelMensajeCanc(envios,enviosHoy){
+  if(enviosHoy>=2)return{idxTpl:-1,etiqueta:'Cupo diario alcanzado',nivel:0,bloqueado:true}
+  const e=envios||0
+  if(e===0)return{idxTpl:0,etiqueta:'1er mensaje',nivel:1}
+  if(e===1)return{idxTpl:1,etiqueta:'2do mensaje',nivel:2}
+  if(e===2)return{idxTpl:2,etiqueta:'3er mensaje',nivel:3}
+  if(e===3)return{idxTpl:3,etiqueta:'4to mensaje',nivel:4}
+  return{idxTpl:4,etiqueta:'5to mensaje (última llamada)',nivel:5}
+}
+
+// Saldo = total − $15.000 (los $15.000 del envío van por adelantado). Total de precio_dropi
+// o, si no hay, del precio del producto según la cantidad (catálogo en memoria).
+function _cancSaldo(m){
+  let total=Number(m.precio_dropi)||0
+  if(!total){
+    try{
+      const prod=(productos||[]).find(p=>p.id===m.producto_id)||(productos||[]).find(p=>_normProd(p.nombre)===_normProd(m.producto))
+      if(prod){
+        const q=Math.min(4,Math.max(1,m.cantidad||1))
+        total=Number(prod['precio_'+q+'u'])||Number(prod.precio_2u)||0
+      }
+    }catch(_){}
+  }
+  if(!total)return null
+  const saldo=total-15000
+  return saldo>0?saldo:total
+}
+
+// Reemplaza placeholders. Transportadora vacía → ENVIA. Saldo formateado en COP.
+function armarMensajeCanc(m,idxTpl){
+  const tpl=CANC_MSGS[idxTpl]||CANC_MSGS[0]
+  const prodNom=(typeof resolveProdName==='function'?(resolveProdName(m.producto)||{}).nombre:null)||m.producto||'tu pedido'
+  const transp=(m.transportadora&&String(m.transportadora).trim())?String(m.transportadora).trim():'ENVIA'
+  const saldo=_cancSaldo(m)
+  const saldoTxt=saldo!=null?('$'+fmt(saldo)):'el saldo'
+  return tpl
+    .replace(/\[NOMBRE\]/g,m.nombre_cliente||'')
+    .replace(/\[PRODUCTO\]/g,prodNom)
+    .replace(/\[CIUDAD\]/g,m.ciudad||'tu ciudad')
+    .replace(/\[TRANSPORTADORA\]/g,transp)
+    .replace(/\[SALDO\]/g,saldoTxt)
 }
 
 window._confCache={items:[],fechaActiva:null}
@@ -6933,6 +7022,185 @@ function renderPendientesSinFecha(){
 }
 window.renderPendientesSinFecha=renderPendientesSinFecha
 
+// ════════════════════ PASO 3 — CANCELADOS (carga / render / envío) ════════════════════
+window._cancCache={items:[],limit:20}
+
+async function cargarCancelados(){
+  const el=document.getElementById('canc-content')
+  if(!el)return
+  el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando cancelados...</div>'
+  try{
+    const hace90=_isoDate(new Date(Date.now()-90*24*60*60*1000))
+    // 1) Cancelados de los últimos 90 días
+    const{data:canc,error:e1}=await sb.from('mapeos')
+      .select('id,telefono,nombre_cliente,producto,producto_id,cantidad,ciudad,transportadora,precio_dropi,fecha,fecha_dropi,estado_inicial,estado_final,created_at')
+      .eq('estado_final','CANCELADO')
+      .gte('fecha',hace90)
+      .order('fecha',{ascending:false}).limit(1000)
+    if(e1)throw e1
+    let lista=canc||[]
+    if(!lista.length){el.innerHTML='<div class="alert alert-blue">No hay pedidos cancelados por el cruce Dropi para recuperar.</div>';window._cancCache={items:[],limit:20};return}
+    // 2) Excluir los cancelados MANUALMENTE desde Reservados (evento cancelado + fuente auxiliar_manual).
+    //    Los cancelados sin rastro de cancelación manual se consideran del cruce Dropi → se incluyen.
+    const ids=lista.map(m=>m.id)
+    let evManual=[]
+    for(let i=0;i<ids.length;i+=100){
+      const batch=ids.slice(i,i+100)
+      const{data}=await sb.from('mapeo_eventos').select('mapeo_id').in('mapeo_id',batch).eq('evento','cancelado').eq('fuente','auxiliar_manual')
+      if(data)evManual=evManual.concat(data)
+    }
+    const manualSet=new Set(evManual.map(e=>e.mapeo_id))
+    lista=lista.filter(m=>!manualSet.has(m.id))
+    if(!lista.length){el.innerHTML='<div class="alert alert-blue">No hay cancelados del cruce Dropi (los cancelados existentes se cancelaron manualmente).</div>';window._cancCache={items:[],limit:20};return}
+    // 3) Contar mensajes de recuperación enviados (mapeo_eventos: canc_mensaje_enviado)
+    const lids=lista.map(m=>m.id)
+    let evEnv=[]
+    for(let i=0;i<lids.length;i+=100){
+      const batch=lids.slice(i,i+100)
+      const{data}=await sb.from('mapeo_eventos').select('mapeo_id,created_at').in('mapeo_id',batch).eq('evento','canc_mensaje_enviado').order('created_at',{ascending:false}).limit(20000)
+      if(data)evEnv=evEnv.concat(data)
+    }
+    const hoyStr=today()
+    const envBy={}
+    for(const e of evEnv){
+      const mid=e.mapeo_id
+      if(!envBy[mid])envBy[mid]={count:0,enviosHoy:0,ultimo:null}
+      envBy[mid].count++
+      if(String(e.created_at||'').slice(0,10)===hoyStr)envBy[mid].enviosHoy++
+      if(!envBy[mid].ultimo)envBy[mid].ultimo=e.created_at
+    }
+    for(const m of lista){
+      const info=envBy[m.id]||{count:0,enviosHoy:0,ultimo:null}
+      m.canc_envios=info.count
+      m.canc_envios_hoy=info.enviosHoy
+      m.canc_ultimo=info.ultimo
+    }
+    lista.sort((a,b)=>String(b.fecha||b.created_at||'').localeCompare(String(a.fecha||a.created_at||'')))
+    window._cancCache={items:lista,limit:window._cancCache?.limit||20}
+    renderCancelados()
+  }catch(e){el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`}
+}
+window.cargarCancelados=cargarCancelados
+
+function renderCancelados(){
+  const el=document.getElementById('canc-content')
+  if(!el)return
+  const cache=window._cancCache||{items:[],limit:20}
+  const items=cache.items||[]
+  const limit=cache.limit||20
+  if(!items.length){el.innerHTML='<div class="alert alert-blue">No hay pedidos cancelados del cruce Dropi para recuperar.</div>';return}
+  const total=items.length
+  const visibles=items.slice(0,limit)
+  const renderCard=(m)=>{
+    const fechaCompra=m.fecha?new Date(m.fecha+'T00:00:00').toLocaleDateString('es-CO',{day:'numeric',month:'short',year:'numeric'}):'—'
+    const envios=m.canc_envios||0
+    const enviosHoy=m.canc_envios_hoy||0
+    const nivelInfo=getNivelMensajeCanc(envios,enviosHoy)
+    const bloqueadoHoy=nivelInfo.bloqueado
+    const transp=(m.transportadora&&String(m.transportadora).trim())?m.transportadora:'ENVIA'
+    let enviosBadge=''
+    if(envios>0){
+      const ultFmt=m.canc_ultimo?new Date(m.canc_ultimo).toLocaleDateString('es-CO',{day:'numeric',month:'short'}):'—'
+      enviosBadge=`<span class="pill" style="background:rgba(59,130,246,.12);color:var(--blue);border:1px solid var(--blue);font-size:11px">📨 ${envios} mensaje${envios===1?'':'s'} · último: ${ultFmt}</span>`
+    }
+    const btnEnviar=bloqueadoHoy
+      ?`<button class="btn-sm" disabled style="background:var(--card2);color:var(--muted);border:1px solid var(--border);cursor:not-allowed;padding:8px 12px">⛔ Cupo diario (2/2)</button>`
+      :`<button class="btn-sm" onclick="enviarMensajeCanc('${m.id}')" style="background:#25D366;color:#fff;border:none;padding:8px 12px;font-weight:600">📨 Enviar ${nivelInfo.etiqueta}</button>`
+    return`<div class="card" style="margin-bottom:8px;border-left:3px solid var(--red)">
+      <div style="display:flex;justify-content:space-between;align-items:start;gap:10px;flex-wrap:wrap">
+        <div style="flex:1;min-width:240px">
+          <div style="font-size:14px;font-weight:600;font-family:monospace">${m.telefono||'—'}</div>
+          <div style="font-size:13px;margin-top:2px">${m.nombre_cliente||'—'} · <strong>${m.producto||'—'}</strong> ${m.cantidad?`(${m.cantidad}u)`:''}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">${m.ciudad||'—'} · ${transp} · Compra: ${fechaCompra}</div>
+          <div style="font-size:12px;margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            <span class="pill" style="background:rgba(239,68,68,.12);color:var(--red);border:1px solid var(--red);font-size:11px">❌ Cancelado (cruce Dropi)</span>
+            ${enviosBadge}
+          </div>
+        </div>
+        <div style="text-align:right;flex-shrink:0;display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+          ${btnEnviar}
+          <div style="display:flex;gap:6px">
+            <button class="btn-sm btn-green" onclick="confirmarCancelado('${m.id}')" style="padding:8px 10px">✅ Confirmar</button>
+            <button class="btn-sm btn-primary" onclick="agendarCancelado('${m.id}')" style="padding:8px 10px">📅 Agendar fecha</button>
+          </div>
+        </div>
+      </div>
+    </div>`
+  }
+  let controles=''
+  const puedeVerMas=limit<total
+  const puedeVerMenos=limit>20
+  if(puedeVerMas||puedeVerMenos){
+    controles=`<div style="display:flex;gap:8px;justify-content:center;margin-top:14px">
+      ${puedeVerMenos?`<button class="btn-sm btn-outline" onclick="window._cancCache.limit=Math.max(20,(window._cancCache.limit||20)-20);renderCancelados()">⬆ Ver menos 20</button>`:''}
+      ${puedeVerMas?`<button class="btn-sm btn-primary" onclick="window._cancCache.limit=(window._cancCache.limit||20)+20;renderCancelados()">⬇ Ver más 20</button>`:''}
+    </div>`
+  }
+  el.innerHTML=`
+    <div class="alert" style="margin-bottom:12px;font-size:12px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);color:var(--text)">
+      🔴 ${total} pedido${total===1?'':'s'} cancelado${total===1?'':'s'} por el cruce Dropi · Mostrando ${visibles.length} de ${total}. Recupéralos ofreciendo el adelanto del envío.
+    </div>
+    ${visibles.map(renderCard).join('')}
+    ${controles}
+  `
+}
+window.renderCancelados=renderCancelados
+
+window.enviarMensajeCanc=async(mapeoId)=>{
+  const cache=window._cancCache||{}
+  const m=(cache.items||[]).find(i=>String(i.id)===String(mapeoId))
+  if(!m){alert('No se encontró el pedido');return}
+  const envios=m.canc_envios||0
+  const enviosHoy=m.canc_envios_hoy||0
+  if(enviosHoy>=2){alert('Ya enviaste los 2 mensajes permitidos hoy para este pedido.');return}
+  const nivelInfo=getNivelMensajeCanc(envios,enviosHoy)
+  if(nivelInfo.bloqueado){alert('Cupo diario alcanzado.');return}
+  const mensaje=armarMensajeCanc(m,nivelInfo.idxTpl)
+  const telLimpio=String(m.telefono||'').replace(/\D/g,'')
+  if(telLimpio.length<7){alert('Teléfono inválido');return}
+  const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  window.open(`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`,'_blank','noopener')
+  try{
+    const{error:evErr}=await sb.from('mapeo_eventos').insert({
+      mapeo_id:m.id,
+      evento:'canc_mensaje_enviado',
+      fuente:'reservados',
+      usuario_id:me?.id||null,
+      detalle:{
+        nivel_mensaje:nivelInfo.nivel,
+        etiqueta:nivelInfo.etiqueta,
+        telefono:m.telefono||null,
+        producto:m.producto||null,
+        ciudad:m.ciudad||null,
+        transportadora:m.transportadora||'ENVIA',
+        envios_previos:envios,
+        usuario_nombre:me?.nombre||null,
+        desde_pagina:'cancelados'
+      }
+    })
+    if(evErr){console.warn('No se pudo registrar envío cancelado:',evErr.message);alert('El mensaje se abrió pero no se pudo registrar: '+evErr.message);return}
+    logAction('canc_mensaje_enviado',{mapeo_id:m.id,tel:m.telefono,nivel:nivelInfo.nivel}).catch(()=>{})
+  }catch(e){console.warn('Error registrando envío cancelado:',e);alert('Error: '+e.message);return}
+  setTimeout(()=>cargarCancelados(),500)
+}
+
+// Recuperar un cancelado: confirmar (reactivar → CONFIRMADO) o agendar fecha.
+// Reutilizan cambiarEstadoOrden / abrirModalProgramarEnvio (definidas en pageAuxReservado).
+window.confirmarCancelado=(mapeoId)=>{
+  const cache=window._cancCache||{}
+  const m=(cache.items||[]).find(i=>String(i.id)===String(mapeoId))
+  if(!m)return
+  window._resOrden=m
+  if(typeof cambiarEstadoOrden==='function')cambiarEstadoOrden('reactivar',true)
+}
+window.agendarCancelado=(mapeoId)=>{
+  const cache=window._cancCache||{}
+  const m=(cache.items||[]).find(i=>String(i.id)===String(mapeoId))
+  if(!m)return
+  window._resOrden=m
+  if(typeof abrirModalProgramarEnvio==='function')abrirModalProgramarEnvio()
+}
+
 // ── ENVIAR MENSAJE A PENDIENTE SIN FECHA ─────────────────────────────────
 window.enviarMensajePsf=async(mapeoId)=>{
   if(!mapeoId){alert('ID de pedido inválido');return}
@@ -7040,6 +7308,10 @@ window._pendColaState=null
 
 // Devuelve la lista de items "enviables" según el tipo, leída del cache vivo
 function _pendColaItems(tipo){
+  if(tipo==='canc'){
+    const items=(window._cancCache&&window._cancCache.items)||[]
+    return items.filter(m=>(m.canc_envios_hoy||0)<2)
+  }
   if(tipo==='psf'){
     const items=(window._psfCache&&window._psfCache.items)||[]
     // Solo los que todavía tienen cupo de hoy (no 2/2)
@@ -7060,6 +7332,12 @@ window.iniciarPendColaConf=()=>{
   const lista=_pendColaItems('conf')
   if(!lista.length){alert('No hay pedidos pendientes con cupo disponible para confirmar ahora.');return}
   window._pendColaState={tipo:'conf',idx:0,enviando:false}
+  _pendColaRender()
+}
+window.iniciarPendColaCanc=()=>{
+  const lista=_pendColaItems('canc')
+  if(!lista.length){alert('No hay cancelados con cupo disponible para enviar ahora.');return}
+  window._pendColaState={tipo:'canc',idx:0,enviando:false}
   _pendColaRender()
 }
 
@@ -7091,7 +7369,17 @@ function _pendColaRender(){
 
   // Mensajes enviados a este pedido + etiqueta del siguiente mensaje
   let enviadosTxt='',etiqueta='',ultimoTxt=''
-  if(esPsf){
+  if(st.tipo==='canc'){
+    const envios=item.canc_envios||0
+    const enviosHoy=item.canc_envios_hoy||0
+    const ni=getNivelMensajeCanc(envios,enviosHoy)
+    etiqueta=ni.etiqueta||'mensaje'
+    enviadosTxt=`📨 Mensajes a este pedido: <strong>${envios}</strong> · hoy: <strong>${enviosHoy}/2</strong>`
+    if(item.canc_ultimo){
+      const u=new Date(item.canc_ultimo).toLocaleDateString('es-CO',{day:'numeric',month:'short'})
+      ultimoTxt=`Último: ${u}`
+    }
+  }else if(esPsf){
     const envios=item.psf_envios||0
     const enviosHoy=item.psf_envios_hoy||0
     const ni=getNivelMensajePsf(envios,enviosHoy)
@@ -7112,8 +7400,8 @@ function _pendColaRender(){
     }
   }
 
-  const acento=esPsf?'var(--amber)':'var(--green)'
-  const tituloModo=esPsf?'⏳ Recuperar pendientes':'📅 Confirmar pedidos'
+  const acento=st.tipo==='canc'?'var(--red)':(esPsf?'var(--amber)':'var(--green)')
+  const tituloModo=st.tipo==='canc'?'🔴 Recuperar cancelados':(esPsf?'⏳ Recuperar pendientes':'📅 Confirmar pedidos')
   const btnEnviando=st.enviando
 
   openModal(`<div style="max-width:440px;margin:0 auto;text-align:center">
@@ -7149,7 +7437,9 @@ window._pendColaEnviar=async()=>{
   st.enviando=true
   _pendColaRender() // muestra "Registrando..."
   try{
-    if(st.tipo==='psf'){
+    if(st.tipo==='canc'){
+      await window.enviarMensajeCanc(item.id)
+    }else if(st.tipo==='psf'){
       await window.enviarMensajePsf(item.id)
     }else{
       await window.enviarMensajeConfirmacion(item.prog_id)

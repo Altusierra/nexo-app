@@ -355,8 +355,6 @@ tr:hover td{background:var(--card2)}
 .aux-search-wrap input:focus{border-color:#fff;outline:none;box-shadow:0 0 0 3px rgba(255,255,255,.25)}
 .aux-search-wrap .aux-search-btn{background:#fff;color:var(--accent);border:none;border-radius:11px;padding:14px 22px;font-size:15px;font-weight:800;font-family:inherit;cursor:pointer;white-space:nowrap}
 .aux-search-wrap .aux-search-btn:hover{background:#eef0ff}
-/* sticky en escritorio: justo debajo de la barra de avance */
-@media(min-width:769px){.aux-search-wrap{position:sticky;top:64px;z-index:25}}
 .aux-search-res{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px 18px;margin-bottom:18px;animation:auxpop .3s ease}
 .aux-search-res .tel{font-size:16px;font-weight:800;font-family:ui-monospace,monospace}
 .aux-search-res .where{font-size:13.5px;margin-top:6px}
@@ -9339,72 +9337,189 @@ window._auxSecInfo=(m)=>{
   }
   return{sec:'aux-dropi',label:'Cruce Dropi',color:'blue',que:'Revisa su estado en el Cruce Dropi.'}
 }
+// ════════════════════════════════════════════════════════════════════════════
+// CAPA CANÓNICA — ÚNICA FUENTE DE VERDAD DEL ESTADO DE UN PEDIDO
+// ─────────────────────────────────────────────────────────────────────────────
+// Antes cada pantalla decidía el estado de un pedido a su manera (consultaba las
+// tablas que le convenían: mapeos / novedades / reclame), y por eso el buscador
+// y las secciones se contradecían. Para que NO vuelva a pasar: hay UN solo lugar
+// (resolverEstadoPedido) que decide el estado. El buscador —y cualquier feature
+// futura— debe PREGUNTAR AQUÍ, nunca reinventar la lógica.
+//
+// Jerarquía (decidida con el owner):
+//   1) Si el número está en una COLA accionable (novedad o reclame) → ese manda,
+//      con su estado real (pendiente / contactada / resuelta). Entre novedad y
+//      reclame gana el MÁS RECIENTE (un número no suele estar en ambas a la vez).
+//   2) Si no hay cola → manda el estado oficial de Dropi (mapeos.estado_final):
+//      reservado / en tránsito / entregado / cancelado / devuelto.
+// ════════════════════════════════════════════════════════════════════════════
+const ESTADO_PEDIDO={
+  novedad:    {sec:'aux-novedades',  label:'Novedad',               emoji:'⚠️', color:'amber', acciones:['whatsapp','resolver'], que:'El repartidor tuvo un problema — contacta al cliente.'},
+  reclame:    {sec:'aux-reclame',    label:'Reclame en oficina',    emoji:'📦', color:'amber', acciones:['whatsapp','resolver'], que:'Avísale al cliente que vaya a recoger a la oficina.'},
+  reservado:  {sec:'aux-reservado',  label:'Reservado / Pendiente', emoji:'🔁', color:'amber', acciones:['reservado'],          que:'Confírmalo o agéndale fecha de envío.'},
+  en_transito:{sec:'aux-seguimiento',label:'En tránsito',           emoji:'🚚', color:'blue',  acciones:['ir'],                 que:'Va en camino — vigílalo para que no se devuelva.'},
+  entregado:  {sec:null,             label:'Entregado',             emoji:'✅', color:'green', acciones:[],                     que:'Ya está entregado, nada que hacer. 🎉'},
+  cancelado:  {sec:null,             label:'Cancelado',             emoji:'❌', color:'red',   acciones:[],                     que:'Este pedido está cancelado.'},
+  devuelto:   {sec:null,             label:'Devuelto',              emoji:'↩️', color:'red',   acciones:[],                     que:'Este pedido se devolvió.'},
+  desconocido:{sec:null,             label:'No encontrado',         emoji:'❓', color:'muted', acciones:[],                     que:'No hay ningún pedido con ese número.'},
+}
+window.ESTADO_PEDIDO=ESTADO_PEDIDO
+
+// ÚNICA función que decide el estado de un pedido. Devuelve un objeto canónico:
+//   { telefono, estado, resuelta, def, datos, fuente, _ts }
+// `estado` es una clave de ESTADO_PEDIDO; `datos` es el item/registro de la fuente.
+async function resolverEstadoPedido(tel){
+  tel=String(tel||'').replace(/\D/g,'')
+  if(tel.length<7)return{telefono:tel,estado:'desconocido',resuelta:false,def:ESTADO_PEDIDO.desconocido,datos:null,fuente:null,_ts:0}
+  // 1) Colas accionables (cache del día primero; si no está, consulta la base)
+  let nov=((window._novCache&&window._novCache.items)||[]).find(i=>String(i.tel||'').replace(/\D/g,'')===tel)||null
+  if(!nov)nov=await _auxFetchNovedad(tel)
+  let rec=[...((window._reclameCache&&window._reclameCache.items)||[]),...((window._reclameCache&&window._reclameCache.arrastrados)||[])].find(i=>String(i.tel||'').replace(/\D/g,'')===tel)||null
+  if(!rec)rec=await _auxFetchReclame(tel)
+  let cola=null
+  if(nov&&rec)cola=((rec._ts||0)>(nov._ts||0))?{tipo:'reclame',it:rec}:{tipo:'novedad',it:nov}
+  else if(nov)cola={tipo:'novedad',it:nov}
+  else if(rec)cola={tipo:'reclame',it:rec}
+  if(cola){
+    const it=cola.it
+    const resuelta=cola.tipo==='novedad'?!!(it.resol&&it.resol.accion==='resuelta'):!!it.resuelta
+    return{telefono:tel,estado:cola.tipo,resuelta,def:ESTADO_PEDIDO[cola.tipo],datos:it,fuente:cola.tipo,_ts:it._ts||0}
+  }
+  // 2) Sin cola → estado oficial de Dropi (mapeos)
+  const{data}=await sb.from('mapeos').select('*').eq('telefono',tel).order('fecha',{ascending:false}).limit(1)
+  if(!data||!data.length)return{telefono:tel,estado:'desconocido',resuelta:false,def:ESTADO_PEDIDO.desconocido,datos:null,fuente:null,_ts:0}
+  const m=data[0]
+  const ef=(m.estado_final||'').toString().trim().toUpperCase()
+  const ds=DROPI_STATUS[ef]
+  const cat=ds?ds.cat:null
+  let estado='reservado'
+  if(cat==='novedad')estado='novedad'
+  else if(cat==='en_bodega')estado='reclame'
+  else if(cat==='en_transito'||cat==='en_proceso')estado='en_transito'
+  else if(cat==='entregado'||cat==='novedad_ok')estado='entregado'
+  else if(cat==='cancelado')estado='cancelado'
+  else if(cat==='devuelto')estado='devuelto'
+  else estado='reservado' // pendiente o sin estado todavía
+  return{telefono:tel,estado,resuelta:false,def:ESTADO_PEDIDO[estado]||ESTADO_PEDIDO.reservado,datos:m,fuente:'mapeos',_ts:0}
+}
+window.resolverEstadoPedido=resolverEstadoPedido
+
+// ════════ BUSCADOR UNIVERSAL — ya NO detecta nada: solo PREGUNTA a la capa canónica y pinta ════════
 window.auxBuscarPedido=async()=>{
   const inp=document.getElementById('aux-buscar-tel')
   const res=document.getElementById('aux-buscar-res')
   if(!inp)return
   const tel=(inp.value||'').replace(/\D/g,'')
   if(tel.length<7){if(res)res.innerHTML='<div class="alert alert-blue">Escribe un teléfono de al menos 7 dígitos.</div>';return}
-
-  // ── Botones según la sección donde estás: abre un popup con SOLO ese pedido y sus acciones ──
-  // Reservados → popup nativo (confirmar / cancelar / programar). Reutiliza buscarOrden.
-  if(currentPage==='aux-reservado'&&typeof window.buscarOrden==='function'){
-    if(res)res.innerHTML=''
-    window.buscarOrden(tel)
-    return
-  }
-  // Novedades → popup con WhatsApp + Marcar resuelta (sobre el lote del día).
-  if(currentPage==='aux-novedades'){if(res)res.innerHTML='';return window._auxPopupNovedad(tel,res)}
-  // Reclame → popup con WhatsApp + Marcar resuelta (sobre el lote del día).
-  if(currentPage==='aux-reclame'){if(res)res.innerHTML='';return window._auxPopupReclame(tel,res)}
-
-  // ── Demás secciones: comportamiento de siempre (te digo dónde está y un botón para ir) ──
   if(res)res.innerHTML='<div style="padding:12px;color:var(--muted)">Buscando…</div>'
   try{
-    const{data}=await sb.from('mapeos').select('*').eq('telefono',tel).order('fecha',{ascending:false}).limit(5)
-    if(!data||!data.length){if(res)res.innerHTML=`<div class="alert alert-blue">No encontré ningún pedido con el teléfono <b>${tel}</b>.</div>`;return}
-    const m=data[0]
-    const info=window._auxSecInfo(m)
-    const ef=(m.estado_final||'').toString().trim()
-    const ds=DROPI_STATUS[ef.toUpperCase()]
-    const estadoTxt=ds?`${ds.emoji} ${ds.label}`:(ef||m.estado_inicial||'Recién cargado')
-    const btn=info.sec?`<button class="btn-sm btn-primary" style="margin-top:10px" onclick="navigate('${info.sec}')">Ir a «${info.label}» →</button>`:`<div class="aux-empty" style="margin-top:10px;padding:14px"><span class="e">✅</span>${info.que}</div>`
+    const r=await resolverEstadoPedido(tel)
+    // Novedad / Reclame con item real → popup con acciones (el estado real lo trae el item)
+    if(r.estado==='novedad'&&r.fuente==='novedad'){if(res)res.innerHTML='';return _auxRenderPopupNovedad(r.datos)}
+    if(r.estado==='reclame'&&r.fuente==='reclame'){if(res)res.innerHTML='';return _auxRenderPopupReclame(r.datos)}
+    // Reservado/pendiente → en Reservados abre el popup de acciones; si no, tarjeta informativa
+    if(r.estado==='reservado'&&currentPage==='aux-reservado'&&typeof window.buscarOrden==='function'){if(res)res.innerHTML='';window.buscarOrden(tel);return}
+    // Resto → tarjeta informativa (incluye novedad/reclame que solo aparecen en Dropi, en tránsito, entregado, etc.)
+    if(!r.datos){if(res)res.innerHTML=`<div class="alert alert-blue">No encontré ningún pedido con el teléfono <b>${tel}</b>.</div>`;return}
+    const def=r.def||ESTADO_PEDIDO.reservado
+    const d=r.datos
+    const btn=def.sec?`<button class="btn-sm btn-primary" style="margin-top:10px" onclick="navigate('${def.sec}')">Ir a «${def.label}» →</button>`:`<div class="aux-empty" style="margin-top:10px;padding:14px"><span class="e">✅</span>${def.que}</div>`
     if(res)res.innerHTML=`<div class="aux-search-res">
-      <div class="tel">📞 ${m.telefono}</div>
-      <div class="where">Producto: <b>${m.producto||'—'}</b> · Estado: <b>${estadoTxt}</b>${m.fecha?` · Compra: ${m.fecha}`:''}</div>
-      <div class="what">👉 ${info.que}</div>
-      ${info.sec?btn:btn}
+      <div class="tel">📞 ${d.telefono||d.tel||tel}</div>
+      <div class="where">Producto: <b>${d.producto||'—'}</b> · Estado: <b>${def.emoji} ${def.label}</b>${d.fecha?` · Compra: ${d.fecha}`:''}</div>
+      <div class="what">👉 ${def.que}</div>
+      ${btn}
     </div>`
   }catch(e){
     if(res)res.innerHTML=`<div class="alert alert-red">Error buscando: ${e.message}</div>`
   }
 }
 
-// ── Popup de un pedido en NOVEDADES (busca en el lote del día) ──
-// Reutiliza mostrarProtocolo / marcarResuelta / desmarcarResuelta (refrescan la lista a su manera).
+// Trae la novedad MÁS RECIENTE del teléfono desde la base (para detectarla desde cualquier sección)
+async function _auxFetchNovedad(tel){
+  try{
+    const{data:items}=await sb.from('novedades_items').select('*').eq('telefono',tel).order('created_at',{ascending:false}).limit(1)
+    if(!items||!items.length)return null
+    const it=items[0]
+    const oid=it.orden_id||''
+    const{data:resols}=await sb.from('novedades_resoluciones').select('*').eq('telefono',tel).order('created_at',{ascending:false}).limit(30)
+    let resol=null, contact=null
+    for(const r of (resols||[])){
+      if((r.orden_id||'')!==oid)continue
+      if(r.accion==='contactada'){if(!contact)contact={cuando:r.created_at,usuario:r.usuario_nombre}}
+      else if(!resol){resol={accion:r.accion,usuario:r.usuario_nombre,cuando:r.created_at,motivo:r.motivo}}
+    }
+    const cat=NOV_RULES[(it.cat_idx||1)-1]||{tipo:it.tipo||'Novedad',idx:it.cat_idx||99}
+    return{
+      tel:it.telefono,orden_id:it.orden_id,nombre:it.cliente_nombre,
+      carrier:it.carrier,direccion:it.direccion,producto:it.producto,
+      cat:{...cat,idx:it.cat_idx||cat.idx,tipo:it.tipo||cat.tipo},
+      resol,contact,_ts:(it.created_at?new Date(it.created_at).getTime():0)
+    }
+  }catch(e){return null}
+}
+
+// Trae el reclame MÁS RECIENTE del teléfono desde la base. Lo deja en el cache para que las acciones funcionen
+async function _auxFetchReclame(tel){
+  try{
+    const{data:items}=await sb.from('reclame_items').select('*').eq('telefono',tel).order('created_at',{ascending:false}).limit(1)
+    if(!items||!items.length)return null
+    const it=items[0]
+    const g=it.guia||''
+    const{data:envios}=await sb.from('reclame_envios').select('telefono,guia,created_at,usuario_nombre,nivel_mensaje').eq('telefono',tel).order('created_at',{ascending:false}).limit(200)
+    let count=0, resuelta=false, resueltaFecha=null, resueltaUsuario=null
+    for(const e of (envios||[])){
+      if((e.guia||'')!==g)continue
+      if(e.nivel_mensaje===99){if(!resuelta){resuelta=true;resueltaFecha=e.created_at;resueltaUsuario=e.usuario_nombre}continue}
+      count++
+    }
+    let prod=it.producto
+    try{const{data:md}=await sb.from('mapeos').select('producto').eq('telefono',tel).limit(1);if(md&&md.length&&md[0].producto)prod=md[0].producto}catch(_e){}
+    const item={
+      tel:it.telefono,guia:it.guia,nombre:it.cliente_nombre,
+      carrier:it.carrier,ciudad:it.ciudad,depto:it.depto,direccion:it.direccion,
+      producto:prod,cantidad:it.cantidad,orden_id:it.orden_id,
+      envios:count,resuelta,resueltaFecha,resueltaUsuario,_ts:(it.created_at?new Date(it.created_at).getTime():0)
+    }
+    // Dejarlo en el cache (sin romper la lista) para que enviarReclameUno / marcarReclameResuelta lo encuentren
+    if(!window._reclameCache)window._reclameCache={fechaActiva:null,items:[],reporteId:null}
+    if(!window._reclameCache.items)window._reclameCache.items=[]
+    const k=(item.tel||'')+'|'+(item.guia||'')
+    if(!window._reclameCache.items.some(x=>((x.tel||'')+'|'+(x.guia||''))===k))window._reclameCache.items.push(item)
+    return item
+  }catch(e){return null}
+}
+
+// ── Popup de NOVEDAD: muestra el estado REAL (pendiente / contactada / resuelta) ──
 window._auxNovItem=null
-window._auxPopupNovedad=(tel,res)=>{
-  const items=(window._novCache&&window._novCache.items)||[]
-  const m=items.find(i=>String(i.tel||i.telefono||'').replace(/\D/g,'')===tel)
-  if(!m){if(res)res.innerHTML=`<div class="alert alert-blue">El teléfono <b>${tel}</b> no está en las novedades del lote de hoy.</div>`;return}
+function _auxRenderPopupNovedad(m){
   window._auxNovItem=m
   const esc=s=>(s||'').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-  const resuelta=!!m.resuelta
-  const catLabel=(m.cat&&m.cat.label)||'Novedad'
+  const resuelta=m.resol&&m.resol.accion==='resuelta'
+  const contactada=!!m.contact&&!resuelta
+  const catTipo=(m.cat&&m.cat.tipo)||'Novedad'
+  let pillTxt,pillC,pillBg
+  if(resuelta){pillTxt='✅ Resuelta';pillC='var(--green)';pillBg='var(--green-bg)'}
+  else if(contactada){pillTxt='📨 Contactada';pillC='var(--blue)';pillBg='var(--blue-bg)'}
+  else{pillTxt='⚠️ '+esc(catTipo);pillC='var(--amber)';pillBg='var(--amber-bg)'}
+  let estadoLinea=''
+  if(resuelta)estadoLinea=`<div style="margin-top:10px;padding:8px 10px;background:var(--green-bg);border:1px solid var(--green);border-radius:8px;font-size:12.5px;color:var(--green)">✅ Resuelta${m.resol.usuario?' por '+esc(m.resol.usuario):''}${m.resol.cuando?' · '+(m.resol.cuando||'').slice(0,16).replace('T',' '):''}</div>`
+  else if(contactada)estadoLinea=`<div style="margin-top:10px;padding:8px 10px;background:var(--blue-bg);border:1px solid var(--blue);border-radius:8px;font-size:12.5px;color:var(--blue)">📨 Ya contactada${m.contact.usuario?' por '+esc(m.contact.usuario):''} · falta marcarla resuelta</div>`
   closeModal()
   const ov=document.createElement('div')
   ov.id='user-modal';ov.className='modal-bg'
   ov.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:460px">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">
-      <div class="modal-title" style="margin:0;font-family:monospace">⚠️ ${esc(m.tel||tel)}</div>
-      <span class="pill" style="background:${resuelta?'var(--green-bg)':'var(--amber-bg)'};color:${resuelta?'var(--green)':'var(--amber)'};border:1px solid ${resuelta?'var(--green)':'var(--amber)'}">${resuelta?'✅ Resuelta':'⚠️ '+esc(catLabel)}</span>
+      <div class="modal-title" style="margin:0;font-family:monospace">⚠️ ${esc(m.tel)}</div>
+      <span class="pill" style="background:${pillBg};color:${pillC};border:1px solid ${pillC}">${pillTxt}</span>
     </div>
     <div style="font-size:14px;line-height:1.9;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:12px 14px">
       <div><strong>Cliente:</strong> ${esc(m.nombre||'—')}</div>
       <div><strong>Producto:</strong> ${esc(m.producto||'—')}</div>
       <div><strong>Transportadora:</strong> ${esc(m.carrier||'—')}</div>
       ${m.direccion?`<div><strong>Dirección:</strong> ${esc(m.direccion)}</div>`:''}
-    </div>
+      <div><strong>Tipo:</strong> ${esc(catTipo)}</div>
+    </div>${estadoLinea}
     <div style="margin-top:14px;display:flex;flex-direction:column;gap:10px">
       <button class="btn-full btn-green" style="padding:16px;font-size:16px;font-weight:800" onclick="_auxNovWhatsapp()">📋 Ver mensaje (WhatsApp)</button>
       ${resuelta
@@ -9420,30 +9535,29 @@ window._auxNovWhatsapp=()=>{const m=window._auxNovItem;if(!m)return;const idx=(m
 window._auxNovResolver=()=>{const m=window._auxNovItem;if(!m)return;closeModal();marcarResuelta(m.tel,m.orden_id||'')}
 window._auxNovDesresolver=()=>{const m=window._auxNovItem;if(!m)return;closeModal();desmarcarResuelta(m.tel,m.orden_id||'')}
 
-// ── Popup de un pedido en RECLAME (busca en el lote del día) ──
-// Reutiliza enviarReclameUno / marcarReclameResuelta / desmarcarReclameResuelta (refrescan la lista a su manera).
+// ── Popup de RECLAME: muestra el estado REAL (pendiente / resuelta) ──
 window._auxRecItem=null
-window._auxPopupReclame=(tel,res)=>{
-  const cache=window._reclameCache||{}
-  const items=[...(cache.items||[]),...(cache.arrastrados||[])]
-  const m=items.find(i=>String(i.tel||i.telefono||'').replace(/\D/g,'')===tel)
-  if(!m){if(res)res.innerHTML=`<div class="alert alert-blue">El teléfono <b>${tel}</b> no está en el reclame en oficina del lote de hoy.</div>`;return}
+function _auxRenderPopupReclame(m){
   window._auxRecItem=m
   const esc=s=>(s||'').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
   const resuelta=!!m.resuelta
+  let estadoLinea=''
+  if(resuelta)estadoLinea=`<div style="margin-top:10px;padding:8px 10px;background:var(--green-bg);border:1px solid var(--green);border-radius:8px;font-size:12.5px;color:var(--green)">✅ Resuelta${m.resueltaUsuario?' por '+esc(m.resueltaUsuario):''}${m.resueltaFecha?' · '+(m.resueltaFecha||'').slice(0,16).replace('T',' '):''}</div>`
+  else if(m.envios>0)estadoLinea=`<div style="margin-top:10px;padding:8px 10px;background:var(--blue-bg);border:1px solid var(--blue);border-radius:8px;font-size:12.5px;color:var(--blue)">📨 ${m.envios} mensaje${m.envios>1?'s':''} enviado${m.envios>1?'s':''} · falta que recoja</div>`
   closeModal()
   const ov=document.createElement('div')
   ov.id='user-modal';ov.className='modal-bg'
   ov.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:460px">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">
-      <div class="modal-title" style="margin:0;font-family:monospace">📦 ${esc(m.tel||tel)}</div>
+      <div class="modal-title" style="margin:0;font-family:monospace">📦 ${esc(m.tel)}</div>
       <span class="pill" style="background:${resuelta?'var(--green-bg)':'var(--amber-bg)'};color:${resuelta?'var(--green)':'var(--amber)'};border:1px solid ${resuelta?'var(--green)':'var(--amber)'}">${resuelta?'✅ Resuelta':'📦 Reclame'}</span>
     </div>
     <div style="font-size:14px;line-height:1.9;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:12px 14px">
+      <div><strong>Cliente:</strong> ${esc(m.nombre||'—')}</div>
       <div><strong>Producto:</strong> ${esc(m.producto||'—')}</div>
       <div><strong>Transportadora:</strong> ${esc(m.carrier||'—')}</div>
       ${m.guia?`<div><strong>Guía:</strong> ${esc(m.guia)}</div>`:''}
-    </div>
+    </div>${estadoLinea}
     <div style="margin-top:14px;display:flex;flex-direction:column;gap:10px">
       <button class="btn-full btn-green" style="padding:16px;font-size:16px;font-weight:800" onclick="_auxRecWhatsapp()">📲 Abrir WhatsApp</button>
       ${resuelta

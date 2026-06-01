@@ -6002,6 +6002,7 @@ async function pageAuxReservado(c){
           </div>
           <button class="btn-sm btn-outline" onclick="cargarPendientesConfirmacion()">🔄 Recargar</button>
           <button class="btn-sm btn-primary" onclick="iniciarPendColaConf()" style="font-weight:700">▶️ Modo envío rápido</button>
+          <span data-wa-pill="conf" style="margin-left:8px;vertical-align:middle">${typeof _waPillHTML==='function'?_waPillHTML('conf'):''}</span>
         </div>
       </div>
       <div id="conf-content"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div></div>
@@ -6013,7 +6014,7 @@ async function pageAuxReservado(c){
         <div style="font-size:18px;font-weight:700">PASO 2 — Recuperar los que NO tienen fecha</div>
       </div>
       <div class="page-sub" style="margin-bottom:14px">Pedidos en estado pendiente (desde el cruce Dropi) que aún no tienen fecha programada. Búscalos por teléfono arriba para asignarles una.</div>
-      <div style="margin-bottom:14px"><button class="btn-sm btn-primary" onclick="iniciarPendColaPsf()" style="font-weight:700;padding:9px 16px">▶️ Modo envío rápido</button></div>
+      <div style="margin-bottom:14px"><button class="btn-sm btn-primary" onclick="iniciarPendColaPsf()" style="font-weight:700;padding:9px 16px">▶️ Modo envío rápido</button> <span data-wa-pill="psf" style="vertical-align:middle">${typeof _waPillHTML==='function'?_waPillHTML('psf'):''}</span></div>
       <div id="psf-content"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div></div>
     </div>
 
@@ -6023,7 +6024,7 @@ async function pageAuxReservado(c){
         <div style="font-size:18px;font-weight:700">PASO 3 — Recuperar los CANCELADOS</div>
       </div>
       <div class="page-sub" style="margin-bottom:14px">Pedidos cancelados por el cruce Dropi. Ofréceles asegurar el envío con un adelanto (se descuenta del total) para recuperarlos. Al confirmarlos o agendarles fecha, salen de aquí.</div>
-      <div style="margin-bottom:14px"><button class="btn-sm btn-primary" onclick="iniciarPendColaCanc()" style="font-weight:700;padding:9px 16px">▶️ Modo envío rápido</button></div>
+      <div style="margin-bottom:14px"><button class="btn-sm btn-primary" onclick="iniciarPendColaCanc()" style="font-weight:700;padding:9px 16px">▶️ Modo envío rápido</button> <span data-wa-pill="canc" style="vertical-align:middle">${typeof _waPillHTML==='function'?_waPillHTML('canc'):''}</span></div>
       <div id="canc-content"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div></div>
     </div>`
 
@@ -6516,6 +6517,138 @@ async function pageAuxReservado(c){
 
 
 // ── PENDIENTES DE CONFIRMACIÓN (queue diaria) ─────────────
+// ════════════════════════════════════════════════════════════════════════════
+// FRENO ANTI-BLOQUEO DE WHATSAPP (independiente por sección)
+// Cada sección tiene su propio número de WhatsApp → su propio contador y su reloj.
+// Al llegar a 22 mensajes enviados se obliga un descanso de 30 min (no deja enviar
+// en ESA sección; el auxiliar sí puede irse a otra sección con otro número).
+// El contador y la hora de fin de pausa se guardan en el navegador (por equipo),
+// se reinician al terminar el descanso y cada día nuevo.
+// ════════════════════════════════════════════════════════════════════════════
+const WA_LIMITE=22
+const WA_PAUSA_MS=30*60*1000
+const WA_SECCIONES={
+  reclame:'RECLAME EN OFICINA',
+  novedades:'NOVEDADES',
+  conf:'CONFIRMAR CON FECHA',
+  psf:'RECUPERAR SIN FECHA',
+  canc:'RECUPERAR CANCELADOS'
+}
+let _waInterval=null,_waModalSec=null
+function _waKey(sec){return 'wa_throttle_'+sec}
+function _waThrottleState(sec){
+  let st={count:0,pausaHasta:null,dia:today()}
+  try{const raw=localStorage.getItem(_waKey(sec));if(raw)st=JSON.parse(raw)||st}catch(_){}
+  if(st.dia!==today()){st={count:0,pausaHasta:null,dia:today()};_waSave(sec,st)}
+  return st
+}
+function _waSave(sec,st){try{localStorage.setItem(_waKey(sec),JSON.stringify(st))}catch(_){}}
+
+// Contador visible (📨 X/22) para cada sección
+function _waPillHTML(sec){
+  const st=_waThrottleState(sec)
+  const n=st.count||0
+  const enPausa=st.pausaHasta&&Date.now()<st.pausaHasta
+  if(enPausa){
+    return `<span class="pill" style="background:rgba(239,68,68,.15);color:var(--red);border:1px solid var(--red);font-weight:700;font-size:11px">⏸️ En descanso</span>`
+  }
+  const restantes=Math.max(0,WA_LIMITE-n)
+  const col=n>=WA_LIMITE?'var(--red)':(restantes<=5?'var(--amber)':'var(--green)')
+  const bg=n>=WA_LIMITE?'rgba(239,68,68,.12)':(restantes<=5?'rgba(245,158,11,.12)':'rgba(34,197,94,.12)')
+  return `<span class="pill" style="background:${bg};color:${col};border:1px solid ${col};font-weight:700;font-size:11px">📨 ${n}/${WA_LIMITE}${restantes<=5&&restantes>0?` · faltan ${restantes}`:''}</span>`
+}
+function waThrottleRefreshPills(){
+  document.querySelectorAll('[data-wa-pill]').forEach(el=>{
+    const sec=el.getAttribute('data-wa-pill')
+    if(sec)el.innerHTML=_waPillHTML(sec)
+  })
+}
+window.waThrottleRefreshPills=waThrottleRefreshPills
+
+// ¿Puede enviar en esta sección? Si está en descanso → muestra el reloj y devuelve false.
+function waThrottleCheck(sec){
+  const st=_waThrottleState(sec)
+  const ahora=Date.now()
+  if(st.pausaHasta&&ahora<st.pausaHasta){_waModalDescanso(sec,st.pausaHasta-ahora);return false}
+  if(st.pausaHasta&&ahora>=st.pausaHasta){st.count=0;st.pausaHasta=null;_waSave(sec,st)}
+  return true
+}
+window.waThrottleCheck=waThrottleCheck
+
+// Registra un envío. Al llegar a 22, arranca el descanso de 30 min y avisa con el reloj.
+function waThrottleRegistrar(sec){
+  const st=_waThrottleState(sec)
+  st.count=(st.count||0)+1
+  if(st.count>=WA_LIMITE)st.pausaHasta=Date.now()+WA_PAUSA_MS
+  _waSave(sec,st)
+  waThrottleRefreshPills()
+  if(st.pausaHasta&&Date.now()<st.pausaHasta)_waModalDescanso(sec,st.pausaHasta-Date.now())
+}
+window.waThrottleRegistrar=waThrottleRegistrar
+
+function _waFmtMMSS(ms){
+  const s=Math.max(0,Math.floor(ms/1000))
+  return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')
+}
+// Pantalla de descanso (overlay propio, encima de todo). Bloquea el envío de la sección,
+// pero deja cerrarse para trabajar en otra sección. Reaparece si se intenta enviar en pausa.
+function _waModalDescanso(sec,msIniciales){
+  const nombre=WA_SECCIONES[sec]||sec
+  if(_waModalSec===sec&&document.getElementById('wa-descanso-modal'))return
+  const prev=document.getElementById('wa-descanso-modal');if(prev)prev.remove()
+  if(_waInterval){clearInterval(_waInterval);_waInterval=null}
+  _waModalSec=sec
+  const ov=document.createElement('div')
+  ov.id='wa-descanso-modal'
+  ov.style.cssText='position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.88);display:flex;align-items:center;justify-content:center;padding:18px'
+  ov.innerHTML=`<div id="wa-desc-box" style="max-width:430px;width:100%;background:var(--card);border:3px solid var(--red);border-radius:18px;padding:26px 22px;text-align:center;box-shadow:0 12px 44px rgba(0,0,0,.55)">
+    <div style="font-size:54px;line-height:1">🛑</div>
+    <div id="wa-desc-titulo" style="font-size:23px;font-weight:800;color:var(--red);margin-top:6px">DESCANSA 30 MINUTOS</div>
+    <div id="wa-desc-texto" style="font-size:14px;color:var(--text);margin-top:10px;line-height:1.5">
+      Mandaste <strong>${WA_LIMITE} mensajes</strong> en <strong>${nombre}</strong>.<br>
+      Si sigues ahora, WhatsApp puede <strong style="color:var(--red)">BLOQUEAR</strong> el número.<br>
+      Espera a que el reloj llegue a <strong>CERO</strong> 👇
+    </div>
+    <div id="wa-desc-reloj" style="font-size:60px;font-weight:800;font-family:monospace;letter-spacing:2px;margin:12px 0;color:var(--text)">--:--</div>
+    <div style="height:14px;background:var(--card2);border-radius:8px;overflow:hidden;border:1px solid var(--border)">
+      <div id="wa-desc-barra" style="height:100%;width:0%;background:var(--red);transition:width 1s linear"></div>
+    </div>
+    <div id="wa-desc-accion" style="margin-top:18px">
+      <button onclick="waCerrarDescanso()" class="btn-sm btn-outline" style="padding:10px 16px;font-size:13px">✖️ Cerrar (puedo trabajar en otra sección)</button>
+    </div>
+  </div>`
+  document.body.appendChild(ov)
+  const fin=Date.now()+msIniciales
+  const tick=()=>{
+    const reloj=document.getElementById('wa-desc-reloj')
+    if(!reloj){if(_waInterval){clearInterval(_waInterval);_waInterval=null}return}
+    const falta=fin-Date.now()
+    const barra=document.getElementById('wa-desc-barra')
+    if(falta<=0){
+      if(_waInterval){clearInterval(_waInterval);_waInterval=null}
+      const st=_waThrottleState(sec);st.count=0;st.pausaHasta=null;_waSave(sec,st)
+      waThrottleRefreshPills()
+      const box=document.getElementById('wa-desc-box');if(box)box.style.borderColor='var(--green)'
+      const tit=document.getElementById('wa-desc-titulo');if(tit){tit.textContent='✅ ¡LISTO, YA PUEDES SEGUIR!';tit.style.color='var(--green)'}
+      const txt=document.getElementById('wa-desc-texto');if(txt)txt.innerHTML=`Ya puedes seguir enviando en <strong>${nombre}</strong>.`
+      reloj.textContent='00:00';reloj.style.color='var(--green)'
+      if(barra){barra.style.width='100%';barra.style.background='var(--green)'}
+      const acc=document.getElementById('wa-desc-accion');if(acc)acc.innerHTML=`<button onclick="waCerrarDescanso()" style="width:100%;padding:14px;border:none;border-radius:10px;background:var(--green);color:#fff;font-weight:800;font-size:16px;cursor:pointer">Continuar ▶</button>`
+      return
+    }
+    reloj.textContent=_waFmtMMSS(falta)
+    if(barra)barra.style.width=Math.min(100,Math.max(0,100*(1-falta/WA_PAUSA_MS)))+'%'
+  }
+  _waInterval=setInterval(tick,1000);tick()
+}
+window.waCerrarDescanso=()=>{
+  if(_waInterval){clearInterval(_waInterval);_waInterval=null}
+  _waModalSec=null
+  const ov=document.getElementById('wa-descanso-modal');if(ov)ov.remove()
+}
+// Mantener los contadores visibles siempre al día (barato: solo actualiza spans visibles)
+setInterval(()=>{try{waThrottleRefreshPills()}catch(_){}},1500)
+
 const CONF_MSGS=[
   // NIVEL 1 — Día 2 antes, 1er mensaje (cordial / informativo)
   `Hola [NOMBRE] ✨\n\nTe escribimos para avisarte que tu pedido de *[PRODUCTO]* ([CANTIDAD]) está apartado y listo.\n\n📦 Despacho programado: *[FECHA_ENVIO]* a [CIUDAD]\n💵 Pago contra entrega — recibes y pagas al transportador\n\n¿Confirmas que sigues interesado? Así alistamos todo para enviártelo 🙏`,
@@ -7159,7 +7292,9 @@ window.enviarMensajeCanc=async(mapeoId)=>{
   const telLimpio=String(m.telefono||'').replace(/\D/g,'')
   if(telLimpio.length<7){alert('Teléfono inválido');return}
   const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  if(!waThrottleCheck('canc'))return
   window.open(`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`,'_blank','noopener')
+  waThrottleRegistrar('canc')
   try{
     const{error:evErr}=await sb.from('mapeo_eventos').insert({
       mapeo_id:m.id,
@@ -7216,8 +7351,10 @@ window.enviarMensajePsf=async(mapeoId)=>{
   const telLimpio=String(m.telefono||'').replace(/\D/g,'')
   if(telLimpio.length<7){alert('Teléfono inválido');return}
   const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  if(!waThrottleCheck('psf'))return
   const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`
   window.open(url,'_blank','noopener')
+  waThrottleRegistrar('psf')
   try{
     const{error}=await sb.from('pendientes_sin_fecha_envios').insert({
       mapeo_id:m.id,
@@ -7263,8 +7400,10 @@ window.enviarMensajeConfirmacion=async(progId)=>{
   const telLimpio=String(item.telefono||'').replace(/\D/g,'')
   if(telLimpio.length<7){alert('Teléfono inválido');return}
   const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  if(!waThrottleCheck('conf'))return
   const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`
   window.open(url,'_blank','noopener')
+  waThrottleRegistrar('conf')
   try{
     await sb.from('confirmacion_envios').insert({
       programacion_id:progId,
@@ -7406,7 +7545,7 @@ function _pendColaRender(){
 
   openModal(`<div style="max-width:440px;margin:0 auto;text-align:center">
     <div style="font-size:12px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin-bottom:4px">${tituloModo}</div>
-    <div style="font-size:13px;font-weight:700;color:${acento};margin-bottom:14px">Pedido ${st.idx+1} de ${total}</div>
+    <div style="font-size:13px;font-weight:700;color:${acento};margin-bottom:14px">Pedido ${st.idx+1} de ${total} &nbsp; ${typeof _waPillHTML==='function'?_waPillHTML(st.tipo):''}</div>
 
     <div class="card" style="padding:18px;border:2px solid ${acento};margin-bottom:16px">
       <div style="font-size:30px;font-weight:800;font-family:monospace;letter-spacing:1px;color:var(--text)">${tel}</div>
@@ -7434,6 +7573,7 @@ window._pendColaEnviar=async()=>{
   const lista=_pendColaItems(st.tipo)
   const item=lista[st.idx]
   if(!item){_pendColaRender();return}
+  if(!waThrottleCheck(st.tipo))return
   st.enviando=true
   _pendColaRender() // muestra "Registrando..."
   try{
@@ -7450,6 +7590,9 @@ window._pendColaEnviar=async()=>{
   setTimeout(()=>{
     if(!window._pendColaState)return
     window._pendColaState.enviando=false
+    // Si la sección entró en descanso (llegó al límite), no reabrir la cola: dejar el reloj
+    const _st=_waThrottleState(st.tipo)
+    if(_st.pausaHasta&&Date.now()<_st.pausaHasta)return
     // Avanzar al siguiente (el actual ya pudo salir de la lista por cupo)
     window._pendColaState.idx=st.idx+1
     _pendColaRender()
@@ -7888,6 +8031,7 @@ function renderNovedadesContent(rep,items){
         📨 Enviar protocolos (${colaSinContactar} sin contactar)
       </button>
       <span style="font-size:11px;color:var(--muted)">Modo cola — envía mensajes uno por uno sin perder tiempo</span>
+      <span data-wa-pill="novedades" style="margin-left:8px"></span>
     </div>`:''
   el.innerHTML=`
     <div class="alert alert-blue" style="margin-bottom:12px">
@@ -8391,8 +8535,10 @@ window._colaAbrirWa=async()=>{
   const armado=_colaArmarMensaje(m)
   const telLimpio=String(m.tel||'').replace(/\D/g,'')
   const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  if(!waThrottleCheck('novedades'))return
   const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(armado.msg)}`
   window.open(url,'_blank','noopener')
+  waThrottleRegistrar('novedades')
   // Auto-registrar como contactada (no bloquea la apertura de WhatsApp si falla)
   try{
     const{error}=await sb.from('novedades_resoluciones').insert({
@@ -8823,6 +8969,7 @@ function renderReclameContent(rep,items,arrastrados){
         📨 Enviar en cola (${sinEnviar} sin enviar${yaEnviados>0?` · ${yaEnviados} con seguimiento`:''})
       </button>
       <span style="font-size:11px;color:var(--muted)">Modo cola — primero los más urgentes (último aviso)</span>
+      <span data-wa-pill="reclame" style="margin-left:8px"></span>
     </div>`:''
   // Cartelito de arrastrados (arriba del header del lote)
   const cartelitoArrastrados=arrastrados.length>0?`
@@ -9035,8 +9182,10 @@ window.enviarReclameUno=async(tel,guia)=>{
   const mensaje=armarMensajeReclame(m,nivel)
   const telLimpio=String(m.tel||'').replace(/\D/g,'')
   const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  if(!waThrottleCheck('reclame'))return
   const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`
   window.open(url,'_blank','noopener')
+  waThrottleRegistrar('reclame')
   try{
     await sb.from('reclame_envios').insert({
       telefono:m.tel,guia:m.guia||null,nivel_mensaje:nivel,
@@ -9265,8 +9414,10 @@ window._recColaAbrirWa=async()=>{
   const mensaje=armarMensajeReclame(m,nivel)
   const telLimpio=String(m.tel||'').replace(/\D/g,'')
   const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  if(!waThrottleCheck('reclame'))return
   const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`
   window.open(url,'_blank','noopener')
+  waThrottleRegistrar('reclame')
   // Auto-registrar envío (no bloquea apertura si falla)
   try{
     const{error}=await sb.from('reclame_envios').insert({

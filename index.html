@@ -13906,80 +13906,109 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   if(!camps.length){accEl.innerHTML='<div class="alert alert-blue">Sin campañas</div>';return}
 
   // ── Ventas reales: ad hierarchy + mapeos ──
-  // Base: jerarquía desde la BD (meta_campanas). En vivo se completa con datos frescos de Meta.
-  // OPTIMIZACIÓN: las consultas (BD + Meta) se lanzan EN PARALELO para cargar más rápido.
-  // El procesamiento se mantiene en el MISMO orden de antes → el resultado es idéntico.
+  // Jerarquía base desde la BD (meta_campanas). Rápido (1 consulta por nivel).
+  // Los ad_ids NUEVOS que aún no están en la BD se resuelven más abajo, puntualmente,
+  // pidiéndole a Meta SOLO esos (no se baja toda la cuenta). Ver "resolver huérfanos".
   let _adToken=''
   if(source==='meta'){
     _adToken=document.getElementById('cfg-token')?.value?.trim()||''
     if(!_adToken)_adToken=await getConfig('meta_access_token')
   }
-  const _pBdAdsets=sb.from('meta_campanas').select('meta_id,parent_id').eq('account_id',accountId).eq('nivel','adset')
-  const _pBdAds=sb.from('meta_campanas').select('meta_id,parent_id').eq('account_id',accountId).eq('nivel','ad')
-  const _pLiveAdsets=(source==='meta'&&_adToken)?metaGet(`/${actId}/adsets`,_adToken,{fields:'id,campaign_id',limit:'500'}).catch(e=>{console.warn('[ventas] adsets en vivo falló, uso BD:',e.message);return null}):Promise.resolve(null)
-  const _pLiveAds=(source==='meta'&&_adToken)?metaGet(`/${actId}/ads`,_adToken,{fields:'id,adset_id',limit:'500'}).catch(e=>{console.warn('[ventas] ads en vivo falló, uso BD:',e.message);return null}):Promise.resolve(null)
-  const [{data:allAdsets},{data:allAds},liveAdsets,liveAds]=await Promise.all([_pBdAdsets,_pBdAds,_pLiveAdsets,_pLiveAds])
-  // Procesamiento en el MISMO orden que antes (resultado idéntico):
+  const [{data:allAdsets},{data:allAds}]=await Promise.all([
+    sb.from('meta_campanas').select('meta_id,parent_id').eq('account_id',accountId).eq('nivel','adset'),
+    sb.from('meta_campanas').select('meta_id,parent_id').eq('account_id',accountId).eq('nivel','ad')
+  ])
   const adsetToCamp={}
   for(const as of (allAdsets||[]))adsetToCamp[as.meta_id]=as.parent_id
   const adToCamp={}
   for(const ad of (allAds||[]))adToCamp[ad.meta_id]=adsetToCamp[ad.parent_id]||''
-  // Completar con datos frescos de Meta (resuelve ad_ids nuevos que el sync aún no trajo a la BD):
-  if(liveAdsets){for(const as of liveAdsets){if(as.id&&as.campaign_id)adsetToCamp[as.id]=as.campaign_id}}
-  if(liveAds){for(const ad of liveAds){if(ad.id&&ad.adset_id&&adsetToCamp[ad.adset_id])adToCamp[ad.id]=adsetToCamp[ad.adset_id]}}
   const allAdIds=Object.keys(adToCamp)
 
   // Determinar si el rango es solo HOY o incluye días anteriores
   const esSoloHoy=(desde===hoy&&hasta===hoy)
   const ventasByCamp={}
-  if(allAdIds.length){
-    let mapeos=[]
-    for(let i=0;i<allAdIds.length;i+=100){
-      const batch=allAdIds.slice(i,i+100)
-      // Usar fecha de COMPRA (m.fecha), no fecha_dropi
-      const{data}=await sb.from('mapeos').select('ad_id,estado_final,fecha,fecha_dropi').in('ad_id',batch).gte('fecha',desde).lte('fecha',hasta)
-      if(data)mapeos=mapeos.concat(data)
-    }
-    for(const m of mapeos){
-      const campId=adToCamp[m.ad_id]
-      if(!campId)continue
-      // FIX: mapeos cuya fecha sea HOY (cruce parcial) NO se cuentan aquí.
-      // Para HOY la fuente única son los ad_ids del "Reporte del día" (bucle siguiente).
-      if(m.fecha===hoy)continue
-      if(!ventasByCamp[campId])ventasByCamp[campId]={ventas:0,canceladas:0,pendientes:0,_src:'mapeos'}
-      const v=ventasByCamp[campId]
-      v._src='mapeos'
-      // Días anteriores: ya conciliado, mostrar solo el estado final
-      const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
-      if(cat==='cancelado')v.canceladas++
-      else if(cat==='pendiente'||!m.estado_final)v.pendientes++
-      else v.ventas++  // confirmadas (entregadas, en proceso, devueltas, etc.)
-    }
+
+  // ── 1) Cargar mapeos del rango y reportes del rango (en paralelo) ──
+  // Mapeos: por RANGO de fecha (no por lista de ad_ids), así también vemos ad_ids nuevos.
+  //         Luego filtramos en memoria a los que pertenecen a ESTA cuenta (vía adToCamp / huérfanos).
+  const [mapeosRes,reportesRes]=await Promise.all([
+    sb.from('mapeos').select('ad_id,estado_final,fecha,fecha_dropi').not('ad_id','is',null).neq('ad_id','').gte('fecha',desde).lte('fecha',hasta),
+    sb.from('reportes_diarios').select('ad_ids,fecha,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false})
+  ])
+  const mapeos=mapeosRes.data||[]
+  const reportes=reportesRes.data||[]
+
+  // Dedup de reportes (fecha+producto, el más reciente gana) — igual que antes
+  const _seenRep=new Set()
+  const uniqueReportes=[]
+  for(const rep of reportes){
+    const key=rep.fecha+'|'+(rep.producto_id||rep.producto_nombre)
+    if(_seenRep.has(key))continue
+    _seenRep.add(key)
+    uniqueReportes.push(rep)
   }
 
-  // ── También buscar ventas del reporte diario (ad_ids manuales del auxiliar) ──
-  const{data:reportes}=await sb.from('reportes_diarios').select('ad_ids,fecha,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false})
-  if(reportes?.length){
-    const seen=new Set()
-    const uniqueReportes=[]
-    for(const rep of reportes){
-      const key=rep.fecha+'|'+(rep.producto_id||rep.producto_nombre)
-      if(seen.has(key))continue
-      seen.add(key)
-      uniqueReportes.push(rep)
-    }
-    for(const rep of uniqueReportes){
-      if(!rep.ad_ids)continue
-      const ids=rep.ad_ids.split(/[\n,]+/).map(s=>s.trim()).filter(s=>s.length>5)
-      for(const adId of ids){
-        const campId=adToCamp[adId]
-        if(!campId)continue
-        if(!ventasByCamp[campId])ventasByCamp[campId]={ventas:0,canceladas:0,pendientes:0}
-        if(ventasByCamp[campId]._src!=='mapeos'){
-          // Si la fecha del reporte es hoy, va a pendientes (aproximación)
-          if(rep.fecha===hoy)ventasByCamp[campId].pendientes++
-          else ventasByCamp[campId].ventas++
+  // ── 2) Juntar TODOS los ad_ids que de verdad vamos a usar ──
+  const _adIdsUsados=new Set()
+  for(const m of mapeos){if(m.ad_id)_adIdsUsados.add(String(m.ad_id))}
+  for(const rep of uniqueReportes){
+    if(!rep.ad_ids)continue
+    for(const id of rep.ad_ids.split(/[\n,]+/).map(s=>s.trim()).filter(s=>s.length>5))_adIdsUsados.add(id)
+  }
+
+  // ── 3) Resolver SOLO los huérfanos (los que la BD no conoce) pidiéndoselos a Meta ──
+  // Una sola llamada batch (?ids=...&fields=campaign_id). Si no hay huérfanos → 0 llamadas a Meta.
+  // Nota: el endpoint batch ?ids= devuelve un OBJETO {adId:{campaign_id}}, no {data:[...]},
+  // por eso se usa fetch directo aquí (metaGet siempre acumula .data y devuelve array).
+  const _huerfanos=[...(_adIdsUsados)].filter(id=>!adToCamp[id])
+  if(_huerfanos.length&&source==='meta'&&_adToken){
+    try{
+      for(let i=0;i<_huerfanos.length;i+=50){
+        const lote=_huerfanos.slice(i,i+50)
+        const _url=`${META_BASE}/?ids=${encodeURIComponent(lote.join(','))}&fields=campaign_id&access_token=${_adToken}`
+        const r=await fetch(_url)
+        if(!r.ok){console.warn('[ventas] batch ad_ids nuevos respondió',r.status);break}
+        const obj=await r.json()
+        if(obj&&typeof obj==='object'){
+          for(const adId of lote){
+            const o=obj[adId]
+            if(o&&o.campaign_id)adToCamp[adId]=o.campaign_id
+          }
         }
+      }
+    }catch(e){console.warn('[ventas] no se pudieron resolver ad_ids nuevos en vivo:',e.message)}
+  }
+
+  // ── 4) Conteo (idéntico al de antes) ──
+  // Mapeos: solo los que pertenecen a ESTA cuenta (su ad_id resuelve a una campaña conocida).
+  for(const m of mapeos){
+    const campId=adToCamp[m.ad_id]
+    if(!campId)continue
+    // FIX: mapeos cuya fecha sea HOY (cruce parcial) NO se cuentan aquí.
+    // Para HOY la fuente única son los ad_ids del "Reporte del día" (bucle siguiente).
+    if(m.fecha===hoy)continue
+    if(!ventasByCamp[campId])ventasByCamp[campId]={ventas:0,canceladas:0,pendientes:0,_src:'mapeos'}
+    const v=ventasByCamp[campId]
+    v._src='mapeos'
+    // Días anteriores: ya conciliado, mostrar solo el estado final
+    const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
+    if(cat==='cancelado')v.canceladas++
+    else if(cat==='pendiente'||!m.estado_final)v.pendientes++
+    else v.ventas++  // confirmadas (entregadas, en proceso, devueltas, etc.)
+  }
+
+  // Reporte diario (ad_ids manuales del auxiliar)
+  for(const rep of uniqueReportes){
+    if(!rep.ad_ids)continue
+    const ids=rep.ad_ids.split(/[\n,]+/).map(s=>s.trim()).filter(s=>s.length>5)
+    for(const adId of ids){
+      const campId=adToCamp[adId]
+      if(!campId)continue
+      if(!ventasByCamp[campId])ventasByCamp[campId]={ventas:0,canceladas:0,pendientes:0}
+      if(ventasByCamp[campId]._src!=='mapeos'){
+        // Si la fecha del reporte es hoy, va a pendientes (aproximación)
+        if(rep.fecha===hoy)ventasByCamp[campId].pendientes++
+        else ventasByCamp[campId].ventas++
       }
     }
   }

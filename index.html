@@ -13906,28 +13906,27 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   if(!camps.length){accEl.innerHTML='<div class="alert alert-blue">Sin campañas</div>';return}
 
   // ── Ventas reales: ad hierarchy + mapeos ──
-  // Base: jerarquía desde la BD (meta_campanas). Si falla algo o no hay token, esto se usa tal cual.
-  const{data:allAdsets}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('account_id',accountId).eq('nivel','adset')
-  const{data:allAds}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('account_id',accountId).eq('nivel','ad')
+  // Base: jerarquía desde la BD (meta_campanas). En vivo se completa con datos frescos de Meta.
+  // OPTIMIZACIÓN: las consultas (BD + Meta) se lanzan EN PARALELO para cargar más rápido.
+  // El procesamiento se mantiene en el MISMO orden de antes → el resultado es idéntico.
+  let _adToken=''
+  if(source==='meta'){
+    _adToken=document.getElementById('cfg-token')?.value?.trim()||''
+    if(!_adToken)_adToken=await getConfig('meta_access_token')
+  }
+  const _pBdAdsets=sb.from('meta_campanas').select('meta_id,parent_id').eq('account_id',accountId).eq('nivel','adset')
+  const _pBdAds=sb.from('meta_campanas').select('meta_id,parent_id').eq('account_id',accountId).eq('nivel','ad')
+  const _pLiveAdsets=(source==='meta'&&_adToken)?metaGet(`/${actId}/adsets`,_adToken,{fields:'id,campaign_id',limit:'500'}).catch(e=>{console.warn('[ventas] adsets en vivo falló, uso BD:',e.message);return null}):Promise.resolve(null)
+  const _pLiveAds=(source==='meta'&&_adToken)?metaGet(`/${actId}/ads`,_adToken,{fields:'id,adset_id',limit:'500'}).catch(e=>{console.warn('[ventas] ads en vivo falló, uso BD:',e.message);return null}):Promise.resolve(null)
+  const [{data:allAdsets},{data:allAds},liveAdsets,liveAds]=await Promise.all([_pBdAdsets,_pBdAds,_pLiveAdsets,_pLiveAds])
+  // Procesamiento en el MISMO orden que antes (resultado idéntico):
   const adsetToCamp={}
   for(const as of (allAdsets||[]))adsetToCamp[as.meta_id]=as.parent_id
   const adToCamp={}
   for(const ad of (allAds||[]))adToCamp[ad.meta_id]=adsetToCamp[ad.parent_id]||''
-  // Si estamos viendo EN VIVO, completamos la jerarquía con adsets+ads frescos de Meta.
-  // Esto resuelve ad_ids nuevos (recién creados) que el último sync aún no trajo a la BD,
-  // para que sus ventas del Reporte del día se cuenten en su campaña. NO borra la base de BD.
-  if(source==='meta'){
-    try{
-      let token=document.getElementById('cfg-token')?.value?.trim()||''
-      if(!token)token=await getConfig('meta_access_token')
-      if(token){
-        const liveAdsets=await metaGet(`/${actId}/adsets`,token,{fields:'id,campaign_id',limit:'500'})
-        for(const as of (liveAdsets||[])){if(as.id&&as.campaign_id)adsetToCamp[as.id]=as.campaign_id}
-        const liveAds=await metaGet(`/${actId}/ads`,token,{fields:'id,adset_id',limit:'500'})
-        for(const ad of (liveAds||[])){if(ad.id&&ad.adset_id&&adsetToCamp[ad.adset_id])adToCamp[ad.id]=adsetToCamp[ad.adset_id]}
-      }
-    }catch(e){console.warn('[ventas] no se pudo refrescar jerarquía de ads en vivo, uso BD:',e.message)}
-  }
+  // Completar con datos frescos de Meta (resuelve ad_ids nuevos que el sync aún no trajo a la BD):
+  if(liveAdsets){for(const as of liveAdsets){if(as.id&&as.campaign_id)adsetToCamp[as.id]=as.campaign_id}}
+  if(liveAds){for(const ad of liveAds){if(ad.id&&ad.adset_id&&adsetToCamp[ad.adset_id])adToCamp[ad.id]=adsetToCamp[ad.adset_id]}}
   const allAdIds=Object.keys(adToCamp)
 
   // Determinar si el rango es solo HOY o incluye días anteriores

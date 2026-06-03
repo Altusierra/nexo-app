@@ -11402,6 +11402,7 @@ async function pageAuxSeguimiento(c){
       </div>
       <div id="seg-msg" style="margin-top:10px"></div>
     </div>
+    <div id="seg-pegados" style="margin-top:18px"></div>
     <div id="seg-resultado" style="margin-top:18px"></div>
     <div class="divider"></div>
     <div class="page-title" style="font-size:16px">📦 Historial de lotes</div>
@@ -11617,6 +11618,78 @@ async function cargarDevPorCampana(){
 }
 window.cargarDevPorCampana=cargarDevPorCampana
 
+// ════════ 🚚 PEDIDOS PEGADOS EN SEGUIMIENTO (pendiente / guía generada / rechazado) ════════
+// Lee del XLSX crudo de Seguimiento y muestra SOLO lo que está clavado antes de salir,
+// agrupado por día. Días/estados sin pedidos no se pintan. Identificación por ESTATUS EXACTO.
+window._segParseFecha=(f)=>{
+  // "DD-MM-YYYY" o "DD/MM/YYYY" → "YYYY-MM-DD"
+  const m=String(f||'').trim().match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/)
+  if(!m)return null
+  return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`
+}
+window._segDiasAtras=(iso)=>{
+  if(!iso)return null
+  return Math.round((new Date(today()+'T00:00:00')-new Date(iso+'T00:00:00'))/86400000)
+}
+window._segCopy=(txt,el,ok)=>{
+  navigator.clipboard.writeText(txt).then(()=>{
+    if(el){const o=el.textContent;el.textContent=ok||'✅ Copiado';setTimeout(()=>{el.textContent=o},1300)}
+  }).catch(()=>{})
+}
+window._renderPegadosSeguimiento=(ordenes)=>{
+  const cont=document.getElementById('seg-pegados')
+  if(!cont)return
+  const esc=s=>String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\r/g,'').replace(/\n/g,'\\n')
+  const CAJONES=[
+    {key:'PENDIENTE',     emoji:'🟡', titulo:'Pendientes',    accion:'Presiona al proveedor para que GENERE la guía', color:'var(--amber)'},
+    {key:'GUIA_GENERADA', emoji:'📦', titulo:'Guía generada', accion:'Presiona para que la DESPACHEN',                color:'var(--blue)'},
+    {key:'RECHAZADO',     emoji:'🔴', titulo:'Rechazados',    accion:'Investiga qué pasó',                           color:'var(--red)'},
+  ]
+  let html=''
+  for(const cj of CAJONES){
+    const items=(ordenes||[]).filter(o=>String(o.estatus||'').trim().toUpperCase()===cj.key)
+    if(!items.length)continue
+    const porDia={}
+    for(const o of items){const f=o.fecha_dropi||'Sin fecha';(porDia[f]=porDia[f]||[]).push(o)}
+    const dias=Object.keys(porDia).sort((a,b)=>{
+      const ia=window._segParseFecha(a),ib=window._segParseFecha(b)
+      if(!ia)return 1;if(!ib)return -1;return ia<ib?-1:(ia>ib?1:0)
+    })
+    const allIds=items.map(o=>o.id_dropi).filter(Boolean).join('\n')
+    let cuerpo=''
+    for(const dia of dias){
+      const arr=porDia[dia], iso=window._segParseFecha(dia), dAgo=window._segDiasAtras(iso)
+      let tagTxt,esAlarma
+      if(cj.key==='RECHAZADO'){tagTxt='revisar';esAlarma=true}
+      else if(dAgo===0){tagTxt='de hoy';esAlarma=false}
+      else if(dAgo===null){tagTxt='sin fecha';esAlarma=true}
+      else{tagTxt=`lleva ${dAgo} día${dAgo>1?'s':''}`;esAlarma=true}
+      const tagColor=esAlarma?'var(--red)':'var(--muted)', tagIco=esAlarma?'🔴':'🟢'
+      let fLeg=dia
+      if(iso){try{fLeg=new Date(iso+'T00:00:00').toLocaleDateString('es-CO',{day:'numeric',month:'short'})}catch(e){}}
+      cuerpo+=`<div style="margin:11px 0 5px;font-size:12.5px;font-weight:800;color:var(--text)">📅 ${fLeg} <span style="color:${tagColor};font-weight:700">· ${tagIco} ${tagTxt}</span> <span style="color:var(--muted);font-weight:600">(${arr.length})</span></div>`
+      cuerpo+=arr.map(o=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--card2);border:1px solid var(--border);border-left:3px solid ${cj.color};border-radius:9px;padding:9px 12px;margin-bottom:6px">
+          <div style="min-width:0">
+            <div style="font-weight:700;font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${o.producto_dropi||'—'}</div>
+            <div style="font-family:monospace;font-size:13px;color:var(--muted);margin-top:2px">${o.id_dropi||'—'}</div>
+          </div>
+          <button class="btn-sm btn-outline" onclick="_segCopy('${esc(o.id_dropi)}',this,'✅')" style="flex:none;padding:6px 10px;font-size:12px" title="Copiar ID">📋 Copiar</button>
+        </div>`).join('')
+    }
+    html+=`<div style="background:var(--card);border:1px solid var(--border);border-radius:13px;padding:14px 15px;margin-bottom:14px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:4px">
+        <div style="font-size:15px;font-weight:800;color:var(--text)">${cj.emoji} ${cj.titulo} <span style="color:var(--muted)">(${items.length})</span></div>
+        <button class="btn-sm btn-outline" onclick="_segCopy('${esc(allIds)}',this,'✅ Copiados')" style="padding:6px 11px;font-size:12px" title="Copiar todos los IDs de este estado">📋 Copiar todos</button>
+      </div>
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:4px">👉 ${cj.accion}</div>
+      ${cuerpo}
+    </div>`
+  }
+  cont.innerHTML = html
+    ? `<div style="font-size:16px;font-weight:800;color:var(--text);margin:0 0 10px">🚚 Pedidos pegados — hay que empujar</div>${html}`
+    : `<div class="alert alert-green" style="margin-top:0">✅ No hay pedidos pegados (sin pendientes, sin guía generada sin salir, sin rechazados). Todo en orden.</div>`
+}
+
 window.procesarSeguimiento=async()=>{
   const fileInput=document.getElementById('seg-file')
   const msg=document.getElementById('seg-msg')
@@ -11662,6 +11735,9 @@ window.procesarSeguimiento=async()=>{
       hora_orden:String(r['HORA']||'').trim(),
       fecha_reporte:String(r['FECHA DE REPORTE']||'').trim(),
     })).filter(o=>o.telefono.length>=7)
+
+    // 🚚 PEDIDOS PEGADOS (pendiente / guía generada / rechazado) — lee del XLSX crudo, ANTES del cruce con mapeos
+    try{ window._renderPegadosSeguimiento(ordenes) }catch(e){ console.warn('[PEGADOS]',e) }
 
     // Cruzar con mapeos
     const telefonos=[...new Set(ordenes.map(o=>o.telefono))]

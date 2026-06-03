@@ -11418,6 +11418,7 @@ async function pageAuxSeguimiento(c){
     <div class="page-sub">Tasa de devolución real por ID de anuncio (dato clave)</div>
     <div id="seg-camp-content"><div class="loading">Cargando...</div></div>`:''}`
   cargarSeguimientoHist()
+  try{ window._segLeerPegados&&window._segLeerPegados() }catch(e){}
   if(currentRol()==='admin')cargarDevPorCampana()
 }
 
@@ -11636,10 +11637,47 @@ window._segCopy=(txt,el,ok)=>{
     if(el){const o=el.textContent;el.textContent=ok||'✅ Copiado';setTimeout(()=>{el.textContent=o},1300)}
   }).catch(()=>{})
 }
-window._renderPegadosSeguimiento=(ordenes)=>{
+window._nombreActualProd=(rawTexto,mapeo)=>{
+  // Nombre actual del producto: 1) por ID interno del mapeo, 2) por alias del texto, 3) crudo
+  if(mapeo&&mapeo.producto_id&&Array.isArray(productos)){
+    const p=productos.find(x=>x.id===mapeo.producto_id)
+    if(p)return p.nombre
+  }
+  for(const t of [mapeo&&mapeo.producto, rawTexto]){
+    if(!t)continue
+    const rr=(typeof resolveProdName==='function')?(resolveProdName(t)||{}):{}
+    if(rr.id)return rr.nombre
+  }
+  return rawTexto||(mapeo&&mapeo.producto)||'—'
+}
+window._segGuardarPegados=(ordenes,paresSeg)=>{
+  // Construye los pedidos pegados (resolviendo nombre por ID), GUARDA en localStorage y pinta
+  const items=[]
+  ;(ordenes||[]).forEach((o,idx)=>{
+    const est=String(o.estatus||'').trim().toUpperCase()
+    if(est!=='PENDIENTE'&&est!=='GUIA_GENERADA'&&est!=='RECHAZADO')return
+    const mp=(paresSeg&&paresSeg.get)?paresSeg.get(idx):null
+    items.push({estatus:est,fecha:o.fecha_dropi||'',id:o.id_dropi||'',nombre:window._nombreActualProd(o.producto_dropi,mp)})
+  })
+  const payload={ts:new Date().toISOString(),items}
+  try{localStorage.setItem('nexo_seg_pegados_v1',JSON.stringify(payload))}catch(e){}
+  window._renderPegadosSeguimiento(payload)
+}
+window._segLeerPegados=()=>{
+  // Lee lo último guardado y lo pinta (al entrar a Seguimiento; aguanta refresco)
+  let payload=null
+  try{const raw=localStorage.getItem('nexo_seg_pegados_v1');if(raw)payload=JSON.parse(raw)}catch(e){}
+  window._renderPegadosSeguimiento(payload)
+}
+window._renderPegadosSeguimiento=(payload)=>{
   const cont=document.getElementById('seg-pegados')
   if(!cont)return
+  if(!payload||!Array.isArray(payload.items)){cont.innerHTML='';return} // nada subido aún → no pinta nada
+  const items=payload.items
   const esc=s=>String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\r/g,'').replace(/\n/g,'\\n')
+  let hora=''
+  try{if(payload.ts){hora=new Date(payload.ts).toLocaleString('es-CO',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}}catch(e){}
+  const horaHtml=hora?`<div style="font-size:12px;color:var(--muted);margin:0 0 10px">📅 Datos del último archivo subido: <b>${hora}</b></div>`:''
   const CAJONES=[
     {key:'PENDIENTE',     emoji:'🟡', titulo:'Pendientes',    accion:'Presiona al proveedor para que GENERE la guía', color:'var(--amber)'},
     {key:'GUIA_GENERADA', emoji:'📦', titulo:'Guía generada', accion:'Presiona para que la DESPACHEN',                color:'var(--blue)'},
@@ -11647,15 +11685,15 @@ window._renderPegadosSeguimiento=(ordenes)=>{
   ]
   let html=''
   for(const cj of CAJONES){
-    const items=(ordenes||[]).filter(o=>String(o.estatus||'').trim().toUpperCase()===cj.key)
-    if(!items.length)continue
+    const its=items.filter(o=>String(o.estatus||'').trim().toUpperCase()===cj.key)
+    if(!its.length)continue
     const porDia={}
-    for(const o of items){const f=o.fecha_dropi||'Sin fecha';(porDia[f]=porDia[f]||[]).push(o)}
+    for(const o of its){const f=o.fecha||'Sin fecha';(porDia[f]=porDia[f]||[]).push(o)}
     const dias=Object.keys(porDia).sort((a,b)=>{
       const ia=window._segParseFecha(a),ib=window._segParseFecha(b)
       if(!ia)return 1;if(!ib)return -1;return ia<ib?-1:(ia>ib?1:0)
     })
-    const allIds=items.map(o=>o.id_dropi).filter(Boolean).join('\n')
+    const allIds=its.map(o=>o.id).filter(Boolean).join('\n')
     let cuerpo=''
     for(const dia of dias){
       const arr=porDia[dia], iso=window._segParseFecha(dia), dAgo=window._segDiasAtras(iso)
@@ -11670,15 +11708,15 @@ window._renderPegadosSeguimiento=(ordenes)=>{
       cuerpo+=`<div style="margin:11px 0 5px;font-size:12.5px;font-weight:800;color:var(--text)">📅 ${fLeg} <span style="color:${tagColor};font-weight:700">· ${tagIco} ${tagTxt}</span> <span style="color:var(--muted);font-weight:600">(${arr.length})</span></div>`
       cuerpo+=arr.map(o=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--card2);border:1px solid var(--border);border-left:3px solid ${cj.color};border-radius:9px;padding:9px 12px;margin-bottom:6px">
           <div style="min-width:0">
-            <div style="font-weight:700;font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${o.producto_dropi||'—'}</div>
-            <div style="font-family:monospace;font-size:13px;color:var(--muted);margin-top:2px">${o.id_dropi||'—'}</div>
+            <div style="font-weight:700;font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${o.nombre||'—'}</div>
+            <div style="font-family:monospace;font-size:13px;color:var(--muted);margin-top:2px">${o.id||'—'}</div>
           </div>
-          <button class="btn-sm btn-outline" onclick="_segCopy('${esc(o.id_dropi)}',this,'✅')" style="flex:none;padding:6px 10px;font-size:12px" title="Copiar ID">📋 Copiar</button>
+          <button class="btn-sm btn-outline" onclick="_segCopy('${esc(o.id)}',this,'✅')" style="flex:none;padding:6px 10px;font-size:12px" title="Copiar ID">📋 Copiar</button>
         </div>`).join('')
     }
     html+=`<div style="background:var(--card);border:1px solid var(--border);border-radius:13px;padding:14px 15px;margin-bottom:14px">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:4px">
-        <div style="font-size:15px;font-weight:800;color:var(--text)">${cj.emoji} ${cj.titulo} <span style="color:var(--muted)">(${items.length})</span></div>
+        <div style="font-size:15px;font-weight:800;color:var(--text)">${cj.emoji} ${cj.titulo} <span style="color:var(--muted)">(${its.length})</span></div>
         <button class="btn-sm btn-outline" onclick="_segCopy('${esc(allIds)}',this,'✅ Copiados')" style="padding:6px 11px;font-size:12px" title="Copiar todos los IDs de este estado">📋 Copiar todos</button>
       </div>
       <div style="font-size:12.5px;color:var(--muted);margin-bottom:4px">👉 ${cj.accion}</div>
@@ -11686,8 +11724,8 @@ window._renderPegadosSeguimiento=(ordenes)=>{
     </div>`
   }
   cont.innerHTML = html
-    ? `<div style="font-size:16px;font-weight:800;color:var(--text);margin:0 0 10px">🚚 Pedidos pegados — hay que empujar</div>${html}`
-    : `<div class="alert alert-green" style="margin-top:0">✅ No hay pedidos pegados (sin pendientes, sin guía generada sin salir, sin rechazados). Todo en orden.</div>`
+    ? `<div style="font-size:16px;font-weight:800;color:var(--text);margin:0 0 4px">🚚 Pedidos pegados — hay que empujar</div>${horaHtml}${html}`
+    : `<div style="font-size:16px;font-weight:800;color:var(--text);margin:0 0 4px">🚚 Pedidos pegados</div>${horaHtml}<div class="alert alert-green" style="margin-top:0">✅ No hay pedidos pegados (sin pendientes, sin guía generada sin salir, sin rechazados). Todo en orden.</div>`
 }
 
 window.procesarSeguimiento=async()=>{
@@ -11736,9 +11774,6 @@ window.procesarSeguimiento=async()=>{
       fecha_reporte:String(r['FECHA DE REPORTE']||'').trim(),
     })).filter(o=>o.telefono.length>=7)
 
-    // 🚚 PEDIDOS PEGADOS (pendiente / guía generada / rechazado) — lee del XLSX crudo, ANTES del cruce con mapeos
-    try{ window._renderPegadosSeguimiento(ordenes) }catch(e){ console.warn('[PEGADOS]',e) }
-
     // Cruzar con mapeos
     const telefonos=[...new Set(ordenes.map(o=>o.telefono))]
     let mapeos=[]
@@ -11752,6 +11787,10 @@ window.procesarSeguimiento=async()=>{
 
     // Cruzar y clasificar (emparejamiento robusto 1 a 1, no por primer mapeo)
     const _paresSeg=_emparejarDropi(ordenes,mapeos)
+
+    // 🚚 PEDIDOS PEGADOS — resuelve nombre por ID interno del mapeo, GUARDA en localStorage y pinta (todas, no solo las cruzadas)
+    try{ window._segGuardarPegados(ordenes,_paresSeg) }catch(e){ console.warn('[PEGADOS]',e) }
+
     const resultados=ordenes.map((o,idx)=>{
       const mapeo=_paresSeg.get(idx)||null
       const producto=mapeo?.producto||o.producto_dropi
@@ -11770,8 +11809,9 @@ window.procesarSeguimiento=async()=>{
       const lote=r.fecha_lote||'Sin lote'
       if(!lotes[lote])lotes[lote]={entregado:0,devuelto:0,en_transito:0,novedad:0,cancelado:0,otro:0,total:0,items:[]}
       lotes[lote].total++
+      r._nombreNexo=window._nombreActualProd(r.producto,r.mapeo)
       lotes[lote].items.push(r)
-      productosSet.add(r.producto)
+      productosSet.add(r._nombreNexo)
       const cat=r.si.cat
       if(cat==='entregado'||cat==='novedad_ok')lotes[lote].entregado++
       else if(cat==='devuelto')lotes[lote].devuelto++
@@ -11804,7 +11844,7 @@ window.procesarSeguimiento=async()=>{
       // Para admin: buscar estimado del producto principal del lote
       let devEstHtml=''
       if(esAdmin){
-        const prodPrincipal=d.items[0]?.producto
+        const prodPrincipal=d.items[0]?._nombreNexo
         const prodObj=productos.find(p=>p.nombre===prodPrincipal)
         const estPct=prodObj?Math.round((prodObj.dev_pct||0)*100):null
         if(estPct!==null){
@@ -11812,7 +11852,7 @@ window.procesarSeguimiento=async()=>{
           devEstHtml=` · Estimada: ${estPct}% → Real: <strong style="color:${diffColor}">${pctDev}%</strong> ${pctDev>estPct?'⚠️':'✅'}`
         }
       }
-      return`<div class="card seg-lote" data-productos="${d.items.map(i=>i.producto).join(',')}" style="margin-bottom:12px">
+      return`<div class="card seg-lote" data-productos="${d.items.map(i=>i._nombreNexo).join(',')}" style="margin-bottom:12px">
         <div style="font-weight:600;margin-bottom:10px">📦 Lote ${fecha} <span style="color:var(--muted);font-weight:400">(${d.total} órdenes)</span></div>
         <div class="cards-row c4" style="margin-bottom:8px">
           <div class="card c-green" style="padding:10px"><div class="card-label">Entregados</div><div class="card-val">${d.entregado} <span style="font-size:12px">(${pctEnt}%)</span></div></div>

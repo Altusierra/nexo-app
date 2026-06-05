@@ -11095,6 +11095,14 @@ window.actualizarEstadosDropi=async()=>{
     // Convertir DD-MM-YYYY → YYYY-MM-DD para Supabase
     let fd=null
     if(r.fecha_dropi){const p=r.fecha_dropi.split('-');if(p.length===3)fd=`${p[2]}-${p[1]}-${p[0]}`}
+    // ── FIX: el cruce de Dropi NO puede regresar a "Pendiente" una orden ya decidida a mano ──
+    // Si en Nexo está CONFIRMADO/CANCELADO y Dropi manda un estado pendiente, se conserva la decisión manual.
+    // (Si Dropi manda algo más avanzado: despachada, entregada, etc., sí se respeta y actualiza normal.)
+    const _estNexo=(r.mapeo.estado_final||'').toUpperCase().trim()
+    const _estDropi=(r.estatus||'').toUpperCase().trim()
+    const _decisionManual=_estNexo==='CONFIRMADO'||_estNexo==='CANCELADO'
+    const _dropiPendiente=_estDropi==='PENDIENTE'||_estDropi==='PENDIENTE CONFIRMACION'
+    const _protegerEstado=_decisionManual&&_dropiPendiente
     const updatePayload={
       estado_final:r.estatus,
       fecha_dropi:fd,
@@ -11104,6 +11112,8 @@ window.actualizarEstadosDropi=async()=>{
       transportadora:r.transportadora||null,
       precio_dropi:r.total||null
     }
+    // Conservar la decisión manual: no dejar que Dropi la regrese a pendiente
+    if(_protegerEstado)delete updatePayload.estado_final
     // Snapshot del flete real desde Dropi (sobreescribe estimación del asignador)
     if(r.flete>0)updatePayload.flete_snapshot=r.flete
     // flete de devolución: COSTO DEV FLETE real (ida+vuelta); si Dropi no lo liquidó, usa el PRECIO FLETE de ida.
@@ -11141,7 +11151,8 @@ window.actualizarEstadosDropi=async()=>{
       // ── Fase 3 paso 3: registrar evento en mapeo_eventos si cambió el estado ──
       const estadoAnterior=r.mapeo.estado_final||null
       const estadoNuevo=r.estatus||null
-      if(estadoNuevo&&estadoAnterior!==estadoNuevo){
+      // Si protegimos la decisión manual, no registrar una transición falsa a pendiente
+      if(!_protegerEstado&&estadoNuevo&&estadoAnterior!==estadoNuevo){
         try{
           const{error:evErr}=await sb.from('mapeo_eventos').insert({
             mapeo_id:r.mapeo.id,

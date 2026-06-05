@@ -12195,14 +12195,14 @@ window.runMetaSync=async(days)=>{
       log(`📊 ${a.name}: campañas...`)
       const camps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,effective_status,objective,daily_budget,lifetime_budget',limit:'500'})
       for(const c of camps){
-        await sb.from('meta_campanas').upsert({meta_id:c.id,account_id:accId,nivel:'campaign',nombre:c.name||'',estado:c.effective_status||c.status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget/100:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget/100:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+        await sb.from('meta_campanas').upsert({meta_id:c.id,account_id:accId,nivel:'campaign',nombre:c.name||'',estado:c.effective_status||c.status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
         tCamp++
       }
 
       log(`📊 ${a.name}: conjuntos...`)
       const adsets=await metaGet(`/${actId}/adsets`,token,{fields:'id,name,status,effective_status,campaign_id,daily_budget',limit:'500'})
       for(const s of adsets){
-        await sb.from('meta_campanas').upsert({meta_id:s.id,account_id:accId,nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.effective_status||s.status||'',daily_budget:s.daily_budget?s.daily_budget/100:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+        await sb.from('meta_campanas').upsert({meta_id:s.id,account_id:accId,nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.effective_status||s.status||'',daily_budget:s.daily_budget?s.daily_budget:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
       }
 
       log(`📊 ${a.name}: anuncios...`)
@@ -12880,27 +12880,27 @@ async function _syncOneAccount(accountId,token,days,onProgress){
   const camps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,effective_status,objective,daily_budget,lifetime_budget',limit:'500'})
   // Detectar cambios de budget en campañas (CBO) ANTES de hacer upsert
   for(const c of camps){
-    const newBudget=c.daily_budget?c.daily_budget/100:null
+    const newBudget=c.daily_budget?c.daily_budget:null
     const prev=prevBudgetMap[c.id+'|campaign']
     if(newBudget&&prev){
       await _detectarCambioPresupuesto(c.id,'campaign',c.name||prevNombreMap[c.id+'|campaign']||'',accountId,newBudget,prev)
     }
   }
   for(const c of camps){
-    await sb.from('meta_campanas').upsert({meta_id:c.id,account_id:accountId,nivel:'campaign',nombre:c.name||'',estado:c.effective_status||c.status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget/100:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget/100:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+    await sb.from('meta_campanas').upsert({meta_id:c.id,account_id:accountId,nivel:'campaign',nombre:c.name||'',estado:c.effective_status||c.status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
   }
   _p(25,'Ad sets...')
   const adsets=await metaGet(`/${actId}/adsets`,token,{fields:'id,name,status,effective_status,campaign_id,daily_budget',limit:'500'})
   // Detectar cambios de budget en adsets (ABO) ANTES de hacer upsert
   for(const s of adsets){
-    const newBudget=s.daily_budget?s.daily_budget/100:null
+    const newBudget=s.daily_budget?s.daily_budget:null
     const prev=prevBudgetMap[s.id+'|adset']
     if(newBudget&&prev){
       await _detectarCambioPresupuesto(s.id,'adset',s.name||prevNombreMap[s.id+'|adset']||'',accountId,newBudget,prev)
     }
   }
   for(const s of adsets){
-    await sb.from('meta_campanas').upsert({meta_id:s.id,account_id:accountId,nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.effective_status||s.status||'',daily_budget:s.daily_budget?s.daily_budget/100:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+    await sb.from('meta_campanas').upsert({meta_id:s.id,account_id:accountId,nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.effective_status||s.status||'',daily_budget:s.daily_budget?s.daily_budget:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
   }
   _p(40,'Anuncios...')
   const ads=await metaGet(`/${actId}/ads`,token,{fields:'id,name,status,effective_status,adset_id',limit:'500'})
@@ -13095,6 +13095,28 @@ async function _renderResumenProductos(desde,hasta,hoy){
     for(const id of ids)reportesAdIdsByProd[pn].add(id)
   }
 
+  // ── DIAGNÓSTICO TEMPORAL: por qué AYER puede mostrar 0 IDs reportados ──
+  // (se quita después de confirmar la causa). Solo corre cuando el rango es 1 solo día pasado.
+  try{
+    const _esUnDia=(desde===hasta&&desde!==hoy)
+    if(_esUnDia){
+      const _diag={
+        fecha_consultada:desde,
+        filas_con_ad_ids:(reportes||[]).length,
+        filas_unicas:(repsUnique||[]).length,
+        detalle_filas:(repsUnique||[]).map(r=>({
+          producto_guardado:r.producto_nombre||'(sin nombre)',
+          producto_resuelto:resolveProdName(r.producto_nombre||'').nombre||'(no resuelve)',
+          fecha_fila:r.fecha,
+          n_ids:(r.ad_ids||'').split(/[\n,]+/).map(s=>s.trim()).filter(s=>s.length>5).length
+        })),
+        conteo_por_producto:{...reportesByProd}
+      }
+      window._nexoDiagAyer=_diag
+      console.log('%c[DIAG AYER] reportes_diarios para '+desde,'background:#7c3aed;color:#fff;padding:2px 6px;border-radius:4px',_diag)
+    }
+  }catch(_e){}
+
   // 6.5 Conversaciones por producto (suma del rango, dedupe por fecha+producto — último gana)
   // No filtra por ad_ids: queremos las conversaciones aunque el reporte no tenga ad_ids cargados.
   const{data:reportesConv}=await sb.from('reportes_diarios')
@@ -13204,6 +13226,12 @@ async function _renderResumenProductos(desde,hasta,hoy){
 
   // 13. HTML final
   return`
+  ${window._nexoDiagAyer?`<div style="background:#1e1b4b;border:1px solid #7c3aed;border-radius:10px;padding:12px 14px;margin-bottom:14px;font-size:12px;color:#e9d5ff;line-height:1.6">
+    <div style="font-weight:700;font-size:13px;margin-bottom:6px">🔍 DIAGNÓSTICO AYER (temporal) — fecha consultada: ${window._nexoDiagAyer.fecha_consultada}</div>
+    <div>Filas en reportes_diarios con IDs (rango): <b>${window._nexoDiagAyer.filas_con_ad_ids}</b> · únicas tras dedupe: <b>${window._nexoDiagAyer.filas_unicas}</b></div>
+    ${window._nexoDiagAyer.detalle_filas.length?window._nexoDiagAyer.detalle_filas.map(f=>`<div style="margin-top:4px;padding-left:8px;border-left:2px solid #7c3aed">📦 guardado como: <b>"${f.producto_guardado}"</b> → resuelve a: <b>"${f.producto_resuelto}"</b> · fecha de la fila: <b>${f.fecha_fila}</b> · IDs: <b>${f.n_ids}</b></div>`).join(''):'<div style="margin-top:4px;color:#fca5a5">⚠️ NINGUNA fila con ad_ids encontrada para esta fecha. → El reporte se guardó con OTRA fecha, sin IDs, o no se guardó.</div>'}
+    <div style="margin-top:6px">Conteo final que ve Meta Ads: <b>${JSON.stringify(window._nexoDiagAyer.conteo_por_producto)}</b></div>
+  </div>`:''}
   <div class="resumen-productos" data-sem-port="${semCodePort}" style="background:${portC.bg};border:1px solid ${portC.border};border-radius:12px;padding:16px 18px;margin-bottom:16px">
     <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:12px;padding-bottom:12px;border-bottom:1px solid var(--border)">
       <div>
@@ -14296,7 +14324,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     if(!token)throw new Error('Sin token')
 
     const rawCamps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,effective_status,objective,daily_budget,lifetime_budget',limit:'500'})
-    camps=rawCamps.map(c=>({meta_id:c.id,nombre:c.name||'',estado:c.status||c.effective_status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget/100:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget/100:null}))
+    camps=rawCamps.map(c=>({meta_id:c.id,nombre:c.name||'',estado:c.status||c.effective_status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget:null}))
 
     const timeRange=JSON.stringify({since:desde,until:hasta})
     const rawIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
@@ -16165,7 +16193,7 @@ window.toggleCampDesglose=async(campId,accountId)=>{
       if(token){
         const timeRange=JSON.stringify({since:desde,until:hasta})
         const raw=await metaGet(`/${campId}/adsets`,token,{fields:'id,name,status,effective_status,daily_budget',limit:'200'})
-        adsets=raw.map(a=>({meta_id:a.id,nombre:a.name||'',estado:a.effective_status||a.status||'',daily_budget:a.daily_budget?a.daily_budget/100:0}))
+        adsets=raw.map(a=>({meta_id:a.id,nombre:a.name||'',estado:a.effective_status||a.status||'',daily_budget:a.daily_budget?a.daily_budget:0}))
         const ins=await metaGet(`/${campId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,actions,ctr,cpm,frequency',time_range:timeRange,level:'adset',time_increment:'1',limit:'500'})
         for(const i of ins){
           if(!agg[i.adset_id])agg[i.adset_id]={spend:0,conv:0,imp:0,clicks:0,ctrs:[],cpms:[],freqs:[]}

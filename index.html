@@ -14428,36 +14428,16 @@ window._estadoApply=async()=>{
 // ════════════════════════════════════════════════════════════════════
 window._massState=null
 window.massStart=async(accountId,action)=>{
-  openModal(`<div class="modal-title">⏳ Cargando...</div><div style="font-size:13px;color:var(--muted);padding:10px 0">Trayendo campañas y conjuntos de la cuenta.</div>`)
-  let rows=[]
-  try{
-    const{data}=await sb.from('meta_campanas')
-      .select('meta_id,nivel,parent_id,nombre,estado,daily_budget,lifetime_budget')
-      .eq('account_id',accountId).in('nivel',['campaign','adset']).order('nombre')
-    rows=data||[]
-  }catch(e){
-    openModal(`<div class="modal-title">❌ No se pudo cargar</div><div style="font-size:13px;color:var(--red);padding:10px 0">${e.message||'Error'}</div><div style="display:flex;justify-content:flex-end"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>`)
+  const lista=(window._metaPort&&window._metaPort.campsActivasByAcc&&window._metaPort.campsActivasByAcc[accountId])||[]
+  if(!lista.length){
+    openModal(`<div class="modal-title">Sin campañas con actividad</div><div style="font-size:13px;color:var(--muted);padding:10px 0">Esta cuenta no tiene campañas con actividad cargadas. Abre la cuenta, espera a que termine de cargar y vuelve a intentar.</div><div style="display:flex;justify-content:flex-end"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>`)
     return
   }
-  const campBudget={},campNombre={}
-  for(const r of rows){if(r.nivel==='campaign'){campBudget[r.meta_id]=(r.daily_budget||r.lifetime_budget||0);campNombre[r.meta_id]=r.nombre||r.meta_id}}
-  const items=[]
-  for(const r of rows){
-    const estado=(r.estado||'').toUpperCase()
-    if(action==='presupuesto'){
-      if(r.nivel==='campaign'){
-        const b=(r.daily_budget||r.lifetime_budget||0)
-        if(b>0)items.push({meta_id:r.meta_id,nivel:'campaign',nombre:r.nombre||r.meta_id,estado,budget:b,tipoBudget:'CBO'})
-      }else{
-        const b=(r.daily_budget||0),parentB=campBudget[r.parent_id]||0
-        if(b>0&&parentB<=0)items.push({meta_id:r.meta_id,nivel:'adset',nombre:r.nombre||r.meta_id,estado,budget:b,tipoBudget:'ABO',parentNombre:campNombre[r.parent_id]||''})
-      }
-    }else{
-      if(r.nivel==='campaign')items.push({meta_id:r.meta_id,nivel:'campaign',nombre:r.nombre||r.meta_id,estado})
-      else items.push({meta_id:r.meta_id,nivel:'adset',nombre:r.nombre||r.meta_id,estado,parentNombre:campNombre[r.parent_id]||''})
-    }
-  }
-  window._massState={action,accountId,items,selected:new Set(),perItem:{}}
+  const items=lista.map(c=>{
+    const budget=(c.daily_budget||c.lifetime_budget||0)
+    return {meta_id:c.meta_id,nivel:'campaign',nombre:c.nombre,estado:c.estado,semCode:c.semCode,budget,esCBO:budget>0}
+  })
+  window._massState={action,accountId,items,selected:new Set(),perItem:{},filtroUrg:'all',budItems:null}
   window._massRenderSelect()
 }
 window._massMatchable=(it)=>{
@@ -14468,28 +14448,37 @@ window._massMatchable=(it)=>{
 }
 window._massRenderSelect=()=>{
   const st=window._massState;if(!st)return
-  const cfg={activar:{t:'▶️ Activar varias',hint:'Marca las que quieres ACTIVAR (las pausadas están resaltadas; las que ya están activas, apagadas).',color:'var(--green)'},
-             pausar:{t:'⏸️ Pausar varias',hint:'Marca las que quieres PAUSAR (las activas están resaltadas; las que ya están pausadas, apagadas).',color:'var(--red)'},
-             presupuesto:{t:'💰 Cambiar presupuesto a varias',hint:'Marca a cuáles cambiarles el presupuesto (campañas CBO y conjuntos ABO).',color:'var(--accent)'}}[st.action]
-  const rows=st.items.map(it=>{
+  const cfg={activar:{t:'▶️ Activar varias',hint:'Marca las que quieres ACTIVAR (las pausadas resaltadas; las ya activas, apagadas).',color:'var(--green)'},
+             pausar:{t:'⏸️ Pausar varias',hint:'Marca las que quieres PAUSAR (las activas resaltadas; las ya pausadas, apagadas).',color:'var(--red)'},
+             presupuesto:{t:'💰 Cambiar presupuesto a varias',hint:'Marca a cuáles cambiarles el presupuesto. Las ABO se abren en sus conjuntos al continuar.',color:'var(--accent)'}}[st.action]
+  const urgDefs=[['all','Todas','var(--muted)'],['stop','🔴 Pausar','var(--red)'],['precaucion','🟡 Cuidado','var(--amber)'],['fuego','🟣 Doblar','var(--purple)'],['escalar','🟢 Escalar','var(--green)'],['sin_ventas','⏳ Esperar','var(--muted)']]
+  const cont={};for(const it of st.items)cont[it.semCode]=(cont[it.semCode]||0)+1
+  const filtroBtns=urgDefs.map(([code,lbl,col])=>{
+    const n=code==='all'?st.items.length:(cont[code]||0)
+    const activo=st.filtroUrg===code
+    return `<button class="btn-sm ${activo?'btn-primary':'btn-outline'}" onclick="massFilterUrg('${code}')" style="padding:3px 8px;font-size:10px;${activo?'':'border-color:'+col+';color:'+col}">${lbl} ${n}</button>`
+  }).join('')
+  const visibles=st.items.filter(it=>st.filtroUrg==='all'||it.semCode===st.filtroUrg)
+  const rows=visibles.map(it=>{
     const ok=window._massMatchable(it)
     const checked=st.selected.has(it.meta_id)?'checked':''
-    const tag=it.nivel==='campaign'?'🎯':'📦'
-    const sub=it.nivel==='adset'?`<span style="color:var(--muted);font-size:9px"> · de ${it.parentNombre||'—'}</span>`:''
+    const badge=it.semCode?window.nexoBadgeMega(it.semCode,'sm',false):''
     const estTxt=it.estado==='ACTIVE'?'<span style="color:var(--green)">🟢 activa</span>':'<span style="color:var(--muted)">⚫ pausada</span>'
-    const budTxt=st.action==='presupuesto'?` · <span style="color:var(--accent)">$${fmt(it.budget)}</span> <span style="font-size:9px;color:var(--muted)">${it.tipoBudget}</span>`:''
+    const budTxt=st.action==='presupuesto'?` · <span style="color:var(--accent)">$${fmt(it.budget)}</span> <span style="font-size:9px;color:var(--muted)">${it.esCBO?'CBO':'ABO'}</span>`:''
     return `<label style="display:flex;align-items:center;gap:8px;padding:7px 8px;border:1px solid var(--border);border-radius:8px;margin-bottom:4px;${ok?'':'opacity:.4'}">
       <input type="checkbox" ${checked} ${ok?'':'disabled'} onchange="massToggle('${it.meta_id}')" style="width:16px;height:16px;flex-shrink:0">
       <div style="flex:1;min-width:0">
-        <div style="font-size:11px;color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${tag} ${it.nombre}${sub}</div>
+        <div style="font-size:11px;color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">🎯 ${it.nombre}</div>
         <div style="font-size:9px">${estTxt}${budTxt}</div>
       </div>
+      ${badge}
     </label>`
   }).join('')
   openModal(`
     <div class="modal-title" style="color:${cfg.color}">${cfg.t}</div>
-    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">${cfg.hint}</div>
-    <div style="max-height:46vh;overflow-y:auto;margin-bottom:10px">${rows||'<div style="color:var(--muted);font-size:12px;padding:10px">Nada que mostrar en esta cuenta.</div>'}</div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:6px">${cfg.hint}</div>
+    <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">${filtroBtns}</div>
+    <div style="max-height:42vh;overflow-y:auto;margin-bottom:10px">${rows||'<div style="color:var(--muted);font-size:12px;padding:10px">Nada con ese filtro.</div>'}</div>
     <div style="display:flex;gap:8px;justify-content:flex-end;align-items:center">
       <span id="mass-count" style="font-size:12px;color:var(--muted);margin-right:auto">${st.selected.size} marcadas</span>
       <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
@@ -14497,19 +14486,40 @@ window._massRenderSelect=()=>{
     </div>
   `)
 }
+window.massFilterUrg=(code)=>{
+  const st=window._massState;if(!st)return
+  st.filtroUrg=code
+  window._massRenderSelect()
+}
 window.massToggle=(metaId)=>{
   const st=window._massState;if(!st)return
   if(st.selected.has(metaId))st.selected.delete(metaId);else st.selected.add(metaId)
   const cnt=document.getElementById('mass-count');if(cnt)cnt.textContent=st.selected.size+' marcadas'
   const btn=document.getElementById('mass-continue');if(btn){btn.disabled=!st.selected.size;btn.style.opacity=st.selected.size?'1':'.5'}
 }
-window.massContinue=()=>{
+window.massContinue=async()=>{
   const st=window._massState;if(!st||!st.selected.size)return
-  const sel=st.items.filter(it=>st.selected.has(it.meta_id))
-  if(st.action==='presupuesto'){
-    for(const it of sel){if(!st.perItem[it.meta_id])st.perItem[it.meta_id]={mode:null,val:0,nuevo:it.budget}}
-    window._massRenderBudget(sel)
-  }else window._massRenderConfirmEstado(sel)
+  const selCamps=st.items.filter(it=>st.selected.has(it.meta_id))
+  if(st.action!=='presupuesto'){window._massRenderConfirmEstado(selCamps);return}
+  openModal(`<div class="modal-title">⏳ Preparando...</div><div style="font-size:13px;color:var(--muted);padding:10px 0">Cargando conjuntos de las campañas ABO.</div>`)
+  const budItems=[]
+  for(const c of selCamps){if(c.esCBO)budItems.push({meta_id:c.meta_id,nivel:'campaign',nombre:c.nombre,budget:c.budget,tipoBudget:'CBO'})}
+  const aboCamps=selCamps.filter(c=>!c.esCBO)
+  if(aboCamps.length){
+    try{
+      const ids=aboCamps.map(c=>c.meta_id),nomPadre={}
+      for(const c of aboCamps)nomPadre[c.meta_id]=c.nombre
+      const{data:adsets}=await sb.from('meta_campanas').select('meta_id,parent_id,nombre,daily_budget').in('parent_id',ids).eq('nivel','adset')
+      for(const a of (adsets||[])){const b=a.daily_budget||0;if(b>0)budItems.push({meta_id:a.meta_id,nivel:'adset',nombre:a.nombre||a.meta_id,budget:b,tipoBudget:'ABO',parentNombre:nomPadre[a.parent_id]||''})}
+    }catch(e){console.warn('[mass] adsets ABO:',e.message)}
+  }
+  if(!budItems.length){
+    openModal(`<div class="modal-title">Nada para cambiar</div><div style="font-size:13px;color:var(--muted);padding:10px 0">Las marcadas no tienen presupuesto editable (¿ABO sin conjuntos con presupuesto?).</div><div style="display:flex;justify-content:flex-end"><button class="btn-sm btn-outline" onclick="_massRenderSelect()">⬅️ Atrás</button></div>`)
+    return
+  }
+  st.budItems=budItems
+  for(const it of budItems){if(!st.perItem[it.meta_id])st.perItem[it.meta_id]={mode:null,val:0,nuevo:it.budget}}
+  window._massRenderBudget(budItems)
 }
 window._massRenderConfirmEstado=(sel)=>{
   const st=window._massState;const act=st.action==='activar'
@@ -14556,7 +14566,10 @@ window._massRenderBudget=(sel)=>{
     </div>
   `)
 }
-window._massItem=(metaId)=>(window._massState?window._massState.items.find(i=>i.meta_id===metaId):null)
+window._massItem=(metaId)=>{
+  const st=window._massState;if(!st)return null
+  return (st.budItems&&st.budItems.find(i=>i.meta_id===metaId))||st.items.find(i=>i.meta_id===metaId)||null
+}
 window._massRecalcItem=(metaId)=>{
   const st=window._massState;if(!st)return
   const it=window._massItem(metaId);if(!it)return
@@ -14587,7 +14600,7 @@ window.massBudInput=(metaId,which,raw)=>{
 }
 window.massApplyAll=()=>{
   const st=window._massState;if(!st)return
-  const sel=st.items.filter(it=>st.selected.has(it.meta_id))
+  const sel=st.action==='presupuesto'?(st.budItems||[]):st.items.filter(it=>st.selected.has(it.meta_id))
   if(!sel.length)return
   const accionTxt=st.action==='activar'?'ACTIVAR':(st.action==='pausar'?'PAUSAR':'cambiar el PRESUPUESTO de')
   openModal(`
@@ -14601,7 +14614,7 @@ window.massApplyAll=()=>{
 }
 window._massRun=async()=>{
   const st=window._massState;if(!st)return
-  const sel=st.items.filter(it=>st.selected.has(it.meta_id))
+  const sel=st.action==='presupuesto'?(st.budItems||[]):st.items.filter(it=>st.selected.has(it.meta_id))
   const acc=st.accountId
   const html=sel.map(it=>`<div id="massrun-${it.meta_id}" style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-bottom:1px solid var(--border);font-size:11px"><span style="width:16px">⏳</span><span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${it.nivel==='campaign'?'🎯':'📦'} ${it.nombre}</span></div>`).join('')
   openModal(`
@@ -15130,6 +15143,13 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const gb=agg[b.meta_id]?.spend||0
     return gb-ga
   })
+
+  // Mejora 2: exponer las campañas CON ACTIVIDAD de esta cuenta (con su semáforo) para el panel de acciones masivas
+  if(!window._metaPort.campsActivasByAcc)window._metaPort.campsActivasByAcc={}
+  window._metaPort.campsActivasByAcc[accountId]=conActividad.map(c=>({
+    meta_id:c.meta_id,nombre:c.nombre||c.meta_id,estado:(c.estado||'').toUpperCase(),
+    daily_budget:c.daily_budget||0,lifetime_budget:c.lifetime_budget||0,semCode:c._semCode||''
+  }))
 
   // Strip contador + mini-leyenda (solo si hay actividad)
   if(conActividad.length){

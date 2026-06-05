@@ -14763,6 +14763,15 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     if(!rep.ad_ids)continue
     for(const id of rep.ad_ids.split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5))_adIdsUsados.add(id)
   }
+  // FIX columnas "ayer": también juntar los ad_ids de AYER (mapeos + reportes) para que
+  // el paso de resolver huérfanos (3) los ate a su campaña. Sin esto, los ad_ids de ayer
+  // que no estén en meta_campanas (típico en campañas pausadas) quedan sin resolver y sus
+  // ventas de ayer se descartan (adToCamp[adId] undefined → continue) → 0 o de menos.
+  for(const m of mapeosAyer){if(m.ad_id)_adIdsUsados.add(String(m.ad_id))}
+  for(const rep of reportesAyer){
+    if(!rep.ad_ids)continue
+    for(const id of rep.ad_ids.split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5))_adIdsUsados.add(id)
+  }
 
   // ── 3) Resolver SOLO los huérfanos (los que la BD no conoce) pidiéndoselos a Meta ──
   // Una sola llamada batch (?ids=...&fields=campaign_id). Si no hay huérfanos → 0 llamadas a Meta.
@@ -14922,6 +14931,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   // Sirve para comparar el CPA Meta de hoy/ayer contra el día anterior, por meta_id.
   const _diaPrev=_isoDate(new Date(new Date(desde+'T00:00:00').getTime()-86400000))
   const cpaMetaPrevByMeta={} // meta_id → CPA Meta del día previo (spend/conversions)
+  const gastoPrevByMeta={}   // meta_id → Gasto Meta del día previo (para columnas "Gasto ayer" / "CPA Real ayer")
   try{
     const{data:insPrev}=await sb.from('meta_insights')
       .select('meta_id,nivel,spend,conversions')
@@ -14932,7 +14942,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       _acc[i.meta_id].spend+=i.spend||0
       _acc[i.meta_id].conv+=i.conversions||0
     }
-    for(const mid in _acc){cpaMetaPrevByMeta[mid]=_acc[mid].conv>0?_acc[mid].spend/_acc[mid].conv:0}
+    for(const mid in _acc){cpaMetaPrevByMeta[mid]=_acc[mid].conv>0?_acc[mid].spend/_acc[mid].conv:0;gastoPrevByMeta[mid]=_acc[mid].spend}
   }catch(_){}
   // ── Mejora 1: cambios de HOY (presupuesto/estado) hechos desde NEXO ──
   const cambiosHoy={}
@@ -14952,6 +14962,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   window._metaPort.cambiosHoy=cambiosHoy
   // Exponer índices para el desglose (adset/ad)
   window._metaPort.cpaMetaPrevByMeta=cpaMetaPrevByMeta
+  window._metaPort.gastoPrevByMeta=gastoPrevByMeta
   window._metaPort.diaPrev=_diaPrev
   window._metaPort.ventasIdsByAd=ventasIdsByAd
   window._metaPort.ventasIdsByCamp=ventasIdsByCamp
@@ -15063,6 +15074,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const ventasIds=ventasIdsByCamp[camp.meta_id]||0
     const ventasIdsAyer=ventasIdsByCampAyer[camp.meta_id]||0
     const ventasRealesAyer=ventasRealesByCampAyer[camp.meta_id]||0
+    // Columnas nuevas "ayer": gasto del día previo y CPA real de ayer (gasto ayer / ventas reales ayer)
+    const gastoAyer=gastoPrevByMeta[camp.meta_id]||0
+    const cpaRealAyer=ventasRealesAyer>0?gastoAyer/ventasRealesAyer:0
 
     return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" data-campid="${camp.meta_id}" data-estado="${camp.estado||''}" data-urgencia="${camp._urgenciaCode||''}" data-vendenogasta="${camp._vendeNoGasta?1:0}" style="margin-bottom:5px;${opacity}">
       <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-camp)">
@@ -15088,8 +15102,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
           ${badgeMega||`<span class="pill ${semCls}" ${prodTooltip}>${semTxt}</span>`}
         </div>
       </div>
-      ${camp._hasData?`<div style="margin-top:6px;display:grid;grid-template-columns:repeat(${esSoloHoy?11:10},1fr);gap:6px">
+      ${camp._hasData?`<div style="margin-top:6px;display:grid;grid-template-columns:repeat(${esSoloHoy?13:12},1fr);gap:6px">
         <div class="nexo-met"><div class="nm-lbl">Gasto</div><div class="nm-val">$${fmt(m.spend)}</div></div>
+        <div class="nexo-met"><div class="nm-lbl" title="Gasto Meta del día anterior (${_diaPrev}). Compáralo con el Gasto de hoy.">Gasto ayer</div><div class="nm-val" style="color:var(--muted)">${gastoAyer>0?'$'+fmt(gastoAyer):'—'}</div></div>
         <div class="nexo-met"><div class="nm-lbl" title="(Ventas reales × Precio) / Gasto">ROAS Real</div><div class="nm-val" style="color:${roasReal>=1?'var(--green)':roasReal>0?'var(--red)':'var(--muted)'}">${roasReal>0?roasReal.toFixed(2)+'x':'—'}</div></div>
         <div class="nexo-met"><div class="nm-lbl">CPA Meta</div><div class="nm-val">${cpa>0?'$'+fmt(cpa):'—'}</div></div>
         <div class="nexo-met"><div class="nm-lbl" title="CPA Meta del día anterior (${_diaPrev}). Compáralo con el CPA Meta de hoy.">CPA Meta ayer</div><div class="nm-val" style="color:var(--muted)">${cpaMetaPrev>0?'$'+fmt(cpaMetaPrev):'—'}</div></div>
@@ -15100,6 +15115,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
         <div class="nexo-met"><div class="nm-lbl" title="Ventas por IDs reportadas AYER (día completo). Sirve para comparar cómo iba ayer contra lo que llevas hoy.">Ventas IDs ayer</div><div class="nm-val" style="color:var(--muted)">${ventasIdsAyer}</div></div>
         ${esSoloHoy?`<div class="nexo-met"><div class="nm-lbl" title="Estimación: ventas × ${Math.round(pctConf*100)}%">V. Efectivas</div><div class="nm-val" style="color:var(--purple)" title="${Math.round(pctConf*100)}% confirmación">${ventasEfectivas.toFixed(2)}</div></div>`:''}
         <div class="nexo-met"><div class="nm-lbl">CPA Real</div><div class="nm-val" style="color:${window.nexoCpaColor(cpaReal,ctxCamp.margenBE)}" title="Break-even: $${fmt(ctxCamp.margenBE)}">${cpaReal>0?'$'+fmt(cpaReal):'—'}</div></div>
+        <div class="nexo-met"><div class="nm-lbl" title="CPA Real de AYER = Gasto ayer ÷ Ventas reales ayer (cruce Dropi). Compáralo con el CPA Real de hoy.">CPA Real ayer</div><div class="nm-val" style="color:${cpaRealAyer>0?window.nexoCpaColor(cpaRealAyer,ctxCamp.margenBE):'var(--muted)'}">${cpaRealAyer>0?'$'+fmt(cpaRealAyer):'—'}</div></div>
       </div>
       <div style="display:flex;gap:12px;margin-top:4px;font-size:10px;color:var(--muted)">
         <span>CTR: ${avgCtr.toFixed(2)}%</span><span>CPM: $${fmt(avgCpm)}</span><span>Freq: ${avgFreq.toFixed(1)}</span>

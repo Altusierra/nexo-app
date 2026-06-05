@@ -14735,14 +14735,16 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   // ── 1) Cargar mapeos del rango y reportes del rango (en paralelo) ──
   // Mapeos: por RANGO de fecha (no por lista de ad_ids), así también vemos ad_ids nuevos.
   //         Luego filtramos en memoria a los que pertenecen a ESTA cuenta (vía adToCamp / huérfanos).
-  const [mapeosRes,reportesRes,reportesAyerRes]=await Promise.all([
+  const [mapeosRes,reportesRes,reportesAyerRes,mapeosAyerRes]=await Promise.all([
     sb.from('mapeos').select('ad_id,estado_final,fecha,fecha_dropi').not('ad_id','is',null).neq('ad_id','').gte('fecha',desde).lte('fecha',hasta),
     sb.from('reportes_diarios').select('ad_ids,fecha,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false}),
-    sb.from('reportes_diarios').select('ad_ids,fecha,producto_id,producto_nombre,updated_at').eq('fecha',ayer).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false})
+    sb.from('reportes_diarios').select('ad_ids,fecha,producto_id,producto_nombre,updated_at').eq('fecha',ayer).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false}),
+    sb.from('mapeos').select('ad_id,estado_final').not('ad_id','is',null).neq('ad_id','').eq('fecha',ayer)
   ])
   const mapeos=mapeosRes.data||[]
   const reportes=reportesRes.data||[]
   const reportesAyer=reportesAyerRes.data||[]
+  const mapeosAyer=mapeosAyerRes.data||[]
 
   // Dedup de reportes (fecha+producto, el más reciente gana) — igual que antes
   const _seenRep=new Set()
@@ -14848,6 +14850,17 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     }
   }
 
+  // ── Ventas REALES (cruce Dropi) de AYER por campaña: confirmadas (no canceladas, no pendientes) ──
+  const ventasRealesByCampAyer={}
+  for(const m of mapeosAyer){
+    const campId=adToCamp[m.ad_id]
+    if(!campId)continue
+    const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
+    if(cat==='cancelado')continue
+    if(cat==='pendiente'||!m.estado_final)continue
+    ventasRealesByCampAyer[campId]=(ventasRealesByCampAyer[campId]||0)+1
+  }
+
   // ── DIAGNÓSTICO TEMPORAL: por qué las VENTAS por campaña pueden dar 0 ──
   try{
     if(desde===hasta&&desde!==hoy){
@@ -14944,6 +14957,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   window._metaPort.ventasIdsByCamp=ventasIdsByCamp
   window._metaPort.ventasIdsByCampAyer=ventasIdsByCampAyer
   window._metaPort.ventasIdsByAdAyer=ventasIdsByAdAyer
+  window._metaPort.ventasRealesByCampAyer=ventasRealesByCampAyer
   window._metaPort.adToAdset=adToAdset
 
   // ── Clasificar: con/sin actividad (gasto > 0 en el rango) ──
@@ -15043,6 +15057,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const cpaMetaPrev=cpaMetaPrevByMeta[camp.meta_id]||0
     const ventasIds=ventasIdsByCamp[camp.meta_id]||0
     const ventasIdsAyer=ventasIdsByCampAyer[camp.meta_id]||0
+    const ventasRealesAyer=ventasRealesByCampAyer[camp.meta_id]||0
 
     return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" data-campid="${camp.meta_id}" data-estado="${camp.estado||''}" data-urgencia="${camp._urgenciaCode||''}" style="margin-bottom:5px;${opacity}">
       <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-camp)">
@@ -15067,13 +15082,14 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
           ${badgeMega||`<span class="pill ${semCls}" ${prodTooltip}>${semTxt}</span>`}
         </div>
       </div>
-      ${camp._hasData?`<div style="margin-top:6px;display:grid;grid-template-columns:repeat(${esSoloHoy?9:8},1fr);gap:6px">
+      ${camp._hasData?`<div style="margin-top:6px;display:grid;grid-template-columns:repeat(${esSoloHoy?11:10},1fr);gap:6px">
         <div class="nexo-met"><div class="nm-lbl">Gasto</div><div class="nm-val">$${fmt(m.spend)}</div></div>
         <div class="nexo-met"><div class="nm-lbl" title="(Ventas reales × Precio) / Gasto">ROAS Real</div><div class="nm-val" style="color:${roasReal>=1?'var(--green)':roasReal>0?'var(--red)':'var(--muted)'}">${roasReal>0?roasReal.toFixed(2)+'x':'—'}</div></div>
         <div class="nexo-met"><div class="nm-lbl">CPA Meta</div><div class="nm-val">${cpa>0?'$'+fmt(cpa):'—'}</div></div>
         <div class="nexo-met"><div class="nm-lbl" title="CPA Meta del día anterior (${_diaPrev}). Compáralo con el CPA Meta de hoy.">CPA Meta ayer</div><div class="nm-val" style="color:var(--muted)">${cpaMetaPrev>0?'$'+fmt(cpaMetaPrev):'—'}</div></div>
         <div class="nexo-met"><div class="nm-lbl">Conv.</div><div class="nm-val">${m.conv}</div></div>
         <div class="nexo-met"><div class="nm-lbl" style="color:${esSoloHoy?'var(--amber)':'var(--green)'}">Ventas</div><div class="nm-val" style="color:${esSoloHoy?'var(--amber)':'var(--green)'}">${esSoloHoy?v.pendientes+' ⏳':v.ventas+' ✅'}</div></div>
+        <div class="nexo-met"><div class="nm-lbl" title="Ventas reales (cruce Dropi) confirmadas de AYER. Compáralas con la columna Ventas para ver cómo iba ayer vs hoy.">Ventas ayer</div><div class="nm-val" style="color:var(--muted)">${ventasRealesAyer} ✅</div></div>
         <div class="nexo-met"><div class="nm-lbl" title="Ventas contadas por los IDs que reportaste (reportes del día). Compáralas con la columna Ventas (cruce Dropi) para ver qué tanto varían.">Ventas IDs</div><div class="nm-val" style="color:var(--blue)">${ventasIds}</div></div>
         <div class="nexo-met"><div class="nm-lbl" title="Ventas por IDs reportadas AYER (día completo). Sirve para comparar cómo iba ayer contra lo que llevas hoy.">Ventas IDs ayer</div><div class="nm-val" style="color:var(--muted)">${ventasIdsAyer}</div></div>
         ${esSoloHoy?`<div class="nexo-met"><div class="nm-lbl" title="Estimación: ventas × ${Math.round(pctConf*100)}%">V. Efectivas</div><div class="nm-val" style="color:var(--purple)" title="${Math.round(pctConf*100)}% confirmación">${ventasEfectivas.toFixed(2)}</div></div>`:''}

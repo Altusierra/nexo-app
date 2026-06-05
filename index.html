@@ -70,7 +70,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 /* APP SHELL */
 #app{display:none;min-height:100vh}
 .shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
-.shell.sb-hidden{grid-template-columns:0 1fr}
+.shell.sb-hidden{grid-template-columns:1fr}
 .shell.sb-hidden .sidebar{display:none}
 .sb-collapse-btn{margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);width:24px;height:24px;border-radius:6px;cursor:pointer;font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:0}
 .sb-collapse-btn:hover{color:var(--text);border-color:var(--accent)}
@@ -14967,7 +14967,12 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const _v=ventasByCamp[camp.meta_id]
     // Tiene actividad si gastó hoy O si tiene ventas/pendientes atribuidas del día (ad_ids del reporte)
     const _ventasCamp=_v?((_v.ventas||0)+(_v.pendientes||0)):0
-    const hasSpend=(m&&m.spend>0)||_ventasCamp>0
+    const _ventasIds=ventasIdsByCamp[camp.meta_id]||0
+    const _gasto=!!(m&&m.spend>0)
+    const _tieneVentas=_ventasCamp>0||_ventasIds>0
+    // 🔔 VENDE SIN GASTAR: $0 de gasto pero con ventas (reales o por IDs reportados) → está apagada en Meta
+    camp._vendeNoGasta=!_gasto&&_tieneVentas
+    const hasSpend=_gasto||_tieneVentas
     camp._hasData=hasSpend
     if(hasSpend)conActividad.push(camp)
     else sinActividad.push(camp)
@@ -15059,8 +15064,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const ventasIdsAyer=ventasIdsByCampAyer[camp.meta_id]||0
     const ventasRealesAyer=ventasRealesByCampAyer[camp.meta_id]||0
 
-    return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" data-campid="${camp.meta_id}" data-estado="${camp.estado||''}" data-urgencia="${camp._urgenciaCode||''}" style="margin-bottom:5px;${opacity}">
+    return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" data-campid="${camp.meta_id}" data-estado="${camp.estado||''}" data-urgencia="${camp._urgenciaCode||''}" data-vendenogasta="${camp._vendeNoGasta?1:0}" style="margin-bottom:5px;${opacity}">
       <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-camp)">
+      ${camp._vendeNoGasta?`<div style="background:var(--red-bg);border:1px solid var(--red);border-radius:6px;padding:5px 9px;margin-bottom:6px;display:flex;align-items:center;gap:7px;font-size:11px;font-weight:600;color:var(--red)"><span style="font-size:14px">🔔</span><span>VENDE Y NO GASTA → $0 de gasto hoy. Está apagada en Meta — ¿prenderla?</span></div>`:''}
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
         <div style="flex:1;min-width:0;cursor:pointer" onclick="viewCampDetail('${camp.meta_id}')">
           <div style="font-weight:600;font-size:12px;line-height:1.25"><span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:${camp.estado==='ACTIVE'?'#22c55e':'#1a1a1a'};border:1.5px solid ${camp.estado==='ACTIVE'?'#16a34a':'#525252'};${camp.estado==='ACTIVE'?'box-shadow:0 0 6px rgba(34,197,94,.7);':''}vertical-align:middle;margin-right:6px" title="${camp.estado==='ACTIVE'?'🟢 Activa en Meta':'⚫ Inactiva ('+(camp.estado||'desconocido')+')'}"></span><span class="nexo-hier-pill" style="background:var(--hier-camp-bg);color:var(--hier-camp);border:1px solid var(--hier-camp)">🎯 Campaña</span>${camp.nombre||camp.meta_id}</div>
@@ -15142,8 +15148,14 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     if(cpaR>ctxC.margenBE*0.45)return 'escalar'
     return 'fuego'
   }
-  const _conta={stop:0,precaucion:0,fuego:0,escalar:0,sin_ventas:0}
+  const _conta={stop:0,precaucion:0,fuego:0,escalar:0,sin_ventas:0,vende_no_gasta:0}
   for(const c of conActividad){
+    if(c._vendeNoGasta){
+      c._semCode=''
+      c._urgenciaCode='vende_no_gasta' // ← filtro 🔔
+      _conta.vende_no_gasta++
+      continue
+    }
     const code=_clasificar(c)
     c._semCode=code
     c._urgenciaCode=code // ← usado por el filtro (data-urgencia)
@@ -15184,6 +15196,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       ${_pill('fuego',_conta.fuego,'🟣 DOBLAR','var(--purple)','var(--purple-bg)','FUEGO: campañas rindiendo brutal. Click para filtrar y doblar presupuesto.')}
       ${_pill('escalar',_conta.escalar,'🟢 ESCALAR','var(--green)','var(--green-bg)','ESCALAR: campañas sanas. Click para filtrar y subir presupuesto +30%.')}
       ${_pill('sin_ventas',_conta.sin_ventas,'⏳ ESPERAR','var(--muted)','var(--card)','ESPERAR: campañas sin ventas todavía. Click para filtrar y dejar correr.')}
+      ${_conta.vende_no_gasta>0?_pill('vende_no_gasta',_conta.vende_no_gasta,'🔔 VENDEN SIN GASTAR','var(--blue)','var(--blue-bg)','VENDE SIN GASTAR: tienen ventas pero $0 de gasto hoy (apagadas en Meta). Click para filtrar y prenderlas.'):''}
       <button onclick="nexoFilterByUrgencia('${accountId}','',this)" title="Mostrar todas las campañas sin filtro" style="margin-left:auto;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:10px;cursor:pointer">Ver todas</button>
     </div>
     <div style="display:flex;gap:10px;flex-wrap:wrap;margin:0 0 10px 0;font-size:10px;color:var(--muted);align-items:center">
@@ -15196,8 +15209,8 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   }
 
   if(conActividad.length){
-    const _camActivas=conActividad.filter(c=>c.estado==='ACTIVE')
-    const _camInactivas=conActividad.filter(c=>c.estado!=='ACTIVE')
+    const _camActivas=conActividad.filter(c=>c.estado==='ACTIVE'&&!c._vendeNoGasta)
+    const _camInactivas=conActividad.filter(c=>c.estado!=='ACTIVE'||c._vendeNoGasta)
     campHtml+=`<div class="section-title" style="color:var(--green)">Con actividad (${conActividad.length})</div>`
     campHtml+=`<div style="margin:4px 0 8px 0;display:flex;gap:4px;flex-wrap:wrap;align-items:center">
       <button class="btn-sm btn-primary cs-btn" data-sub="active" onclick="filterCampSubtab('${accountId}','active',this)">🟢 Activas (${_camActivas.length})</button>
@@ -15255,7 +15268,7 @@ window.filterCampSubtab=(accountId,sub,btn)=>{
     if(target)target.className='btn-sm btn-primary cs-btn'
   }
   accEl.querySelectorAll('.meta-camp-item[data-hasdata="1"]').forEach(el=>{
-    const isActiva=el.dataset.estado==='ACTIVE'
+    const isActiva=el.dataset.estado==='ACTIVE'&&el.dataset.vendenogasta!=='1'
     if(sub==='all')el.style.display=''
     else if(sub==='active')el.style.display=isActiva?'':'none'
     else if(sub==='inactive')el.style.display=!isActiva?'':'none'

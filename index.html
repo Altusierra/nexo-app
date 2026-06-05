@@ -14100,6 +14100,173 @@ window._confirmarProdCamp=async(campId,accountId)=>{
   if(window.toggleMetaCuenta)window.toggleMetaCuenta(accountId,true)
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// NUEVO: CONTROL DE META (subir/bajar presupuesto + pausar/activar)
+// La escritura pasa por la Edge Function 'meta-write' (token en secret, no en cliente)
+// ════════════════════════════════════════════════════════════════════════════
+window._metaWrite=async(body)=>{
+  try{
+    const{data,error}=await sb.functions.invoke('meta-write',{body})
+    if(error){
+      let realMsg=error.message
+      try{const b=await error.context?.json?.();if(b?.error)realMsg=b.error}catch(_){}
+      return{ok:false,error:realMsg}
+    }
+    if(data&&data.ok===false)return{ok:false,error:data.error||'Error desconocido'}
+    return{ok:true,data}
+  }catch(e){return{ok:false,error:e.message||'Error desconocido'}}
+}
+
+// ── Modal: cambiar presupuesto (CBO=campaña / ABO=adset) ──
+window.modalPresupuesto=(nodeId,level,nombre,currentHuman,accountId)=>{
+  window._budModal={nodeId,level,nombre:nombre||'',current:Number(currentHuman)||0,accountId,mode:null,pct:0,amount:0,nuevo:Number(currentHuman)||0}
+  window._budRenderMain()
+}
+window._budRenderMain=()=>{
+  const st=window._budModal;if(!st)return
+  const nivelTxt=st.level==='campaign'?'la campaña':'el conjunto (adset)'
+  openModal(`
+    <div class="modal-title">💰 Cambiar presupuesto</div>
+    <div class="modal-sub">${st.nombre}</div>
+    <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px;margin:10px 0;text-align:center">
+      <div style="font-size:11px;color:var(--muted)">Presupuesto actual de ${nivelTxt}</div>
+      <div style="font-size:22px;font-weight:700;color:var(--text)">$${fmt(st.current)}</div>
+    </div>
+    <div style="font-size:12px;color:var(--text);font-weight:700;margin-bottom:6px">1) Por porcentaje</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+      <button class="btn-sm btn-outline" onclick="_budSetPct(20)" style="padding:5px 10px">+20%</button>
+      <button class="btn-sm btn-outline" onclick="_budSetPct(30)" style="padding:5px 10px">+30%</button>
+      <button class="btn-sm btn-outline" onclick="_budSetPct(50)" style="padding:5px 10px">+50%</button>
+      <button class="btn-sm btn-outline" onclick="_budSetPct(100)" style="padding:5px 10px">Doblar ×2</button>
+      <button class="btn-sm btn-outline" onclick="_budSetPct(-20)" style="padding:5px 10px;border-color:var(--amber);color:var(--amber)">-20%</button>
+      <button class="btn-sm btn-outline" onclick="_budSetPct(-30)" style="padding:5px 10px;border-color:var(--amber);color:var(--amber)">-30%</button>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:12px">
+      <span style="font-size:12px;color:var(--muted)">o escribe %:</span>
+      <input id="bud-pct" type="number" inputmode="numeric" placeholder="ej: 30 (sube) o -15 (baja)" oninput="_budOnPct()" style="width:170px;padding:7px 9px;background:var(--card);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px">
+    </div>
+    <div style="font-size:12px;color:var(--text);font-weight:700;margin-bottom:6px">2) O monto exacto</div>
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:12px">
+      <span style="font-size:14px;color:var(--muted)">$</span>
+      <input id="bud-monto" type="number" inputmode="numeric" placeholder="ej: 120000" oninput="_budOnMonto()" style="flex:1;padding:7px 9px;background:var(--card);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px">
+    </div>
+    <div id="bud-preview" style="text-align:center;padding:10px;border-radius:8px;background:var(--card2);border:1px dashed var(--border);font-size:13px;color:var(--muted)">Elige cuánto subir o bajar 👆</div>
+    <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end">
+      <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
+      <button id="bud-apply" class="btn-sm btn-blue" disabled onclick="_budConfirmStep()" style="opacity:.5">Aplicar cambio</button>
+    </div>
+  `)
+  window._budRecalc()
+}
+window._budRecalc=()=>{
+  const st=window._budModal;if(!st)return
+  let nuevo=st.current
+  if(st.mode==='pct')nuevo=Math.round(st.current*(1+(st.pct||0)/100))
+  else if(st.mode==='manual')nuevo=Math.round(st.amount||0)
+  st.nuevo=nuevo
+  const valido=!!st.mode&&nuevo>0&&nuevo!==st.current
+  const pv=document.getElementById('bud-preview')
+  if(pv){
+    if(!st.mode){pv.innerHTML='Elige cuánto subir o bajar 👆';pv.style.color='var(--muted)'}
+    else{
+      const sube=nuevo>st.current
+      pv.innerHTML=`Nuevo presupuesto: <span style="font-size:18px;font-weight:700;color:${sube?'var(--green)':'var(--amber)'}">$${fmt(nuevo)}</span><br><span style="font-size:11px;color:var(--muted)">$${fmt(st.current)} → $${fmt(nuevo)} (${sube?'+':''}$${fmt(nuevo-st.current)})</span>`
+    }
+  }
+  const btn=document.getElementById('bud-apply')
+  if(btn){btn.disabled=!valido;btn.style.opacity=valido?'1':'.5'}
+}
+window._budSetPct=(p)=>{
+  const st=window._budModal;if(!st)return
+  st.mode='pct';st.pct=p
+  const pi=document.getElementById('bud-pct');if(pi)pi.value=p
+  const mi=document.getElementById('bud-monto');if(mi)mi.value=''
+  window._budRecalc()
+}
+window._budOnPct=()=>{
+  const st=window._budModal;if(!st)return
+  const v=parseFloat(document.getElementById('bud-pct')?.value)
+  if(isNaN(v)){st.mode=null}else{st.mode='pct';st.pct=v;const mi=document.getElementById('bud-monto');if(mi)mi.value=''}
+  window._budRecalc()
+}
+window._budOnMonto=()=>{
+  const st=window._budModal;if(!st)return
+  const v=parseFloat(document.getElementById('bud-monto')?.value)
+  if(isNaN(v)){st.mode=null}else{st.mode='manual';st.amount=v;const pi=document.getElementById('bud-pct');if(pi)pi.value=''}
+  window._budRecalc()
+}
+window._budConfirmStep=()=>{
+  const st=window._budModal;if(!st||!st.mode||st.nuevo<=0||st.nuevo===st.current)return
+  const sube=st.nuevo>st.current
+  openModal(`
+    <div class="modal-title">⚠️ Confirmar cambio</div>
+    <div style="font-size:13px;color:var(--text);margin:12px 0;line-height:1.5">
+      Vas a cambiar el presupuesto de <strong>${st.nombre}</strong>:
+      <div style="text-align:center;font-size:17px;margin:12px 0">$${fmt(st.current)} → <strong style="color:${sube?'var(--green)':'var(--amber)'}">$${fmt(st.nuevo)}</strong></div>
+      ¿Seguro que quieres aplicarlo?
+    </div>
+    <div style="display:flex;gap:8px;margin-top:8px;justify-content:flex-end">
+      <button class="btn-sm btn-outline" onclick="_budRenderMain()">⬅️ Atrás</button>
+      <button class="btn-sm btn-blue" onclick="_budApply()">✅ Sí, aplicar</button>
+    </div>
+  `)
+}
+window._budApply=async()=>{
+  const st=window._budModal;if(!st)return
+  const body={action:'set_budget',node_id:st.nodeId,current_human:st.current}
+  if(st.mode==='pct'){body.mode='pct';body.pct=st.pct}else{body.mode='manual';body.amount=st.nuevo}
+  openModal(`<div class="modal-title">⏳ Aplicando cambio...</div><div style="font-size:13px;color:var(--muted);padding:10px 0">Hablando con Meta, espera un momento.</div>`)
+  const r=await window._metaWrite(body)
+  if(!r.ok){
+    openModal(`<div class="modal-title">❌ No se pudo</div><div style="font-size:13px;color:var(--red);padding:10px 0;line-height:1.5">${r.error||'Error'}</div><div style="display:flex;justify-content:flex-end"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>`)
+    return
+  }
+  const d=r.data||{}
+  const antH=d.human_current!=null?d.human_current:st.current
+  const nuevoH=d.human_new!=null?d.human_new:st.nuevo
+  logAction('meta_presupuesto_cambiado',{node_id:st.nodeId,nivel:st.level,de:antH,a:nuevoH}).catch(()=>{})
+  const acc=st.accountId,nivelTxt=st.level==='campaign'?'campaña':'adset'
+  openModal(`<div class="modal-title">✅ Listo</div>
+    <div style="font-size:13px;color:var(--text);padding:10px 0;line-height:1.5">
+      Se cambió el presupuesto exitosamente.
+      <div style="text-align:center;font-size:17px;margin:12px 0">$${fmt(antH)} → <strong style="color:var(--green)">$${fmt(nuevoH)}</strong></div>
+      La ${nivelTxt} quedó con un presupuesto de <strong>$${fmt(nuevoH)}</strong>.
+    </div>
+    <div style="display:flex;justify-content:flex-end"><button class="btn-sm btn-blue" onclick="closeModal();if(window.toggleMetaCuenta)window.toggleMetaCuenta('${acc}',true)">Entendido</button></div>`)
+}
+
+// ── Modal: pausar / activar (campaña, adset o ad) ──
+window.modalEstado=(nodeId,level,nombre,estadoActual,accountId)=>{
+  const esActiva=(estadoActual||'').toUpperCase()==='ACTIVE'
+  const nuevoStatus=esActiva?'PAUSED':'ACTIVE'
+  const accion=esActiva?'PAUSAR':'ACTIVAR'
+  const nivelTxt=level==='campaign'?'la campaña':(level==='adset'?'el conjunto (adset)':'el anuncio (ad)')
+  window._estadoModal={nodeId,level,nombre:nombre||'',nuevoStatus,accountId}
+  openModal(`
+    <div class="modal-title">${esActiva?'⏸️ Pausar':'▶️ Activar'}</div>
+    <div style="font-size:13px;color:var(--text);margin:12px 0;line-height:1.5">
+      ¿Seguro que quieres <strong>${accion}</strong> ${nivelTxt}?
+      <div style="margin-top:8px"><strong>${nombre||''}</strong></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:8px;justify-content:flex-end">
+      <button class="btn-sm btn-outline" onclick="closeModal()">Cancelar</button>
+      <button class="btn-sm ${esActiva?'btn-outline':'btn-blue'}" ${esActiva?'style="border-color:var(--red);color:var(--red)"':''} onclick="_estadoApply()">${esActiva?'⏸️ Sí, pausar':'▶️ Sí, activar'}</button>
+    </div>
+  `)
+}
+window._estadoApply=async()=>{
+  const st=window._estadoModal;if(!st)return
+  openModal(`<div class="modal-title">⏳ Aplicando...</div><div style="font-size:13px;color:var(--muted);padding:10px 0">Hablando con Meta, espera un momento.</div>`)
+  const r=await window._metaWrite({action:'set_status',node_id:st.nodeId,status:st.nuevoStatus})
+  if(!r.ok){
+    openModal(`<div class="modal-title">❌ No se pudo</div><div style="font-size:13px;color:var(--red);padding:10px 0;line-height:1.5">${r.error||'Error'}</div><div style="display:flex;justify-content:flex-end"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>`)
+    return
+  }
+  logAction('meta_estado_cambiado',{node_id:st.nodeId,nivel:st.level,status:st.nuevoStatus}).catch(()=>{})
+  const acc=st.accountId,txt=st.nuevoStatus==='ACTIVE'?'activó ▶️':'pausó ⏸️'
+  openModal(`<div class="modal-title">✅ Listo</div><div style="font-size:13px;color:var(--text);padding:10px 0">Se ${txt} exitosamente.</div><div style="display:flex;justify-content:flex-end"><button class="btn-sm btn-blue" onclick="closeModal();if(window.toggleMetaCuenta)window.toggleMetaCuenta('${acc}',true)">Entendido</button></div>`)
+}
+
 window.toggleMetaCuenta=async(accountId,forceReload)=>{
   const accEl=document.getElementById('meta-acc-'+accountId)
   const chevron=document.getElementById('meta-chevron-'+accountId)
@@ -14129,7 +14296,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     if(!token)throw new Error('Sin token')
 
     const rawCamps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,effective_status,objective,daily_budget,lifetime_budget',limit:'500'})
-    camps=rawCamps.map(c=>({meta_id:c.id,nombre:c.name||'',estado:c.status||c.effective_status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget/100:null}))
+    camps=rawCamps.map(c=>({meta_id:c.id,nombre:c.name||'',estado:c.status||c.effective_status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget/100:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget/100:null}))
 
     const timeRange=JSON.stringify({since:desde,until:hasta})
     const rawIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
@@ -14144,7 +14311,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     console.warn('Meta API error, fallback Supabase:',e.message)
     source='supabase'
     const{data:freshCamps}=await sb.from('meta_campanas').select('*').eq('account_id',accountId).eq('nivel','campaign').order('nombre')
-    camps=(freshCamps||[]).map(c=>({meta_id:c.meta_id,nombre:c.nombre||'',estado:c.estado||'',objetivo:c.objetivo||'',daily_budget:c.daily_budget}))
+    camps=(freshCamps||[]).map(c=>({meta_id:c.meta_id,nombre:c.nombre||'',estado:c.estado||'',objetivo:c.objetivo||'',daily_budget:c.daily_budget,lifetime_budget:c.lifetime_budget}))
 
     const{data:ins}=await sb.from('meta_insights').select('meta_id,spend,impressions,clicks,reach,conversions,ctr,cpm,frequency').eq('nivel','campaign').eq('account_id',accountId).gte('fecha',desde).lte('fecha',hasta)
     for(const i of (ins||[])){
@@ -14394,6 +14561,12 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const heroVal=esSoloHoy?cpaRealEfectivas:cpaReal
     const heroTitle=esSoloHoy?`Estimado con ${Math.round(pctConf*100)}% confirmación · Break-even: $${fmt(ctxCamp.margenBE)}`:`Break-even: $${fmt(ctxCamp.margenBE)}`
 
+    // NUEVO: control de presupuesto (solo CBO) y estado (pausar/activar)
+    const _campBudget=(camp.daily_budget||camp.lifetime_budget||0)
+    const _esCBO=_campBudget>0
+    const _campActiva=(camp.estado||'').toUpperCase()==='ACTIVE'
+    const _campNomEsc=(camp.nombre||'').replace(/'/g,"\\'")
+
     return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" data-estado="${camp.estado||''}" data-urgencia="${camp._urgenciaCode||''}" style="margin-bottom:5px;${opacity}">
       <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-camp)">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
@@ -14404,6 +14577,10 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
           ${camp._hasData&&heroVal>0?`<div class="nexo-cpa-hero"><div class="nch-lbl">${heroLbl}</div><div class="nch-val" style="color:${cpaColorCss}" title="${heroTitle}">$${fmt(heroVal)}</div></div>`:''}
           <div style="display:flex;flex-direction:column;gap:3px;align-items:flex-end">
             ${camp._hasData?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();toggleCampDesglose('${camp.meta_id}','${accountId}')" style="padding:3px 7px;font-size:9px" title="Ver conjuntos y anuncios">📊 Desglose</button>`:''}
+            <div style="display:flex;gap:3px">
+              ${_esCBO?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();modalPresupuesto('${camp.meta_id}','campaign','${_campNomEsc}',${_campBudget},'${accountId}')" style="padding:2px 6px;font-size:9px;border-color:var(--accent);color:var(--accent)" title="Cambiar presupuesto de la campaña (CBO)">💰 $${fmt(_campBudget)}</button>`:''}
+              <button class="btn-sm btn-outline" onclick="event.stopPropagation();modalEstado('${camp.meta_id}','campaign','${_campNomEsc}','${camp.estado||''}','${accountId}')" style="padding:2px 6px;font-size:9px;${_campActiva?'border-color:var(--amber);color:var(--amber)':'border-color:var(--green);color:var(--green)'}" title="${_campActiva?'Pausar campaña':'Activar campaña'}">${_campActiva?'⏸️ Pausar':'▶️ Activar'}</button>
+            </div>
             <div style="display:flex;gap:3px">
               <button class="btn-sm btn-outline" onclick="event.stopPropagation();modalAsignarProductoCamp('${camp.meta_id}','${(camp.nombre||'').replace(/'/g,"\\'")}','${accountId}')" style="padding:2px 6px;font-size:9px;${ctxCamp.esGlobal?'border-color:var(--amber);color:var(--amber)':'border-color:var(--green);color:var(--green)'}" title="${ctxCamp.esGlobal?'⚠️ Sin producto · clic para asignar':'Producto: '+ctxCamp.nombre+' · clic para cambiar'}">${ctxCamp.esGlobal?'⚠️ Producto':'📦 Cambiar'}</button>
               <button class="btn-sm btn-outline" onclick="event.stopPropagation();copyMetaId('${camp.meta_id}',this)" style="padding:2px 5px;font-size:9px" title="Copiar ID de campaña">📋</button>
@@ -15987,8 +16164,8 @@ window.toggleCampDesglose=async(campId,accountId)=>{
     try{
       if(token){
         const timeRange=JSON.stringify({since:desde,until:hasta})
-        const raw=await metaGet(`/${campId}/adsets`,token,{fields:'id,name,status,effective_status',limit:'200'})
-        adsets=raw.map(a=>({meta_id:a.id,nombre:a.name||'',estado:a.effective_status||a.status||''}))
+        const raw=await metaGet(`/${campId}/adsets`,token,{fields:'id,name,status,effective_status,daily_budget',limit:'200'})
+        adsets=raw.map(a=>({meta_id:a.id,nombre:a.name||'',estado:a.effective_status||a.status||'',daily_budget:a.daily_budget?a.daily_budget/100:0}))
         const ins=await metaGet(`/${campId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,actions,ctr,cpm,frequency',time_range:timeRange,level:'adset',time_increment:'1',limit:'500'})
         for(const i of ins){
           if(!agg[i.adset_id])agg[i.adset_id]={spend:0,conv:0,imp:0,clicks:0,ctrs:[],cpms:[],freqs:[]}
@@ -16004,8 +16181,8 @@ window.toggleCampDesglose=async(campId,accountId)=>{
       }
     }catch(_){}
     if(!adsets.length){
-      const{data:dbAs}=await sb.from('meta_campanas').select('meta_id,nombre,estado').eq('parent_id',campId).eq('nivel','adset').order('nombre')
-      adsets=(dbAs||[]).map(a=>({meta_id:a.meta_id,nombre:a.nombre||'',estado:a.estado||''}))
+      const{data:dbAs}=await sb.from('meta_campanas').select('meta_id,nombre,estado,daily_budget').eq('parent_id',campId).eq('nivel','adset').order('nombre')
+      adsets=(dbAs||[]).map(a=>({meta_id:a.meta_id,nombre:a.nombre||'',estado:a.estado||'',daily_budget:a.daily_budget||0}))
       const{data:ins}=await sb.from('meta_insights').select('meta_id,spend,impressions,conversions,clicks,ctr,cpm,frequency').eq('nivel','adset').gte('fecha',desde).lte('fecha',hasta).in('meta_id',adsets.map(a=>a.meta_id))
       for(const i of (ins||[])){
         if(!agg[i.meta_id])agg[i.meta_id]={spend:0,conv:0,imp:0,clicks:0,ctrs:[],cpms:[],freqs:[]}
@@ -16083,6 +16260,10 @@ window.toggleCampDesglose=async(campId,accountId)=>{
         const cpaNormalColor=window.nexoCpaColor(mr.cpaReal,ctx.margenBE)
         const pctConfTxt=Math.round((mr.pctConf||0.62)*100)
         const heroTitle=mr.esSoloHoy?`Estimado con ${pctConfTxt}% confirmación`:''
+        const _asBudget=as.daily_budget||0
+        const _esABO=_asBudget>0
+        const _asActiva=(as.estado||'').toUpperCase()==='ACTIVE'
+        const _asNomEsc=(as.nombre||'').replace(/'/g,"\\'")
         return`<div style="margin-bottom:4px;${hasSpend?'':'opacity:0.4'}">
           <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-adset)">
             <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:${hasSpend?'6px':'0'}">
@@ -16094,6 +16275,10 @@ window.toggleCampDesglose=async(campId,accountId)=>{
                 ${hasSpend&&heroVal>0?`<div class="nexo-cpa-hero nch-sm"><div class="nch-lbl">${heroLbl}</div><div class="nch-val" style="color:${cpaColorCss}" title="${heroTitle}">$${fmt(heroVal)}</div></div>`:''}
                 <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end">
                   ${hasSpend?`<button class="btn-sm btn-outline" onclick="toggleAdsetDesglose('${as.meta_id}','${accountId}')" style="padding:2px 5px;font-size:8px" title="Ver anuncios">📌 Ads</button>`:''}
+                  <div style="display:flex;gap:3px">
+                    ${_esABO?`<button class="btn-sm btn-outline" onclick="modalPresupuesto('${as.meta_id}','adset','${_asNomEsc}',${_asBudget},'${accountId}')" style="padding:2px 5px;font-size:8px;border-color:var(--accent);color:var(--accent)" title="Cambiar presupuesto del adset (ABO)">💰 $${fmt(_asBudget)}</button>`:''}
+                    <button class="btn-sm btn-outline" onclick="modalEstado('${as.meta_id}','adset','${_asNomEsc}','${as.estado||''}','${accountId}')" style="padding:2px 5px;font-size:8px;${_asActiva?'border-color:var(--amber);color:var(--amber)':'border-color:var(--green);color:var(--green)'}" title="${_asActiva?'Pausar adset':'Activar adset'}">${_asActiva?'⏸️':'▶️'}</button>
+                  </div>
                   <div style="display:flex;gap:3px">
                     <button class="btn-sm btn-outline" onclick="copyMetaId('${as.meta_id}',this)" style="padding:2px 5px;font-size:8px" title="Copiar ID adset">📋</button>
                     <button class="btn-sm btn-outline" onclick="analizarConIA('adset','${as.meta_id}','${(as.nombre||'').replace(/'/g,"\\'")}')" style="padding:2px 5px;font-size:8px">🤖</button>
@@ -16227,6 +16412,8 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
       const cpaNormalColor=window.nexoCpaColor(mr.cpaReal,ctx.margenBE)
       const pctConfTxt=Math.round((mr.pctConf||0.62)*100)
       const heroTitle=mr.esSoloHoy?`Estimado con ${pctConfTxt}% confirmación`:''
+      const _adActiva=(ad.estado||'').toUpperCase()==='ACTIVE'
+      const _adNomEsc=(ad.nombre||'').replace(/'/g,"\\'")
       return`<div style="padding:6px 9px;border-left:4px solid var(--hier-ad);margin-bottom:3px;background:var(--card2);border-radius:5px;${hasSpend?'':'opacity:0.4'}">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:5px;margin-bottom:${hasSpend?'5px':'0'}">
           <div style="flex:1;min-width:0">
@@ -16238,6 +16425,7 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
             <div style="display:flex;gap:3px">
               <button class="btn-sm btn-outline" onclick="copyMetaId('${ad.meta_id}',this)" style="padding:2px 5px;font-size:8px" title="Copiar ad_id">📋</button>
               <button class="btn-sm btn-outline" onclick="analizarConIA('anuncio','${ad.meta_id}','${(ad.nombre||'').replace(/'/g,"\\'")}')" style="padding:2px 5px;font-size:8px">🤖</button>
+              <button class="btn-sm btn-outline" onclick="modalEstado('${ad.meta_id}','ad','${_adNomEsc}','${ad.estado||''}','${accountId}')" style="padding:2px 5px;font-size:8px;${_adActiva?'border-color:var(--amber);color:var(--amber)':'border-color:var(--green);color:var(--green)'}" title="${_adActiva?'Pausar anuncio':'Activar anuncio'}">${_adActiva?'⏸️':'▶️'}</button>
             </div>
             ${badgeMega||(hasSpend&&mr.sem.txt?`<span class="pill ${mr.sem.cls}" style="font-size:10px">${mr.sem.txt}</span>`:'')}
           </div>

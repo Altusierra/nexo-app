@@ -13084,7 +13084,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
     desdePrev=_isoDate(prevDesde);hastaPrev=_isoDate(prevHasta)
   }catch(_){desdePrev='';hastaPrev='';nDiasRango=0}
 
-  const mapeosPrevByProd={},gastoPrevByCampId={}
+  const mapeosPrevByProd={},gastoPrevByCampId={},reportesPrevByProd={}
   if(desdePrev&&hastaPrev){
     const{data:mapeosPrev}=await sb.from('mapeos')
       .select('cantidad,producto,estado_final,fecha,ad_id')
@@ -13100,6 +13100,22 @@ async function _renderResumenProductos(desde,hasta,hoy){
     for(const i of (insPrev||[])){
       if(!i.meta_id)continue
       gastoPrevByCampId[String(i.meta_id)]=(gastoPrevByCampId[String(i.meta_id)]||0)+(i.spend||0)
+    }
+    // Pedidos por IDs reportados del período previo (mismo criterio que reportesByProd)
+    const{data:repsPrev}=await sb.from('reportes_diarios')
+      .select('ad_ids,producto_id,producto_nombre,fecha,updated_at')
+      .gte('fecha',desdePrev).lte('fecha',hastaPrev)
+      .not('ad_ids','is',null).neq('ad_ids','')
+      .order('updated_at',{ascending:false})
+    const _seenRepPrev=new Set()
+    for(const r of (repsPrev||[])){
+      const k=(r.fecha||'')+'|'+(r.producto_id||r.producto_nombre||'')
+      if(_seenRepPrev.has(k))continue
+      _seenRepPrev.add(k)
+      const pn=resolveProdName(r.producto_nombre||'').nombre||(r.producto_nombre||'')
+      if(!pn)continue
+      const ids=(r.ad_ids||'').split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)
+      reportesPrevByProd[pn]=(reportesPrevByProd[pn]||0)+ids.length
     }
   }
 
@@ -13205,7 +13221,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
   const esSoloHoy=(desde===hoy&&hasta===hoy)
   const productosResumen=[]
   for(const prod of productos){
-    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd)
+    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd,reportesPrevByProd)
     if(data)productosResumen.push(data)
   }
 
@@ -13272,14 +13288,6 @@ async function _renderResumenProductos(desde,hasta,hoy){
 
   // 13. HTML final
   return`
-  ${window._nexoDiagAyer?`<div style="background:#1e1b4b;border:1px solid #7c3aed;border-radius:10px;padding:12px 14px;margin-bottom:14px;font-size:12px;color:#e9d5ff;line-height:1.6">
-    <div style="font-weight:700;font-size:13px;margin-bottom:6px">🔍 DIAGNÓSTICO AYER (temporal) — fecha consultada: ${window._nexoDiagAyer.fecha_consultada}</div>
-    <div>Filas en reportes_diarios con IDs (rango): <b>${window._nexoDiagAyer.filas_con_ad_ids}</b> · únicas tras dedupe: <b>${window._nexoDiagAyer.filas_unicas}</b></div>
-    ${window._nexoDiagAyer.detalle_filas.length?window._nexoDiagAyer.detalle_filas.map(f=>`<div style="margin-top:4px;padding-left:8px;border-left:2px solid #7c3aed">📦 guardado como: <b>"${f.producto_guardado}"</b> → resuelve a: <b>"${f.producto_resuelto}"</b> · fecha de la fila: <b>${f.fecha_fila}</b> · IDs: <b>${f.n_ids}</b></div>`).join(''):'<div style="margin-top:4px;color:#fca5a5">⚠️ NINGUNA fila con ad_ids encontrada para esta fecha. → El reporte se guardó con OTRA fecha, sin IDs, o no se guardó.</div>'}
-    <div style="margin-top:6px">IDs reportados (aux): <b>${JSON.stringify(window._nexoDiagAyer.conteo_por_producto)}</b></div>
-    <div style="margin-top:2px">Mapeos en BD (cruce): <b>${JSON.stringify(window._nexoDiagAyer.mapeos_por_producto)}</b> · de esos, CONFIRMADOS: <b>${JSON.stringify(window._nexoDiagAyer.mapeos_confirmados_por_producto)}</b></div>
-    <div style="margin-top:4px;color:#fde68a">👉 Si "Mapeos en BD" es 0 pero PEDIDOS sigue en 0 = caché del navegador (recarga con Ctrl+Shift+R). Si "Mapeos en BD" es &gt;0, ese es el motivo: el código prefiere el cruce.</div>
-  </div>`:''}
   <div class="resumen-productos" data-sem-port="${semCodePort}" style="background:${portC.bg};border:1px solid ${portC.border};border-radius:12px;padding:16px 18px;margin-bottom:16px">
     <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:12px;padding-bottom:12px;border-bottom:1px solid var(--border)">
       <div>
@@ -13310,7 +13318,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
 
 // Calcula las metricas consolidadas de un producto en el rango.
 // Devuelve null si no hay actividad relevante (sin gasto y sin pedidos).
-function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd){
+function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd,reportesPrevByProd){
   // Gasto desde campaign_ids configurados del producto
   let gasto=0
   const campIds=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
@@ -13468,7 +13476,8 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
       const gananciaP=ventaEfP-costoProvP-costoFleteP-costoDevP-gastoP-costoConvProdP
       const cpaP=pConfP>0?gastoP/pConfP:0
       const roasP=gastoP>0?ventaP/gastoP:0
-      prevData={gasto:gastoP,pedidos:pConfP,ganancia:gananciaP,cpa:cpaP,roas:roasP}
+      const pedidosIdsP=(reportesPrevByProd&&reportesPrevByProd[prod.nombre])||0
+      prevData={gasto:gastoP,pedidos:pConfP,ganancia:gananciaP,cpa:cpaP,roas:roasP,pedidosIds:pedidosIdsP}
     }
   }
 
@@ -13486,6 +13495,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     ctrProd,cpmProd,cpaMetaProd,activas:_activas,pausadas:_pausadas,
     prevData,nDiasRango:nDiasRango||0,
     conversaciones,
+    pedidosIds:pReportados,
     // Desglose para tooltip de ganancia
     desgloseGanancia:{ventaEfectiva,costoProv,costoFlete,costoDev,gasto,costoConvProd,devPct}
   }
@@ -13551,7 +13561,10 @@ function _renderProductoCardResumen(data,ranking){
       </div>
       <div style="text-align:right;font-size:14px;color:${pCol};font-weight:500">${pSign}$${fmt(Math.abs(p.ganancia))}</div>
       <div style="text-align:right;font-size:14px;color:var(--muted)">${p.cpa>0?'$'+fmt(Math.round(p.cpa)):'—'}</div>
-      <div style="text-align:right;font-size:14px;color:var(--muted)">${p.pedidos}</div>
+      <div style="text-align:right">
+        <div style="font-size:14px;color:var(--muted)">${p.pedidos}</div>
+        <div style="font-size:11px;color:var(--blue);margin-top:2px" title="Pedidos por IDs reportados de ese día">🆔 IDs: ${p.pedidosIds||0}</div>
+      </div>
       <div style="text-align:right;font-size:14px;color:var(--muted)">${p.roas>0?p.roas.toFixed(2)+'x':'—'}</div>
       <div style="text-align:right;font-size:14px;color:var(--muted)">${p.gasto>0?'$'+fmt(p.gasto):'—'}</div>
     </div>`
@@ -13585,6 +13598,7 @@ function _renderProductoCardResumen(data,ranking){
       <div style="text-align:right">
         <div style="font-size:14px;color:var(--text);line-height:1.2" title="${data.esSoloHoy?'Pedidos brutos del día (aún sin cruce Dropi)':(data.pedidosConfirmados>0?'Pedidos confirmados del cruce Dropi. Pendientes y cancelados no cuentan.':'IDs reportados por el auxiliar (cruce Dropi aún sin confirmar). Cuando el cruce confirme, ese manda.')}">📦 ${data.esSoloHoy?data.totalPedidos:(data.pedidosConfirmados>0?data.pedidosConfirmados:data.totalPedidos)}</div>
         ${data.esSoloHoy&&data.pedidosEfectivos>0?`<div style="font-size:11px;color:var(--purple);margin-top:2px" title="Estimación: ${data.totalPedidos} × ${Math.round((data.pctConf||0.62)*100)}% confirmación">🟣 P.Ef: ${data.pedidosEfectivos.toFixed(2)}</div>`:''}
+        <div style="font-size:11px;color:var(--blue);margin-top:2px" title="Pedidos contados por los IDs que reportó el auxiliar. Compáralo con el 📦 de arriba (cruce Dropi) para ver cuánto varían.">🆔 IDs: ${data.pedidosIds||0}</div>
       </div>
       <div style="text-align:right">
         <div style="font-size:14px;color:${roasColor};font-weight:600;line-height:1.2">${data.roas>0?data.roas.toFixed(2)+'x':'—'}</div>
@@ -13928,10 +13942,6 @@ async function renderMetaPortafolio(el,isAdmin){
       <button class="btn-sm btn-outline" id="mf-all" onclick="setMetaFilter('all')">Todas</button>
       <button class="btn-sm btn-primary" id="mf-ACTIVE" onclick="setMetaFilter('ACTIVE')">Activas</button>
       <button class="btn-sm btn-outline" id="mf-INACTIVE" onclick="setMetaFilter('INACTIVE')">Inactivas</button>
-    </div>
-    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px">
-      <input type="text" id="meta-search-camp" placeholder="🆔 Buscar por ID de campaña (en las cuentas abiertas)..." style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:6px 10px;color:var(--text);font-size:12px;flex:1;min-width:160px;outline:none" oninput="filterMetaCampId()" title="Pega el ID de una campaña. Primero abre la cuenta donde está. Te deja sola esa campaña y la resalta.">
-      <button class="btn-sm btn-outline" onclick="document.getElementById('meta-search-camp').value='';filterMetaCampId()" title="Limpiar búsqueda por ID">✖ Limpiar</button>
     </div>
   </div>`
 
@@ -14827,10 +14837,12 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const _camActivas=conActividad.filter(c=>c.estado==='ACTIVE')
     const _camInactivas=conActividad.filter(c=>c.estado!=='ACTIVE')
     campHtml+=`<div class="section-title" style="color:var(--green)">Con actividad (${conActividad.length})</div>`
-    campHtml+=`<div style="margin:4px 0 8px 0;display:flex;gap:4px;flex-wrap:wrap">
+    campHtml+=`<div style="margin:4px 0 8px 0;display:flex;gap:4px;flex-wrap:wrap;align-items:center">
       <button class="btn-sm btn-primary cs-btn" data-sub="active" onclick="filterCampSubtab('${accountId}','active',this)">🟢 Activas (${_camActivas.length})</button>
       <button class="btn-sm btn-outline cs-btn" data-sub="inactive" onclick="filterCampSubtab('${accountId}','inactive',this)">⚫ Inactivas (${_camInactivas.length})</button>
       <button class="btn-sm btn-outline cs-btn" data-sub="all" onclick="filterCampSubtab('${accountId}','all',this)">Todas (${conActividad.length})</button>
+      <input type="text" id="meta-search-camp-${accountId}" placeholder="🆔 Buscar por ID de campaña..." oninput="filterMetaCampId('${accountId}')" style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:5px 10px;color:var(--text);font-size:11px;flex:1;min-width:150px;outline:none" title="Pega el ID de una campaña de esta cuenta. Te deja sola esa campaña y la resalta.">
+      <button class="btn-sm btn-outline" onclick="document.getElementById('meta-search-camp-${accountId}').value='';filterMetaCampId('${accountId}')" title="Limpiar búsqueda por ID">✖</button>
     </div>`
     campHtml+=conActividad.map(renderCamp).join('')
   }
@@ -16627,15 +16639,29 @@ window.setMetaFilter=(filter)=>{
   filterMetaCuentas()
 }
 
-// Busca por ID de campaña SOLO en las cuentas que ya están abiertas (las que tienen
-// campañas pintadas en el DOM). Deja visible la que coincide y la resalta; al limpiar,
-// vuelve a mostrar todas las campañas.
-window.filterMetaCampId=()=>{
-  const q=(document.getElementById('meta-search-camp')?.value||'').trim()
+// Busca por ID de campaña SOLO dentro de una cuenta (accountId). Deja visible la que
+// coincide y la resalta; al limpiar, vuelve a aplicar el sub-filtro activo (Activas/Inactivas/Todas).
+window.filterMetaCampId=(accountId)=>{
+  const accEl=accountId?document.getElementById('meta-acc-'+accountId):null
+  const scope=accEl||document
+  const inp=accountId?document.getElementById('meta-search-camp-'+accountId):document.getElementById('meta-search-camp')
+  const q=(inp?.value||'').trim()
+  if(!q){
+    // Sin búsqueda: limpiar resaltado y re-aplicar el sub-filtro activo de la cuenta
+    scope.querySelectorAll('.meta-camp-item').forEach(el=>{el.style.outline='';el.style.borderRadius=''})
+    if(accEl){
+      const activeBtn=accEl.querySelector('.cs-btn.btn-primary')
+      const sub=activeBtn?.dataset?.sub||'all'
+      if(typeof filterCampSubtab==='function')filterCampSubtab(accountId,sub,activeBtn||null)
+      else scope.querySelectorAll('.meta-camp-item').forEach(el=>{el.style.display=''})
+    }else{
+      scope.querySelectorAll('.meta-camp-item').forEach(el=>{el.style.display=''})
+    }
+    return
+  }
   let primera=null
-  document.querySelectorAll('.meta-camp-item').forEach(el=>{
+  scope.querySelectorAll('.meta-camp-item').forEach(el=>{
     const cid=el.dataset.campid||''
-    if(!q){el.style.display='';el.style.outline='';el.style.borderRadius='';return}
     const match=cid.includes(q)
     el.style.display=match?'':'none'
     el.style.outline=match?'2px solid var(--accent)':''

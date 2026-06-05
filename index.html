@@ -70,6 +70,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 /* APP SHELL */
 #app{display:none;min-height:100vh}
 .shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+.shell.sb-hidden{grid-template-columns:0 1fr}
+.shell.sb-hidden .sidebar{display:none}
+.sb-collapse-btn{margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--muted);width:24px;height:24px;border-radius:6px;cursor:pointer;font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:0}
+.sb-collapse-btn:hover{color:var(--text);border-color:var(--accent)}
+.sb-reopen-btn{display:none;position:fixed;top:12px;left:12px;z-index:60;background:var(--card);border:1px solid var(--border);color:var(--text);width:34px;height:34px;border-radius:8px;cursor:pointer;font-size:16px;align-items:center;justify-content:center;box-shadow:0 2px 10px rgba(0,0,0,.4)}
+.sb-reopen-btn:hover{border-color:var(--accent)}
+.shell.sb-hidden .sb-reopen-btn{display:flex}
 
 /* SIDEBAR */
 .sidebar{background:var(--card);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:0}
@@ -236,6 +243,7 @@ tr:hover td{background:var(--card2)}
 @media(max-width:768px){
   .mob-topbar{display:flex}
   .shell{grid-template-columns:1fr}
+  .sb-collapse-btn,.sb-reopen-btn{display:none !important}
   .sidebar{position:fixed;top:0;left:0;height:100vh;width:78%;max-width:300px;z-index:50;transform:translateX(-100%);transition:transform .25s ease;display:flex !important;box-shadow:8px 0 30px rgba(0,0,0,.5)}
   .sidebar.open{transform:translateX(0)}
   .content{padding:14px}
@@ -412,9 +420,10 @@ tr:hover td{background:var(--card2)}
 </div>
 <div class="mob-backdrop" id="mob-backdrop" onclick="toggleSidebar(false)"></div>
 <div class="shell">
+  <button class="sb-reopen-btn" onclick="toggleSidebarDesktop()" title="Mostrar menú" aria-label="Mostrar menú">☰</button>
   <!-- SIDEBAR -->
   <nav class="sidebar" id="sidebar">
-    <div class="sb-logo">Nexo <span>COD Operations</span></div>
+    <div class="sb-logo" style="position:relative">Nexo <span>COD Operations</span><button class="sb-collapse-btn" onclick="toggleSidebarDesktop()" title="Ocultar menú" aria-label="Ocultar menú" style="position:absolute;top:18px;right:14px">«</button></div>
     <div class="sb-nav" id="sb-nav"></div>
     <div class="sb-user">
       <div class="sb-user-name" id="sb-name">—</div>
@@ -532,6 +541,7 @@ sb.auth.onAuthStateChange((ev,sess)=>{
 function showApp(){
   document.getElementById('login-wrap').style.display='none'
   document.getElementById('app').style.display='block'
+  if(window._applySidebarState)window._applySidebarState()
   document.getElementById('sb-name').textContent=me?.nombre||'—'
   document.getElementById('sb-role').textContent=currentRol()||'—'
   syncMobRole()
@@ -561,6 +571,23 @@ window.toggleSidebar=(force)=>{
   const willOpen=typeof force==='boolean'?force:!sb.classList.contains('open')
   sb.classList.toggle('open',willOpen)
   bd.classList.toggle('open',willOpen)
+}
+
+// Colapsa/expande el sidebar en escritorio (estilo Claude). Recuerda el estado.
+window.toggleSidebarDesktop=()=>{
+  const shell=document.querySelector('.shell')
+  if(!shell)return
+  const hide=!shell.classList.contains('sb-hidden')
+  shell.classList.toggle('sb-hidden',hide)
+  try{localStorage.setItem('nexo_sb_hidden',hide?'1':'0')}catch(_){}
+}
+// Aplica el estado guardado del sidebar (llamar al mostrar la app)
+window._applySidebarState=()=>{
+  const shell=document.querySelector('.shell')
+  if(!shell)return
+  let hidden=false
+  try{hidden=localStorage.getItem('nexo_sb_hidden')==='1'}catch(_){}
+  shell.classList.toggle('sb-hidden',hidden)
 }
 
 window.toggleActionsMenu=(btn)=>{
@@ -5633,7 +5660,10 @@ async function cargarReporteData(){
   if(!fecha){el.innerHTML='<div class="alert alert-blue">Selecciona una fecha</div>';return}
   const esHoy=fecha===today()&&tipo==='compra'
   const esAyer=fecha===_daysAgo(1)&&tipo==='compra'
-  const permiteVentas=esHoy||esAyer
+  const modoHist=currentMe()?.modo_historico===true
+  // Modo histórico: el auxiliar puede meter IDs de ventas de cualquier fecha de compra
+  const esHistManual=modoHist&&tipo==='compra'&&!!fecha&&!esHoy&&!esAyer
+  const permiteVentas=esHoy||esAyer||esHistManual
   const usandoDropi=tipo==='dropi'
   const campo=usandoDropi?'fecha_dropi':'fecha'
   // Resaltar el botón del día activo
@@ -5752,8 +5782,10 @@ async function cargarReporteData(){
   // Ventas / IDs (hoy o ayer)
   let ventasHtml=''
   if(permiteVentas){
-    const tit=esAyer?'📝 Completar los IDs de AYER':'📝 Ventas de hoy (manual)'
-    const bannerVentas=esAyer
+    const tit=esHistManual?('📝 Meter IDs del '+fecha+' (modo histórico)'):(esAyer?'📝 Completar los IDs de AYER':'📝 Ventas de hoy (manual)')
+    const bannerVentas=esHistManual
+      ?`<div class="aux-banner amber" style="margin-bottom:14px"><span>🕓</span><span><b>Modo histórico activado.</b> Estás metiendo los IDs de las ventas del día <b>${fecha}</b>. Pega los IDs de anuncio y dale guardar.</span></div>`
+      :esAyer
       ?`<div class="aux-banner amber" style="margin-bottom:14px"><span>⏳</span><span><b>Esto es temporal.</b> Pega aquí los IDs que faltan de ayer. Cuando llegue el archivo de Dropi al mediodía, esto se arregla solo. No pasa nada si lo dejas.</span></div>
         <div style="background:var(--amber-bg);border:2px dashed var(--amber);border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:14px;line-height:1.8;color:var(--text)">
           <b>1.</b> Mira los IDs que ya pusiste 👀<br>
@@ -5774,6 +5806,7 @@ async function cargarReporteData(){
   let modoBanner=''
   if(esHoy)modoBanner=`<div style="background:var(--green-bg);border:3px solid var(--green);border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:15px;font-weight:700;color:var(--text)">✅ Estás anotando las ventas de <b>HOY</b>.</div>`
   else if(esAyer)modoBanner=`<div style="background:var(--amber-bg);border:3px solid var(--amber);border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:15px;font-weight:700;color:var(--text);line-height:1.6">⏳ Estás completando los IDs de <b>AYER</b>.<br><span style="font-weight:500;font-size:13px;color:var(--muted)">Es temporal, hasta que llegue el archivo de Dropi al mediodía. Cuando llegue, esto se reemplaza solo. No pasa nada si lo dejas.</span></div>`
+  else if(esHistManual)modoBanner=`<div style="background:var(--amber-bg);border:3px solid var(--amber);border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:15px;font-weight:700;color:var(--text);line-height:1.6">🕓 Modo histórico — estás metiendo los IDs del día <b>${fecha}</b>.<br><span style="font-weight:500;font-size:13px;color:var(--muted)">Pega los IDs de ese día y dale guardar.</span></div>`
   el.innerHTML=`
     ${modoBanner}
     <div class="section-title" style="color:var(--green)">📊 Datos ${labelFecha} (auto desde Dropi)</div>
@@ -5787,8 +5820,8 @@ async function cargarReporteData(){
   // Cargar ventas existentes o crear primera fila
   if(permiteVentas){
     const ventasExist=reportes?.filter(r=>r.ad_ids)||[]
-    if(esAyer){
-      // Ayer: mostrar lo ya guardado para poder verlo/editarlo (provisional)
+    if(esAyer||esHistManual){
+      // Ayer / histórico: mostrar lo ya guardado para poder verlo/editarlo
       if(ventasExist.length>0){for(const v of ventasExist)addVentaRow(v.producto_nombre||'',v.ad_ids||'',v.conversaciones_aprox||0)}
       else addVentaRow()
     }else if(impersonating&&ventasExist.length>0){
@@ -5837,7 +5870,8 @@ window.habilitarEdicionHist=()=>{
 window.saveReporteV2=async(fecha)=>{
   const esHoy=fecha===today()
   const esAyer=fecha===_daysAgo(1)
-  const permiteVentas=esHoy||esAyer
+  const modoHist=currentMe()?.modo_historico===true
+  const permiteVentas=esHoy||esAyer||modoHist
   const msg=document.getElementById('rep-msg')
 
   if(!permiteVentas){
@@ -12252,6 +12286,16 @@ async function pageAdminMeta(c){
 
   c.innerHTML=`<div class="page-title">📡 Meta Ads</div>
     <div class="page-sub">Conexión con Meta Graph API y portafolio de campañas</div>
+    <div class="card" style="margin-bottom:16px;border:1px solid var(--accent)">
+      <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;font-weight:600">📅 Abrir fechas en Meta (al instante)</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <button class="btn-sm" onclick="abrirMetaComparativa3()" style="background:var(--accent);color:#fff;font-weight:600;padding:6px 12px;border:none;border-radius:6px;cursor:pointer" title="Abre 3 pestañas: Ayer · Antier · Últimos 3 días">📅 Ver Ayer/Antier/3d</button>
+        <button class="btn-sm btn-outline" onclick="abrirMetaUnDia('ayer')" title="Abre 1 pestaña solo con AYER">Ver Ayer</button>
+        <button class="btn-sm btn-outline" onclick="abrirMetaUnDia('antier')" title="Abre 1 pestaña solo con ANTIER">Ver Antier</button>
+        <button class="btn-sm btn-outline" onclick="abrirMetaUnDia('3d')" title="Abre 1 pestaña con los últimos 3 días">Ver 3d</button>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:6px">Abre Meta Ads ya con las fechas puestas. No tienes que esperar a que cargue el portafolio.</div>
+    </div>
     <div id="meta-portafolio"><div class="loading">Cargando portafolio...</div></div>
     <div class="divider"></div>
     <div class="card" style="max-width:600px;margin-bottom:20px">
@@ -13885,6 +13929,10 @@ async function renderMetaPortafolio(el,isAdmin){
       <button class="btn-sm btn-primary" id="mf-ACTIVE" onclick="setMetaFilter('ACTIVE')">Activas</button>
       <button class="btn-sm btn-outline" id="mf-INACTIVE" onclick="setMetaFilter('INACTIVE')">Inactivas</button>
     </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px">
+      <input type="text" id="meta-search-camp" placeholder="🆔 Buscar por ID de campaña (en las cuentas abiertas)..." style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:6px 10px;color:var(--text);font-size:12px;flex:1;min-width:160px;outline:none" oninput="filterMetaCampId()" title="Pega el ID de una campaña. Primero abre la cuenta donde está. Te deja sola esa campaña y la resalta.">
+      <button class="btn-sm btn-outline" onclick="document.getElementById('meta-search-camp').value='';filterMetaCampId()" title="Limpiar búsqueda por ID">✖ Limpiar</button>
+    </div>
   </div>`
 
   // Bloque 2: ¿QUÉ DÍAS QUIERES VER? (botones rápidos + rango personalizado + día específico)
@@ -14379,7 +14427,8 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   const adsetToCamp={}
   for(const as of (allAdsets||[]))adsetToCamp[as.meta_id]=as.parent_id
   const adToCamp={}
-  for(const ad of (allAds||[]))adToCamp[ad.meta_id]=adsetToCamp[ad.parent_id]||''
+  const adToAdset={}
+  for(const ad of (allAds||[])){adToCamp[ad.meta_id]=adsetToCamp[ad.parent_id]||'';adToAdset[ad.meta_id]=ad.parent_id||''}
   const allAdIds=Object.keys(adToCamp)
 
   // Determinar si el rango es solo HOY o incluye días anteriores
@@ -14456,12 +14505,17 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   }
 
   // Reporte diario (ad_ids manuales del auxiliar)
+  const ventasIdsByAd={}    // adId → veces que aparece reportado (cada aparición = 1 venta por IDs)
+  const ventasIdsByCamp={}  // campId → suma de sus ads (ventas por IDs)
   for(const rep of uniqueReportes){
     if(!rep.ad_ids)continue
     const ids=rep.ad_ids.split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)
     for(const adId of ids){
+      // Ventas por IDs: SIEMPRE cuenta (independiente de mapeos), para comparar contra Dropi
+      ventasIdsByAd[adId]=(ventasIdsByAd[adId]||0)+1
       const campId=adToCamp[adId]
       if(!campId)continue
+      ventasIdsByCamp[campId]=(ventasIdsByCamp[campId]||0)+1
       if(!ventasByCamp[campId])ventasByCamp[campId]={ventas:0,canceladas:0,pendientes:0}
       if(ventasByCamp[campId]._src!=='mapeos'){
         // Si la fecha del reporte es hoy, va a pendientes (aproximación)
@@ -14527,6 +14581,29 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   // Exponer al window para que toggleCampDesglose y toggleAdsetDesglose puedan usarlo
   if(!window._metaPort)window._metaPort={}
   window._metaPort.semaforosByMeta=semaforosByMeta
+
+  // ── CPA META DEL DÍA PREVIO (día anterior a "desde") · todos los niveles ──
+  // Sirve para comparar el CPA Meta de hoy/ayer contra el día anterior, por meta_id.
+  const _diaPrev=_isoDate(new Date(new Date(desde+'T00:00:00').getTime()-86400000))
+  const cpaMetaPrevByMeta={} // meta_id → CPA Meta del día previo (spend/conversions)
+  try{
+    const{data:insPrev}=await sb.from('meta_insights')
+      .select('meta_id,nivel,spend,conversions')
+      .eq('account_id',accountId).eq('fecha',_diaPrev).limit(20000)
+    const _acc={}
+    for(const i of (insPrev||[])){
+      if(!_acc[i.meta_id])_acc[i.meta_id]={spend:0,conv:0}
+      _acc[i.meta_id].spend+=i.spend||0
+      _acc[i.meta_id].conv+=i.conversions||0
+    }
+    for(const mid in _acc){cpaMetaPrevByMeta[mid]=_acc[mid].conv>0?_acc[mid].spend/_acc[mid].conv:0}
+  }catch(_){}
+  // Exponer índices para el desglose (adset/ad)
+  window._metaPort.cpaMetaPrevByMeta=cpaMetaPrevByMeta
+  window._metaPort.diaPrev=_diaPrev
+  window._metaPort.ventasIdsByAd=ventasIdsByAd
+  window._metaPort.ventasIdsByCamp=ventasIdsByCamp
+  window._metaPort.adToAdset=adToAdset
 
   // ── Clasificar: con/sin actividad (gasto > 0 en el rango) ──
   const conActividad=[],sinActividad=[]
@@ -14621,8 +14698,11 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const _esCBO=_campBudget>0
     const _campActiva=(camp.estado||'').toUpperCase()==='ACTIVE'
     const _campNomEsc=(camp.nombre||'').replace(/'/g,"\\'")
+    // NUEVO: CPA Meta del día previo + Ventas por IDs reportados (para comparar)
+    const cpaMetaPrev=cpaMetaPrevByMeta[camp.meta_id]||0
+    const ventasIds=ventasIdsByCamp[camp.meta_id]||0
 
-    return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" data-estado="${camp.estado||''}" data-urgencia="${camp._urgenciaCode||''}" style="margin-bottom:5px;${opacity}">
+    return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" data-campid="${camp.meta_id}" data-estado="${camp.estado||''}" data-urgencia="${camp._urgenciaCode||''}" style="margin-bottom:5px;${opacity}">
       <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-camp)">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
         <div style="flex:1;min-width:0;cursor:pointer" onclick="viewCampDetail('${camp.meta_id}')">
@@ -14645,12 +14725,14 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
           ${badgeMega||`<span class="pill ${semCls}" ${prodTooltip}>${semTxt}</span>`}
         </div>
       </div>
-      ${camp._hasData?`<div style="margin-top:6px;display:grid;grid-template-columns:repeat(${esSoloHoy?7:6},1fr);gap:6px">
+      ${camp._hasData?`<div style="margin-top:6px;display:grid;grid-template-columns:repeat(${esSoloHoy?9:8},1fr);gap:6px">
         <div class="nexo-met"><div class="nm-lbl">Gasto</div><div class="nm-val">$${fmt(m.spend)}</div></div>
         <div class="nexo-met"><div class="nm-lbl" title="(Ventas reales × Precio) / Gasto">ROAS Real</div><div class="nm-val" style="color:${roasReal>=1?'var(--green)':roasReal>0?'var(--red)':'var(--muted)'}">${roasReal>0?roasReal.toFixed(2)+'x':'—'}</div></div>
         <div class="nexo-met"><div class="nm-lbl">CPA Meta</div><div class="nm-val">${cpa>0?'$'+fmt(cpa):'—'}</div></div>
+        <div class="nexo-met"><div class="nm-lbl" title="CPA Meta del día anterior (${_diaPrev}). Compáralo con el CPA Meta de hoy.">CPA Meta ayer</div><div class="nm-val" style="color:var(--muted)">${cpaMetaPrev>0?'$'+fmt(cpaMetaPrev):'—'}</div></div>
         <div class="nexo-met"><div class="nm-lbl">Conv.</div><div class="nm-val">${m.conv}</div></div>
-        <div class="nexo-met"><div class="nm-lbl">Ventas</div><div class="nm-val" style="color:${esSoloHoy?'var(--amber)':'var(--green)'}">${esSoloHoy?v.pendientes+' ⏳':v.ventas+' ✅'}</div></div>
+        <div class="nexo-met"><div class="nm-lbl" style="color:${esSoloHoy?'var(--amber)':'var(--green)'}">Ventas</div><div class="nm-val" style="color:${esSoloHoy?'var(--amber)':'var(--green)'}">${esSoloHoy?v.pendientes+' ⏳':v.ventas+' ✅'}</div></div>
+        <div class="nexo-met"><div class="nm-lbl" title="Ventas contadas por los IDs que reportaste (reportes del día). Compáralas con la columna Ventas (cruce Dropi) para ver qué tanto varían.">Ventas IDs</div><div class="nm-val" style="color:var(--blue)">${ventasIds}</div></div>
         ${esSoloHoy?`<div class="nexo-met"><div class="nm-lbl" title="Estimación: ventas × ${Math.round(pctConf*100)}%">V. Efectivas</div><div class="nm-val" style="color:var(--purple)" title="${Math.round(pctConf*100)}% confirmación">${ventasEfectivas.toFixed(2)}</div></div>`:''}
         <div class="nexo-met"><div class="nm-lbl">CPA Real</div><div class="nm-val" style="color:${window.nexoCpaColor(cpaReal,ctxCamp.margenBE)}" title="Break-even: $${fmt(ctxCamp.margenBE)}">${cpaReal>0?'$'+fmt(cpaReal):'—'}</div></div>
       </div>
@@ -16296,6 +16378,11 @@ window.toggleCampDesglose=async(campId,accountId)=>{
         const hasSpend=d.spend>0
         const mr=metricasByAdset[as.meta_id]||{ventas:0,canceladas:0,pendientes:0,cpaReal:0,roasReal:0,tasaCancel:0,ventasEfectivas:0,cpaRealEfectivas:0,sem:{cls:'',txt:'',border:'var(--border)'},esSoloHoy:false,pctConf:0.62}
         const cpaMeta=d.conv>0?d.spend/d.conv:0
+        // NUEVO: CPA Meta día previo (del adset) + Ventas por IDs (suma de sus ads)
+        const _vIdsAd=(window._metaPort&&window._metaPort.ventasIdsByAd)||{}
+        const cpaMetaPrev=((window._metaPort&&window._metaPort.cpaMetaPrevByMeta)||{})[as.meta_id]||0
+        const ventasIds=(adsByAdset[as.meta_id]||[]).reduce((s,adId)=>s+(_vIdsAd[adId]||0),0)
+        const _diaPrevTxt=(window._metaPort&&window._metaPort.diaPrev)||'día anterior'
         const avgCtr=d.ctrs.length?(d.ctrs.reduce((a,b)=>a+b,0)/d.ctrs.length):0
         const avgCpm=d.cpms.length?(d.cpms.reduce((a,b)=>a+b,0)/d.cpms.length):0
         const avgFreq=d.freqs.length?(d.freqs.reduce((a,b)=>a+b,0)/d.freqs.length):0
@@ -16342,12 +16429,14 @@ window.toggleCampDesglose=async(campId,accountId)=>{
                 ${badgeMega||(hasSpend&&mr.sem.txt?`<span class="pill ${mr.sem.cls}" style="font-size:10px">${mr.sem.txt}</span>`:'')}
               </div>
             </div>
-            ${hasSpend?`<div style="display:grid;grid-template-columns:repeat(${mr.esSoloHoy?7:6},1fr);gap:5px">
+            ${hasSpend?`<div style="display:grid;grid-template-columns:repeat(${mr.esSoloHoy?9:8},1fr);gap:5px">
               <div class="nexo-met nm-sm"><div class="nm-lbl">Gasto</div><div class="nm-val">$${fmt(d.spend)}</div></div>
               <div class="nexo-met nm-sm"><div class="nm-lbl" title="(Ventas reales × Precio) / Gasto">ROAS Real</div><div class="nm-val" style="color:${mr.roasReal>=1?'var(--green)':mr.roasReal>0?'var(--red)':'var(--muted)'}">${mr.roasReal>0?mr.roasReal.toFixed(2)+'x':'—'}</div></div>
               <div class="nexo-met nm-sm"><div class="nm-lbl">CPA Meta</div><div class="nm-val">${cpaMeta>0?'$'+fmt(cpaMeta):'—'}</div></div>
+              <div class="nexo-met nm-sm"><div class="nm-lbl" title="CPA Meta del día anterior (${_diaPrevTxt})">CPA Meta ayer</div><div class="nm-val" style="color:var(--muted)">${cpaMetaPrev>0?'$'+fmt(cpaMetaPrev):'—'}</div></div>
               <div class="nexo-met nm-sm"><div class="nm-lbl">Conv.</div><div class="nm-val">${d.conv}</div></div>
               <div class="nexo-met nm-sm"><div class="nm-lbl">Ventas</div><div class="nm-val" style="color:${ventasColor}">${ventasShow} ${ventasIcon}</div></div>
+              <div class="nexo-met nm-sm"><div class="nm-lbl" title="Ventas por los IDs reportados de este conjunto. Compáralas con Ventas (Dropi).">Ventas IDs</div><div class="nm-val" style="color:var(--blue)">${ventasIds}</div></div>
               ${mr.esSoloHoy?`<div class="nexo-met nm-sm"><div class="nm-lbl" title="Estimación: ventas × ${pctConfTxt}%">V. Efectivas</div><div class="nm-val" style="color:var(--purple)">${mr.ventasEfectivas.toFixed(2)}</div></div>`:''}
               <div class="nexo-met nm-sm"><div class="nm-lbl">CPA Real</div><div class="nm-val" style="color:${cpaNormalColor}">${mr.cpaReal>0?'$'+fmt(mr.cpaReal):'—'}</div></div>
             </div>
@@ -16449,6 +16538,10 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
       const hasSpend=d.spend>0
       const mr=metricasByAd[ad.meta_id]||{ventas:0,canceladas:0,pendientes:0,cpaReal:0,roasReal:0,tasaCancel:0,ventasEfectivas:0,cpaRealEfectivas:0,sem:{cls:'',txt:'',border:'var(--border)'},esSoloHoy:false,pctConf:0.62}
       const cpaMeta=d.conv>0?d.spend/d.conv:0
+      // NUEVO: CPA Meta día previo (del ad) + Ventas por IDs (de este ad_id)
+      const cpaMetaPrev=((window._metaPort&&window._metaPort.cpaMetaPrevByMeta)||{})[ad.meta_id]||0
+      const ventasIds=((window._metaPort&&window._metaPort.ventasIdsByAd)||{})[ad.meta_id]||0
+      const _diaPrevTxt=(window._metaPort&&window._metaPort.diaPrev)||'día anterior'
       const avgCtr=d.ctrs.length?(d.ctrs.reduce((a,b)=>a+b,0)/d.ctrs.length):0
       const avgCpm=d.cpms.length?(d.cpms.reduce((a,b)=>a+b,0)/d.cpms.length):0
       const avgFreq=d.freqs.length?(d.freqs.reduce((a,b)=>a+b,0)/d.freqs.length):0
@@ -16485,12 +16578,14 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
             ${badgeMega||(hasSpend&&mr.sem.txt?`<span class="pill ${mr.sem.cls}" style="font-size:10px">${mr.sem.txt}</span>`:'')}
           </div>
         </div>
-        ${hasSpend?`<div style="display:grid;grid-template-columns:repeat(${mr.esSoloHoy?7:6},1fr);gap:5px">
+        ${hasSpend?`<div style="display:grid;grid-template-columns:repeat(${mr.esSoloHoy?9:8},1fr);gap:5px">
           <div class="nexo-met nm-sm"><div class="nm-lbl">Gasto</div><div class="nm-val">$${fmt(d.spend)}</div></div>
           <div class="nexo-met nm-sm"><div class="nm-lbl" title="(Ventas reales × Precio) / Gasto">ROAS Real</div><div class="nm-val" style="color:${mr.roasReal>=1?'var(--green)':mr.roasReal>0?'var(--red)':'var(--muted)'}">${mr.roasReal>0?mr.roasReal.toFixed(2)+'x':'—'}</div></div>
           <div class="nexo-met nm-sm"><div class="nm-lbl">CPA Meta</div><div class="nm-val">${cpaMeta>0?'$'+fmt(cpaMeta):'—'}</div></div>
+          <div class="nexo-met nm-sm"><div class="nm-lbl" title="CPA Meta del día anterior (${_diaPrevTxt})">CPA Meta ayer</div><div class="nm-val" style="color:var(--muted)">${cpaMetaPrev>0?'$'+fmt(cpaMetaPrev):'—'}</div></div>
           <div class="nexo-met nm-sm"><div class="nm-lbl">Conv.</div><div class="nm-val">${d.conv}</div></div>
           <div class="nexo-met nm-sm"><div class="nm-lbl">Ventas</div><div class="nm-val" style="color:${ventasColor}">${ventasShow} ${ventasIcon}</div></div>
+          <div class="nexo-met nm-sm"><div class="nm-lbl" title="Ventas por el ID reportado de este anuncio. Compáralas con Ventas (Dropi).">Ventas IDs</div><div class="nm-val" style="color:var(--blue)">${ventasIds}</div></div>
           ${mr.esSoloHoy?`<div class="nexo-met nm-sm"><div class="nm-lbl" title="Estimación: ventas × ${pctConfTxt}%">V. Efectivas</div><div class="nm-val" style="color:var(--purple)">${mr.ventasEfectivas.toFixed(2)}</div></div>`:''}
           <div class="nexo-met nm-sm"><div class="nm-lbl">CPA Real</div><div class="nm-val" style="color:${cpaNormalColor}">${mr.cpaReal>0?'$'+fmt(mr.cpaReal):'—'}</div></div>
         </div>
@@ -16530,6 +16625,24 @@ window.setMetaFilter=(filter)=>{
     b.className=b.id==='mf-'+filter?'btn-sm btn-primary':'btn-sm btn-outline'
   })
   filterMetaCuentas()
+}
+
+// Busca por ID de campaña SOLO en las cuentas que ya están abiertas (las que tienen
+// campañas pintadas en el DOM). Deja visible la que coincide y la resalta; al limpiar,
+// vuelve a mostrar todas las campañas.
+window.filterMetaCampId=()=>{
+  const q=(document.getElementById('meta-search-camp')?.value||'').trim()
+  let primera=null
+  document.querySelectorAll('.meta-camp-item').forEach(el=>{
+    const cid=el.dataset.campid||''
+    if(!q){el.style.display='';el.style.outline='';el.style.borderRadius='';return}
+    const match=cid.includes(q)
+    el.style.display=match?'':'none'
+    el.style.outline=match?'2px solid var(--accent)':''
+    el.style.borderRadius=match?'8px':''
+    if(match&&!primera)primera=el
+  })
+  if(primera)primera.scrollIntoView({behavior:'smooth',block:'center'})
 }
 
 // Sincroniza meta-desde y meta-hasta a una misma fecha (modo "dia unico") y refresca el rango.
@@ -16573,6 +16686,21 @@ window.abrirMetaComparativa3=function(){
   for(const url of pestanas){ if(window.open(url,'_blank'))abiertas++ }
   if(abiertas<pestanas.length){
     alert('⚠️ El navegador bloqueó algunas pestañas.\n\nPermite las ventanas emergentes de este sitio (icono a la derecha de la barra de direcciones) y vuelve a darle clic.')
+  }
+}
+
+// Abre UNA sola pestaña de Meta Ads (Nexo) con la fecha ya puesta.
+// which = 'ayer' | 'antier' | '3d' (3d = últimos 3 días: hace3 → ayer)
+window.abrirMetaUnDia=function(which){
+  const ayer=_daysAgo(1),antier=_daysAgo(2),hace3=_daysAgo(3)
+  const base=location.origin+location.pathname+'?meta_desde='
+  let url=''
+  if(which==='ayer')url=base+ayer+'&meta_hasta='+ayer
+  else if(which==='antier')url=base+antier+'&meta_hasta='+antier
+  else if(which==='3d')url=base+hace3+'&meta_hasta='+ayer
+  else return
+  if(!window.open(url,'_blank')){
+    alert('⚠️ El navegador bloqueó la pestaña.\n\nPermite las ventanas emergentes de este sitio (icono a la derecha de la barra de direcciones) y vuelve a darle clic.')
   }
 }
 

@@ -16030,6 +16030,20 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
 //   - Solo si el último punto es de HOY
 //   - Solo afecta el meta_id de la card que se aprieta
 // ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// MARCA DE "REFRESCADOS" (solo en el navegador · NO toca la BD ni el timeline actual)
+// Guarda los ids de los puntos del semáforo que se actualizaron al darle Refrescar,
+// para poder filtrar el modal Historial y ver SOLO esos + el cruce Dropi.
+window._semRefrescadosSet=()=>{
+  try{return new Set(JSON.parse(localStorage.getItem('nexo_sem_refrescados')||'[]').map(String))}catch(_){return new Set()}
+}
+window._marcarSemRefrescado=(ids)=>{
+  try{
+    const set=window._semRefrescadosSet()
+    for(const id of (ids||[])){if(id!=null&&id!=='')set.add(String(id))}
+    localStorage.setItem('nexo_sem_refrescados',JSON.stringify([...set].slice(-2000)))
+  }catch(_){}
+}
 window.refrescarUltimoSemaforo=async(metaId,nivel,btnEl)=>{
   if(!metaId)return
   const origHtml=btnEl?btnEl.innerHTML:''
@@ -16117,6 +16131,7 @@ window.refrescarUltimoSemaforo=async(metaId,nivel,btnEl)=>{
     }finally{
       window._semRefreshBatch=null
     }
+    try{window._marcarSemRefrescado(Object.values(ultimoPorMeta).map(o=>o&&o.id))}catch(_){}
     if(btnEl){
       btnEl.innerHTML='✅ Refrescado'
       setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.disabled=false},1800)
@@ -16245,6 +16260,7 @@ window.refrescarSemaforosCuenta=async(accountId,btnEl)=>{
     }finally{
       window._semRefreshBatch=null
     }
+    try{window._marcarSemRefrescado(Object.values(ultimoPorMeta).map(o=>o&&o.id))}catch(_){}
 
     if(btnEl){
       btnEl.innerHTML=`✅ ${ultimos.length} refrescados`
@@ -16289,16 +16305,27 @@ function _semHistRenderChips(){
   const ctx=window._semHistCtx;if(!ctx)return
   const chipsEl=document.getElementById('sem-hist-chips');if(!chipsEl)return
   const mk=(f,lab,esActiva)=>`<button class="btn-sm ${esActiva?'btn-primary':'btn-outline'}" onclick="event.stopPropagation();_semHistFiltrar('${f}')" style="padding:5px 11px;font-size:11px">${lab}</button>`
+  const _solo=!!ctx.soloRefrescados
   chipsEl.innerHTML=
     mk(ctx.antier,'Antier ('+ctx.antier.slice(5)+')',ctx.activa===ctx.antier)+
     mk(ctx.ayer,'Ayer ('+ctx.ayer.slice(5)+')',ctx.activa===ctx.ayer)+
     mk(ctx.hoy,'Hoy ('+ctx.hoy.slice(5)+')',ctx.activa===ctx.hoy)+
+    `<button class="btn-sm ${_solo?'btn-primary':'btn-outline'}" onclick="event.stopPropagation();_semHistToggleRefrescados()" title="Muestra solo los puntos que actualizaste con el botón Refrescar + el cruce Dropi" style="padding:5px 11px;font-size:11px;${_solo?'':'border-color:var(--purple);color:var(--purple)'}">🔄 Solo refrescados</button>`+
     `<button class="btn-sm btn-outline" onclick="event.stopPropagation();_semHistRango()" style="padding:5px 11px;font-size:11px;margin-left:auto">📅 Elegir rango</button>`
+}
+// Toggle "Solo refrescados": filtra el timeline del modal a los puntos marcados como
+// refrescados (en el navegador) + el cruce Dropi. No toca la BD ni el timeline de la tarjeta.
+window._semHistToggleRefrescados=()=>{
+  const ctx=window._semHistCtx;if(!ctx)return
+  ctx.soloRefrescados=!ctx.soloRefrescados
+  _semHistRenderChips()
+  _semHistLoad(ctx._fechasActuales||[ctx.activa])
 }
 
 // Helper interno: carga registros para una o varias fechas y pinta el timeline
 async function _semHistLoad(fechas){
   const ctx=window._semHistCtx;if(!ctx)return
+  ctx._fechasActuales=fechas
   const body=document.getElementById('sem-hist-body');if(!body)return
   body.innerHTML='<div class="loading">Cargando...</div>'
   try{
@@ -16308,7 +16335,13 @@ async function _semHistLoad(fechas){
     const{data,error}=await q.order('hora_calculo',{ascending:true}).limit(1000)
     if(error){body.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
     if(!data||!data.length){body.innerHTML='<div class="alert alert-blue">Sin registros en este rango</div>';return}
-    body.innerHTML=_semRenderTimeline(data)
+    let rows=data
+    if(ctx.soloRefrescados){
+      const refSet=window._semRefrescadosSet()
+      rows=data.filter(r=>(r.id!=null&&refSet.has(String(r.id)))||r.triggered_by==='cruce_dropi')
+      if(!rows.length){body.innerHTML='<div class="alert alert-blue">Sin puntos refrescados en este rango. Dale al botón <strong>🔄 Refrescar</strong> en la campaña para marcarlos (el cruce Dropi también aparece aquí).</div>';return}
+    }
+    body.innerHTML=_semRenderTimeline(rows)
   }catch(e){body.innerHTML=`<div class="alert alert-red">${e.message}</div>`}
 }
 

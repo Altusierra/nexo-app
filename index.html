@@ -6797,14 +6797,20 @@ function getNivelMensajeConfirmacion(diasFalta,enviosHoy){
   return{idxTpl:0,etiqueta:'Recordatorio',nivel:1}
 }
 
+// Reemplaza [NOMBRE]: con nombre del cliente lo usa tal cual; sin nombre deja un
+// saludo natural ("Hola ..." / "Hola, ...") en vez del literal [NOMBRE]. (fix nombre vacío)
+function _aplicarNombreSaludo(tpl,nombre){
+  const n=(nombre==null?'':String(nombre)).trim()
+  if(n)return tpl.replace(/\[NOMBRE\]/g,n)
+  return tpl.replace(/Hola \[NOMBRE\]/g,'Hola').replace(/\[NOMBRE\]/g,'Hola').replace(/ {2,}/g,' ')
+}
 function armarMensajeConfirmacion(item,idxTpl){
   const tpl=CONF_MSGS[idxTpl]||CONF_MSGS[0]
   const prodNom=(typeof resolveProdName==='function'?(resolveProdName(item.producto)||{}).nombre:null)||item.producto||'[PRODUCTO]'
   const cantTxt=item.cantidad?`${item.cantidad} unidad${item.cantidad>1?'es':''}`:'[CANTIDAD]'
   const fechaFmt=item.fecha_envio_programada?new Date(item.fecha_envio_programada+'T00:00:00').toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long'}):'[FECHA_ENVIO]'
   const _telCli=String(item.telefono||'').replace(/\D/g,'')
-  return tpl
-    .replace(/\[NOMBRE\]/g,item.nombre_cliente||'[NOMBRE]')
+  return _aplicarNombreSaludo(tpl,item.nombre_cliente)
     .replace(/\[PRODUCTO\]/g,prodNom)
     .replace(/\[CANTIDAD\]/g,cantTxt)
     .replace(/\[CIUDAD\]/g,item.ciudad||'[CIUDAD]')
@@ -6843,8 +6849,7 @@ function armarMensajePsf(m,idxTpl){
   const prodNom=(typeof resolveProdName==='function'?(resolveProdName(m.producto)||{}).nombre:null)||m.producto||'[PRODUCTO]'
   const cantTxt=m.cantidad?`${m.cantidad} unidad${m.cantidad>1?'es':''}`:'[CANTIDAD]'
   const _telCli=String(m.telefono||'').replace(/\D/g,'')
-  return tpl
-    .replace(/\[NOMBRE\]/g,m.nombre_cliente||'[NOMBRE]')
+  return _aplicarNombreSaludo(tpl,m.nombre_cliente)
     .replace(/\[PRODUCTO\]/g,prodNom)
     .replace(/\[CANTIDAD\]/g,cantTxt)
     .replace(/\[CIUDAD\]/g,m.ciudad||'[CIUDAD]')
@@ -6898,13 +6903,12 @@ Si ahora no puedes, tranquila — aquí estaré. Cuando quieras me escribes a *e
 
 // Nivel según envíos previos. Cuota: 2 mensajes por día por pedido.
 function getNivelMensajeCanc(envios,enviosHoy){
-  if(enviosHoy>=2)return{idxTpl:-1,etiqueta:'Cupo diario alcanzado',nivel:0,bloqueado:true}
   const e=envios||0
+  if(e>=3)return{idxTpl:-1,etiqueta:'Ya enviaste 3 mensajes',nivel:0,bloqueado:true,limiteAlcanzado:true}
+  if(enviosHoy>=2)return{idxTpl:-1,etiqueta:'Cupo diario alcanzado',nivel:0,bloqueado:true}
   if(e===0)return{idxTpl:0,etiqueta:'1er mensaje',nivel:1}
   if(e===1)return{idxTpl:1,etiqueta:'2do mensaje',nivel:2}
-  if(e===2)return{idxTpl:2,etiqueta:'3er mensaje',nivel:3}
-  if(e===3)return{idxTpl:3,etiqueta:'4to mensaje',nivel:4}
-  return{idxTpl:4,etiqueta:'5to mensaje (última llamada)',nivel:5}
+  return{idxTpl:2,etiqueta:'3er mensaje (último)',nivel:3}
 }
 
 // Total del producto: de precio_dropi o, si no hay, del precio según la cantidad (catálogo en memoria).
@@ -6939,8 +6943,7 @@ function armarMensajeCanc(m,idxTpl){
   const total=_cancTotal(m)
   const totalTxt=total!=null?('$'+fmt(total)):'el total'
   const _telCli=String(m.telefono||'').replace(/\D/g,'')
-  return tpl
-    .replace(/\[NOMBRE\]/g,m.nombre_cliente||'')
+  return _aplicarNombreSaludo(tpl,m.nombre_cliente)
     .replace(/\[PRODUCTO\]/g,prodNom)
     .replace(/\[CIUDAD\]/g,m.ciudad||'tu ciudad')
     .replace(/\[TRANSPORTADORA\]/g,transp)
@@ -7335,7 +7338,14 @@ async function cargarCancelados(){
       const{data}=await sb.from('mapeo_eventos').select('mapeo_id').in('mapeo_id',batch).eq('evento','cancelado').eq('fuente','auxiliar_manual')
       if(data)evManual=evManual.concat(data)
     }
-    const manualSet=new Set(evManual.map(e=>e.mapeo_id))
+    // 2b) Excluir los que el auxiliar marcó "Ya dijo que NO" (re_cancelado): salen para siempre.
+    let evReCanc=[]
+    for(let i=0;i<ids.length;i+=100){
+      const batch=ids.slice(i,i+100)
+      const{data}=await sb.from('mapeo_eventos').select('mapeo_id').in('mapeo_id',batch).eq('evento','re_cancelado')
+      if(data)evReCanc=evReCanc.concat(data)
+    }
+    const manualSet=new Set([...evManual.map(e=>e.mapeo_id),...evReCanc.map(e=>e.mapeo_id)])
     lista=lista.filter(m=>!manualSet.has(m.id))
     if(!lista.length){el.innerHTML='<div class="alert alert-blue">No hay cancelados del cruce Dropi (los cancelados existentes se cancelaron manualmente).</div>';window._cancCache={items:[],limit:20};return}
     // 3) Contar mensajes de recuperación enviados (mapeo_eventos: canc_mensaje_enviado)
@@ -7389,7 +7399,9 @@ function renderCancelados(){
       const ultFmt=m.canc_ultimo?new Date(m.canc_ultimo).toLocaleDateString('es-CO',{day:'numeric',month:'short'}):'—'
       enviosBadge=`<span class="pill" style="background:rgba(59,130,246,.12);color:var(--blue);border:1px solid var(--blue);font-size:11px">📨 ${envios} mensaje${envios===1?'':'s'} · último: ${ultFmt}</span>`
     }
-    const btnEnviar=bloqueadoHoy
+    const btnEnviar=nivelInfo.limiteAlcanzado
+      ?`<div style="font-size:11px;color:var(--amber);background:rgba(245,158,11,.12);border:1px solid var(--amber);border-radius:8px;padding:6px 10px;max-width:230px;text-align:right;line-height:1.35">Ya le escribiste <strong>3 veces</strong>. Ahora decide 👇</div>`
+      :bloqueadoHoy
       ?`<button class="btn-sm" disabled style="background:var(--card2);color:var(--muted);border:1px solid var(--border);cursor:not-allowed;padding:8px 12px">⛔ Cupo diario (2/2)</button>`
       :`<button class="btn-sm" onclick="enviarMensajeCanc('${m.id}')" style="background:#25D366;color:#fff;border:none;padding:8px 12px;font-weight:600">📨 Enviar ${nivelInfo.etiqueta}</button>`
     return`<div class="card" style="margin-bottom:8px;border-left:3px solid var(--red)">
@@ -7409,6 +7421,7 @@ function renderCancelados(){
             <button class="btn-sm btn-green" onclick="confirmarCancelado('${m.id}')" style="padding:8px 10px">✅ Confirmar</button>
             <button class="btn-sm btn-primary" onclick="agendarCancelado('${m.id}')" style="padding:8px 10px">📅 Agendar fecha</button>
           </div>
+          <button class="btn-sm" onclick="reCancelarPedido('${m.id}')" style="padding:8px 10px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid var(--red);font-weight:600">🚫 Ya dijo que NO</button>
         </div>
       </div>
     </div>`
@@ -7424,7 +7437,7 @@ function renderCancelados(){
   }
   el.innerHTML=`
     <div class="alert" style="margin-bottom:12px;font-size:12px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);color:var(--text)">
-      🔴 ${total} pedido${total===1?'':'s'} cancelado${total===1?'':'s'} por el cruce Dropi · Mostrando ${visibles.length} de ${total}. Recupéralos ofreciendo el adelanto del envío.
+      🔴 <strong>Te faltan por revisar: ${total}</strong> pedido${total===1?'':'s'} cancelado${total===1?'':'s'} (estás viendo ${visibles.length}). Recupéralos ofreciendo el adelanto del envío. Cuando le des a <strong>✅ Confirmar</strong>, <strong>📅 Agendar fecha</strong> o <strong>🚫 Ya dijo que NO</strong>, ese pedido sale de la lista.
     </div>
     ${visibles.map(renderCard).join('')}
     ${controles}
@@ -7488,6 +7501,38 @@ window.agendarCancelado=(mapeoId)=>{
   if(!m)return
   window._resOrden=m
   if(typeof abrirModalProgramarEnvio==='function')abrirModalProgramarEnvio()
+}
+// "Ya dijo que NO": el cliente fue contactado y canceló definitivo. Queda el rastro
+// en mapeo_eventos (evento re_cancelado: quién y cuándo) y sale de la fila para siempre.
+window.reCancelarPedido=async(mapeoId)=>{
+  const cache=window._cancCache||{}
+  const m=(cache.items||[]).find(i=>String(i.id)===String(mapeoId))
+  if(!m){alert('No se encontró el pedido');return}
+  if(!confirm(`¿El cliente ${m.nombre_cliente||m.telefono||''} ya te dijo que NO lo quiere?\n\nLo vamos a sacar de la lista y NO volverá a aparecer.`))return
+  try{
+    const{error:evErr}=await sb.from('mapeo_eventos').insert({
+      mapeo_id:m.id,
+      evento:'re_cancelado',
+      fuente:'reservados',
+      usuario_id:me?.id||null,
+      detalle:{
+        motivo:'Cliente contactado: ya dijo que NO',
+        telefono:m.telefono||null,
+        producto:m.producto||null,
+        ciudad:m.ciudad||null,
+        envios_previos:m.canc_envios||0,
+        usuario_nombre:me?.nombre||null,
+        desde_pagina:'cancelados'
+      }
+    })
+    if(evErr){alert('No se pudo registrar: '+evErr.message);return}
+    logAction('canc_re_cancelado',{mapeo_id:m.id,tel:m.telefono}).catch(()=>{})
+  }catch(e){alert('Error: '+e.message);return}
+  if(window._cancCache&&Array.isArray(window._cancCache.items)){
+    window._cancCache.items=window._cancCache.items.filter(i=>String(i.id)!==String(mapeoId))
+  }
+  renderCancelados()
+  setTimeout(()=>cargarCancelados(),500)
 }
 
 // ── ENVIAR MENSAJE A PENDIENTE SIN FECHA ─────────────────────────────────

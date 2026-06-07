@@ -13358,12 +13358,61 @@ async function _renderResumenProductos(desde,hasta,hoy){
     }
   }
 
+  // 6.7 ANTIER (prev2) y TRASANTIER (prev3): mapeos + gasto + IDs reportados + conversaciones
+  // Consistente con "ayer" de este resumen: gasto desde meta_insights (BD), no Meta API.
+  const mapeosAntierByProd={},gastoAntierByCampId={},reportesAntierByProd={},conversacionesAntierByProd={}
+  const mapeosTrasByProd={},gastoTrasByCampId={},reportesTrasByProd={},conversacionesTrasByProd={}
+  if(desdePrev&&hastaPrev&&nDiasRango>0){
+    const _mkRango=(refDesde)=>{
+      const d=new Date(refDesde+'T00:00:00')
+      const h=new Date(d);h.setDate(h.getDate()-1)
+      const dd=new Date(h);dd.setDate(dd.getDate()-(nDiasRango-1))
+      return{desde:_isoDate(dd),hasta:_isoDate(h)}
+    }
+    const _r2=_mkRango(desdePrev)   // antier
+    const _r3=_mkRango(_r2.desde)   // trasantier
+    const _cargarDiaExtra=async(rg,mapeosOut,gastoOut,repsOut,convOut)=>{
+      const{data:mp}=await sb.from('mapeos').select('cantidad,producto,estado_final,fecha,ad_id').gte('fecha',rg.desde).lte('fecha',rg.hasta).limit(10000)
+      for(const m of (mp||[])){
+        const pn=resolveProdName(m.producto).nombre||(m.producto||'Sin producto')
+        if(!mapeosOut[pn])mapeosOut[pn]=[]
+        mapeosOut[pn].push(m)
+      }
+      const{data:ins}=await sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',rg.desde).lte('fecha',rg.hasta)
+      for(const i of (ins||[])){if(!i.meta_id)continue;gastoOut[String(i.meta_id)]=(gastoOut[String(i.meta_id)]||0)+(i.spend||0)}
+      const{data:reps}=await sb.from('reportes_diarios').select('ad_ids,producto_id,producto_nombre,fecha,updated_at').gte('fecha',rg.desde).lte('fecha',rg.hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false})
+      const _seen=new Set()
+      for(const r of (reps||[])){
+        const k=(r.fecha||'')+'|'+(r.producto_id||r.producto_nombre||'')
+        if(_seen.has(k))continue
+        _seen.add(k)
+        const pn=resolveProdName(r.producto_nombre||'').nombre||(r.producto_nombre||'')
+        if(!pn)continue
+        const ids=(r.ad_ids||'').split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)
+        repsOut[pn]=(repsOut[pn]||0)+ids.length
+      }
+      const{data:repsC}=await sb.from('reportes_diarios').select('conversaciones,producto_id,producto_nombre,fecha,updated_at').gte('fecha',rg.desde).lte('fecha',rg.hasta).order('updated_at',{ascending:false})
+      const _seenC=new Set()
+      for(const r of (repsC||[])){
+        const k=(r.fecha||'')+'|'+(r.producto_id||r.producto_nombre||'')
+        if(_seenC.has(k))continue
+        _seenC.add(k)
+        const pn=resolveProdName(r.producto_nombre||'').nombre||(r.producto_nombre||'')
+        if(!pn)continue
+        convOut[pn]=(convOut[pn]||0)+(r.conversaciones||0)
+      }
+    }
+    await _cargarDiaExtra(_r2,mapeosAntierByProd,gastoAntierByCampId,reportesAntierByProd,conversacionesAntierByProd)
+    await _cargarDiaExtra(_r3,mapeosTrasByProd,gastoTrasByCampId,reportesTrasByProd,conversacionesTrasByProd)
+  }
+  const _extrasDias={mapeosAntierByProd,gastoAntierByCampId,reportesAntierByProd,conversacionesAntierByProd,mapeosTrasByProd,gastoTrasByCampId,reportesTrasByProd,conversacionesTrasByProd}
+
   // 7. Calcular metricas por producto
   // esSoloHoy = el rango es exactamente HOY (sin cruce Dropi todavía)
   const esSoloHoy=(desde===hoy&&hasta===hoy)
   const productosResumen=[]
   for(const prod of productos){
-    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd,reportesPrevByProd)
+    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd,reportesPrevByProd,_extrasDias)
     if(data)productosResumen.push(data)
   }
 
@@ -13460,7 +13509,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
 
 // Calcula las metricas consolidadas de un producto en el rango.
 // Devuelve null si no hay actividad relevante (sin gasto y sin pedidos).
-function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd,reportesPrevByProd){
+function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd,reportesPrevByProd,extrasDias){
   // Gasto desde campaign_ids configurados del producto
   let gasto=0
   const campIds=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
@@ -13619,9 +13668,45 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
       const cpaP=pConfP>0?gastoP/pConfP:0
       const roasP=gastoP>0?ventaP/gastoP:0
       const pedidosIdsP=(reportesPrevByProd&&reportesPrevByProd[prod.nombre])||0
-      prevData={gasto:gastoP,pedidos:pConfP,ganancia:gananciaP,cpa:cpaP,roas:roasP,pedidosIds:pedidosIdsP}
+      prevData={gasto:gastoP,pedidos:pConfP,ganancia:gananciaP,cpa:cpaP,roas:roasP,pedidosIds:pedidosIdsP,conversaciones:_convPrev}
     }
   }
+
+  // ── ANTIER (prev2) y TRASANTIER (prev3): mismo cálculo que el período previo ──
+  // Helper local: replica la lógica de prevData (ganancia, cpa, roas, conv) para un día extra.
+  const _calcDiaExtra=(mpsArr,gastoMap,convMap,repMap)=>{
+    if(!gastoMap)return null
+    let gP=0
+    for(const cid of campIds){gP+=gastoMap[String(cid)]||0}
+    const mpsX=mpsArr||[]
+    let pCX=0,a1=0,a2=0,a3=0,a4=0
+    for(const m of mpsX){
+      const q=m.cantidad||2
+      if(m.estado_final==='CANCELADO')continue
+      if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)continue
+      pCX++
+      if(q===1)a1++;else if(q===2)a2++;else if(q===3)a3++;else a4++
+    }
+    const totX=mpsX.length
+    if(gP<=0&&totX<=0)return null
+    const ventaX=(a1*(prod.precio_1u||0))+(a2*(prod.precio_2u||0))+(a3*(prod.precio_3u||0))+(a4*(prod.precio_4u||0))
+    const costoProvX=(a1*(prod.costo_1u||0))+(a2*(prod.costo_2u||0))+(a3*(prod.costo_3u||0))+(a4*(prod.costo_4u||0))
+    const costoFleteX=pCX*(prod.flete_outbound||21000)
+    const costoDevX=Math.round(pCX*devPct*(prod.flete_devolucion||18000))
+    const ventaEfX=Math.round(ventaX*(1-devPct))
+    const convX=(convMap&&convMap[prod.nombre])||0
+    const costoConvX=convX*(prod.costo_conversacion||100)
+    const gananciaX=ventaEfX-costoProvX-costoFleteX-costoDevX-gP-costoConvX
+    const cpaX=pCX>0?gP/pCX:0
+    const roasX=gP>0?ventaX/gP:0
+    const idsX=(repMap&&repMap[prod.nombre])||0
+    return{gasto:gP,pedidos:pCX,ganancia:gananciaX,cpa:cpaX,roas:roasX,pedidosIds:idsX,conversaciones:convX}
+  }
+  const _ex=extrasDias||{}
+  const prevData2=(nDiasRango>0)?_calcDiaExtra(_ex.mapeosAntierByProd&&_ex.mapeosAntierByProd[prod.nombre],_ex.gastoAntierByCampId,_ex.conversacionesAntierByProd,_ex.reportesAntierByProd):null
+  const prevData3=(nDiasRango>0)?_calcDiaExtra(_ex.mapeosTrasByProd&&_ex.mapeosTrasByProd[prod.nombre],_ex.gastoTrasByCampId,_ex.conversacionesTrasByProd,_ex.reportesTrasByProd):null
+  // Stock: solo existe el valor ACTUAL (productos.stock_actual). No hay histórico por día.
+  const stockActual=(prod.stock_actual!=null&&!isNaN(prod.stock_actual))?Number(prod.stock_actual):null
 
   // Conversaciones del producto en el rango (manual, suma del rango)
   const conversaciones=(conversacionesByProd&&conversacionesByProd[prod.nombre])||0
@@ -13636,6 +13721,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     pedidosEfectivos,cpaRealEfectivo,pctConf,esSoloHoy,
     ctrProd,cpmProd,cpaMetaProd,activas:_activas,pausadas:_pausadas,
     prevData,nDiasRango:nDiasRango||0,
+    prevData2,prevData3,stockActual,
     conversaciones,
     pedidosIds:pReportados,
     // Desglose para tooltip de ganancia
@@ -13685,46 +13771,59 @@ function _renderProductoCardResumen(data,ranking){
 
   // Tabla de comparación: fila Hoy + fila Día anterior alineadas en 5 columnas
   // (Ganancia / CPA real / Pedidos / ROAS / Gasto) para comparar visualmente vertical.
-  const _gridCols='110px 1.1fr 1fr 0.9fr 0.9fr 1fr'
+  const _gridCols='110px 1.1fr 1fr 0.9fr 0.9fr 1fr 0.85fr 0.8fr'
   const _hoyLabel=data.esSoloHoy?'Hoy':'Periodo'
   // Tooltip de cómo sale la ganancia (preservado del diseño anterior)
   const _tooltipGan=data.desgloseGanancia?`Cómo sale ${plataSign}$${fmt(plataAbs)}:&#10;&#10;Venta efectiva (${Math.round((data.desgloseGanancia.devPct||0.19)*100)}% dev): $${fmt(data.desgloseGanancia.ventaEfectiva)}&#10;− Costo producto: −$${fmt(data.desgloseGanancia.costoProv)}&#10;− Flete: −$${fmt(data.desgloseGanancia.costoFlete)}&#10;− Devolución: −$${fmt(data.desgloseGanancia.costoDev)}&#10;− Gasto ads: −$${fmt(data.desgloseGanancia.gasto)}&#10;− Costo conversación: −$${fmt(data.desgloseGanancia.costoConvProd)}&#10;&#10;= ${plataSign}$${fmt(plataAbs)}&#10;&#10;(No incluye gastos fijos — esos van en Dashboard)`:''
-  // Fila previa (si hay datos)
-  let _filaPrev=''
-  if(data.nDiasRango>0&&data.prevData){
-    const p=data.prevData
+  // Filas previas (Ayer / Antier / Trasantier) con color encadenado + borde semáforo en CPA.
+  // Cada fila colorea su número comparándose con la fila de ABAJO (más antigua); la última es neutra.
+  const _cmpRP=(a,b,dir)=>window._nexoCmpColor(a,b,dir)
+  const _semRP=(cpa)=>window._nexoSemColor(cpa,data.margenBE)
+  const _filaPrevHtml=(p,pNext,label,bg,bl)=>{
+    const neutro=!pNext
+    const colGan=neutro?(p.ganancia>=0?'var(--green)':'var(--red)'):_cmpRP(p.ganancia,pNext.ganancia,'up')
+    const colCpa=neutro?'var(--muted)':_cmpRP(p.cpa,pNext.cpa,'down')
+    const colPed=neutro?'var(--muted)':_cmpRP(p.pedidos,pNext.pedidos,'up')
+    const colRoas=neutro?'var(--muted)':_cmpRP(p.roas,pNext.roas,'up')
+    const colGasto=neutro?'var(--muted)':_cmpRP(p.gasto,pNext.gasto,'up')
+    const colConv=neutro?'var(--muted)':_cmpRP(p.conversaciones||0,pNext.conversaciones||0,'up')
     const pSign=p.ganancia>=0?'+':'−'
-    const pCol=p.ganancia>=0?'var(--green)':'var(--red)'
-    const _prevLabel=data.nDiasRango===1?(data.esSoloHoy?'Ayer':'Día ant.'):`${data.nDiasRango}d ant.`
-    _filaPrev=`<div style="display:grid;grid-template-columns:${_gridCols};gap:10px;padding:10px 8px;align-items:center;background:rgba(34,197,94,.04);border-left:3px solid var(--green);border-radius:6px;margin-top:4px">
-      <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);font-weight:500">
-        <span style="font-size:13px">⏪</span>
-        <span>${_prevLabel}</span>
-      </div>
-      <div style="text-align:right;font-size:14px;color:${pCol};font-weight:500">${pSign}$${fmt(Math.abs(p.ganancia))}</div>
-      <div style="text-align:right;font-size:14px;color:var(--muted)">${p.cpa>0?'$'+fmt(Math.round(p.cpa)):'—'}</div>
-      <div style="text-align:right">
-        <div style="font-size:14px;color:var(--muted)">${p.pedidos}</div>
-        <div style="font-size:11px;color:var(--blue);margin-top:2px" title="Pedidos por IDs reportados de ese día">🆔 IDs: ${p.pedidosIds||0}</div>
-      </div>
-      <div style="text-align:right;font-size:14px;color:var(--muted)">${p.roas>0?p.roas.toFixed(2)+'x':'—'}</div>
-      <div style="text-align:right;font-size:14px;color:var(--muted)">${p.gasto>0?'$'+fmt(p.gasto):'—'}</div>
+    const cpaBorde=p.cpa>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${_semRP(p.cpa)};padding:2px 5px`:''
+    return`<div style="display:grid;grid-template-columns:${_gridCols};gap:10px;padding:10px 8px;align-items:center;background:${bg};border-left:3px solid ${bl};border-radius:6px;margin-top:4px;min-width:700px">
+      <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);font-weight:500"><span style="font-size:13px">⏪</span><span>${label}</span></div>
+      <div style="text-align:right;font-size:14px;color:${colGan};font-weight:500">${pSign}$${fmt(Math.abs(p.ganancia))}</div>
+      <div style="text-align:right;font-size:14px;color:${colCpa};${cpaBorde}" title="Número = vs día más antiguo · Borde = semáforo break-even ($${fmt(data.margenBE)})">${p.cpa>0?'$'+fmt(Math.round(p.cpa)):'—'}</div>
+      <div style="text-align:right"><div style="font-size:14px;color:${colPed}">${p.pedidos}</div><div style="font-size:11px;color:var(--blue);margin-top:2px" title="Pedidos por IDs reportados de ese día">🆔 IDs: ${p.pedidosIds||0}</div></div>
+      <div style="text-align:right;font-size:14px;color:${colRoas}">${p.roas>0?p.roas.toFixed(2)+'x':'—'}</div>
+      <div style="text-align:right;font-size:14px;color:${colGasto}">${p.gasto>0?'$'+fmt(p.gasto):'—'}</div>
+      <div style="text-align:right;font-size:14px;color:${colConv}">${(p.conversaciones||0)>0?p.conversaciones:'—'}</div>
+      <div style="text-align:right;font-size:14px;color:var(--subtle)" title="El stock no tiene histórico por día — solo el valor actual (fila Hoy)">—</div>
     </div>`
-  }else if(data.nDiasRango>0){
+  }
+  let _filaPrev=''
+  if(data.nDiasRango>0){
     const _prevLabel=data.nDiasRango===1?(data.esSoloHoy?'Ayer':'Día ant.'):`${data.nDiasRango}d ant.`
-    _filaPrev=`<div style="margin-top:6px;padding:6px 10px;background:rgba(255,255,255,.02);border-left:2px solid var(--subtle);border-radius:6px;font-size:11px;color:var(--muted);font-style:italic">⏪ ${_prevLabel}: sin datos previos para comparar</div>`
+    if(data.prevData){
+      _filaPrev+=_filaPrevHtml(data.prevData,data.prevData2,_prevLabel,'rgba(34,197,94,.04)','var(--green)')
+      if(data.prevData2)_filaPrev+=_filaPrevHtml(data.prevData2,data.prevData3,data.esSoloHoy?'Antier':'2º ant.','rgba(255,255,255,.02)','var(--subtle)')
+      if(data.prevData3)_filaPrev+=_filaPrevHtml(data.prevData3,null,data.esSoloHoy?'Trasantier':'3º ant.','rgba(255,255,255,.02)','var(--subtle)')
+    }else{
+      _filaPrev=`<div style="margin-top:6px;padding:6px 10px;background:rgba(255,255,255,.02);border-left:2px solid var(--subtle);border-radius:6px;font-size:11px;color:var(--muted);font-style:italic">⏪ ${_prevLabel}: sin datos previos para comparar</div>`
+    }
   }
   // Tabla completa: header + fila Hoy + fila Día anterior alineadas
   const _compGridHtml=`<div style="margin-top:10px;padding-left:46px;overflow-x:auto">
-    <div style="display:grid;grid-template-columns:${_gridCols};gap:10px;padding:4px 8px;font-size:10px;color:var(--subtle);font-weight:600;letter-spacing:.05em;text-transform:uppercase;border-bottom:1px solid var(--border);min-width:560px">
+    <div style="display:grid;grid-template-columns:${_gridCols};gap:10px;padding:4px 8px;font-size:10px;color:var(--subtle);font-weight:600;letter-spacing:.05em;text-transform:uppercase;border-bottom:1px solid var(--border);min-width:700px">
       <div></div>
       <div style="text-align:right">Ganancia neta</div>
       <div style="text-align:right">CPA real</div>
       <div style="text-align:right">Pedidos</div>
       <div style="text-align:right">ROAS</div>
       <div style="text-align:right">Gasto Ads</div>
+      <div style="text-align:right">Conv.</div>
+      <div style="text-align:right">Stock</div>
     </div>
-    <div style="display:grid;grid-template-columns:${_gridCols};gap:10px;padding:12px 8px;align-items:flex-start;border-bottom:1px solid var(--border);min-width:560px">
+    <div style="display:grid;grid-template-columns:${_gridCols};gap:10px;padding:12px 8px;align-items:flex-start;border-bottom:1px solid var(--border);min-width:700px">
       <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:${c.color};font-weight:600;padding-top:2px">
         <span style="width:6px;height:6px;border-radius:50%;background:${c.color}"></span>
         <span>${_hoyLabel}</span>
@@ -13748,6 +13847,12 @@ function _renderProductoCardResumen(data,ranking){
       </div>
       <div style="text-align:right">
         <div style="font-size:14px;color:var(--text);line-height:1.2">$${fmt(data.gasto)}</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:14px;color:var(--text);line-height:1.2" title="Conversaciones manuales del día (reporte del auxiliar)">${(data.conversaciones||0)>0?data.conversaciones:'—'}</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:14px;color:${data.stockActual!=null?(data.stockActual<=30?'var(--amber)':'var(--text)'):'var(--subtle)'};line-height:1.2" title="Stock actual del producto (valor más reciente, sin histórico por día)">${data.stockActual!=null?data.stockActual:'—'}</div>
       </div>
     </div>
     ${_filaPrev}
@@ -14908,21 +15013,37 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   const _prevHasta=_dt2ymd(new Date(_ymd2dt(desde).getTime()-_MS_DIA))
   const _prevDesde=_dt2ymd(new Date(_ymd2dt(desde).getTime()-_nDiasRango*_MS_DIA))
   const ayer=_prevHasta
+  // ANTIER (prev2) y TRASANTIER (prev3): períodos previos 2 y 3, mismo tamaño que el rango.
+  // En modo "solo hoy" (nDiasRango=1): prev2 = antier (hace 2), prev3 = trasantier (hace 3).
+  const _prev2Hasta=_dt2ymd(new Date(_ymd2dt(_prevDesde).getTime()-_MS_DIA))
+  const _prev2Desde=_dt2ymd(new Date(_ymd2dt(_prevDesde).getTime()-_nDiasRango*_MS_DIA))
+  const _prev3Hasta=_dt2ymd(new Date(_ymd2dt(_prev2Desde).getTime()-_MS_DIA))
+  const _prev3Desde=_dt2ymd(new Date(_ymd2dt(_prev2Desde).getTime()-_nDiasRango*_MS_DIA))
+  const antier=_prev2Hasta
+  const trasantier=_prev3Hasta
   const ventasByCamp={}
 
   // ── 1) Cargar mapeos del rango y reportes del rango (en paralelo) ──
   // Mapeos: por RANGO de fecha (no por lista de ad_ids), así también vemos ad_ids nuevos.
   //         Luego filtramos en memoria a los que pertenecen a ESTA cuenta (vía adToCamp / huérfanos).
-  const [mapeosRes,reportesRes,reportesAyerRes,mapeosAyerRes]=await Promise.all([
+  const [mapeosRes,reportesRes,reportesAyerRes,mapeosAyerRes,reportesAntierRes,mapeosAntierRes,reportesTrasantierRes,mapeosTrasantierRes]=await Promise.all([
     sb.from('mapeos').select('ad_id,estado_final,fecha,fecha_dropi').not('ad_id','is',null).neq('ad_id','').gte('fecha',desde).lte('fecha',hasta),
     sb.from('reportes_diarios').select('ad_ids,fecha,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false}),
     sb.from('reportes_diarios').select('ad_ids,fecha,producto_id,producto_nombre,updated_at').gte('fecha',_prevDesde).lte('fecha',_prevHasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false}),
-    sb.from('mapeos').select('ad_id,estado_final').not('ad_id','is',null).neq('ad_id','').gte('fecha',_prevDesde).lte('fecha',_prevHasta)
+    sb.from('mapeos').select('ad_id,estado_final').not('ad_id','is',null).neq('ad_id','').gte('fecha',_prevDesde).lte('fecha',_prevHasta),
+    sb.from('reportes_diarios').select('ad_ids,fecha,producto_id,producto_nombre,updated_at').gte('fecha',_prev2Desde).lte('fecha',_prev2Hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false}),
+    sb.from('mapeos').select('ad_id,estado_final').not('ad_id','is',null).neq('ad_id','').gte('fecha',_prev2Desde).lte('fecha',_prev2Hasta),
+    sb.from('reportes_diarios').select('ad_ids,fecha,producto_id,producto_nombre,updated_at').gte('fecha',_prev3Desde).lte('fecha',_prev3Hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false}),
+    sb.from('mapeos').select('ad_id,estado_final').not('ad_id','is',null).neq('ad_id','').gte('fecha',_prev3Desde).lte('fecha',_prev3Hasta)
   ])
   const mapeos=mapeosRes.data||[]
   const reportes=reportesRes.data||[]
   const reportesAyer=reportesAyerRes.data||[]
   const mapeosAyer=mapeosAyerRes.data||[]
+  const reportesAntier=reportesAntierRes.data||[]
+  const mapeosAntier=mapeosAntierRes.data||[]
+  const reportesTrasantier=reportesTrasantierRes.data||[]
+  const mapeosTrasantier=mapeosTrasantierRes.data||[]
 
   // Dedup de reportes (fecha+producto, el más reciente gana) — igual que antes
   const _seenRep=new Set()
@@ -15050,6 +15171,45 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     ventasRealesByCampAyer[campId]=(ventasRealesByCampAyer[campId]||0)+1
   }
 
+  // ── ANTIER / TRASANTIER: mismo conteo que AYER (ventas por IDs reportados + ventas reales Dropi) ──
+  // Helper local: dado un set de reportes y mapeos de un día previo, devuelve los 4 mapas
+  // (por campaña y por ad). Reutiliza adToCamp + DROPI_STATUS que ya están en scope.
+  const _calcDiaPrevio=(reportesArr,mapeosArr)=>{
+    const idsByCamp={},idsByAd={},realesByCamp={},realesByAd={}
+    const _seen=new Set(),_uniq=[]
+    for(const rep of (reportesArr||[])){
+      const key=rep.fecha+'|'+(rep.producto_id||rep.producto_nombre)
+      if(_seen.has(key))continue
+      _seen.add(key);_uniq.push(rep)
+    }
+    for(const rep of _uniq){
+      if(!rep.ad_ids)continue
+      const ids=rep.ad_ids.split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)
+      for(const adId of ids){
+        idsByAd[adId]=(idsByAd[adId]||0)+1
+        const campId=adToCamp[adId]
+        if(!campId)continue
+        idsByCamp[campId]=(idsByCamp[campId]||0)+1
+      }
+    }
+    for(const m of (mapeosArr||[])){
+      const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
+      if(cat==='cancelado')continue
+      if(cat==='pendiente'||!m.estado_final)continue
+      if(m.ad_id)realesByAd[m.ad_id]=(realesByAd[m.ad_id]||0)+1
+      const campId=adToCamp[m.ad_id]
+      if(!campId)continue
+      realesByCamp[campId]=(realesByCamp[campId]||0)+1
+    }
+    return{idsByCamp,idsByAd,realesByCamp,realesByAd}
+  }
+  const _antierDia=_calcDiaPrevio(reportesAntier,mapeosAntier)
+  const _trasantierDia=_calcDiaPrevio(reportesTrasantier,mapeosTrasantier)
+  const ventasIdsByCampAntier=_antierDia.idsByCamp,ventasIdsByAdAntier=_antierDia.idsByAd
+  const ventasRealesByCampAntier=_antierDia.realesByCamp,ventasRealesByAdAntier=_antierDia.realesByAd
+  const ventasIdsByCampTrasantier=_trasantierDia.idsByCamp,ventasIdsByAdTrasantier=_trasantierDia.idsByAd
+  const ventasRealesByCampTrasantier=_trasantierDia.realesByCamp,ventasRealesByAdTrasantier=_trasantierDia.realesByAd
+
   // ── DIAGNÓSTICO TEMPORAL: por qué las VENTAS por campaña pueden dar 0 ──
   try{
     if(desde===hasta&&desde!==hoy){
@@ -15153,6 +15313,51 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       for(const mid in _acc){cpaMetaPrevByMeta[mid]=_acc[mid].conv>0?_acc[mid].spend/_acc[mid].conv:0;gastoPrevByMeta[mid]=_acc[mid].spend;convPrevByMeta[mid]=_acc[mid].conv}
     }catch(_){}
   }
+
+  // ── Meta de ANTIER / TRASANTIER (Gasto + Conv + CPA Meta) · MISMO criterio que AYER ──
+  // En vivo desde Meta API si hay token; fallback a meta_insights de BD por fecha.
+  const _calcMetaDiaPrevio=async(pDesde,pHasta)=>{
+    const gasto={},conv={},cpaMeta={}
+    let enVivo=false
+    if(source==='meta'){
+      try{
+        let _tok=document.getElementById('cfg-token')?.value?.trim()||''
+        if(!_tok)_tok=await getConfig('meta_access_token')
+        if(_tok){
+          const _tr=JSON.stringify({since:pDesde,until:pHasta})
+          const _acc={}
+          for(const _lv of [['campaign','campaign_id'],['adset','adset_id'],['ad','ad_id']]){
+            const _rows=await metaGet(`/${actId}/insights`,_tok,{fields:`${_lv[1]},spend,actions`,time_range:_tr,level:_lv[0],time_increment:'1',limit:'500'})
+            for(const i of (_rows||[])){
+              const mid=i[_lv[1]];if(!mid)continue
+              if(!_acc[mid])_acc[mid]={spend:0,conv:0}
+              _acc[mid].spend+=parseFloat(i.spend)||0
+              _acc[mid].conv+=metaConv(i.actions)
+            }
+          }
+          for(const mid in _acc){gasto[mid]=_acc[mid].spend;conv[mid]=_acc[mid].conv;cpaMeta[mid]=_acc[mid].conv>0?_acc[mid].spend/_acc[mid].conv:0}
+          enVivo=true
+        }
+      }catch(e){console.warn('[día previo en vivo] Meta API falló → fallback BD:',e.message)}
+    }
+    if(!enVivo){
+      try{
+        const{data:ins}=await sb.from('meta_insights').select('meta_id,nivel,spend,conversions').eq('account_id',accountId).gte('fecha',pDesde).lte('fecha',pHasta).limit(20000)
+        const _acc={}
+        for(const i of (ins||[])){
+          if(!_acc[i.meta_id])_acc[i.meta_id]={spend:0,conv:0}
+          _acc[i.meta_id].spend+=i.spend||0
+          _acc[i.meta_id].conv+=i.conversions||0
+        }
+        for(const mid in _acc){cpaMeta[mid]=_acc[mid].conv>0?_acc[mid].spend/_acc[mid].conv:0;gasto[mid]=_acc[mid].spend;conv[mid]=_acc[mid].conv}
+      }catch(_){}
+    }
+    return{gasto,conv,cpaMeta}
+  }
+  const _metaAntier=await _calcMetaDiaPrevio(_prev2Desde,_prev2Hasta)
+  const _metaTrasantier=await _calcMetaDiaPrevio(_prev3Desde,_prev3Hasta)
+  const gastoAntierByMeta=_metaAntier.gasto,convAntierByMeta=_metaAntier.conv,cpaMetaAntierByMeta=_metaAntier.cpaMeta
+  const gastoTrasantierByMeta=_metaTrasantier.gasto,convTrasantierByMeta=_metaTrasantier.conv,cpaMetaTrasantierByMeta=_metaTrasantier.cpaMeta
   // ── Mejora 1: cambios de HOY (presupuesto/estado) hechos desde NEXO ──
   const cambiosHoy={}
   try{
@@ -15302,6 +15507,25 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     // Si no hay ventas IDs → 0 (se pinta "—", no se divide por cero). Color semáforo vs margenBE.
     const cpaIds=ventasIds>0?m.spend/ventasIds:0
     const cpaIdsAyer=ventasIdsAyer>0?gastoAyer/ventasIdsAyer:0
+    // ── ANTIER (prev2) y TRASANTIER (prev3): mismas columnas que AYER ──
+    const ventasIdsAntier=ventasIdsByCampAntier[camp.meta_id]||0
+    const ventasRealesAntier=ventasRealesByCampAntier[camp.meta_id]||0
+    const gastoAntier=gastoAntierByMeta[camp.meta_id]||0
+    const cpaMetaAntier=cpaMetaAntierByMeta[camp.meta_id]||0
+    const convAntier=convAntierByMeta[camp.meta_id]||0
+    const cpaRealAntier=ventasRealesAntier>0?gastoAntier/ventasRealesAntier:0
+    const roasRealAntier=gastoAntier>0&&ventasRealesAntier>0?(ventasRealesAntier*ctxCamp.p2)/gastoAntier:0
+    const vEfectAntier=ventasRealesAntier*pctConf
+    const cpaIdsAntier=ventasIdsAntier>0?gastoAntier/ventasIdsAntier:0
+    const ventasIdsTrasantier=ventasIdsByCampTrasantier[camp.meta_id]||0
+    const ventasRealesTrasantier=ventasRealesByCampTrasantier[camp.meta_id]||0
+    const gastoTrasantier=gastoTrasantierByMeta[camp.meta_id]||0
+    const cpaMetaTrasantier=cpaMetaTrasantierByMeta[camp.meta_id]||0
+    const convTrasantier=convTrasantierByMeta[camp.meta_id]||0
+    const cpaRealTrasantier=ventasRealesTrasantier>0?gastoTrasantier/ventasRealesTrasantier:0
+    const roasRealTrasantier=gastoTrasantier>0&&ventasRealesTrasantier>0?(ventasRealesTrasantier*ctxCamp.p2)/gastoTrasantier:0
+    const vEfectTrasantier=ventasRealesTrasantier*pctConf
+    const cpaIdsTrasantier=ventasIdsTrasantier>0?gastoTrasantier/ventasIdsTrasantier:0
 
     return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" data-campid="${camp.meta_id}" data-estado="${camp.estado||''}" data-urgencia="${camp._urgenciaCode||''}" data-vendenogasta="${camp._vendeNoGasta?1:0}" style="margin-bottom:5px;${opacity}">
       <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-camp)">
@@ -15337,15 +15561,35 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
         <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaReal,cpaRealAyer,'down')};${cpaReal>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaReal,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Número = mejoró/empeoró vs ayer · Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaReal>0?'$'+fmt(cpaReal):'—'}</div>
         <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaIds,cpaIdsAyer,'down')};${cpaIds>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaIds,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Gasto ÷ Ventas IDs · Número = vs ayer · Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaIds>0?'$'+fmt(cpaIds):'—'}</div>
         <div style="border-top:1px solid var(--border);padding-top:5px"><span style="font-size:9px;font-weight:700;color:var(--amber);background:var(--amber-bg);padding:1px 7px;border-radius:5px" title="${_nDiasRango===1?'Día anterior ('+_prevHasta+')':'Período anterior: '+_prevDesde+' → '+_prevHasta}">${_nDiasRango===1?(esSoloHoy?'AYER':'DÍA ANT.'):_nDiasRango+'d ANT.'}</span></div>
-        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:var(--muted)">${gastoAyer>0?'$'+fmt(gastoAyer):'—'}</div>
-        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:var(--muted)">${roasRealAyer>0?roasRealAyer.toFixed(2)+'x':'—'}</div>
-        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:var(--muted)">${cpaMetaPrev>0?'$'+fmt(cpaMetaPrev):'—'}</div>
-        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:var(--muted)">${convAyer}</div>
-        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:var(--muted)">${ventasRealesAyer} ✅</div>
-        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:var(--muted)">${ventasIdsAyer}</div>
-        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:var(--muted)">${vEfectAyer>0?vEfectAyer.toFixed(2):'—'}</div>
-        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:var(--muted)">${cpaRealAyer>0?'$'+fmt(cpaRealAyer):'—'}</div>
-        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:var(--muted)" title="Gasto ÷ Ventas IDs">${cpaIdsAyer>0?'$'+fmt(cpaIdsAyer):'—'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(gastoAyer,gastoAntier,'up')}">${gastoAyer>0?'$'+fmt(gastoAyer):'—'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(roasRealAyer,roasRealAntier,'up')}">${roasRealAyer>0?roasRealAyer.toFixed(2)+'x':'—'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaMetaPrev,cpaMetaAntier,'down')}">${cpaMetaPrev>0?'$'+fmt(cpaMetaPrev):'—'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(convAyer,convAntier,'up')}">${convAyer}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(ventasRealesAyer,ventasRealesAntier,'up')}">${ventasRealesAyer} ✅</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(ventasIdsAyer,ventasIdsAntier,'up')}">${ventasIdsAyer}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(vEfectAyer,vEfectAntier,'up')}">${vEfectAyer>0?vEfectAyer.toFixed(2):'—'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaRealAyer,cpaRealAntier,'down')};${cpaRealAyer>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaRealAyer,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Número = vs antier · Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaRealAyer>0?'$'+fmt(cpaRealAyer):'—'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaIdsAyer,cpaIdsAntier,'down')};${cpaIdsAyer>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaIdsAyer,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Gasto ÷ Ventas IDs · Número = vs antier · Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaIdsAyer>0?'$'+fmt(cpaIdsAyer):'—'}</div>
+        <div><span style="font-size:9px;font-weight:700;color:var(--muted);background:var(--card2);padding:1px 7px;border-radius:5px" title="${_nDiasRango===1?'Hace 2 días ('+_prev2Hasta+')':'Período: '+_prev2Desde+' → '+_prev2Hasta}">${esSoloHoy?'ANTIER':'2º ANT.'}</span></div>
+        <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(gastoAntier,gastoTrasantier,'up')}">${gastoAntier>0?'$'+fmt(gastoAntier):'—'}</div>
+        <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(roasRealAntier,roasRealTrasantier,'up')}">${roasRealAntier>0?roasRealAntier.toFixed(2)+'x':'—'}</div>
+        <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaMetaAntier,cpaMetaTrasantier,'down')}">${cpaMetaAntier>0?'$'+fmt(cpaMetaAntier):'—'}</div>
+        <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(convAntier,convTrasantier,'up')}">${convAntier}</div>
+        <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(ventasRealesAntier,ventasRealesTrasantier,'up')}">${ventasRealesAntier} ✅</div>
+        <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(ventasIdsAntier,ventasIdsTrasantier,'up')}">${ventasIdsAntier}</div>
+        <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(vEfectAntier,vEfectTrasantier,'up')}">${vEfectAntier>0?vEfectAntier.toFixed(2):'—'}</div>
+        <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaRealAntier,cpaRealTrasantier,'down')};${cpaRealAntier>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaRealAntier,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Número = vs trasantier · Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaRealAntier>0?'$'+fmt(cpaRealAntier):'—'}</div>
+        <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaIdsAntier,cpaIdsTrasantier,'down')};${cpaIdsAntier>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaIdsAntier,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Gasto ÷ Ventas IDs · Número = vs trasantier · Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaIdsAntier>0?'$'+fmt(cpaIdsAntier):'—'}</div>
+        <div><span style="font-size:9px;font-weight:700;color:var(--subtle);background:var(--card2);padding:1px 7px;border-radius:5px" title="${_nDiasRango===1?'Hace 3 días ('+_prev3Hasta+')':'Período: '+_prev3Desde+' → '+_prev3Hasta}">${esSoloHoy?'TRASANTIER':'3º ANT.'}</span></div>
+        <div style="font-size:13px;font-weight:700;color:var(--muted)">${gastoTrasantier>0?'$'+fmt(gastoTrasantier):'—'}</div>
+        <div style="font-size:13px;font-weight:700;color:var(--muted)">${roasRealTrasantier>0?roasRealTrasantier.toFixed(2)+'x':'—'}</div>
+        <div style="font-size:13px;font-weight:700;color:var(--muted)">${cpaMetaTrasantier>0?'$'+fmt(cpaMetaTrasantier):'—'}</div>
+        <div style="font-size:13px;font-weight:700;color:var(--muted)">${convTrasantier}</div>
+        <div style="font-size:13px;font-weight:700;color:var(--muted)">${ventasRealesTrasantier} ✅</div>
+        <div style="font-size:13px;font-weight:700;color:var(--muted)">${ventasIdsTrasantier}</div>
+        <div style="font-size:13px;font-weight:700;color:var(--muted)">${vEfectTrasantier>0?vEfectTrasantier.toFixed(2):'—'}</div>
+        <div style="font-size:13px;font-weight:700;color:var(--muted);${cpaRealTrasantier>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaRealTrasantier,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaRealTrasantier>0?'$'+fmt(cpaRealTrasantier):'—'}</div>
+        <div style="font-size:13px;font-weight:700;color:var(--muted);${cpaIdsTrasantier>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaIdsTrasantier,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Gasto ÷ Ventas IDs · Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaIdsTrasantier>0?'$'+fmt(cpaIdsTrasantier):'—'}</div>
       </div>
       <div style="display:flex;gap:12px;margin-top:4px;font-size:10px;color:var(--muted)">
         <span>CTR: ${avgCtr.toFixed(2)}%</span><span>CPM: $${fmt(avgCpm)}</span><span>Freq: ${avgFreq.toFixed(1)}</span>

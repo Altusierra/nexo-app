@@ -3878,12 +3878,23 @@ async function renderProdBody(id,maestrosList){
     const{data,error}=await sb.from('producto_ofertas').select('*').eq('producto_id',id).order('cantidad')
     if(!error&&data)ofertasDB=data
   }catch(_){}
-  // Si no hay ofertas dinámicas → migrar desde columnas viejas
+  // Si no hay ofertas dinámicas → migrar AUTOMÁTICAMENTE desde columnas viejas a producto_ofertas (#6: arreglo de raíz)
   if(!ofertasDB.length){
+    const _legacyOfs=[]
     for(const n of [1,2,3,4]){
       const precio=prod['precio_'+n+'u']||0
       const costo=prod['costo_'+n+'u']||0
-      if(precio>0||costo>0)ofertasDB.push({producto_id:id,cantidad:n,precio,costo,_legacy:true})
+      if(precio>0||costo>0)_legacyOfs.push({producto_id:id,cantidad:n,precio,costo})
+    }
+    if(_legacyOfs.length){
+      // Migrar a la tabla nueva y recargar como filas reales → así desaparece el aviso "Pendiente migrar" en productos viejos.
+      try{
+        await sb.from('producto_ofertas').insert(_legacyOfs.map(o=>({...o,activo:true})))
+        const{data:_re}=await sb.from('producto_ofertas').select('*').eq('producto_id',id).order('cantidad')
+        if(_re&&_re.length)ofertasDB=_re
+      }catch(_){}
+      // Si la migración FALLÓ (RLS/tabla/permiso), mostramos las ofertas viejas CON el aviso → así sabes que sí está pendiente de verdad (no es un parche).
+      if(!ofertasDB.length)ofertasDB=_legacyOfs.map(o=>({...o,_legacy:true}))
     }
   }
 
@@ -5155,9 +5166,12 @@ async function pageAuxAsignador(c){
       if(tieneVis){
         p.aliases_visibles.forEach(a=>{if(a)allKw.add(a.toLowerCase().trim())})
       }else{
-        if(Array.isArray(p.aliases))p.aliases.forEach(a=>{if(a)allKw.add(a.toLowerCase().trim())})
-        if(p.keywords)(p.keywords).split(',').map(k=>k.trim().toLowerCase()).filter(Boolean).forEach(k=>allKw.add(k))
-        if(p.nombre)allKw.add(p.nombre.toLowerCase().trim())
+        const _als=Array.isArray(p.aliases)?p.aliases.filter(Boolean):[]
+        const _kws=p.keywords?p.keywords.split(',').map(k=>k.trim()).filter(Boolean):[]
+        _als.forEach(a=>allKw.add(a.toLowerCase().trim()))
+        _kws.forEach(k=>allKw.add(k.toLowerCase()))
+        // Solo mostrar el NOMBRE si el producto NO tiene alias ni keywords (si ya tiene alias, el nombre no aparece como chip)
+        if(!_als.length&&!_kws.length&&p.nombre)allKw.add(p.nombre.toLowerCase().trim())
       }
     }
     const kwArray=[...allKw].sort()

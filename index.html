@@ -13779,7 +13779,7 @@ function _renderProductoCardResumen(data,ranking){
   // Cada fila colorea su número comparándose con la fila de ABAJO (más antigua); la última es neutra.
   const _cmpRP=(a,b,dir)=>window._nexoCmpColor(a,b,dir)
   const _semRP=(cpa)=>window._nexoSemColor(cpa,data.margenBE)
-  const _filaPrevHtml=(p,pNext,label,bg,bl)=>{
+  const _filaPrevHtml=(p,pNext,label,bg,bl,emo)=>{
     const neutro=!pNext
     const colGan=neutro?(p.ganancia>=0?'var(--green)':'var(--red)'):_cmpRP(p.ganancia,pNext.ganancia,'up')
     const colCpa=neutro?'var(--muted)':_cmpRP(p.cpa,pNext.cpa,'down')
@@ -13790,7 +13790,7 @@ function _renderProductoCardResumen(data,ranking){
     const pSign=p.ganancia>=0?'+':'−'
     const cpaBorde=p.cpa>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${_semRP(p.cpa)};padding:2px 5px`:''
     return`<div style="display:grid;grid-template-columns:${_gridCols};gap:10px;padding:10px 8px;align-items:center;background:${bg};border-left:3px solid ${bl};border-radius:6px;margin-top:4px;min-width:700px">
-      <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);font-weight:500"><span style="font-size:13px">⏪</span><span>${label}</span></div>
+      <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);font-weight:500"><span style="font-size:13px">${emo||'⏪'}</span><span>${label}</span></div>
       <div style="text-align:right;font-size:14px;color:${colGan};font-weight:500">${pSign}$${fmt(Math.abs(p.ganancia))}</div>
       <div style="text-align:right;font-size:14px;color:${colCpa};${cpaBorde}" title="Número = vs día más antiguo · Borde = semáforo break-even ($${fmt(data.margenBE)})">${p.cpa>0?'$'+fmt(Math.round(p.cpa)):'—'}</div>
       <div style="text-align:right"><div style="font-size:14px;color:${colPed}">${p.pedidos}</div><div style="font-size:11px;color:var(--blue);margin-top:2px" title="Pedidos por IDs reportados de ese día">🆔 IDs: ${p.pedidosIds||0}</div></div>
@@ -13800,6 +13800,23 @@ function _renderProductoCardResumen(data,ranking){
       <div style="text-align:right;font-size:14px;color:var(--subtle)" title="El stock no tiene histórico por día — solo el valor actual (fila Hoy)">—</div>
     </div>`
   }
+  // PROM 3 DÍAS: promedio por día de ayer+antier+trasantier (sumables ÷ 3; CPA/ROAS sobre totales).
+  // Días sin datos cuentan como 0 (se divide siempre entre 3). El color compara este promedio vs HOY.
+  const _calcProm3RP=()=>{
+    const dias=[data.prevData,data.prevData2,data.prevData3]
+    let gastoTot=0,pedTot=0,gananciaTot=0,convTot=0,idsTot=0,ventaTot=0,conData=0
+    for(const d of dias){
+      if(!d)continue
+      conData++
+      gastoTot+=d.gasto||0;pedTot+=d.pedidos||0;gananciaTot+=d.ganancia||0
+      convTot+=d.conversaciones||0;idsTot+=d.pedidosIds||0;ventaTot+=(d.roas||0)*(d.gasto||0)
+    }
+    if(conData===0)return null
+    const r1=x=>Math.round(x*10)/10
+    return{gasto:gastoTot/3,pedidos:r1(pedTot/3),ganancia:gananciaTot/3,conversaciones:r1(convTot/3),pedidosIds:r1(idsTot/3),cpa:pedTot>0?gastoTot/pedTot:0,roas:gastoTot>0?ventaTot/gastoTot:0}
+  }
+  const _prom3RP=_calcProm3RP()
+  const _hoyObjRP={ganancia:data.gananciaNeta,cpa:data.cpaReal,pedidos:(data.esSoloHoy?data.totalPedidos:(data.pedidosConfirmados>0?data.pedidosConfirmados:data.totalPedidos)),roas:data.roas,gasto:data.gasto,conversaciones:data.conversaciones,pedidosIds:data.pedidosIds}
   let _filaPrev=''
   if(data.nDiasRango>0){
     const _prevLabel=data.nDiasRango===1?(data.esSoloHoy?'Ayer':'Día ant.'):`${data.nDiasRango}d ant.`
@@ -13807,6 +13824,7 @@ function _renderProductoCardResumen(data,ranking){
       _filaPrev+=_filaPrevHtml(data.prevData,data.prevData2,_prevLabel,'rgba(34,197,94,.04)','var(--green)')
       if(data.prevData2)_filaPrev+=_filaPrevHtml(data.prevData2,data.prevData3,data.esSoloHoy?'Antier':'2º ant.','rgba(255,255,255,.02)','var(--subtle)')
       if(data.prevData3)_filaPrev+=_filaPrevHtml(data.prevData3,null,data.esSoloHoy?'Trasantier':'3º ant.','rgba(255,255,255,.02)','var(--subtle)')
+      if(_prom3RP)_filaPrev+=_filaPrevHtml(_prom3RP,_hoyObjRP,data.esSoloHoy?'Prom 3 días':'Prom período','rgba(59,130,246,.06)','var(--blue)','📊')
     }else{
       _filaPrev=`<div style="margin-top:6px;padding:6px 10px;background:rgba(255,255,255,.02);border-left:2px solid var(--subtle);border-radius:6px;font-size:11px;color:var(--muted);font-style:italic">⏪ ${_prevLabel}: sin datos previos para comparar</div>`
     }
@@ -15403,9 +15421,15 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const _ventasIds=ventasIdsByCamp[camp.meta_id]||0
     const _gasto=!!(m&&m.spend>0)
     const _tieneVentas=_ventasCamp>0||_ventasIds>0
-    // 🔔 VENDE SIN GASTAR: $0 de gasto pero con ventas (reales o por IDs reportados) → está apagada en Meta
+    // 🔔 VENDE SIN GASTAR: $0 de gasto pero con ventas HOY (reales o por IDs reportados) → está apagada en Meta
     camp._vendeNoGasta=!_gasto&&_tieneVentas
-    const hasSpend=_gasto||_tieneVentas
+    // 🛑 PRENDER YA: $0 de gasto HOY y sin ventas HOY, pero SÍ vendió en ayer/antier/trasantier
+    // (IDs reportados o ventas reales Dropi). La apagaste y estás perdiendo ventas que ya funcionaban.
+    const _ventasPrev=(ventasIdsByCampAyer[camp.meta_id]||0)+(ventasRealesByCampAyer[camp.meta_id]||0)
+      +(ventasIdsByCampAntier[camp.meta_id]||0)+(ventasRealesByCampAntier[camp.meta_id]||0)
+      +(ventasIdsByCampTrasantier[camp.meta_id]||0)+(ventasRealesByCampTrasantier[camp.meta_id]||0)
+    camp._prenderYa=!_gasto&&!_tieneVentas&&_ventasPrev>0
+    const hasSpend=_gasto||_tieneVentas||camp._prenderYa
     camp._hasData=hasSpend
     if(hasSpend)conActividad.push(camp)
     else sinActividad.push(camp)
@@ -15478,7 +15502,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     // Badge MEGA de accion (nuevo) — pulsa en FUEGO y APAGAR
     // esFuga = true cuando hay gasto pero ventas reales = 0 (alerta de plata sin convertir)
     const _esFuga=camp._hasData&&m.spend>0&&ventasReales===0
-    const badgeMega=camp._hasData&&semCode?window.nexoBadgeMega(semCode,'lg',_esFuga):''
+    const badgeMega=camp._prenderYa?window.nexoBadgeMega('prender_ya','lg',false):(camp._hasData&&semCode?window.nexoBadgeMega(semCode,'lg',_esFuga):'')
     // Color CPA: si HOY usar cpaRealEfectivas; sino, cpaReal normal
     const cpaColorCss=window._nexoSemColor(cpaParaSemaforo,ctxCamp.margenBE)
     // Etiqueta y valor del hero grande (cambia según esSoloHoy)
@@ -15526,9 +15550,24 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const roasRealTrasantier=gastoTrasantier>0&&ventasRealesTrasantier>0?(ventasRealesTrasantier*ctxCamp.p2)/gastoTrasantier:0
     const vEfectTrasantier=ventasRealesTrasantier*pctConf
     const cpaIdsTrasantier=ventasIdsTrasantier>0?gastoTrasantier/ventasIdsTrasantier:0
+    // ── PROMEDIO 3 DÍAS (ayer+antier+trasantier): promedio por día para sumables; ratios sobre totales ──
+    const _gastoTot3=gastoAyer+gastoAntier+gastoTrasantier
+    const _convTot3=convAyer+convAntier+convTrasantier
+    const _vrTot3=ventasRealesAyer+ventasRealesAntier+ventasRealesTrasantier
+    const _vidsTot3=ventasIdsAyer+ventasIdsAntier+ventasIdsTrasantier
+    const gastoProm3=_gastoTot3/3
+    const convProm3=_convTot3/3
+    const ventasRealesProm3=_vrTot3/3
+    const ventasIdsProm3=_vidsTot3/3
+    const vEfectProm3=(vEfectAyer+vEfectAntier+vEfectTrasantier)/3
+    const cpaRealProm3=_vrTot3>0?_gastoTot3/_vrTot3:0
+    const cpaIdsProm3=_vidsTot3>0?_gastoTot3/_vidsTot3:0
+    const cpaMetaProm3=_convTot3>0?_gastoTot3/_convTot3:0
+    const roasRealProm3=_gastoTot3>0&&_vrTot3>0?(_vrTot3*ctxCamp.p2)/_gastoTot3:0
 
     return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" data-campid="${camp.meta_id}" data-estado="${camp.estado||''}" data-urgencia="${camp._urgenciaCode||''}" data-vendenogasta="${camp._vendeNoGasta?1:0}" style="margin-bottom:5px;${opacity}">
       <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-camp)">
+      ${camp._prenderYa?`<div style="background:var(--red-bg);border:1px solid var(--red);border-radius:6px;padding:5px 9px;margin-bottom:6px;display:flex;align-items:center;gap:7px;font-size:11px;font-weight:600;color:var(--red)"><span style="font-size:14px">🛑</span><span>PRENDER YA → $0 de gasto hoy pero VENDÍA en los últimos 3 días. La apagaste y estás perdiendo esas ventas.</span></div>`:''}
       ${camp._vendeNoGasta?`<div style="background:var(--red-bg);border:1px solid var(--red);border-radius:6px;padding:5px 9px;margin-bottom:6px;display:flex;align-items:center;gap:7px;font-size:11px;font-weight:600;color:var(--red)"><span style="font-size:14px">🔔</span><span>VENDE Y NO GASTA → $0 de gasto hoy. Está apagada en Meta — ¿prenderla?</span></div>`:''}
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
         <div style="flex:1;min-width:0;cursor:pointer" onclick="viewCampDetail('${camp.meta_id}')">
@@ -15590,6 +15629,16 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
         <div style="font-size:13px;font-weight:700;color:var(--muted)">${vEfectTrasantier>0?vEfectTrasantier.toFixed(2):'—'}</div>
         <div style="font-size:13px;font-weight:700;color:var(--muted);${cpaRealTrasantier>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaRealTrasantier,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaRealTrasantier>0?'$'+fmt(cpaRealTrasantier):'—'}</div>
         <div style="font-size:13px;font-weight:700;color:var(--muted);${cpaIdsTrasantier>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaIdsTrasantier,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Gasto ÷ Ventas IDs · Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaIdsTrasantier>0?'$'+fmt(cpaIdsTrasantier):'—'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px"><span style="font-size:9px;font-weight:700;color:var(--blue);background:var(--blue-bg);padding:1px 7px;border-radius:5px" title="Promedio por día de los últimos 3 días (ayer+antier+trasantier). Gasto/Conv/Ventas/IDs/V.Efect = total ÷ 3. CPA y ROAS recalculados sobre los totales. El color compara este promedio contra HOY.">PROM 3D</span></div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(gastoProm3,m.spend,'up')}" title="Gasto promedio por día (últimos 3) · color vs hoy">${gastoProm3>0?'$'+fmt(gastoProm3):'—'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(roasRealProm3,roasReal,'up')}" title="ROAS sobre totales de 3 días · color vs hoy">${roasRealProm3>0?roasRealProm3.toFixed(2)+'x':'—'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaMetaProm3,cpa,'down')}" title="CPA Meta sobre totales de 3 días · color vs hoy">${cpaMetaProm3>0?'$'+fmt(cpaMetaProm3):'—'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(convProm3,m.conv,'up')}" title="Conv promedio por día · color vs hoy">${convProm3>0?convProm3.toFixed(1):'0'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(ventasRealesProm3,ventasReales,'up')}" title="Ventas promedio por día · color vs hoy">${ventasRealesProm3>0?ventasRealesProm3.toFixed(1):'0'} ✅</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(ventasIdsProm3,ventasIds,'up')}" title="Ventas IDs promedio por día · color vs hoy">${ventasIdsProm3>0?ventasIdsProm3.toFixed(1):'0'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(vEfectProm3,ventasEfectivas,'up')}" title="V.Efectivas promedio por día · color vs hoy">${vEfectProm3>0?vEfectProm3.toFixed(2):'—'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaRealProm3,cpaReal,'down')};${cpaRealProm3>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaRealProm3,ctxCamp.margenBE)};padding:2px 5px`:''}" title="CPA Real sobre totales de 3 días · color vs hoy · Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaRealProm3>0?'$'+fmt(cpaRealProm3):'—'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaIdsProm3,cpaIds,'down')};${cpaIdsProm3>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaIdsProm3,ctxCamp.margenBE)};padding:2px 5px`:''}" title="CPA IDs sobre totales de 3 días · color vs hoy · Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaIdsProm3>0?'$'+fmt(cpaIdsProm3):'—'}</div>
       </div>
       <div style="display:flex;gap:12px;margin-top:4px;font-size:10px;color:var(--muted)">
         <span>CTR: ${avgCtr.toFixed(2)}%</span><span>CPM: $${fmt(avgCpm)}</span><span>Freq: ${avgFreq.toFixed(1)}</span>
@@ -15638,8 +15687,14 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     if(cpaR>ctxC.margenBE*0.45)return 'escalar'
     return 'fuego'
   }
-  const _conta={stop:0,precaucion:0,fuego:0,escalar:0,sin_ventas:0,vende_no_gasta:0}
+  const _conta={prender_ya:0,stop:0,precaucion:0,fuego:0,escalar:0,sin_ventas:0,vende_no_gasta:0}
   for(const c of conActividad){
+    if(c._prenderYa){
+      c._semCode='prender_ya'
+      c._urgenciaCode='prender_ya' // ← filtro 🛑
+      _conta.prender_ya++
+      continue
+    }
     if(c._vendeNoGasta){
       c._semCode=''
       c._urgenciaCode='vende_no_gasta' // ← filtro 🔔
@@ -15681,6 +15736,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     }
     campHtml+=`<div style="display:flex;gap:6px;flex-wrap:wrap;margin:10px 0;padding:8px;background:var(--card2);border-radius:8px;align-items:center">
       <span style="font-size:10px;color:var(--muted);letter-spacing:.5px;margin-right:4px">URGENCIA →</span>
+      ${_conta.prender_ya>0?_pill('prender_ya',_conta.prender_ya,'🛑 PRENDER YA','var(--red)','var(--red-bg)','PRENDER YA: $0 de gasto hoy pero vendían en los últimos 3 días (ayer/antier/trasantier). Las apagaste y estás perdiendo esas ventas. Click para filtrar y prenderlas.'):''}
       ${_pill('stop',_conta.stop,'🔴 PAUSAR','var(--red)','var(--red-bg)','APAGAR: campañas perdiendo plata. Click para filtrar y pausarlas ya.')}
       ${_pill('precaucion',_conta.precaucion,'🟡 CUIDADO','var(--amber)','var(--amber-bg)','CUIDADO: campañas al límite del break-even. Click para filtrar y vigilarlas.')}
       ${_pill('fuego',_conta.fuego,'🟣 DOBLAR','var(--purple)','var(--purple-bg)','FUEGO: campañas rindiendo brutal. Click para filtrar y doblar presupuesto.')}
@@ -16250,7 +16306,8 @@ window.nexoBadgeMega=function(code,size,esFuga){
     sin_ventas:{dot:'⏳',state:'ESPERAR',action:'DEJAR CORRER',color:'var(--muted)',bg:'var(--card2)',pulse:false,tooltip:'ESPERAR — Aún sin ventas registradas. DEJÁ CORRER hasta tener datos suficientes para decidir.'},
     esperar:{dot:'⏳🟢',state:'DEJAR CORRER',action:'SIN VENTAS',color:'var(--green)',bg:'var(--green-bg)',pulse:false,tooltip:'DEJAR CORRER (fuga baja) — Sin ventas aún pero el gasto está por debajo del 50% del break-even. Hay margen para que aparezcan ventas. DEJÁ CORRER.'},
     pendiente_sync:{dot:'⏳',state:'ESPERAR',action:'SIN SYNC',color:'var(--muted)',bg:'var(--card2)',pulse:false,tooltip:'ESPERAR — Falta sincronización con Meta. SIN SYNC todavía, vuelve a chequear después del próximo sync.'},
-    reportado:{dot:'📝',state:'REPORTADO',action:'REVISAR',color:'var(--blue)',bg:'var(--blue-bg)',pulse:false,tooltip:'REPORTADO — Se cargaron ventas manualmente desde el reporte del día. REVISÁ que el dato esté correcto.'}
+    reportado:{dot:'📝',state:'REPORTADO',action:'REVISAR',color:'var(--blue)',bg:'var(--blue-bg)',pulse:false,tooltip:'REPORTADO — Se cargaron ventas manualmente desde el reporte del día. REVISÁ que el dato esté correcto.'},
+    prender_ya:{dot:'🛑',state:'PRENDER YA',action:'VENDÍA · $0 HOY',color:'var(--red)',bg:'var(--red-bg)',pulse:true,tooltip:'PRENDER YA — Hoy está en $0 de gasto pero vendió en los últimos 3 días (ayer/antier/trasantier). La apagaste y estás perdiendo esas ventas. PRÉNDELA.'}
   }
   let o=MAP[code]
   if(!o)return ''
@@ -16270,7 +16327,7 @@ window.nexoBadgeMega=function(code,size,esFuga){
 // nexoOrdenUrgencia(code): peso numerico para ordenar (menor = mas arriba).
 // APAGAR primero, luego CUIDADO, FUEGO, ESCALAR, ESPERAR.
 window.nexoOrdenUrgencia=function(code){
-  const W={stop:1,precaucion:2,fuego:3,escalar:4,esperar:5,reportado:5,sin_ventas:6,pendiente_sync:6,'':7}
+  const W={prender_ya:0,stop:1,precaucion:2,fuego:3,escalar:4,esperar:5,reportado:5,sin_ventas:6,pendiente_sync:6,vende_no_gasta:6,'':7}
   return W[code]==null?7:W[code]
 }
 // nexoCpaColor(cpaReal, margenBE): devuelve var CSS color segun break-even.

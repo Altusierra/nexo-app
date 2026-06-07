@@ -2894,6 +2894,9 @@ async function pageAdminProductos(c){
       }
     }
     if(nombre)updateData.nombre=nombre
+    // #7: ID de Dropi (solo si el campo está presente en el editor → no pisa con vacío en otras vistas)
+    const _dropiEl=document.getElementById('pdropi-'+id)
+    if(_dropiEl)updateData.dropi_id=(_dropiEl.value||'').trim()||null
 
     // Intentar guardar incluyendo todos los campos nuevos; si una columna no existe, ir quitándola
     const fullPayload={...updateData,aliases,aliases_visibles,tipo_producto,almacenamiento}
@@ -3008,6 +3011,9 @@ async function pageAdminProductos(c){
         <div class="fld"><label>🏷️ Aliases (separados por coma)</label>
           <input type="text" id="np-aliases" placeholder="neocell, colageno, NeoCell">
           <div style="font-size:11px;color:var(--muted);margin-top:4px">Para que el asignador reconozca nombres variantes desde Dropi/SellerChat.</div></div>
+        <div class="fld"><label>🆔 ID de Dropi (opcional)</label>
+          <input type="text" inputmode="numeric" id="np-dropi" placeholder="Ej: 152345">
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">El número del producto en Dropi. El auxiliar lo verá en el Asignador.</div></div>
       </div>
       <div class="divider"></div>
       <div class="section-title">🏷️ Ofertas iniciales (deja en 0 las que no aplican)</div>
@@ -3079,6 +3085,7 @@ async function pageAdminProductos(c){
       costo_conversacion:parseInt(document.getElementById('np-cc').value)||100,
       conversaciones_por_venta:parseInt(document.getElementById('np-cv')?.value)||25,
       campaign_ids:cids,
+      dropi_id:(document.getElementById('np-dropi')?.value||'').trim()||null,
       maestro_codigo:document.getElementById('np-mc').value||'GEN',
       aliases,aliases_visibles:[],tipo_producto:'dropshipping',almacenamiento:0,
       stock_actual:parseInt(document.getElementById('np-stock')?.value)||0,
@@ -3115,6 +3122,19 @@ async function pageAdminProductos(c){
         if(initialRecords.length)await sb.from('producto_precios_historial').insert(initialRecords)
       }
     }catch(e){console.warn('historial inicial fail:',e)}
+    // #6 (B): sembrar las ofertas en producto_ofertas para que el producto NAZCA en la tabla nueva
+    // (evita el aviso "Pendiente migrar a tabla nueva" en productos nuevos).
+    try{
+      const _npId=data?.id
+      if(_npId){
+        const _ofs=[]
+        for(const n of [1,2,3,4]){
+          const precio=g('np-p'+n),costo=g('np-c'+n)
+          if(precio>0||costo>0)_ofs.push({producto_id:_npId,cantidad:n,precio,costo,activo:true})
+        }
+        if(_ofs.length)await sb.from('producto_ofertas').insert(_ofs)
+      }
+    }catch(e){console.warn('sembrar producto_ofertas fail:',e)}
     await loadProductos()
     logAction('producto_creado',{nombre}).catch(()=>{})
     pageAdminProductos(document.getElementById('content'))
@@ -3878,6 +3898,8 @@ async function renderProdBody(id,maestrosList){
         <input type="text" id="pname-${id}" value="${prod.nombre||''}"></div>
       <div class="fld"><label>🆔 ID interno</label>
         <input type="text" value="${id}" disabled style="font-family:monospace;font-size:11px;opacity:0.6"></div>
+      <div class="fld"><label>🆔 ID de Dropi <span style="color:var(--muted);font-size:10px">(el número del producto en Dropi — lo ve el auxiliar en el Asignador)</span></label>
+        <input type="text" inputmode="numeric" id="pdropi-${id}" value="${prod.dropi_id||''}" placeholder="Ej: 152345" style="font-family:monospace;font-size:12px"></div>
     </div>
     <div style="font-size:10px;color:var(--muted);margin-top:6px;display:flex;gap:14px;flex-wrap:wrap">
       <span>📅 Creado: ${prod.created_at?new Date(prod.created_at).toLocaleString('es-CO'):'—'}</span>
@@ -5144,6 +5166,12 @@ async function pageAuxAsignador(c){
       ? kwArray.map(k=>`<span style="display:inline-block;padding:3px 9px;background:rgba(34,197,94,0.1);border:1px solid var(--green);color:var(--green);border-radius:14px;font-family:monospace;font-size:12px;margin:2px 4px 2px 0">🟢 ${k}</span>`).join('')
       : '<span style="color:var(--muted)">⚠️ No hay productos configurados. Configura productos con keywords en la sección Productos.</span>'
 
+    // #7: lista de IDs de Dropi por producto (para que el auxiliar sepa qué cargar en Dropi)
+    const _dropiList=(productos||[]).filter(p=>p&&p.nombre).map(p=>({nombre:p.nombre,dropi:String(p.dropi_id||'').trim()}))
+    const _dropiHtml=_dropiList.length
+      ? _dropiList.map(p=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)"><span style="font-size:13px;color:var(--text);font-weight:600">📦 ${p.nombre}</span>${p.dropi?`<span onclick="navigator.clipboard.writeText('${p.dropi}').then(()=>{this.textContent='✓ ${p.dropi}';setTimeout(()=>{this.textContent='🆔 ${p.dropi} 📋'},1200)})" style="cursor:pointer;font-family:monospace;font-size:13px;color:var(--accent);background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:3px 9px;white-space:nowrap" title="Clic para copiar el ID de Dropi">🆔 ${p.dropi} 📋</span>`:`<span style="font-size:11px;color:var(--muted)">sin ID — ponlo en Productos</span>`}</div>`).join('')
+      : '<span style="color:var(--muted);font-size:12px">No hay productos configurados.</span>'
+
     // Verificar si está en modo histórico (admin permitió cargas viejas para este auxiliar)
     const modoHistorico=me?.modo_historico===true
 
@@ -5152,6 +5180,11 @@ async function pageAuxAsignador(c){
         <div style="font-size:12px;color:var(--muted);margin-bottom:8px"><strong>Palabras reconocidas en la columna PRODUCTO:</strong></div>
         <div>${kwHtml}</div>
         <div style="font-size:11px;color:var(--amber);margin-top:10px">⚠️ Si el producto del input no coincide con ninguna palabra → la fila NO se procesa</div>
+      </div>
+
+      <div class="card" style="margin-bottom:14px">
+        <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:8px">🆔 IDs de Dropi <span style="font-size:11px;font-weight:400;color:var(--muted)">(número del producto en Dropi — toca para copiar)</span></div>
+        ${_dropiHtml}
       </div>
 
       ${modoHistorico?`<div class="alert alert-amber" style="margin-bottom:14px">⏳ <strong>Modo histórico activado.</strong> Puedes cargar datos de cualquier fecha sin restricción.</div>`:''}

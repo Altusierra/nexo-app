@@ -345,7 +345,7 @@ tr:hover td{background:var(--card2)}
 /* En escritorio: el área de contenido del auxiliar scrollea internamente (altura fija),
    así el position:sticky de .aux-sticky-progress se activa y la barra queda siempre arriba.
    Móvil (≤768px) no se toca: ahí scrollea la ventana como antes. */
-@media(min-width:769px){.aux-page{height:100vh}}
+@media(min-width:769px){.aux-page,.content{height:100vh}}
 /* Buscador de "Confirmar y recuperar pedidos" siempre visible al hacer scroll (escritorio).
    Se ubica debajo de la barra de avance (~58px). Móvil queda en flujo normal. */
 @media(min-width:769px){.res-buscar-sticky{position:sticky;top:58px;z-index:20;background:var(--bg);padding-bottom:10px}}
@@ -14659,7 +14659,27 @@ window._estadoApply=async()=>{
   openModal(`<div class="modal-title">⏳ Aplicando...</div><div style="font-size:13px;color:var(--muted);padding:10px 0">Hablando con Meta, espera un momento.</div>`)
   const r=await window._metaWrite({action:'set_status',node_id:st.nodeId,status:st.nuevoStatus})
   if(!r.ok){
-    openModal(`<div class="modal-title">❌ No se pudo</div><div style="font-size:13px;color:var(--red);padding:10px 0;line-height:1.5">${r.error||'Error'}</div><div style="display:flex;justify-content:flex-end"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>`)
+    const _raw=r.error||'Error'
+    const _e=_raw.toLowerCase()
+    const _esCreativoRoto=_e.includes('reel')||(_e.includes('activo')&&_e.includes('disponible'))||(_e.includes('asset')&&_e.includes('available'))||_e.includes('eliminado')||_e.includes('deleted')||_e.includes('no tengas permiso')||_e.includes('permission to view')
+    if(_esCreativoRoto){
+      const _quien=st.level==='ad'?'Este anuncio tiene':'Un anuncio de '+(st.level==='campaign'?'esta campaña':'este conjunto')+' tiene'
+      const _accTxt=st.nuevoStatus==='ACTIVE'?'activar':'pausar'
+      openModal(`<div class="modal-title">❌ Meta no dejó ${_accTxt}</div>
+        <div style="font-size:13px;color:var(--text);padding:10px 0;line-height:1.6">
+          ${_quien} un <strong>video o reel que fue borrado</strong> en Meta. Por eso Meta no deja cambiar el estado.
+          <div style="margin-top:10px;padding:10px;background:var(--card2);border:1px solid var(--border);border-radius:8px">
+            <strong>Qué hacer:</strong><br>
+            1. Abre el desglose (📌 Ads) y busca el anuncio dañado.<br>
+            2. Pausa o elimina <strong>ese</strong> anuncio en Meta.<br>
+            3. Vuelve a intentar aquí.
+          </div>
+          <details style="margin-top:10px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Ver mensaje técnico de Meta</summary><div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">${_raw}</div></details>
+        </div>
+        <div style="display:flex;justify-content:flex-end"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>`)
+    }else{
+      openModal(`<div class="modal-title">❌ No se pudo</div><div style="font-size:13px;color:var(--red);padding:10px 0;line-height:1.5">${_raw}</div><div style="display:flex;justify-content:flex-end"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>`)
+    }
     return
   }
   logAction('meta_estado_cambiado',{node_id:st.nodeId,nivel:st.level,status:st.nuevoStatus}).catch(()=>{})
@@ -14945,6 +14965,24 @@ window._massRun=async()=>{
   if(foot)foot.innerHTML=`<span style="font-size:12px;float:left;color:var(--muted)">✅ ${okN} · ❌ ${errN}</span><button class="btn-sm btn-blue" onclick="closeModal();window._massState=null;if(window.toggleMetaCuenta)window.toggleMetaCuenta('${acc}',true)">Listo</button>`
 }
 
+// Muestra la tira fina de campaña SOLO cuando está pegada arriba (no al inicio, evita redundancia).
+// Usa un sentinel por campaña + IntersectionObserver sobre el scroller real (.content).
+window._nxObserveCampBars=()=>{
+  try{
+    const root=document.querySelector('.content')||null
+    if(window._nxCampObs)window._nxCampObs.disconnect()
+    window._nxCampObs=new IntersectionObserver((entries)=>{
+      for(const e of entries){
+        const bar=e.target.nextElementSibling
+        if(bar&&bar.classList&&bar.classList.contains('nx-camp-bar')){
+          if(!e.isIntersecting){bar.style.opacity='1';bar.style.pointerEvents='auto'}
+          else{bar.style.opacity='0';bar.style.pointerEvents='none'}
+        }
+      }
+    },{root,rootMargin:'-34px 0px 0px 0px',threshold:0})
+    document.querySelectorAll('.nx-camp-sentinel').forEach(s=>window._nxCampObs.observe(s))
+  }catch(_){}
+}
 window.toggleMetaCuenta=async(accountId,forceReload)=>{
   const accEl=document.getElementById('meta-acc-'+accountId)
   const chevron=document.getElementById('meta-chevron-'+accountId)
@@ -14954,7 +14992,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   let _uiSnap=null
   if(forceReload){
     const _ab=[...document.querySelectorAll('[id^="desglose-"]')].filter(e=>e.style.display==='block').map(e=>e.id)
-    _uiSnap={y:window.scrollY,abiertos:_ab}
+    _uiSnap={y:(document.querySelector('.content')||document.documentElement).scrollTop,abiertos:_ab}
   }
   const isOpen=accEl.style.display!=='none'
   if(isOpen&&!forceReload){
@@ -15603,6 +15641,8 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const _tcvProm3=_vrTot3>0?_convTot3/_vrTot3:0
 
     return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" data-campid="${camp.meta_id}" data-estado="${camp.estado||''}" data-urgencia="${camp._urgenciaCode||''}" data-vendenogasta="${camp._vendeNoGasta?1:0}" style="margin-bottom:5px;${opacity}">
+      <div class="nx-camp-sentinel" style="height:0"></div>
+      <div class="nx-camp-bar" style="position:sticky;top:34px;z-index:8;background:var(--card);border:1px solid var(--border);border-left:3px solid var(--hier-camp);border-radius:6px;padding:4px 9px;margin-bottom:-26px;opacity:0;pointer-events:none;transition:opacity .12s ease;display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;overflow:hidden;white-space:nowrap"><span style="flex-shrink:0">🎯</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${camp.nombre||camp.meta_id}</span><span style="flex-shrink:0;color:${camp.estado==='ACTIVE'?'var(--green)':'var(--muted)'}">· ${camp.estado||''}</span></div>
       <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-camp)">
       ${camp._prenderYa?`<div style="background:var(--red-bg);border:1px solid var(--red);border-radius:6px;padding:5px 9px;margin-bottom:6px;display:flex;align-items:center;gap:7px;font-size:11px;font-weight:600;color:var(--red)"><span style="font-size:14px">🛑</span><span>PRENDER YA → $0 de gasto hoy pero VENDÍA en los últimos 3 días. La apagaste y estás perdiendo esas ventas.</span></div>`:''}
       ${camp._vendeNoGasta?`<div style="background:var(--red-bg);border:1px solid var(--red);border-radius:6px;padding:5px 9px;margin-bottom:6px;display:flex;align-items:center;gap:7px;font-size:11px;font-weight:600;color:var(--red)"><span style="font-size:14px">🔔</span><span>VENDE Y NO GASTA → $0 de gasto hoy. Está apagada en Meta — ¿prenderla?</span></div>`:''}
@@ -15835,6 +15875,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const _btnActive=accEl.querySelector('.cf-btn.btn-primary')
     filterCampsInAccount(accountId,'active',_btnActive||null)
   }
+  window._nxObserveCampBars()
 
   // Mejora 1: restaurar lo que estaba abierto y volver a la misma posición de scroll
   if(_uiSnap){
@@ -15849,10 +15890,10 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
             }
           }catch(_){}
         }
-        window.scrollTo(0,_uiSnap.y)
+        const _sc=document.querySelector('.content')||document.documentElement;_sc.scrollTop=_uiSnap.y
       })()
     }else{
-      window.scrollTo(0,_uiSnap.y)
+      const _sc=document.querySelector('.content')||document.documentElement;_sc.scrollTop=_uiSnap.y
     }
   }
 
@@ -17558,19 +17599,20 @@ window.toggleCampDesglose=async(campId,accountId)=>{
         const _esABO=_asBudget>0
         const _asActiva=(as.estado||'').toUpperCase()==='ACTIVE'
         const _asNomEsc=(as.nombre||'').replace(/'/g,"\\'")
-        return`<div style="margin-bottom:4px;${hasSpend?'':'opacity:0.4'}">
+        const hasAnySpend=hasSpend||_gastoPrevAS>0||_gastoAntierAS>0||_gastoTrasAS>0
+        return`<div style="margin-bottom:4px;${hasAnySpend?'':'opacity:0.4'}">
           <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-adset)">
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:${hasSpend?'6px':'0'}">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:${hasAnySpend?'6px':'0'}">
               <div style="flex:1;min-width:0">
                 <div style="font-weight:500;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.25" title="${as.nombre}"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${as.estado==='ACTIVE'?'#22c55e':'#1a1a1a'};border:1.5px solid ${as.estado==='ACTIVE'?'#16a34a':'#525252'};${as.estado==='ACTIVE'?'box-shadow:0 0 5px rgba(34,197,94,.7);':''}vertical-align:middle;margin-right:5px" title="${as.estado==='ACTIVE'?'🟢 Activo en Meta':'⚫ Inactivo ('+(as.estado||'desconocido')+')'}"></span><span class="nexo-hier-pill" style="background:var(--hier-adset-bg);color:var(--hier-adset);border:1px solid var(--hier-adset)">📦 Adset</span>${as.nombre}</div>
-                <div style="font-size:9px;color:var(--muted);margin-top:1px">${as.estado}${window.metaIdChip(as.meta_id,'adset')}${window._cambiosHoyHTML(as.meta_id)}<span style="display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center;margin-left:8px;vertical-align:middle">${hasSpend?`<button class="btn-sm btn-outline" onclick="toggleAdsetDesglose('${as.meta_id}','${accountId}')" style="padding:5px 10px;font-size:12px" title="Ver anuncios">📌 Ads</button>`:''}${_esABO?`<button class="btn-sm btn-outline" onclick="modalPresupuesto('${as.meta_id}','adset','${_asNomEsc}',${_asBudget},'${accountId}')" style="padding:5px 10px;font-size:12px;border-color:var(--accent);color:var(--accent)" title="Cambiar presupuesto del adset (ABO)">💰 $${fmt(_asBudget)}</button>`:''}<button class="btn-sm btn-outline" onclick="modalEstado('${as.meta_id}','adset','${_asNomEsc}','${as.estado||''}','${accountId}')" style="padding:5px 10px;font-size:12px;${_asActiva?'border-color:var(--amber);color:var(--amber)':'border-color:var(--green);color:var(--green)'}" title="${_asActiva?'Pausar adset':'Activar adset'}">${_asActiva?'⏸️ Pausar':'▶️ Activar'}</button><button class="btn-sm btn-outline" onclick="analizarConIA('adset','${as.meta_id}','${(as.nombre||'').replace(/'/g,"\\'")}')" style="padding:5px 9px;font-size:12px" title="Analizar con IA">🤖</button></span></div>
+                <div style="font-size:9px;color:var(--muted);margin-top:1px">${as.estado}${window.metaIdChip(as.meta_id,'adset')}${window._cambiosHoyHTML(as.meta_id)}<span style="display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center;margin-left:8px;vertical-align:middle">${hasAnySpend?`<button class="btn-sm btn-outline" onclick="toggleAdsetDesglose('${as.meta_id}','${accountId}')" style="padding:5px 10px;font-size:12px" title="Ver anuncios">📌 Ads</button>`:''}${_esABO?`<button class="btn-sm btn-outline" onclick="modalPresupuesto('${as.meta_id}','adset','${_asNomEsc}',${_asBudget},'${accountId}')" style="padding:5px 10px;font-size:12px;border-color:var(--accent);color:var(--accent)" title="Cambiar presupuesto del adset (ABO)">💰 $${fmt(_asBudget)}</button>`:''}<button class="btn-sm btn-outline" onclick="modalEstado('${as.meta_id}','adset','${_asNomEsc}','${as.estado||''}','${accountId}')" style="padding:5px 10px;font-size:12px;${_asActiva?'border-color:var(--amber);color:var(--amber)':'border-color:var(--green);color:var(--green)'}" title="${_asActiva?'Pausar adset':'Activar adset'}">${_asActiva?'⏸️ Pausar':'▶️ Activar'}</button><button class="btn-sm btn-outline" onclick="analizarConIA('adset','${as.meta_id}','${(as.nombre||'').replace(/'/g,"\\'")}')" style="padding:5px 9px;font-size:12px" title="Analizar con IA">🤖</button></span></div>
               </div>
               <div style="display:flex;gap:8px;align-items:center">
                 ${hasSpend&&heroVal>0?`<div class="nexo-cpa-hero nch-sm"><div class="nch-lbl">${heroLbl}</div><div class="nch-val" style="color:${cpaColorCss}" title="${heroTitle}">$${fmt(heroVal)}</div></div>`:''}
                 ${badgeMega||(hasSpend&&mr.sem.txt?`<span class="pill ${mr.sem.cls}" style="font-size:10px">${mr.sem.txt}</span>`:'')}
               </div>
             </div>
-            ${hasSpend?`<div class="nx-tscroll"><div class="nx-tgrid-a" style="display:grid;grid-template-columns:74px repeat(11,minmax(56px,1fr));column-gap:6px;row-gap:4px;align-items:center">
+            ${hasAnySpend?`<div class="nx-tscroll"><div class="nx-tgrid-a" style="display:grid;grid-template-columns:74px repeat(11,minmax(56px,1fr));column-gap:6px;row-gap:4px;align-items:center">
               <div></div>
               <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.3px">Gasto</div>
               <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.3px" title="(Ventas reales × Precio) ÷ Gasto">ROAS Real</div>
@@ -17829,8 +17871,9 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
       const heroTitle=mr.esSoloHoy?`Estimado con ${pctConfTxt}% confirmación`:''
       const _adActiva=(ad.estado||'').toUpperCase()==='ACTIVE'
       const _adNomEsc=(ad.nombre||'').replace(/'/g,"\\'")
-      return`<div style="padding:6px 9px;border-left:4px solid var(--hier-ad);margin-bottom:3px;background:var(--card2);border-radius:5px;${hasSpend?'':'opacity:0.4'}">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:5px;margin-bottom:${hasSpend?'5px':'0'}">
+      const hasAnySpend=hasSpend||_gastoPrevAD>0||_gastoAntierAD>0||_gastoTrasAD>0
+      return`<div style="padding:6px 9px;border-left:4px solid var(--hier-ad);margin-bottom:3px;background:var(--card2);border-radius:5px;${hasAnySpend?'':'opacity:0.4'}">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:5px;margin-bottom:${hasAnySpend?'5px':'0'}">
           <div style="flex:1;min-width:0">
             <div style="font-size:10px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.25" title="${ad.nombre}"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${ad.estado==='ACTIVE'?'#22c55e':'#1a1a1a'};border:1.5px solid ${ad.estado==='ACTIVE'?'#16a34a':'#525252'};${ad.estado==='ACTIVE'?'box-shadow:0 0 5px rgba(34,197,94,.7);':''}vertical-align:middle;margin-right:5px" title="${ad.estado==='ACTIVE'?'🟢 Activo en Meta':'⚫ Inactivo ('+(ad.estado||'desconocido')+')'}"></span><span class="nexo-hier-pill" style="background:var(--hier-ad-bg);color:var(--hier-ad);border:1px solid var(--hier-ad)">🎬 Ad</span>${ad.nombre}</div>
             <div style="font-size:9px;color:var(--muted);margin-top:1px">${ad.estado}${window.metaIdChip(ad.meta_id,'anuncio')}${window._cambiosHoyHTML(ad.meta_id)}<span style="display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center;margin-left:8px;vertical-align:middle"><button class="btn-sm btn-outline" onclick="modalEstado('${ad.meta_id}','ad','${_adNomEsc}','${ad.estado||''}','${accountId}')" style="padding:5px 10px;font-size:12px;${_adActiva?'border-color:var(--amber);color:var(--amber)':'border-color:var(--green);color:var(--green)'}" title="${_adActiva?'Pausar anuncio':'Activar anuncio'}">${_adActiva?'⏸️ Pausar':'▶️ Activar'}</button><button class="btn-sm btn-outline" onclick="analizarConIA('anuncio','${ad.meta_id}','${(ad.nombre||'').replace(/'/g,"\\'")}')" style="padding:5px 9px;font-size:12px" title="Analizar con IA">🤖</button></span></div>
@@ -17840,7 +17883,7 @@ window.toggleAdsetDesglose=async(adsetId,accountId)=>{
             ${badgeMega||(hasSpend&&mr.sem.txt?`<span class="pill ${mr.sem.cls}" style="font-size:10px">${mr.sem.txt}</span>`:'')}
           </div>
         </div>
-        ${hasSpend?`<div class="nx-tscroll"><div class="nx-tgrid-a" style="display:grid;grid-template-columns:74px repeat(11,minmax(56px,1fr));column-gap:6px;row-gap:4px;align-items:center">
+        ${hasAnySpend?`<div class="nx-tscroll"><div class="nx-tgrid-a" style="display:grid;grid-template-columns:74px repeat(11,minmax(56px,1fr));column-gap:6px;row-gap:4px;align-items:center">
           <div></div>
           <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.3px">Gasto</div>
           <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.3px" title="(Ventas reales × Precio) ÷ Gasto">ROAS Real</div>

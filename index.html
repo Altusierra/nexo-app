@@ -13245,6 +13245,9 @@ async function _renderResumenProductos(desde,hasta,hoy){
   }catch(_){desdePrev='';hastaPrev='';nDiasRango=0}
 
   const mapeosPrevByProd={},gastoPrevByCampId={},reportesPrevByProd={}
+  // NUEVO: lista de ad_ids reportados de AYER por producto (antes solo se guardaba el conteo).
+  // Sirve para clasificar las ventas por IDs de AYER por campaña/anuncio en la fusión.
+  const reportesPrevAdIdsListByProd={}
   if(desdePrev&&hastaPrev){
     const{data:mapeosPrev}=await sb.from('mapeos')
       .select('cantidad,producto,estado_final,fecha,ad_id')
@@ -13276,6 +13279,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
       if(!pn)continue
       const ids=(r.ad_ids||'').split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)
       reportesPrevByProd[pn]=(reportesPrevByProd[pn]||0)+ids.length
+      if(!reportesPrevAdIdsListByProd[pn])reportesPrevAdIdsListByProd[pn]=[]
+      for(const id of ids)reportesPrevAdIdsListByProd[pn].push(id)
     }
   }
 
@@ -13382,6 +13387,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
   // Consistente con "ayer" de este resumen: gasto desde meta_insights (BD), no Meta API.
   const mapeosAntierByProd={},gastoAntierByCampId={},reportesAntierByProd={},conversacionesAntierByProd={}
   const mapeosTrasByProd={},gastoTrasByCampId={},reportesTrasByProd={},conversacionesTrasByProd={}
+  // NUEVO: listas de ad_ids reportados de ANTIER y TRASANTIER por producto (para clasificar IDs por campaña/anuncio)
+  const reportesAntierAdIdsListByProd={},reportesTrasAdIdsListByProd={}
   if(desdePrev&&hastaPrev&&nDiasRango>0){
     const _mkRango=(refDesde)=>{
       const d=new Date(refDesde+'T00:00:00')
@@ -13391,7 +13398,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
     }
     const _r2=_mkRango(desdePrev)   // antier
     const _r3=_mkRango(_r2.desde)   // trasantier
-    const _cargarDiaExtra=async(rg,mapeosOut,gastoOut,repsOut,convOut)=>{
+    const _cargarDiaExtra=async(rg,mapeosOut,gastoOut,repsOut,convOut,repsListOut)=>{
       const{data:mp}=await sb.from('mapeos').select('cantidad,producto,estado_final,fecha,ad_id').gte('fecha',rg.desde).lte('fecha',rg.hasta).limit(10000)
       for(const m of (mp||[])){
         const pn=resolveProdName(m.producto).nombre||(m.producto||'Sin producto')
@@ -13410,6 +13417,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
         if(!pn)continue
         const ids=(r.ad_ids||'').split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)
         repsOut[pn]=(repsOut[pn]||0)+ids.length
+        if(repsListOut){if(!repsListOut[pn])repsListOut[pn]=[];for(const id of ids)repsListOut[pn].push(id)}
       }
       const{data:repsC}=await sb.from('reportes_diarios').select('conversaciones,producto_id,producto_nombre,fecha,updated_at').gte('fecha',rg.desde).lte('fecha',rg.hasta).order('updated_at',{ascending:false})
       const _seenC=new Set()
@@ -13422,10 +13430,10 @@ async function _renderResumenProductos(desde,hasta,hoy){
         convOut[pn]=(convOut[pn]||0)+(r.conversaciones||0)
       }
     }
-    await _cargarDiaExtra(_r2,mapeosAntierByProd,gastoAntierByCampId,reportesAntierByProd,conversacionesAntierByProd)
-    await _cargarDiaExtra(_r3,mapeosTrasByProd,gastoTrasByCampId,reportesTrasByProd,conversacionesTrasByProd)
+    await _cargarDiaExtra(_r2,mapeosAntierByProd,gastoAntierByCampId,reportesAntierByProd,conversacionesAntierByProd,reportesAntierAdIdsListByProd)
+    await _cargarDiaExtra(_r3,mapeosTrasByProd,gastoTrasByCampId,reportesTrasByProd,conversacionesTrasByProd,reportesTrasAdIdsListByProd)
   }
-  const _extrasDias={mapeosAntierByProd,gastoAntierByCampId,reportesAntierByProd,conversacionesAntierByProd,mapeosTrasByProd,gastoTrasByCampId,reportesTrasByProd,conversacionesTrasByProd}
+  const _extrasDias={mapeosAntierByProd,gastoAntierByCampId,reportesAntierByProd,conversacionesAntierByProd,mapeosTrasByProd,gastoTrasByCampId,reportesTrasByProd,conversacionesTrasByProd,reportesPrevAdIdsListByProd,reportesAntierAdIdsListByProd,reportesTrasAdIdsListByProd}
 
   // 6.8 NUEVO: Mapa ad_id → cuenta (para el "cuadre de ventas por origen" y el strip de cuenta).
   //      Sigue la cadena ad → adset → campaña → cuenta usando meta_campanas (igual que
@@ -13436,6 +13444,10 @@ async function _renderResumenProductos(desde,hasta,hoy){
     const _adSet=new Set()
     for(const arr of Object.values(mapeosByProd)){for(const m of (arr||[])){if(m.ad_id)_adSet.add(String(m.ad_id))}}
     for(const s of Object.values(reportesAdIdsByProd)){for(const id of (s||[])){if(id)_adSet.add(String(id))}}
+    // NUEVO: también los IDs reportados de los días anteriores (para clasificarlos por campaña en la fusión)
+    for(const arr of Object.values(reportesPrevAdIdsListByProd||{})){for(const id of (arr||[])){if(id)_adSet.add(String(id))}}
+    for(const arr of Object.values(reportesAntierAdIdsListByProd||{})){for(const id of (arr||[])){if(id)_adSet.add(String(id))}}
+    for(const arr of Object.values(reportesTrasAdIdsListByProd||{})){for(const id of (arr||[])){if(id)_adSet.add(String(id))}}
     for(const arr of Object.values(mapeosPrevByProd||{})){for(const m of (arr||[])){if(m.ad_id)_adSet.add(String(m.ad_id))}}
     for(const arr of Object.values(mapeosAntierByProd||{})){for(const m of (arr||[])){if(m.ad_id)_adSet.add(String(m.ad_id))}}
     for(const arr of Object.values(mapeosTrasByProd||{})){for(const m of (arr||[])){if(m.ad_id)_adSet.add(String(m.ad_id))}}
@@ -14068,6 +14080,32 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     cuadre=_mkCuadre(_adList,_gAdsBloques.p||{},gastoByCampId)
   }catch(_){cuadre=null}
 
+  // NUEVO: ventas por IDs del aux POR CAMPAÑA y POR ANUNCIO para cada día (p=hoy/período, a=ayer, b=antier, c=trasantier).
+  // Misma clasificación del cuadre (adToCuenta): solo cuentan los IDs cuyo anuncio pertenece a una campaña sincronizada.
+  // Lo usa la fusión para las columnas 🆔 VTS IDS y el CPA IDS de TODOS los días (antes solo había dato para HOY).
+  const idsPorCampDia={p:{},a:{},b:{},c:{}}
+  const idsPorAdDia={p:{},a:{},b:{},c:{}}
+  try{
+    const _atcIds=adToCuenta||{}
+    const _listasIds={
+      p:(reportesAdIdsListByProd&&reportesAdIdsListByProd[prod.nombre])||[],
+      a:(extrasDias&&extrasDias.reportesPrevAdIdsListByProd&&extrasDias.reportesPrevAdIdsListByProd[prod.nombre])||[],
+      b:(extrasDias&&extrasDias.reportesAntierAdIdsListByProd&&extrasDias.reportesAntierAdIdsListByProd[prod.nombre])||[],
+      c:(extrasDias&&extrasDias.reportesTrasAdIdsListByProd&&extrasDias.reportesTrasAdIdsListByProd[prod.nombre])||[]
+    }
+    for(const kDia of Object.keys(_listasIds)){
+      for(const raw of _listasIds[kDia]){
+        const idAd=(raw!=null&&raw!=='')?String(raw):''
+        if(!idAd)continue
+        const infoId=_atcIds[idAd]
+        if(!infoId||!infoId.campId)continue
+        const ckId=String(infoId.campId)
+        idsPorCampDia[kDia][ckId]=(idsPorCampDia[kDia][ckId]||0)+1
+        idsPorAdDia[kDia][idAd]=(idsPorAdDia[kDia][idAd]||0)+1
+      }
+    }
+  }catch(_){}
+
   return{
     producto:prod,
     metCamp:campMetBloques||null,metAd:adMetBloques||null,
@@ -14082,6 +14120,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     prevData2,prevData3,stockActual,
     conversaciones,
     pedidosIds:pReportados,
+    idsPorCampDia,idsPorAdDia,
     cuadre,
     // Desglose para tooltip de ganancia
     desgloseGanancia:{ventaEfectiva,costoProv,costoFlete,costoDev,gasto,costoConvProd,devPct}
@@ -14500,7 +14539,7 @@ function _renderProductoCardResumen(data,ranking){
     // (o cualquiera) de una sola pasada. El contenedor hace scroll horizontal si no cabe.
     // REGLA DE COLOR: el semáforo 🟢🟡🔴 es EXCLUSIVO del CPA Real. Las demás métricas se
     // identifican por el color suave del ENCABEZADO (pastel), los valores van en gris neutro.
-    const _cw={vts:54,gto:88,cpr:100,cpids:100,cpmt:88,conv:56,cxv:84,cli:72,ctr:62,cpc:80,cpmil:80,frec:56}
+    const _cw={vts:54,vids:66,gto:88,cpr:100,cpids:100,cpmt:88,conv:56,cxv:84,cli:72,ctr:62,cpc:80,cpmil:80,frec:56}
     const _cell=(w,html,tip)=>`<span style="display:inline-block;width:${w}px;flex-shrink:0;text-align:right;padding-right:10px;white-space:nowrap" ${tip?`title="${tip}"`:''}>${html}</span>`
     // Pill de CPA Real para la grilla (sin margen, compacta) — mismo semáforo canónico
     const _cpaPillG=(cpa)=>{
@@ -14526,14 +14565,15 @@ function _renderProductoCardResumen(data,ranking){
     // Celdas de métricas de UNA fila (día, total de campaña o total de anuncio)
     // NUEVO (Mejora 9): cpaIdsVal = CPA por IDs (gasto ÷ ventas por IDs, T. Cierre). Cada valor va en SU columna
     // (igual que las cards: CPA REAL = ventas Dropi · CPA IDS = ventas por IDs) — nunca el mismo número con dos nombres.
-    const _metCells=(n,g,cpa,met,fuga,cpaIdsVal)=>{
+    const _metCells=(n,g,cpa,met,fuga,cpaIdsVal,nIds)=>{
       const x=_metCalc(met,n)
       const cN=fuga?'var(--amber)':'var(--text)'
       const v=(cond,html)=>cond?html:'—'
       return _cell(_cw.vts,`<strong style="color:${cN}">${n}</strong>`,'🛒 Ventas de esta fila')
+        +_cell(_cw.vids,v(nIds>0,`<strong style="color:#fcd34d">${nIds||0}</strong>`),'🆔 VTS IDS: ventas por IDs del aux de esta fila ese día (T. Cierre, ANTES del cruce Dropi) — NO confundir con la columna VENTAS de la izquierda (confirmadas Dropi en días pasados)')
         +_cell(_cw.gto,v(g>0,'$'+fmt(Math.round(g||0))),'💸 Gasto en Meta de esta fila')
         +_cell(_cw.cpr,fuga?`<span style="font-size:9px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:0 6px;white-space:nowrap">🚨 0 vts</span>`:_cpaPillG(cpa),'🚦 CPA Real = gasto ÷ ventas confirmadas Dropi · el ÚNICO con semáforo: 🟢 va bien · 🟡 cuidado · 🔴 pierde plata')
-        +_cell(_cw.cpids,fuga?'—':v(cpaIdsVal>0,_cpaPillG(cpaIdsVal)),'🆔 CPA IDS = gasto ÷ ventas por IDs del aux (T. Cierre, ANTES del cruce Dropi). En esta tabla aplica al día cuyas ventas vienen por IDs (HOY); los días pasados ya son confirmadas Dropi y van en CPA REAL')
+        +_cell(_cw.cpids,v(cpaIdsVal>0,_cpaPillG(cpaIdsVal)),'🆔 CPA IDS = gasto del día ÷ ventas por IDs del aux de ese día (T. Cierre, ANTES del cruce Dropi). Ahora sale para TODOS los días, no solo HOY')
         +_cell(_cw.cpmt,v(x&&x.cpaMeta>0,x?'$'+fmt(Math.round(x.cpaMeta)):''),'🎯 CPA Meta: lo que Meta dice que cuesta cada resultado (gasto ÷ conversaciones)')
         +_cell(_cw.conv,v(x&&x.conv>0,x?fmt(x.conv):''),'💬 Conversaciones por mensajes iniciadas')
         +_cell(_cw.cxv,v(x&&x.cxv>0,x?x.cxv.toFixed(1)+' c/v':''),'🤝 Conversaciones ÷ ventas: cuántos chats cuesta UNA venta. Menos = mejor. HOY las ventas son por IDs (T. Cierre) y en días pasados son confirmadas Dropi (T. Conversión)')
@@ -14546,9 +14586,10 @@ function _renderProductoCardResumen(data,ranking){
     // Encabezado de columnas: cada métrica con SU color pastel suave (solo el título, no los valores)
     const _metHeadCells=[
       {w:_cw.vts,e:'🛒',l:'VENTAS',c:'#e2e8f0',tip:'Ventas de cada fila. HOY = por IDs del aux · días pasados = confirmadas Dropi'},
+      {w:_cw.vids,e:'🆔',l:'VTS IDS',c:'#fcd34d',tip:'Ventas por IDs del aux de cada día (T. Cierre, antes del cruce Dropi) — separadas para no confundirlas con las VENTAS normales'},
       {w:_cw.gto,e:'💸',l:'GASTO',c:'#94a3b8',tip:'Plata gastada en Meta'},
       {w:_cw.cpr,e:'🚦',l:'CPA REAL',c:'#cbd5e1',tip:'Gasto ÷ ventas confirmadas Dropi (días pasados). El ÚNICO con colores de semáforo: 🟢 va bien · 🟡 cuidado · 🔴 pierde plata'},
-      {w:_cw.cpids,e:'🆔',l:'CPA IDS',c:'#fcd34d',tip:'Gasto ÷ ventas por IDs del aux (T. Cierre, antes del cruce Dropi). En esta tabla aplica al día cuyas ventas vienen por IDs (HOY); los días pasados ya son Dropi y van en CPA REAL'},
+      {w:_cw.cpids,e:'🆔',l:'CPA IDS',c:'#fcd34d',tip:'Gasto del día ÷ ventas por IDs del aux de ese día (T. Cierre, antes del cruce Dropi). Sale para TODOS los días: HOY y anteriores'},
       {w:_cw.cpmt,e:'🎯',l:'CPA META',c:'#7dd3fc',tip:'Lo que Meta dice que cuesta cada resultado (gasto ÷ conversaciones)'},
       {w:_cw.conv,e:'💬',l:'CONV',c:'#f9a8d4',tip:'Conversaciones por mensajes iniciadas'},
       {w:_cw.cxv,e:'🤝',l:'CONV/VTA',c:'#c4b5fd',tip:'Conversaciones ÷ ventas: cuántos chats cuesta UNA venta. Menos = mejor'},
@@ -14573,6 +14614,9 @@ function _renderProductoCardResumen(data,ranking){
     // Atajos para leer métricas del día k: campaña y anuncio (mapas cargados en 6.9, 0 llamadas extra)
     const _metCampDe=(k,campId)=>(data.metCamp&&data.metCamp[k]&&data.metCamp[k][String(campId)])||null
     const _metAdDe=(k,adId)=>(data.metAd&&data.metAd[k]&&data.metAd[k][String(adId)])||null
+    // NUEVO: ventas por IDs del aux del día k — por campaña y por anuncio (mapas de _calcResumenProducto, 0 llamadas extra)
+    const _idsCampDiaF=(k,campId)=>((data.idsPorCampDia&&data.idsPorCampDia[k]&&data.idsPorCampDia[k][String(campId)])||0)
+    const _idsAdDiaF=(k,adId)=>((data.idsPorAdDia&&data.idsPorAdDia[k]&&data.idsPorAdDia[k][String(adId)])||0)
     // NUEVO (Mejora 9): ¿las VENTAS del día k vienen por IDs del aux? Misma condición con la que se arma el cuadre:
     // los días previos (a/b/c) SIEMPRE son mapeos confirmados Dropi; el día 'p' es por IDs cuando es solo HOY
     // o cuando no hay confirmados todavía. Decide a qué columna va el CPA de ese día (CPA IDS vs CPA REAL).
@@ -14591,27 +14635,31 @@ function _renderProductoCardResumen(data,ranking){
       return sp
     }
     // Fila Σ TOTAL (campaña o anuncio): mismas columnas, en negrita suave
-    const _filaTotal=(n,g,cpa,met,sz,split)=>{
+    const _filaTotal=(n,g,cpa,met,sz,split,nIdsTot)=>{
       const wL=sz==='sm'?73:96
       const fs=sz==='sm'?'11px':'11.5px'
       // Mejora 9: con split, cada CPA sobre sus propios totales (REAL = días Dropi · IDS = días por IDs). Sin split, comportamiento de antes.
       const _cpaR=split?((split.nDr>0&&split.gDr>0)?split.gDr/split.nDr:0):cpa
       const _cpaI=split?((split.nIds>0&&split.gIds>0)?split.gIds/split.nIds:0):0
-      return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--text);padding:3px 8px;min-width:max-content;background:rgba(167,139,250,.07);border-radius:5px" title="Suma de todos los días de arriba — los ratios (CPA, CTR, etc.) se calculan sobre los totales, no promediando días"><span style="width:${wL}px;flex-shrink:0;font-weight:700">Σ TOTAL</span>${_metCells(n,g,_cpaR,met,n===0&&(g||0)>0,_cpaI)}</div>`
+      // NUEVO: si hay ventas por IDs de TODOS los días (nIdsTot), el CPA IDS total = gasto total ÷ IDs totales
+      const _cpaIT=(nIdsTot>0&&(g||0)>0)?(g||0)/nIdsTot:_cpaI
+      return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--text);padding:3px 8px;min-width:max-content;background:rgba(167,139,250,.07);border-radius:5px" title="Suma de todos los días de arriba — los ratios (CPA, CTR, etc.) se calculan sobre los totales, no promediando días"><span style="width:${wL}px;flex-shrink:0;font-weight:700">Σ TOTAL</span>${_metCells(n,g,_cpaR,met,n===0&&(g||0)>0,_cpaIT,nIdsTot||0)}</div>`
     }
     // Fila de UN día (sirve para campaña y para anuncio): etiqueta + grilla de métricas alineada.
     // Mantiene la regla de FUGA: si gastó y vendió 0 ese día → fila ámbar 🚨 (no "no corrió").
-    const _filaDia=(d,obj,sz,met)=>{
+    const _filaDia=(d,obj,sz,met,nIds)=>{
       const fs=sz==='sm'?'11px':'11.5px'
       const wL=sz==='sm'?73:96
       if(!obj)return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--subtle);padding:3px 8px;min-width:max-content"><span style="width:${wL}px;flex-shrink:0">${d.emo} ${d.lab}</span><span style="font-style:italic">— no corrió ese día —</span></div>`
       const n=obj.count!=null?obj.count:obj.n
       const g=obj.gasto!=null?obj.gasto:obj.g
       const esFuga=n===0&&(g||0)>0
-      if(esFuga)return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--amber);padding:3px 8px;background:rgba(245,158,11,.06);border-radius:5px;min-width:max-content" title="Ese día gastó plata pero vendió CERO: fuga. Revísalo."><span style="width:${wL}px;flex-shrink:0;font-weight:600">${d.emo} ${d.lab}</span>${_metCells(n,g,0,met,true,0)}</div>`
+      // NUEVO: CPA IDS del día para TODOS los días = gasto del día ÷ ventas por IDs de ese día
+      const _cpaIdsDia=(nIds>0&&(g||0)>0)?(g||0)/nIds:0
+      if(esFuga)return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--amber);padding:3px 8px;background:rgba(245,158,11,.06);border-radius:5px;min-width:max-content" title="Ese día gastó plata pero vendió CERO: fuga. Revísalo."><span style="width:${wL}px;flex-shrink:0;font-weight:600">${d.emo} ${d.lab}</span>${_metCells(n,g,0,met,true,_cpaIdsDia,nIds||0)}</div>`
       // Mejora 9: el CPA del día va en SU columna — día por IDs → 🆔 CPA IDS · día Dropi → 🚦 CPA REAL
       const _esIds=_esDiaIdsF(d.k)
-      return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--muted);padding:3px 8px;min-width:max-content"><span style="width:${wL}px;flex-shrink:0;color:var(--text)">${d.emo} ${d.lab}</span>${_metCells(n,g,_esIds?0:obj.cpa,met,false,_esIds?obj.cpa:0)}</div>`
+      return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--muted);padding:3px 8px;min-width:max-content"><span style="width:${wL}px;flex-shrink:0;color:var(--text)">${d.emo} ${d.lab}</span>${_metCells(n,g,_esIds?0:obj.cpa,met,false,_esIds?obj.cpa:_cpaIdsDia,nIds||0)}</div>`
     }
     const _cidF='cuadf_'+_slugProd
     // NUEVO: semáforo por CPA IDS de HOY (día 'p') para cada campaña de la fusión — mismas reglas canónicas
@@ -14649,7 +14697,7 @@ function _renderProductoCardResumen(data,ranking){
     // ── NUEVO: GRILLA POR COLUMNAS para las filas de campañas fusionadas ──
     // Cada cosa en SU columna de ancho fijo (mismo truco de las tablas de métricas): miras de arriba a abajo
     // toda la columna de Presupuesto, Estado, Pausar, etc. de una sola pasada. Scroll horizontal si no cabe.
-    const _cwF={nom:330,acc:66,id:150,cp:34,est:120,alr:106,bud:124,tog:90,dias:316,gto:96,cpa:102,ids:114,vts:46}
+    const _cwF={nom:330,acc:66,id:150,cp:34,est:120,alr:106,bud:124,tog:90,dias:316,gto:96,cpa:102,ids:114,vids:84,vts:46}
     const _cF=(w,html,right,tip,noClip)=>`<span style="display:inline-block;width:${w}px;flex-shrink:0;white-space:nowrap;${noClip?'':'overflow:hidden;text-overflow:ellipsis;'}${right?'text-align:right;padding-right:8px;':'padding-right:6px;'}vertical-align:middle" ${tip?`title="${tip}"`:''}>${html}</span>`
     const _hdrColsF=`<div style="display:flex;align-items:center;min-width:max-content;padding:4px 8px 2px;border-bottom:1px dashed rgba(255,255,255,.1)">${[
       [_cwF.nom,'📣 CAMPAÑA','#e2e8f0','Nombre de la campaña (pasa el cursor para verlo completo)'],
@@ -14664,6 +14712,7 @@ function _renderProductoCardResumen(data,ranking){
       [_cwF.gto,'💸 GASTO','#94a3b8','Gasto total de la campaña en sus días'],
       [_cwF.cpa,'🎯 CPA','#cbd5e1','CPA total = gasto ÷ ventas de todos sus días'],
       [_cwF.ids,'🆔 CPA HOY','#fcd34d','HOY = CPA Real Efectivas (gasto ÷ ventas por IDs × % confirmación) — MISMO número del desglose de la cuenta. Período pasado = CPA Real con ventas Dropi. Con el color del semáforo'],
+      [_cwF.vids,'🆔 VTS HOY','#fcd34d','Ventas por IDs del aux de HOY (T. Cierre, antes del cruce Dropi) — al lado de VTS para no confundirlas con las ventas totales'],
       [_cwF.vts,'🛒 VTS','#e2e8f0','Ventas totales de la campaña']
     ].map(h=>`<span style="display:inline-block;width:${h[0]}px;flex-shrink:0;font-size:8.5px;font-weight:700;letter-spacing:.3px;color:${h[2]};white-space:nowrap;cursor:help;padding-right:6px" title="${h[3]}">${h[1]}</span>`).join('')}</div>`
     const _campsF=_lista.map((F,i)=>{
@@ -14703,7 +14752,7 @@ function _renderProductoCardResumen(data,ranking){
         const _btnsAd=_adActivoL===true?_btnPausarAd:(_adActivoL===false?_btnActivarAd:(_btnPausarAd+_btnActivarAd))
         return`<div style="margin-top:6px;padding:6px 8px;background:${esFugaAd?'rgba(245,158,11,.05)':(j%2===0?'rgba(255,255,255,.025)':'transparent')};border-radius:5px;${esFugaAd?'border:1px solid rgba(245,158,11,.35)':''}">
           <div style="display:flex;align-items:center;font-size:11.5px;color:${esFugaAd?'var(--amber)':'var(--muted)'}">${_dotAd}<span style="font-family:monospace">🖼️ ${_esc(A.adId)}</span>${_btnCopy(A.adId,'ID del anuncio')}${_pyBadgeAd}${_btnsAd}${_gastoTxt(A.gasto)}${esFugaAd?`<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap" title="Gastó plata en sus días y no vendió NADA. Pura fuga: revísalo o apágalo.">🚨 gastó y no vendió</span>`:_cpaPill(A.cpaT,'sm')}<span style="margin-left:auto;color:${esFugaAd?'var(--amber)':'var(--text)'};font-weight:700;padding-left:10px" title="Ventas totales del anuncio sumando sus días">${A.count}</span></div>
-          <div style="margin:2px 0 0 14px;border-left:1px solid ${esFugaAd?'var(--amber)':'var(--border)'};padding-left:8px">${_metHeader(73)}${_dias.map(d=>_filaDia(d,A.dias[d.k],'sm',_metAdDe(d.k,A.adId))).join('')}${_filaTotal(A.count,A.gasto,A.cpaT,_aggMet(_dias.map(d=>_metAdDe(d.k,A.adId))),'sm',_splitCpaF(A.dias))}</div>
+          <div style="margin:2px 0 0 14px;border-left:1px solid ${esFugaAd?'var(--amber)':'var(--border)'};padding-left:8px">${_metHeader(73)}${_dias.map(d=>_filaDia(d,A.dias[d.k],'sm',_metAdDe(d.k,A.adId),_idsAdDiaF(d.k,A.adId))).join('')}${_filaTotal(A.count,A.gasto,A.cpaT,_aggMet(_dias.map(d=>_metAdDe(d.k,A.adId))),'sm',_splitCpaF(A.dias),_dias.reduce((s,d)=>s+_idsAdDiaF(d.k,A.adId),0))}</div>
         </div>`
       }).join('')
       // Cuadre de la plata de la campaña: suma del gasto de todos sus ads vs gasto total campaña
@@ -14774,13 +14823,14 @@ function _renderProductoCardResumen(data,ranking){
           ${_cF(_cwF.gto,_gastoTxt(F.gasto),true)}
           ${_cF(_cwF.cpa,_cpaPill(F.cpa),true)}
           ${_cF(_cwF.ids,_pillIdsHoyF,true)}
+          ${_cF(_cwF.vids,(()=>{const _vI=_idsCampDiaF('p',F.campId);return _vI>0?`<span style="color:#fcd34d;font-weight:700">🆔 ${_vI}</span>`:`<span style="color:var(--subtle)">—</span>`})(),true,'🆔 Ventas por IDs del aux de HOY de esta campaña (T. Cierre, antes del cruce Dropi) — NO son las VTS totales de la derecha')}
           ${_cF(_cwF.vts,`<span style="color:var(--text);font-weight:700">${F.count}</span>`,true,'Ventas totales de la campaña sumando sus días')}
         </div>
         <div id="${_ccid}-sub" style="display:none;margin:3px 0 2px 16px;border-left:1px solid var(--border);padding-left:10px;overflow-x:auto;max-width:calc(100vw - 120px)">
           <div style="font-size:10px;color:var(--subtle);padding:4px 8px 2px;letter-spacing:.3px">1️⃣ La campaña completa, día por día: <span style="opacity:.7">(desliza ➡️ para ver todas las métricas · pasa el cursor por cada título para entenderla)</span></div>
           ${_metHeader(96)}
-          ${_dias.map(d=>_filaDia(d,F.dias[d.k],null,_metCampDe(d.k,F.campId))).join('')}
-          ${_filaTotal(F.count,F.gasto,F.cpa,_aggMet(_dias.map(d=>_metCampDe(d.k,F.campId))),null,_splitCpaF(F.dias))}
+          ${_dias.map(d=>_filaDia(d,F.dias[d.k],null,_metCampDe(d.k,F.campId),_idsCampDiaF(d.k,F.campId))).join('')}
+          ${_filaTotal(F.count,F.gasto,F.cpa,_aggMet(_dias.map(d=>_metCampDe(d.k,F.campId))),null,_splitCpaF(F.dias),_dias.reduce((s,d)=>s+_idsCampDiaF(d.k,F.campId),0))}
           <div style="font-size:10px;color:var(--subtle);padding:8px 8px 0;letter-spacing:.3px">2️⃣ Sus anuncios (mismo ID = mismo bloque), cada uno día por día:</div>
           ${_adsF}
           ${_cuadrePlataF}

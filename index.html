@@ -13681,6 +13681,59 @@ async function _renderResumenProductos(desde,hasta,hoy){
   // 12. Etiqueta de fecha amigable
   const fechaLabel=_resumenFechaLabel(desde,hasta,hoy)
 
+  // 12b. NUEVO: campañas ACTIVAS sin producto asignado — arriba del resumen para asignarlas de una.
+  //      MISMA regla activa/inactiva de la última versión (expand de cuenta y fusión):
+  //      botón ACTIVE (estado LIVE de Meta, fallback BD) + entrega real (≥1 anuncio entregando, no-false).
+  //      Sin producto = el campId no está en campaign_ids de NINGÚN producto (mapa campToProd).
+  let _sinProdBlock=''
+  try{
+    const _cTPsp=(window._metaPort&&window._metaPort.campToProd)||{}
+    const _liveEstSp=window._nexoLiveEstadoByCampId||{}
+    const _entSp=window._nexoEntregaByCampId||{}
+    // Universo combinado: campañas de la BD (meta_campanas) + vistas EN VIVO (incluye las de HOY sin sincronizar)
+    const _univSp={}
+    for(const cp of ((window._metaPort&&Array.isArray(window._metaPort.campanas))?window._metaPort.campanas:[])){
+      if(cp&&cp.meta_id)_univSp[String(cp.meta_id)]={id:String(cp.meta_id),nombre:cp.nombre||String(cp.meta_id),accId:cp.account_id?String(cp.account_id):'',estadoBD:cp.estado||''}
+    }
+    for(const k in (window._liveCampsAll||{})){
+      const lv=window._liveCampsAll[k]
+      if(!_univSp[String(k)])_univSp[String(k)]={id:String(k),nombre:(lv&&lv.nombre)||String(k),accId:(lv&&lv.account_id)?String(lv.account_id):'',estadoBD:''}
+    }
+    const _listaSp=[]
+    for(const k in _univSp){
+      const c=_univSp[k]
+      if(_cTPsp[c.id])continue // tiene producto asignado → no va aquí
+      const _estSp=_liveEstSp[c.id]||c.estadoBD||''
+      if(_estSp!=='ACTIVE')continue // misma regla del expand: botón ACTIVE (vivo, fallback BD)
+      if(_entSp[c.id]===false)continue // misma regla del expand: sin anuncios entregando → inactiva
+      _listaSp.push({id:c.id,nombre:c.nombre,accId:c.accId,gasto:gastoByCampId[c.id]||0})
+    }
+    _listaSp.sort((a,b)=>(b.gasto-a.gasto)||String(a.nombre).localeCompare(String(b.nombre)))
+    if(_listaSp.length){
+      const _escSp=s=>String(s==null?'':s).replace(/</g,'&lt;').replace(/"/g,'&quot;')
+      const _filasSp=_listaSp.map((c,i)=>{
+        const _nomEscSp=String(c.nombre||c.id).replace(/\\/g,'').replace(/'/g,"\\'").replace(/"/g,'')
+        return`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 8px;border-radius:6px;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-bottom:1px solid rgba(255,255,255,.04);font-size:12px;color:var(--text)">
+          <span style="display:inline-block;width:9px;height:9px;border-radius:50%;flex:none;background:#22c55e;border:1.5px solid #16a34a;box-shadow:0 0 5px rgba(34,197,94,.7)" title="🟢 Activa DE VERDAD: botón prendido en Meta y entregando (misma regla del expand de cuenta)"></span>
+          <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:340px" title="${_escSp(c.nombre)}">📣 ${_escSp(c.nombre)}</span>
+          ${c.accId?`<span style="font-size:10px;color:var(--subtle);white-space:nowrap" title="Cuenta publicitaria">🏢 ${_escSp(c.accId)}</span>`:''}
+          <span style="font-family:monospace;font-size:10.5px;color:var(--muted);white-space:nowrap">${_escSp(c.id)}</span>
+          <button onclick="event.stopPropagation();window._rpCopiarId('${_escSp(c.id)}',this)" title="Copiar ID de la campaña" style="background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:5px;color:var(--muted);font-size:10px;padding:1px 7px;cursor:pointer;flex-shrink:0">📋</button>
+          ${c.gasto>0?`<span style="font-size:10px;color:var(--amber);white-space:nowrap" title="Gasto del período que está cayendo al cajón 'sin asignar' por no tener producto">💸 $${fmt(c.gasto)}</span>`:''}
+          <button onclick="event.stopPropagation();modalAsignarProductoCamp('${_escSp(c.id)}','${_nomEscSp}','${_escSp(c.accId)}')" style="margin-left:auto;background:var(--amber-bg);border:1px solid var(--amber);border-radius:6px;color:var(--amber);font-size:10.5px;font-weight:700;padding:3px 10px;cursor:pointer;flex-shrink:0" title="⚠️ Sin producto · clic para asignarle uno (mismo modal de las cards)">⚠️ Asignar producto</button>
+        </div>`
+      }).join('')
+      _sinProdBlock=`<div style="margin:0 0 12px;padding:10px 12px;background:rgba(245,158,11,.05);border:1px solid rgba(245,158,11,.4);border-radius:10px">
+        <div onclick="window._rpToggleCuadre('rp-sinprod')" style="cursor:pointer;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--text)" title="Toca para abrir/cerrar la lista. Estas campañas están ACTIVAS (misma regla activa/inactiva del expand de cuenta) pero NO tienen producto: su gasto cae al cajón 'sin asignar' y no entra al CPA de ningún producto.">
+          <span id="rp-sinprod-chev" style="display:inline-block;width:12px;font-size:9px;color:var(--amber)">▸</span>
+          <span style="font-weight:700;color:var(--amber)">⚠️ ${_listaSp.length} campaña${_listaSp.length===1?'':'s'} ACTIVA${_listaSp.length===1?'':'S'} sin producto asignado</span>
+          <span style="font-size:10.5px;color:var(--muted)">— gastan plata que no entra al CPA de ningún producto · asígnalas aquí mismo</span>
+        </div>
+        <div id="rp-sinprod-sub" style="display:none;margin-top:8px">${_filasSp}</div>
+      </div>`
+    }
+  }catch(_){}
+
   // 13. HTML final
   return`
   <div class="resumen-productos" data-sem-port="${semCodePort}" style="background:${portC.bg};border:1px solid ${portC.border};border-radius:12px;padding:16px 18px;margin-bottom:16px">
@@ -13704,6 +13757,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
       ${conteo.sin_ventas>0?_resumenPillCount('sin_ventas',conteo.sin_ventas,'⏳','en ESPERAR','var(--muted)','var(--card2)','ESPERAR — Sin ventas todavía.'):''}
       <button onclick="resumenProductosFilter('',this)" title="Mostrar todos los productos sin filtro" style="margin-left:auto;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:10px;cursor:pointer">Ver todos</button>
     </div>
+
+    ${_sinProdBlock}
 
     <div id="rp-cards">
       ${productosResumen.map(d=>_renderProductoCardResumen(d,rankingMap[d.nombre])).join('')}
@@ -14561,11 +14616,20 @@ function _renderProductoCardResumen(data,ranking){
     const _cidF='cuadf_'+_slugProd
     // NUEVO: semáforo por CPA IDS de HOY (día 'p') para cada campaña de la fusión — mismas reglas canónicas
     // 45/70/100 del BE + rama fuga (gasto sin ventas). Lo usan: filtros de urgencia, data-attrs y el modal masivo.
+    // FIX: MISMA LÓGICA del desglose de la cuenta (renderCamp). Cuando el período es HOY, el CPA
+    // que manda el semáforo es el CPA Real Efectivas = gasto ÷ (ventas × % confirmación del producto).
+    // Cuando el período es un día/rango pasado (AYER, etc.), las ventas ya son confirmadas Dropi y
+    // se usa el CPA Real sin ajuste — exactamente como lo hace el desglose de la cuenta en ese día.
+    const _pctConfF=(data.pctConf!=null&&!isNaN(data.pctConf))?Number(data.pctConf):0.62
+    const _cpaSemHoyF=(gP,nP)=>{
+      const nEf=data.esSoloHoy?(nP*_pctConfF):nP
+      return nEf>0?gP/nEf:0
+    }
     const _semIdsHoyF=(F)=>{
       if(!(_BE>0))return''
       const gP=(F.dias['p']&&F.dias['p'].gasto)||0
       const nP=(F.dias['p']&&F.dias['p'].count)||0
-      if(gP>0&&nP>0){const c=gP/nP;return c>_BE?'stop':(c>_BE*0.7?'precaucion':(c>_BE*0.45?'escalar':'fuego'))}
+      if(gP>0&&nP>0){const c=_cpaSemHoyF(gP,nP);return c>_BE?'stop':(c>_BE*0.7?'precaucion':(c>_BE*0.45?'escalar':'fuego'))}
       if(gP>0){const p=gP/_BE;return p>=1?'stop':(p>=0.5?'precaucion':'sin_ventas')}
       return'sin_ventas'
     }
@@ -14599,7 +14663,7 @@ function _renderProductoCardResumen(data,ranking){
       [_cwF.dias,'📅 DÍAS','#c4b5fd','Verde = corrió y vendió · 🚨 ámbar = gastó y 0 ventas · gris = no corrió'],
       [_cwF.gto,'💸 GASTO','#94a3b8','Gasto total de la campaña en sus días'],
       [_cwF.cpa,'🎯 CPA','#cbd5e1','CPA total = gasto ÷ ventas de todos sus días'],
-      [_cwF.ids,'🆔 CPA HOY','#fcd34d','CPA IDS de HOY con el color del semáforo'],
+      [_cwF.ids,'🆔 CPA HOY','#fcd34d','HOY = CPA Real Efectivas (gasto ÷ ventas por IDs × % confirmación) — MISMO número del desglose de la cuenta. Período pasado = CPA Real con ventas Dropi. Con el color del semáforo'],
       [_cwF.vts,'🛒 VTS','#e2e8f0','Ventas totales de la campaña']
     ].map(h=>`<span style="display:inline-block;width:${h[0]}px;flex-shrink:0;font-size:8.5px;font-weight:700;letter-spacing:.3px;color:${h[2]};white-space:nowrap;cursor:help;padding-right:6px" title="${h[3]}">${h[1]}</span>`).join('')}</div>`
     const _campsF=_lista.map((F,i)=>{
@@ -14675,9 +14739,14 @@ function _renderProductoCardResumen(data,ranking){
         const nP=(F.dias['p']&&F.dias['p'].count)||0
         if(gP<=0)return''
         if(nP===0)return`<span style="margin-left:6px;font-size:10px;font-weight:700;color:var(--amber);border:1.5px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap;vertical-align:middle" title="HOY gastó $${fmt(gP)} y lleva 0 ventas por IDs: fuga del día. Vigílala.">🆔 🚨 0 vts hoy</span>`
-        const cI=gP/nP
+        // FIX: mismo número del desglose de la cuenta — HOY = CPA Real Efectivas (gasto ÷ ventas × %conf);
+        // período pasado = CPA Real (ventas confirmadas Dropi, sin ajuste).
+        const cI=_cpaSemHoyF(gP,nP)
         const col=(typeof window!=='undefined'&&window._nexoSemColor)?window._nexoSemColor(cI,_BE):(_BE>0?(cI<=_BE?'var(--green)':'var(--red)'):'var(--muted)')
-        return`<span style="margin-left:6px;font-size:10px;font-weight:700;color:${col};border:1.5px solid ${col};border-radius:999px;padding:1px 8px;white-space:nowrap;vertical-align:middle" title="🆔 CPA IDS de HOY = gasto de hoy ÷ ventas por IDs de hoy ($${fmt(gP)} ÷ ${nP}) · Borde = semáforo break-even ($${fmt(_BE)}): 🟢 va bien · 🟡 cuidado · 🔴 pierde plata">🆔 $${fmt(cI)}</span>`
+        const _tipI=data.esSoloHoy
+          ?`🆔 CPA Real Efectivas de HOY = gasto de hoy ÷ (ventas por IDs × ${Math.round(_pctConfF*100)}% confirmación) → $${fmt(gP)} ÷ (${nP} × ${Math.round(_pctConfF*100)}%) · MISMO número del desglose de la cuenta · Borde = semáforo break-even ($${fmt(_BE)}): 🟢 va bien · 🟡 cuidado · 🔴 pierde plata`
+          :`🆔 CPA del período = gasto ÷ ventas confirmadas Dropi ($${fmt(gP)} ÷ ${nP}) · misma lógica del desglose de la cuenta para días pasados · Borde = semáforo break-even ($${fmt(_BE)}): 🟢 va bien · 🟡 cuidado · 🔴 pierde plata`
+        return`<span style="margin-left:6px;font-size:10px;font-weight:700;color:${col};border:1.5px solid ${col};border-radius:999px;padding:1px 8px;white-space:nowrap;vertical-align:middle" title="${_tipI}">🆔 $${fmt(cI)}</span>`
       })()
       // NUEVO: badge de estado como variable (para su columna)
       const _badgeEstF=(()=>{
@@ -14764,10 +14833,10 @@ function _renderProductoCardResumen(data,ranking){
     const _filtroRowF=`<div style="display:flex;gap:6px;flex-wrap:wrap;margin:0 0 8px;padding:7px 9px;background:var(--card2);border-radius:8px;align-items:center">
         <span style="font-size:10px;color:var(--muted);letter-spacing:.5px">URGENCIA →</span>
         ${_urgPillF('prender_ya',_contaF.prender_ya,'🛑 PRENDER YA','var(--red)','var(--red-bg)','PRENDER YA: hoy $0 de gasto pero vendían en los días anteriores. Click para filtrar y prenderlas. Click de nuevo para quitar el filtro.')}
-        ${_urgPillF('stop',_contaF.stop,'🔴 PAUSAR','var(--red)','var(--red-bg)','APAGAR: el CPA IDS de hoy pasa el break-even — pierden plata. Click para filtrar.')}
-        ${_urgPillF('precaucion',_contaF.precaucion,'🟡 CUIDADO','var(--amber)','var(--amber-bg)','CUIDADO: CPA IDS de hoy al límite del break-even. Click para filtrar.')}
-        ${_urgPillF('fuego',_contaF.fuego,'🟣 DOBLAR','var(--purple)','var(--purple-bg)','FUEGO: CPA IDS de hoy brutal (≤45% del BE). Click para filtrar y doblar.')}
-        ${_urgPillF('escalar',_contaF.escalar,'🟢 ESCALAR','var(--green)','var(--green-bg)','ESCALAR: CPA IDS de hoy sano (45–70% del BE). Click para filtrar y subir +30%.')}
+        ${_urgPillF('stop',_contaF.stop,'🔴 PAUSAR','var(--red)','var(--red-bg)','APAGAR: el CPA Real Efectivas de hoy pasa el break-even — pierden plata (misma lógica del desglose de la cuenta). Click para filtrar.')}
+        ${_urgPillF('precaucion',_contaF.precaucion,'🟡 CUIDADO','var(--amber)','var(--amber-bg)','CUIDADO: CPA Real Efectivas de hoy al límite del break-even (misma lógica del desglose de la cuenta). Click para filtrar.')}
+        ${_urgPillF('fuego',_contaF.fuego,'🟣 DOBLAR','var(--purple)','var(--purple-bg)','FUEGO: CPA Real Efectivas de hoy brutal (≤45% del BE). Click para filtrar y doblar.')}
+        ${_urgPillF('escalar',_contaF.escalar,'🟢 ESCALAR','var(--green)','var(--green-bg)','ESCALAR: CPA Real Efectivas de hoy sano (45–70% del BE). Click para filtrar y subir +30%.')}
         ${_urgPillF('sin_ventas',_contaF.sin_ventas,'⏳ ESPERAR','var(--muted)','var(--card)','ESPERAR: hoy sin ventas todavía y gasto bajo. Click para filtrar y dejar correr.')}
         <button onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','sem','',this)" title="Mostrar todas las campañas sin filtro de urgencia" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:4px 9px;font-size:10px;cursor:pointer">Ver todas</button>
         <input type="text" id="${_cidF}-buscarid" placeholder="🆔 Buscar por ID de campaña..." onclick="event.stopPropagation()" oninput="window._rpFusionFiltro('${_cidF}','id',this.value)" style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:5px 10px;color:var(--text);font-size:11px;flex:1;min-width:170px;outline:none" title="Pega el ID de una campaña de esta fusión: te deja sola esa fila.">

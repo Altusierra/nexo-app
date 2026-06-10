@@ -13293,14 +13293,16 @@ async function _renderResumenProductos(desde,hasta,hoy){
   // 6. Contar IDs reportados manualmente por producto (cada ID = 1 venta)
   const reportesByProd={}
   const reportesAdIdsByProd={}
+  const reportesAdIdsListByProd={}
   for(const r of repsUnique){
     const pn=resolveProdName(r.producto_nombre||'').nombre||(r.producto_nombre||'')
     if(!pn)continue
     if(!reportesByProd[pn])reportesByProd[pn]=0
     if(!reportesAdIdsByProd[pn])reportesAdIdsByProd[pn]=new Set()
+    if(!reportesAdIdsListByProd[pn])reportesAdIdsListByProd[pn]=[]
     const ids=(r.ad_ids||'').split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)
     reportesByProd[pn]+=ids.length
-    for(const id of ids)reportesAdIdsByProd[pn].add(id)
+    for(const id of ids){reportesAdIdsByProd[pn].add(id);reportesAdIdsListByProd[pn].push(id)}
   }
 
   // ── DIAGNÓSTICO TEMPORAL: por qué AYER puede mostrar 0 IDs reportados ──
@@ -13413,14 +13415,71 @@ async function _renderResumenProductos(desde,hasta,hoy){
   }
   const _extrasDias={mapeosAntierByProd,gastoAntierByCampId,reportesAntierByProd,conversacionesAntierByProd,mapeosTrasByProd,gastoTrasByCampId,reportesTrasByProd,conversacionesTrasByProd}
 
+  // 6.8 NUEVO: Mapa ad_id → cuenta (para el "cuadre de ventas por origen" y el strip de cuenta).
+  //      Sigue la cadena ad → adset → campaña → cuenta usando meta_campanas (igual que
+  //      buildAdProductMap, pero llegando hasta la cuenta). ADITIVO: no altera ningún cálculo
+  //      de ventas/CPA/semáforo; solo sirve para clasificar de dónde viene cada venta.
+  const adToCuenta={}
+  try{
+    const _adSet=new Set()
+    for(const arr of Object.values(mapeosByProd)){for(const m of (arr||[])){if(m.ad_id)_adSet.add(String(m.ad_id))}}
+    for(const s of Object.values(reportesAdIdsByProd)){for(const id of (s||[])){if(id)_adSet.add(String(id))}}
+    const _adIds=[..._adSet]
+    if(_adIds.length){
+      const _adToAdset={}
+      for(let i=0;i<_adIds.length;i+=300){
+        const{data:ads}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','ad').in('meta_id',_adIds.slice(i,i+300))
+        for(const a of (ads||[])){if(a.parent_id)_adToAdset[String(a.meta_id)]=String(a.parent_id)}
+      }
+      const _adsetIds=[...new Set(Object.values(_adToAdset))]
+      const _adsetToCamp={}
+      for(let i=0;i<_adsetIds.length;i+=300){
+        const{data:adsets}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','adset').in('meta_id',_adsetIds.slice(i,i+300))
+        for(const s of (adsets||[])){if(s.parent_id)_adsetToCamp[String(s.meta_id)]=String(s.parent_id)}
+      }
+      const _campIds=[...new Set(Object.values(_adsetToCamp))]
+      const _campToAcc={}
+      for(let i=0;i<_campIds.length;i+=300){
+        const{data:camps}=await sb.from('meta_campanas').select('meta_id,account_id').eq('nivel','campaign').in('meta_id',_campIds.slice(i,i+300))
+        for(const cp of (camps||[])){if(cp.account_id)_campToAcc[String(cp.meta_id)]=String(cp.account_id)}
+      }
+      const{data:_ctas}=await sb.from('meta_cuentas').select('account_id,nombre')
+      const _accNombre={}
+      for(const cc of (_ctas||[]))_accNombre[String(cc.account_id)]=cc.nombre||String(cc.account_id)
+      for(const adId of _adIds){
+        const adset=_adToAdset[adId];if(!adset)continue
+        const camp=_adsetToCamp[adset];if(!camp)continue
+        const acc=_campToAcc[camp];if(!acc)continue
+        adToCuenta[adId]={accId:acc,accNombre:_accNombre[acc]||acc}
+      }
+    }
+  }catch(e){console.warn('[cuadre ventas] no se pudo armar ad→cuenta:',e&&e.message)}
+
   // 7. Calcular metricas por producto
   // esSoloHoy = el rango es exactamente HOY (sin cruce Dropi todavía)
   const esSoloHoy=(desde===hoy&&hasta===hoy)
   const productosResumen=[]
   for(const prod of productos){
-    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd,reportesPrevByProd,_extrasDias)
+    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd,reportesPrevByProd,_extrasDias,adToCuenta,reportesAdIdsListByProd)
     if(data)productosResumen.push(data)
   }
+
+  // NUEVO: cache global de ventas por cuenta × producto (lo lee el strip de cada cuenta del portafolio).
+  //        Se arma desde el cuadre de cada producto (categoría "En campañas", desglosada por cuenta).
+  try{
+    const _vcp={}
+    for(const d of productosResumen){
+      const pc=d&&d.cuadre&&d.cuadre.porCuenta
+      if(!pc)continue
+      for(const row of pc){
+        if(!_vcp[row.accId])_vcp[row.accId]={}
+        _vcp[row.accId][d.nombre]=(_vcp[row.accId][d.nombre]||0)+row.count
+      }
+    }
+    window._nexoVentasCuentaProd=_vcp
+    window._nexoVentasCuentaProdRango={desde,hasta}
+    if(typeof window._pintarVentasCuentaStrip==='function')setTimeout(()=>window._pintarVentasCuentaStrip(),0)
+  }catch(_){}
 
   if(productosResumen.length===0){
     return`<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin-bottom:16px">
@@ -13515,7 +13574,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
 
 // Calcula las metricas consolidadas de un producto en el rango.
 // Devuelve null si no hay actividad relevante (sin gasto y sin pedidos).
-function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd,reportesPrevByProd,extrasDias){
+function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd,reportesPrevByProd,extrasDias,adToCuenta,reportesAdIdsListByProd){
   // Gasto desde campaign_ids configurados del producto
   let gasto=0
   const campIds=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
@@ -13717,6 +13776,40 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
   // Conversaciones del producto en el rango (manual, suma del rango)
   const conversaciones=(conversacionesByProd&&conversacionesByProd[prod.nombre])||0
 
+  // ── NUEVO: CUADRE DE VENTAS POR ORIGEN (campañas / orgánicas / sin sincronizar) ──
+  // Descompone el MISMO número grande que muestra la card (totalPedidos) según de dónde viene
+  // cada venta, y desglosa "En campañas" por cuenta. Si la suma da el total → cuadra (no hay bug).
+  // Fuente del número (igual criterio que totalPedidos / cpaReal):
+  //   - pasado con confirmados (pConf>0): los mapeos del producto (cada fila = 1 venta)
+  //   - HOY o sin confirmados: los ad_ids reportados por el aux (cada id = 1 venta, con repeticiones)
+  let cuadre=null
+  try{
+    const _atc=adToCuenta||{}
+    let _adList=[]
+    if(!esSoloHoy&&pConf>0){
+      // SOLO mapeos confirmados: es el número grande que la card muestra en días pasados.
+      _adList=mps.filter(m=>m.estado_final&&m.estado_final!=='CANCELADO'&&m.estado_final!=='PENDIENTE CONFIRMACION').map(m=>m.ad_id)
+    }else{
+      const lst=(reportesAdIdsListByProd&&reportesAdIdsListByProd[prod.nombre])||null
+      _adList=lst?lst.slice():[]
+    }
+    let _enCamp=0,_org=0,_sin=0
+    const _porCuentaMap={}
+    for(const raw of _adList){
+      const id=(raw!=null&&raw!=='')?String(raw):''
+      if(!id){_org++;continue}
+      const info=_atc[id]
+      if(info&&info.accId){
+        _enCamp++
+        if(!_porCuentaMap[info.accId])_porCuentaMap[info.accId]={accId:info.accId,nombre:info.accNombre||info.accId,count:0}
+        _porCuentaMap[info.accId].count++
+      }else{_sin++}
+    }
+    const _porCuenta=Object.values(_porCuentaMap).sort((a,b)=>b.count-a.count)
+    const _totalCuadre=_adList.length
+    cuadre={total:_totalCuadre,enCampanas:_enCamp,organicas:_org,sinSync:_sin,porCuenta:_porCuenta,cuadra:(_enCamp+_org+_sin)===_totalCuadre}
+  }catch(_){cuadre=null}
+
   return{
     producto:prod,
     nombre:prod.nombre,
@@ -13730,6 +13823,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     prevData2,prevData3,stockActual,
     conversaciones,
     pedidosIds:pReportados,
+    cuadre,
     // Desglose para tooltip de ganancia
     desgloseGanancia:{ventaEfectiva,costoProv,costoFlete,costoDev,gasto,costoConvProd,devPct}
   }
@@ -13882,6 +13976,39 @@ function _renderProductoCardResumen(data,ranking){
     ${_filaPrev}
   </div>`
 
+  // ── NUEVO: bloque "cuadre de ventas por origen" (En campañas / Orgánicas / Sin sincronizar) ──
+  // Descompone el número grande de la card por origen, con "En campañas" desplegable por cuenta.
+  // Pensado en lenguaje simple: si las 3 sumas dan el total → verde (todo cuadra), sino → rojo.
+  let _cuadreHtml=''
+  if(data.cuadre&&data.cuadre.total>0){
+    const cu=data.cuadre
+    const _cid='cuad_'+String(data.nombre||'x').replace(/[^a-zA-Z0-9]/g,'')
+    const _suma=cu.enCampanas+cu.organicas+cu.sinSync
+    const _ok=cu.cuadra
+    const _ctasHtml=cu.porCuenta.length
+      ? cu.porCuenta.map(pc=>`<div style="display:flex;align-items:center;font-size:12px;color:var(--muted);padding:3px 0"><span>🏢 ${pc.nombre}</span><span style="margin-left:auto;color:var(--text);font-weight:600">${pc.count}</span></div>`).join('')
+      : `<div style="font-size:11px;color:var(--subtle);padding:3px 0">— ninguna —</div>`
+    _cuadreHtml=`<div style="margin-top:10px;padding:12px 13px;background:rgba(0,0,0,.18);border-radius:8px">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;letter-spacing:.2px">🔎 ¿De dónde salen los ${cu.total} pedidos?</div>
+      <div onclick="window._rpToggleCuadre('${_cid}')" style="cursor:pointer;display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0" title="Toca para ver/ocultar el detalle por cuenta">
+        <span id="${_cid}-chev" style="display:inline-block;width:14px;font-size:10px;color:var(--muted)">▼</span>
+        <span style="margin-left:4px">📊 En campañas</span>
+        <span style="margin-left:auto;font-weight:700">${cu.enCampanas}</span>
+      </div>
+      <div id="${_cid}-sub" style="margin:2px 0 6px 20px;border-left:1px solid var(--border);padding-left:12px">${_ctasHtml}</div>
+      <div style="display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0 5px 18px">
+        <span>🌱 Orgánicas (sin anuncio)</span><span style="margin-left:auto;font-weight:700">${cu.organicas}</span>
+      </div>
+      <div style="display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0 5px 18px">
+        <span>🔌 Sin sincronizar con Meta</span><span style="margin-left:auto;font-weight:700">${cu.sinSync}</span>
+      </div>
+      <div style="margin-top:9px;padding:9px 11px;border-radius:7px;font-size:12.5px;display:flex;align-items:center;gap:7px;background:${_ok?'var(--green-bg)':'var(--red-bg)'};color:${_ok?'var(--green)':'var(--red)'};border:1px solid ${_ok?'var(--green)':'var(--red)'}">
+        <span style="font-size:15px">${_ok?'✅':'⚠️'}</span>
+        <span><strong>${cu.enCampanas} + ${cu.organicas} + ${cu.sinSync} = ${_suma}</strong>${_ok?' · TODO CUADRA':' · faltan '+(cu.total-_suma)+' · HAY BUG, REVISAR'}</span>
+      </div>
+    </div>`
+  }
+
   return`
   <details class="rp-card" data-sem-code="${data.semCode}" style="background:${c.bg};border:1px solid ${c.border};border-radius:10px;margin-bottom:8px;overflow:hidden">
     <summary style="list-style:none;cursor:pointer;padding:14px 16px;display:block;outline:none">
@@ -13931,8 +14058,37 @@ function _renderProductoCardResumen(data,ranking){
         <span>4u: <strong style="color:var(--text)">${data.o4}</strong></span>
         ${data.conversaciones>0?`<span style="border-left:1px solid var(--border);padding-left:14px;margin-left:0">💬 Conversaciones: <strong style="color:var(--text)">${fmt(data.conversaciones)}</strong></span>`:''}
       </div>`:''}
+      ${_cuadreHtml}
     </div>
   </details>`
+}
+
+// Despliega/colapsa el detalle por cuenta del cuadre "En campañas" de una card de producto.
+window._rpToggleCuadre=function(cid){
+  const sub=document.getElementById(cid+'-sub')
+  const chev=document.getElementById(cid+'-chev')
+  if(!sub)return
+  const oculto=sub.style.display==='none'
+  sub.style.display=oculto?'block':'none'
+  if(chev)chev.textContent=oculto?'▼':'▸'
+}
+
+// Pinta en el header de cada cuenta el total de ventas (en campañas) desglosado por producto.
+// Lee el cache window._nexoVentasCuentaProd que puebla _renderResumenProductos. Así no hay que
+// ir campaña por campaña contando: la cuenta muestra cuánto vendió cada producto suyo.
+window._pintarVentasCuentaStrip=function(){
+  try{
+    const vcp=window._nexoVentasCuentaProd||{}
+    document.querySelectorAll('[id^="meta-cta-ventas-"]').forEach(el=>{
+      const accId=el.id.replace('meta-cta-ventas-','')
+      const prods=vcp[accId]
+      if(!prods||!Object.keys(prods).length){el.innerHTML='';return}
+      const entries=Object.entries(prods).sort((a,b)=>b[1]-a[1])
+      const total=entries.reduce((s,kv)=>s+kv[1],0)
+      const chips=entries.map(kv=>`<span style="color:var(--text)">${kv[0]} <strong style="color:var(--green)">${kv[1]}</strong></span>`).join(' · ')
+      el.innerHTML=`🛒 Ventas en campañas: ${chips} · <span style="color:var(--muted)">Total <strong style="color:var(--text)">${total}</strong></span>`
+    })
+  }catch(_){}
 }
 
 // Pill del strip de urgencia (counts por estado del semaforo).
@@ -14276,6 +14432,7 @@ async function renderMetaPortafolio(el,isAdmin){
               <span class="pill pill-${badgeColor}" style="font-size:10px" title="Refleja actividad real en el rango seleccionado. Coincide con el filtro 'Con actividad' al expandir la cuenta.">${badgeReal}</span>
             </div>
             <div style="font-size:11px;color:var(--muted)">${cc.total} campañas · ${ca.con} con actividad · <span style="color:var(--green)">${ca.activas} activas</span> · ${ca.pausadas} pausadas</div>
+            <div id="meta-cta-ventas-${cuenta.account_id}" style="font-size:11px;color:var(--muted);margin-top:3px"></div>
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
             ${isAdmin?`<label onclick="event.stopPropagation()" style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--muted);cursor:pointer" title="Si está marcado, esta cuenta NO suma en el Tracker global">

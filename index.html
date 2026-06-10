@@ -14173,6 +14173,115 @@ function _renderProductoCardResumen(data,ranking){
   _cuadreHtml+=_mkCuadreBlock(data.prevData2&&data.prevData2.cuadre,(data.esSoloHoy?'antier':'el 2º período'),'b','var(--subtle)')
   _cuadreHtml+=_mkCuadreBlock(data.prevData3&&data.prevData3.cuadre,(data.esSoloHoy?'trasantier':'el 3º período'),'c','var(--subtle)')
 
+  // ── NUEVO: FUSIÓN 4 DÍAS — todas las campañas juntas, agrupadas por ID ──
+  // Reorganiza los MISMOS datos de los 4 bloques de arriba (data.cuadre / prevData*.cuadre):
+  // cada campaña (mismo campId) aparece UNA sola vez; dentro, primero la campaña día por día
+  // y luego cada anuncio (mismo ad_id = mismo bloque) con sus días. CERO queries nuevas.
+  // CPA pill: MISMA regla del semáforo de los bloques (verde ≤ BE del producto, rojo > BE).
+  const _mkCuadreFusion=()=>{
+    const _dias=[
+      {k:'p',lab:(data.esSoloHoy?'HOY':'PERÍODO'),emo:'📅',cu:data.cuadre},
+      {k:'a',lab:(data.esSoloHoy?'AYER':'PER. ANT.'),emo:'📅',cu:data.prevData&&data.prevData.cuadre},
+      {k:'b',lab:(data.esSoloHoy?'ANTIER':'2º PER.'),emo:'📅',cu:data.prevData2&&data.prevData2.cuadre},
+      {k:'c',lab:(data.esSoloHoy?'TRASANTIER':'3º PER.'),emo:'📅',cu:data.prevData3&&data.prevData3.cuadre}
+    ]
+    // Fusionar: campId → {datos por día + adId → datos por día}
+    const _fus={}
+    let _diasConDatos=0
+    for(const d of _dias){
+      const lista=d.cu&&d.cu.porCampana
+      if(!lista||!lista.length)continue
+      _diasConDatos++
+      for(const cp of lista){
+        const ck=String(cp.campId)
+        if(!_fus[ck])_fus[ck]={campId:ck,nombre:cp.nombre,accNombre:cp.accNombre,count:0,gasto:0,dias:{},ads:{}}
+        const F=_fus[ck]
+        F.count+=cp.count
+        F.gasto+=cp.gasto||0
+        F.dias[d.k]={count:cp.count,gasto:cp.gasto||0,cpa:cp.cpa||0}
+        for(const _adId of Object.keys(cp.ads||{})){
+          const n=cp.ads[_adId]
+          if(!F.ads[_adId])F.ads[_adId]={count:0,gasto:0,dias:{}}
+          const A=F.ads[_adId]
+          const g=(cp.adsGasto&&cp.adsGasto[_adId])||0
+          A.count+=n;A.gasto+=g
+          A.dias[d.k]={n:n,g:g,cpa:(n>0&&g>0)?g/n:0}
+        }
+      }
+    }
+    const _lista=Object.values(_fus)
+    // Solo aparece si hay 2+ días con campañas (con 1 solo día no hay nada que fusionar)
+    if(!_lista.length||_diasConDatos<2)return''
+    for(const F of _lista)F.cpa=(F.count>0&&F.gasto>0)?F.gasto/F.count:0
+    // Orden: mejor CPA total arriba (misma regla que los bloques de arriba). Sin CPA al final.
+    _lista.sort((a,b)=>{const x=a.cpa>0?a.cpa:Infinity,y=b.cpa>0?b.cpa:Infinity;return x!==y?x-y:b.count-a.count})
+    // Helpers visuales (idénticos a los de _mkCuadreBlock para que se vea IGUAL)
+    const _esc=s=>String(s==null?'':s).replace(/</g,'&lt;').replace(/"/g,'&quot;')
+    const _BE=data.margenBE||0
+    const _cpaPill=(cpa,sz)=>{
+      if(!cpa||cpa<=0)return''
+      const col=_BE>0?(cpa<=_BE?'var(--green)':'var(--red)'):'var(--muted)'
+      const fs=sz==='sm'?'10px':'11px'
+      return`<span style="margin-left:8px;font-size:${fs};font-weight:700;color:${col};border:1px solid ${col};border-radius:999px;padding:1px 8px;white-space:nowrap" title="CPA real = gasto ÷ ventas de esta fila · Break-even: $${fmt(_BE)} · Verde = gana plata, Rojo = pierde">🎯 $${fmt(cpa)}</span>`
+    }
+    const _gastoTxt=(g)=>g>0?`<span style="margin-left:8px;font-size:10px;color:var(--muted);white-space:nowrap">💸 $${fmt(g)}</span>`:''
+    const _btnCopy=(id,label)=>{
+      const _on=window._rpIdCopiado&&window._rpIdCopiado(id)
+      return`<button onclick="event.stopPropagation();window._rpCopiarId('${_esc(id)}',this)" title="Copiar ${label}: ${_esc(id)} · Queda marcado en verde (aunque recargues) hasta que lo toques de nuevo" style="margin-left:6px;background:${_on?'var(--green-bg)':'rgba(255,255,255,.06)'};border:1px solid ${_on?'var(--green)':'var(--border)'};border-radius:5px;color:${_on?'var(--green)':'var(--muted)'};font-size:10px;padding:1px 7px;cursor:pointer;flex-shrink:0">${_on?'✅':'📋'}</button>`
+    }
+    // Fila de UN día (sirve para campaña y para anuncio): día + gasto + CPA + ventas. Sin datos → rayita.
+    const _filaDia=(d,obj,sz)=>{
+      const fs=sz==='sm'?'11px':'11.5px'
+      if(!obj)return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--subtle);padding:3px 8px"><span style="width:92px;flex-shrink:0">${d.emo} ${d.lab}</span><span style="font-style:italic">— no corrió ese día —</span></div>`
+      const n=obj.count!=null?obj.count:obj.n
+      const g=obj.gasto!=null?obj.gasto:obj.g
+      return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--muted);padding:3px 8px"><span style="width:92px;flex-shrink:0;color:var(--text)">${d.emo} ${d.lab}</span>${_gastoTxt(g)}${_cpaPill(obj.cpa,'sm')}<span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px" title="Ventas de este día">${n}</span></div>`
+    }
+    const _cidF='cuadf_'+_slugProd
+    const _campsF=_lista.map((F,i)=>{
+      const _ccid=_cidF+'_c'+i
+      // Chips de días: verde = corrió ese día, gris = no corrió
+      const _chips=_dias.map(d=>`<span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:999px;margin-left:3px;white-space:nowrap;${F.dias[d.k]?'background:var(--green-bg);color:var(--green);border:1px solid var(--green)':'background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)'}" title="${F.dias[d.k]?('Corrió '+d.lab+': '+F.dias[d.k].count+' ventas'):('No corrió '+d.lab)}">${d.lab}</span>`).join('')
+      // Anuncios fusionados: mismo ad_id = mismo bloque, mejor CPA total arriba, cada uno día por día
+      const _adsF=Object.keys(F.ads).map(_adId=>{
+        const A=F.ads[_adId]
+        return{adId:_adId,count:A.count,gasto:A.gasto,dias:A.dias,cpaT:(A.count>0&&A.gasto>0)?A.gasto/A.count:0}
+      }).sort((a,b)=>{
+        const x=a.cpaT>0?a.cpaT:Infinity,y=b.cpaT>0?b.cpaT:Infinity
+        return x!==y?x-y:b.count-a.count
+      }).map((A,j)=>`<div style="margin-top:6px;padding:6px 8px;background:${j%2===0?'rgba(255,255,255,.025)':'transparent'};border-radius:5px">
+          <div style="display:flex;align-items:center;font-size:11.5px;color:var(--muted)"><span style="font-family:monospace">🖼️ ${_esc(A.adId)}</span>${_btnCopy(A.adId,'ID del anuncio')}${_gastoTxt(A.gasto)}${_cpaPill(A.cpaT,'sm')}<span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px" title="Ventas totales del anuncio sumando sus días">${A.count}</span></div>
+          <div style="margin:2px 0 0 14px;border-left:1px solid var(--border);padding-left:8px">${_dias.map(d=>_filaDia(d,A.dias[d.k],'sm')).join('')}</div>
+        </div>`).join('')
+      return`<div style="padding:6px 8px;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-radius:6px;border-bottom:1px solid rgba(255,255,255,.04)">
+        <div onclick="window._rpToggleCuadre('${_ccid}')" style="cursor:pointer;display:flex;align-items:center;font-size:12px;color:var(--text);min-height:24px;flex-wrap:wrap" title="Toca para ver esta campaña día por día y sus anuncios agrupados por ID">
+          <span id="${_ccid}-chev" style="display:inline-block;width:12px;font-size:9px;color:var(--muted)">▸</span>
+          <span style="margin-left:3px">📣 ${_esc(F.nombre)}</span>
+          <span style="margin-left:6px;font-size:10px;color:var(--subtle)">🏢 ${_esc(F.accNombre)}</span>
+          ${_btnCopy(F.campId,'ID de la campaña')}${_chips}${_gastoTxt(F.gasto)}${_cpaPill(F.cpa)}
+          <span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px" title="Ventas totales de la campaña sumando sus días">${F.count}</span>
+        </div>
+        <div id="${_ccid}-sub" style="display:none;margin:3px 0 2px 16px;border-left:1px solid var(--border);padding-left:10px">
+          <div style="font-size:10px;color:var(--subtle);padding:4px 8px 2px;letter-spacing:.3px">1️⃣ La campaña completa, día por día:</div>
+          ${_dias.map(d=>_filaDia(d,F.dias[d.k])).join('')}
+          <div style="font-size:10px;color:var(--subtle);padding:8px 8px 0;letter-spacing:.3px">2️⃣ Sus anuncios (mismo ID = mismo bloque), cada uno día por día:</div>
+          ${_adsF}
+        </div>
+      </div>`
+    }).join('')
+    const _totVentasF=_lista.reduce((s,F)=>s+F.count,0)
+    return`<div style="margin-top:10px;padding:12px 13px;background:rgba(0,0,0,.18);border-radius:8px;border-left:3px solid var(--purple)">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;letter-spacing:.2px">🧩 <strong style="color:var(--text)">Todas las campañas JUNTAS</strong> — la misma info de los bloques de arriba pero fusionada: cada campaña aparece UNA sola vez y adentro ves cómo le fue cada día. Ya no toca buscarla bloque por bloque. 👶✨</div>
+      <div onclick="window._rpToggleCuadre('${_cidF}')" style="cursor:pointer;display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0;flex-wrap:wrap" title="Toca para abrir/cerrar · Orden: mejor CPA total arriba, peor abajo">
+        <span id="${_cidF}-chev" style="display:inline-block;width:14px;font-size:10px;color:var(--muted)">▸</span>
+        <span style="margin-left:4px">🧬 ${_lista.length} campaña${_lista.length===1?'':'s'} fusionada${_lista.length===1?'':'s'} en ${_diasConDatos} día${_diasConDatos===1?'':'s'}</span>
+        <span style="margin-left:auto;font-weight:700" title="Suma de las ventas 'En campañas' de todos los días de arriba — debe cuadrar con ellos">${_totVentasF}</span>
+      </div>
+      <div id="${_cidF}-sub" style="display:none;margin:2px 0 6px 20px;border-left:1px solid var(--border);padding-left:12px">${_campsF}</div>
+    </div>`
+  }
+  try{_cuadreHtml+=_mkCuadreFusion()}catch(_){}
+
   return`
   <details class="rp-card" data-sem-code="${data.semCode}" style="background:${c.bg};border:1px solid ${c.border};border-radius:10px;margin-bottom:8px;overflow:hidden">
     <summary style="list-style:none;cursor:pointer;padding:14px 16px;display:block;outline:none">

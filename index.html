@@ -13485,6 +13485,50 @@ async function _renderResumenProductos(desde,hasta,hoy){
     }
   }catch(e){console.warn('[cuadre ventas] no se pudo armar ad→cuenta:',e&&e.message)}
 
+  // 6.8b NUEVO: ads de campañas CON GASTO que NO vendieron (fuga de plata invisible).
+  //      Hasta ahora adToCuenta solo conocía los ads que aparecen en ventas/reportes; un ad
+  //      que gastó pero vendió 0 quedaba invisible y el gasto de la campaña no cuadraba con
+  //      la suma de sus ads. Aquí se baja la cadena campaña→adset→ad SOLO para las campañas
+  //      con gasto en algún bloque, y se agregan esos ads a adToCuenta (misma estructura).
+  //      ADITIVO: no cambia la clasificación de ningún ad ya registrado ni ningún cálculo.
+  try{
+    const _campsConGasto=new Set()
+    for(const mGa of [gastoByCampId,gastoPrevByCampId,gastoAntierByCampId,gastoTrasByCampId]){
+      for(const k of Object.keys(mGa||{})){if((mGa[k]||0)>0)_campsConGasto.add(String(k))}
+    }
+    const _campsCG=[..._campsConGasto]
+    if(_campsCG.length){
+      // Info de campaña (nombre + cuenta) para las que falten
+      const _cgInfo={}
+      for(let i=0;i<_campsCG.length;i+=300){
+        const{data:camps}=await sb.from('meta_campanas').select('meta_id,account_id,nombre').eq('nivel','campaign').in('meta_id',_campsCG.slice(i,i+300))
+        for(const cp of (camps||[]))_cgInfo[String(cp.meta_id)]={acc:cp.account_id?String(cp.account_id):'',nombre:cp.nombre||String(cp.meta_id)}
+      }
+      const{data:_ctasB}=await sb.from('meta_cuentas').select('account_id,nombre')
+      const _accNomB={}
+      for(const cc of (_ctasB||[]))_accNomB[String(cc.account_id)]=cc.nombre||String(cc.account_id)
+      // campaña → adsets
+      const _adsetDeCamp={}
+      for(let i=0;i<_campsCG.length;i+=300){
+        const{data:adsets}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','adset').in('parent_id',_campsCG.slice(i,i+300))
+        for(const s of (adsets||[])){if(s.parent_id)_adsetDeCamp[String(s.meta_id)]=String(s.parent_id)}
+      }
+      // adsets → ads
+      const _asIds=Object.keys(_adsetDeCamp)
+      for(let i=0;i<_asIds.length;i+=300){
+        const{data:adsB}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','ad').in('parent_id',_asIds.slice(i,i+300))
+        for(const a of (adsB||[])){
+          const aid=String(a.meta_id)
+          if(adToCuenta[aid])continue // ya clasificado por ventas/reportes: NO tocar
+          const camp=_adsetDeCamp[String(a.parent_id)]
+          const info=camp?_cgInfo[camp]:null
+          if(!camp||!info||!info.acc)continue
+          adToCuenta[aid]={accId:info.acc,accNombre:_accNomB[info.acc]||info.acc,campId:camp,campNombre:info.nombre,sinVenta:true}
+        }
+      }
+    }
+  }catch(e){console.warn('[cuadre ventas] no se pudo cargar ads sin venta:',e&&e.message)}
+
   // 6.9 NUEVO: Gasto a NIVEL AD por bloque de fechas (período / ayer / antier / trasantier),
   //     para mostrar el CPA real al lado de cada anuncio en el cuadre. UNA consulta batch a
   //     meta_insights (nivel='ad') por todos los ad_ids ya juntados — 0 llamadas a Meta API.
@@ -13767,6 +13811,12 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
   // Recibe una lista de ad_ids y los clasifica en campañas (con desglose por cuenta) / orgánicas
   // (ad_id vacío) / sin sincronizar (ad_id que no está en meta_campanas), usando adToCuenta.
   const _atcCuadre=adToCuenta||{}
+  // NUEVO: campId → {nombre, cuenta} desde adToCuenta (para poder nombrar campañas
+  // que gastaron sin vender — no aparecen en porCampana pero sí deben verse como fuga).
+  const _campInfoCuadre={}
+  for(const _iC of Object.values(_atcCuadre)){
+    if(_iC&&_iC.campId&&_iC.accId&&!_campInfoCuadre[String(_iC.campId)])_campInfoCuadre[String(_iC.campId)]={nombre:_iC.campNombre||String(_iC.campId),accNombre:_iC.accNombre||_iC.accId}
+  }
   const _gAdsBloques=adGastoBloques||{p:{},a:{},b:{},c:{}}
   const _mkCuadre=(adList,gAds,gCamps)=>{
     const _ga=gAds||{},_gc=gCamps||{}
@@ -13800,11 +13850,27 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     // Gasto y CPA por campaña: usa el gasto COMPLETO de la campaña en el rango (gCamps, mismo
     // dato de la card). Si no hay entrada, cae a la suma del gasto de sus ads que vendieron.
     let _gastoTotal=0
+    // NUEVO: índice campId → ads con gasto SIN venta (para cuadrar la plata de cada campaña).
+    // Un ad con gasto (_ga) que pertenece a la campaña (adToCuenta) pero no vendió ese día.
+    const _sinVentaPorCamp={}
+    for(const adIdG of Object.keys(_ga)){
+      const gG=_ga[adIdG]||0
+      if(gG<=0)continue
+      const infoG=_atcCuadre[adIdG]
+      if(!infoG||!infoG.campId)continue
+      const ckG=String(infoG.campId)
+      if(!_sinVentaPorCamp[ckG])_sinVentaPorCamp[ckG]={}
+      _sinVentaPorCamp[ckG][adIdG]=gG
+    }
     for(const cp of Object.values(_campMap)){
       const gFull=_gc[cp.campId]
       cp.gasto=(gFull!=null&&gFull>0)?gFull:Object.values(cp.adsGasto).reduce((s,x)=>s+(x||0),0)
       cp.cpa=cp.count>0&&cp.gasto>0?cp.gasto/cp.count:0
       _gastoTotal+=cp.gasto
+      // adsSinVenta: con gasto ese día pero 0 ventas (no están en cp.ads)
+      cp.adsSinVenta={}
+      const svMap=_sinVentaPorCamp[cp.campId]||{}
+      for(const aSv of Object.keys(svMap)){if(!cp.ads[aSv])cp.adsSinVenta[aSv]=svMap[aSv]}
     }
     const _pc=Object.values(_pcMap).sort((a,b)=>b.count-a.count)
     // Orden: mejor CPA arriba (más barato) → peor abajo. Sin gasto/CPA al final. Empate: más ventas arriba.
@@ -13813,7 +13879,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
       return x!==y?x-y:b.count-a.count
     })
     const _t=(adList||[]).length
-    return{total:_t,enCampanas:_enCamp,organicas:_org,sinSync:_sin,huerfanos:_huer,porCuenta:_pc,porCampana:_porCampana,huerfanosIds:_huerMap,sinSyncIds:_sinMap,gastoTotal:_gastoTotal,cpaTotal:(_enCamp>0&&_gastoTotal>0)?_gastoTotal/_enCamp:0,cuadra:(_enCamp+_org+_huer+_sin)===_t}
+    return{total:_t,enCampanas:_enCamp,organicas:_org,sinSync:_sin,huerfanos:_huer,porCuenta:_pc,porCampana:_porCampana,huerfanosIds:_huerMap,sinSyncIds:_sinMap,gastoTotal:_gastoTotal,cpaTotal:(_enCamp>0&&_gastoTotal>0)?_gastoTotal/_enCamp:0,cuadra:(_enCamp+_org+_huer+_sin)===_t,gastoCampanas:_gc,sinVentaPorCamp:_sinVentaPorCamp,campInfo:_campInfoCuadre}
   }
   // Lista de ad_ids de los mapeos CONFIRMADOS de un día (lo que muestra el número grande).
   const _confDeMps=(arr)=>(arr||[]).filter(m=>m.estado_final&&m.estado_final!=='CANCELADO'&&m.estado_final!=='PENDIENTE CONFIRMACION').map(m=>m.ad_id)
@@ -14088,12 +14154,13 @@ function _renderProductoCardResumen(data,ranking){
     const _ok=cu.cuadra&&_huerN===0&&cu.sinSync===0
     const _esc=s=>String(s==null?'':s).replace(/</g,'&lt;').replace(/"/g,'&quot;')
     const _BE=data.margenBE||0
-    // Pill de CPA coloreada contra el break-even del producto (verde ≤ BE, rojo > BE)
+    // Pill de CPA coloreada con el SEMÁFORO CANÓNICO del break-even (_nexoSemColor):
+    // 🟢 CPA ≤ 70% del BE (va bien) · 🟡 entre 70% y 100% (cuidado) · 🔴 > BE (pierde plata)
     const _cpaPill=(cpa,sz)=>{
       if(!cpa||cpa<=0)return''
-      const col=_BE>0?(cpa<=_BE?'var(--green)':'var(--red)'):'var(--muted)'
+      const col=(typeof window!=='undefined'&&window._nexoSemColor)?window._nexoSemColor(cpa,_BE):(_BE>0?(cpa<=_BE?'var(--green)':'var(--red)'):'var(--muted)')
       const fs=sz==='sm'?'10px':'11px'
-      return`<span style="margin-left:8px;font-size:${fs};font-weight:700;color:${col};border:1px solid ${col};border-radius:999px;padding:1px 8px;white-space:nowrap" title="CPA real = gasto ÷ ventas de esta fila · Break-even: $${fmt(_BE)} · Verde = gana plata, Rojo = pierde">🎯 $${fmt(cpa)}</span>`
+      return`<span style="margin-left:8px;font-size:${fs};font-weight:700;color:${col};border:1px solid ${col};border-radius:999px;padding:1px 8px;white-space:nowrap" title="CPA real = gasto ÷ ventas de esta fila · Break-even: $${fmt(_BE)} · Semáforo: 🟢 ≤70% del BE va bien · 🟡 cuidado, se acerca · 🔴 pasa el BE, pierde plata">🎯 $${fmt(cpa)}</span>`
     }
     const _gastoTxt=(g)=>g>0?`<span style="margin-left:8px;font-size:10px;color:var(--muted);white-space:nowrap">💸 $${fmt(g)}</span>`:''
     // Botón copiar con marca PERSISTENTE (localStorage): verde si ya se copió; clic de nuevo la quita.
@@ -14102,23 +14169,50 @@ function _renderProductoCardResumen(data,ranking){
       return`<button onclick="event.stopPropagation();window._rpCopiarId('${_esc(id)}',this)" title="Copiar ${label}: ${_esc(id)} · Queda marcado en verde (aunque recargues) hasta que lo toques de nuevo" style="margin-left:6px;background:${_on?'var(--green-bg)':'rgba(255,255,255,.06)'};border:1px solid ${_on?'var(--green)':'var(--border)'};border-radius:5px;color:${_on?'var(--green)':'var(--muted)'};font-size:10px;padding:1px 7px;cursor:pointer;flex-shrink:0">${_on?'✅':'📋'}</button>`
     }
     // Fila de ad: zebra + separador para lectura fácil. Orden: mejor CPA arriba, sin CPA al final.
-    const _adRows=(adsObj,adsGasto)=>Object.entries(adsObj||{}).map(([adId,n])=>{
-      const g=(adsGasto&&adsGasto[adId])||0
-      return{adId,n,g,cpa:(n>0&&g>0)?g/n:0}
-    }).sort((a,b)=>{
-      const x=a.cpa>0?a.cpa:Infinity,y=b.cpa>0?b.cpa:Infinity
-      return x!==y?x-y:b.n-a.n
-    }).map((r,i)=>{
-      return`<div style="display:flex;align-items:center;font-size:11.5px;color:var(--muted);padding:6px 8px;background:${i%2===0?'rgba(255,255,255,.025)':'transparent'};border-radius:5px">
+    // NUEVO: al final, los ads que GASTARON pero NO vendieron (fuga 🚨) + cuadre de la plata:
+    // suma de gasto de todos los ads (vendieron + no vendieron) vs gasto de la campaña.
+    const _adRows=(adsObj,adsGasto,adsSinVenta,gastoCamp)=>{
+      const _vendidos=Object.entries(adsObj||{}).map(([adId,n])=>{
+        const g=(adsGasto&&adsGasto[adId])||0
+        return{adId,n,g,cpa:(n>0&&g>0)?g/n:0}
+      }).sort((a,b)=>{
+        const x=a.cpa>0?a.cpa:Infinity,y=b.cpa>0?b.cpa:Infinity
+        return x!==y?x-y:b.n-a.n
+      })
+      let html=_vendidos.map((r,i)=>{
+        return`<div style="display:flex;align-items:center;font-size:11.5px;color:var(--muted);padding:6px 8px;background:${i%2===0?'rgba(255,255,255,.025)':'transparent'};border-radius:5px">
         <span style="font-family:monospace">🖼️ ${_esc(r.adId)}</span>${_btnCopy(r.adId,'ID del anuncio')}${_gastoTxt(r.g)}${_cpaPill(r.cpa,'sm')}
         <span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px">${r.n}</span>
       </div>`
-    }).join('')
+      }).join('')
+      let _gSinVenta=0
+      const _svList=Object.entries(adsSinVenta||{}).sort((a,b)=>b[1]-a[1])
+      if(_svList.length){
+        html+=_svList.map(([adId,g])=>{
+          _gSinVenta+=g
+          return`<div style="display:flex;align-items:center;font-size:11.5px;color:var(--amber);padding:6px 8px;background:rgba(245,158,11,.06);border-radius:5px;margin-top:2px" title="Este anuncio gastó plata ese día pero vendió CERO. Es plata que se fue sin volver (fuga). Revísalo o apágalo.">
+        <span style="font-family:monospace">🖼️ ${_esc(adId)}</span>${_btnCopy(adId,'ID del anuncio')}${_gastoTxt(g)}<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap">🚨 0 ventas — gastó y no vendió</span>
+        <span style="margin-left:auto;color:var(--amber);font-weight:700;padding-left:10px">0</span>
+      </div>`
+        }).join('')
+      }
+      // Cuadre de la plata: ads que vendieron + ads que no vendieron vs gasto total de la campaña
+      const _gVend=_vendidos.reduce((s,r)=>s+(r.g||0),0)
+      const _gSuma=_gVend+_gSinVenta
+      if((gastoCamp||0)>0&&_gSuma>0){
+        const _dif=Math.round((gastoCamp||0)-_gSuma)
+        const _cuadraPlata=Math.abs(_dif)<=Math.max(500,Math.round((gastoCamp||0)*0.01))
+        html+=`<div style="display:flex;align-items:center;gap:6px;font-size:10.5px;margin-top:5px;padding:5px 8px;border-radius:5px;background:${_cuadraPlata?'var(--green-bg)':'rgba(245,158,11,.08)'};color:${_cuadraPlata?'var(--green)':'var(--amber)'}" title="Suma del gasto de TODOS los anuncios (vendieron + no vendieron) comparada con el gasto total de la campaña. Diferencias chiquitas son redondeo de Meta.">
+        <span>${_cuadraPlata?'✅':'⚠️'}</span><span>💸 $${fmt(_gVend)} + $${fmt(_gSinVenta)} (sin venta) = $${fmt(_gSuma)} vs campaña $${fmt(gastoCamp||0)}${_cuadraPlata?' · LA PLATA CUADRA':' · diferencia $'+fmt(Math.abs(_dif))+' (redondeo Meta o ads de otro rango)'}</span>
+      </div>`
+      }
+      return html
+    }
     // Campañas (jerarquía real ad→adset→campaña), cada una desplegable a sus ad_ids. CERRADAS al inicio.
     const _campsHtml=(cu.porCampana&&cu.porCampana.length)
       ? cu.porCampana.map((cp,i)=>{
           const _ccid=_cid+'_c'+i
-          return`<div style="padding:6px 8px;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-radius:6px;border-bottom:1px solid rgba(255,255,255,.04)">
+          return`<div id="${_ccid}-box" style="padding:6px 8px;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-radius:6px;border-bottom:1px solid rgba(255,255,255,.04)">
             <div onclick="window._rpToggleCuadre('${_ccid}')" style="cursor:pointer;display:flex;align-items:center;font-size:12px;color:var(--text);min-height:24px" title="Toca para ver los IDs de anuncio de esta campaña">
               <span id="${_ccid}-chev" style="display:inline-block;width:12px;font-size:9px;color:var(--muted)">▸</span>
               <span style="margin-left:3px">📣 ${_esc(cp.nombre)}</span>
@@ -14126,7 +14220,7 @@ function _renderProductoCardResumen(data,ranking){
               ${_btnCopy(cp.campId,'ID de la campaña')}${_gastoTxt(cp.gasto)}${_cpaPill(cp.cpa)}
               <span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px">${cp.count}</span>
             </div>
-            <div id="${_ccid}-sub" style="display:none;margin:3px 0 2px 16px;border-left:1px solid var(--border);padding-left:10px">${_adRows(cp.ads,cp.adsGasto)}</div>
+            <div id="${_ccid}-sub" style="display:none;margin:3px 0 2px 16px;border-left:1px solid var(--border);padding-left:10px">${_adRows(cp.ads,cp.adsGasto,cp.adsSinVenta,cp.gasto)}</div>
           </div>`
         }).join('')
       : `<div style="font-size:11px;color:var(--subtle);padding:3px 0">— ninguna —</div>`
@@ -14207,6 +14301,71 @@ function _renderProductoCardResumen(data,ranking){
           A.count+=n;A.gasto+=g
           A.dias[d.k]={n:n,g:g,cpa:(n>0&&g>0)?g/n:0}
         }
+        // NUEVO: ads que gastaron ese día pero NO vendieron (fuga 🚨) — entran con 0 ventas
+        for(const _adSv of Object.keys(cp.adsSinVenta||{})){
+          const gSv=cp.adsSinVenta[_adSv]||0
+          if(gSv<=0)continue
+          if(!F.ads[_adSv])F.ads[_adSv]={count:0,gasto:0,dias:{}}
+          const Asv=F.ads[_adSv]
+          if(Asv.dias[d.k])continue // ya registrado con ventas ese día
+          Asv.gasto+=gSv
+          Asv.dias[d.k]={n:0,g:gSv,cpa:0}
+        }
+      }
+    }
+    // NUEVO: días donde la campaña GASTÓ pero vendió 0 (no aparece en porCampana de ese día).
+    // Se detecta con el mapa gastoCampanas que expone _mkCuadre. La fila del día pasa de
+    // "no corrió" a "🚨 gastó $X y 0 ventas" — pura fuga visible.
+    for(const ckF of Object.keys(_fus)){
+      const F=_fus[ckF]
+      for(const d of _dias){
+        if(F.dias[d.k])continue
+        const gc=d.cu&&d.cu.gastoCampanas
+        const gDia=gc?(gc[ckF]||0):0
+        if(gDia>0){
+          F.dias[d.k]={count:0,gasto:gDia,cpa:0}
+          F.gasto+=gDia
+          // sus ads sin venta de ese día también entran
+          const svc=d.cu&&d.cu.sinVentaPorCamp&&d.cu.sinVentaPorCamp[ckF]
+          for(const _adSv of Object.keys(svc||{})){
+            const gSv=svc[_adSv]||0
+            if(gSv<=0)continue
+            if(!F.ads[_adSv])F.ads[_adSv]={count:0,gasto:0,dias:{}}
+            const Asv=F.ads[_adSv]
+            if(Asv.dias[d.k])continue
+            Asv.gasto+=gSv
+            Asv.dias[d.k]={n:0,g:gSv,cpa:0}
+          }
+        }
+      }
+    }
+    // NUEVO: campañas del producto que GASTARON en algún día pero vendieron 0 en TODOS
+    // (pura fuga 🚨): no están en porCampana de ningún día, pero la plata sí salió.
+    // Solo campañas configuradas del producto (campaign_ids) — no se cuelan las de otros productos.
+    const _campIdsProdF=((data.producto&&Array.isArray(data.producto.campaign_ids))?data.producto.campaign_ids:[]).map(String)
+    for(const ckP of _campIdsProdF){
+      if(_fus[ckP])continue
+      let gTotP=0;const diasGP={}
+      for(const d of _dias){
+        const gc=d.cu&&d.cu.gastoCampanas
+        const g=gc?(gc[ckP]||0):0
+        if(g>0){diasGP[d.k]=g;gTotP+=g}
+      }
+      if(gTotP<=0)continue
+      let infoP=null
+      for(const d of _dias){const ci=d.cu&&d.cu.campInfo;if(ci&&ci[ckP]){infoP=ci[ckP];break}}
+      const F=_fus[ckP]={campId:ckP,nombre:(infoP&&infoP.nombre)||ckP,accNombre:(infoP&&infoP.accNombre)||'?',count:0,gasto:gTotP,dias:{},ads:{}}
+      for(const kP of Object.keys(diasGP)){
+        F.dias[kP]={count:0,gasto:diasGP[kP],cpa:0}
+        const dP=_dias.find(x=>x.k===kP)
+        const svc=dP&&dP.cu&&dP.cu.sinVentaPorCamp&&dP.cu.sinVentaPorCamp[ckP]
+        for(const aSv of Object.keys(svc||{})){
+          const gSv=svc[aSv]||0
+          if(gSv<=0)continue
+          if(!F.ads[aSv])F.ads[aSv]={count:0,gasto:0,dias:{}}
+          F.ads[aSv].gasto+=gSv
+          F.ads[aSv].dias[kP]={n:0,g:gSv,cpa:0}
+        }
       }
     }
     const _lista=Object.values(_fus)
@@ -14220,9 +14379,9 @@ function _renderProductoCardResumen(data,ranking){
     const _BE=data.margenBE||0
     const _cpaPill=(cpa,sz)=>{
       if(!cpa||cpa<=0)return''
-      const col=_BE>0?(cpa<=_BE?'var(--green)':'var(--red)'):'var(--muted)'
+      const col=(typeof window!=='undefined'&&window._nexoSemColor)?window._nexoSemColor(cpa,_BE):(_BE>0?(cpa<=_BE?'var(--green)':'var(--red)'):'var(--muted)')
       const fs=sz==='sm'?'10px':'11px'
-      return`<span style="margin-left:8px;font-size:${fs};font-weight:700;color:${col};border:1px solid ${col};border-radius:999px;padding:1px 8px;white-space:nowrap" title="CPA real = gasto ÷ ventas de esta fila · Break-even: $${fmt(_BE)} · Verde = gana plata, Rojo = pierde">🎯 $${fmt(cpa)}</span>`
+      return`<span style="margin-left:8px;font-size:${fs};font-weight:700;color:${col};border:1px solid ${col};border-radius:999px;padding:1px 8px;white-space:nowrap" title="CPA real = gasto ÷ ventas de esta fila · Break-even: $${fmt(_BE)} · Semáforo: 🟢 ≤70% del BE va bien · 🟡 cuidado, se acerca · 🔴 pasa el BE, pierde plata">🎯 $${fmt(cpa)}</span>`
     }
     const _gastoTxt=(g)=>g>0?`<span style="margin-left:8px;font-size:10px;color:var(--muted);white-space:nowrap">💸 $${fmt(g)}</span>`:''
     const _btnCopy=(id,label)=>{
@@ -14230,30 +14389,47 @@ function _renderProductoCardResumen(data,ranking){
       return`<button onclick="event.stopPropagation();window._rpCopiarId('${_esc(id)}',this)" title="Copiar ${label}: ${_esc(id)} · Queda marcado en verde (aunque recargues) hasta que lo toques de nuevo" style="margin-left:6px;background:${_on?'var(--green-bg)':'rgba(255,255,255,.06)'};border:1px solid ${_on?'var(--green)':'var(--border)'};border-radius:5px;color:${_on?'var(--green)':'var(--muted)'};font-size:10px;padding:1px 7px;cursor:pointer;flex-shrink:0">${_on?'✅':'📋'}</button>`
     }
     // Fila de UN día (sirve para campaña y para anuncio): día + gasto + CPA + ventas. Sin datos → rayita.
+    // NUEVO: si gastó y vendió 0 ese día → fila ámbar de FUGA 🚨 (antes salía como "no corrió").
     const _filaDia=(d,obj,sz)=>{
       const fs=sz==='sm'?'11px':'11.5px'
       if(!obj)return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--subtle);padding:3px 8px"><span style="width:92px;flex-shrink:0">${d.emo} ${d.lab}</span><span style="font-style:italic">— no corrió ese día —</span></div>`
       const n=obj.count!=null?obj.count:obj.n
       const g=obj.gasto!=null?obj.gasto:obj.g
+      if(n===0&&(g||0)>0)return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--amber);padding:3px 8px;background:rgba(245,158,11,.06);border-radius:5px" title="Ese día gastó plata pero vendió CERO: fuga. Revísalo."><span style="width:92px;flex-shrink:0;font-weight:600">${d.emo} ${d.lab}</span>${_gastoTxt(g)}<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap">🚨 0 ventas</span><span style="margin-left:auto;color:var(--amber);font-weight:700;padding-left:10px">0</span></div>`
       return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--muted);padding:3px 8px"><span style="width:92px;flex-shrink:0;color:var(--text)">${d.emo} ${d.lab}</span>${_gastoTxt(g)}${_cpaPill(obj.cpa,'sm')}<span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px" title="Ventas de este día">${n}</span></div>`
     }
     const _cidF='cuadf_'+_slugProd
     const _campsF=_lista.map((F,i)=>{
       const _ccid=_cidF+'_c'+i
-      // Chips de días: verde = corrió ese día, gris = no corrió
-      const _chips=_dias.map(d=>`<span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:999px;margin-left:3px;white-space:nowrap;${F.dias[d.k]?'background:var(--green-bg);color:var(--green);border:1px solid var(--green)':'background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)'}" title="${F.dias[d.k]?('Corrió '+d.lab+': '+F.dias[d.k].count+' ventas'):('No corrió '+d.lab)}">${d.lab}</span>`).join('')
-      // Anuncios fusionados: mismo ad_id = mismo bloque, mejor CPA total arriba, cada uno día por día
+      // Chips de días: verde = corrió y vendió · ámbar = gastó y 0 ventas (fuga) · gris = no corrió
+      const _chips=_dias.map(d=>{
+        const dd=F.dias[d.k]
+        const esFugaD=dd&&dd.count===0&&(dd.gasto||0)>0
+        const st=dd?(esFugaD?'background:rgba(245,158,11,.12);color:var(--amber);border:1px solid var(--amber)':'background:var(--green-bg);color:var(--green);border:1px solid var(--green)'):'background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)'
+        const tt=dd?(esFugaD?('FUGA '+d.lab+': gastó $'+fmt(dd.gasto)+' y vendió 0'):('Corrió '+d.lab+': '+dd.count+' ventas')):('No corrió '+d.lab)
+        return`<span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:999px;margin-left:3px;white-space:nowrap;${st}" title="${tt}">${esFugaD?'🚨':''}${d.lab}</span>`
+      }).join('')
+      // Anuncios fusionados: mismo ad_id = mismo bloque, mejor CPA total arriba, cada uno día por día.
+      // Los que vendieron 0 en todos sus días (pura fuga) van AL FINAL marcados en ámbar.
       const _adsF=Object.keys(F.ads).map(_adId=>{
         const A=F.ads[_adId]
         return{adId:_adId,count:A.count,gasto:A.gasto,dias:A.dias,cpaT:(A.count>0&&A.gasto>0)?A.gasto/A.count:0}
       }).sort((a,b)=>{
         const x=a.cpaT>0?a.cpaT:Infinity,y=b.cpaT>0?b.cpaT:Infinity
         return x!==y?x-y:b.count-a.count
-      }).map((A,j)=>`<div style="margin-top:6px;padding:6px 8px;background:${j%2===0?'rgba(255,255,255,.025)':'transparent'};border-radius:5px">
-          <div style="display:flex;align-items:center;font-size:11.5px;color:var(--muted)"><span style="font-family:monospace">🖼️ ${_esc(A.adId)}</span>${_btnCopy(A.adId,'ID del anuncio')}${_gastoTxt(A.gasto)}${_cpaPill(A.cpaT,'sm')}<span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px" title="Ventas totales del anuncio sumando sus días">${A.count}</span></div>
-          <div style="margin:2px 0 0 14px;border-left:1px solid var(--border);padding-left:8px">${_dias.map(d=>_filaDia(d,A.dias[d.k],'sm')).join('')}</div>
-        </div>`).join('')
-      return`<div style="padding:6px 8px;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-radius:6px;border-bottom:1px solid rgba(255,255,255,.04)">
+      }).map((A,j)=>{
+        const esFugaAd=A.count===0&&A.gasto>0
+        return`<div style="margin-top:6px;padding:6px 8px;background:${esFugaAd?'rgba(245,158,11,.05)':(j%2===0?'rgba(255,255,255,.025)':'transparent')};border-radius:5px;${esFugaAd?'border:1px solid rgba(245,158,11,.35)':''}">
+          <div style="display:flex;align-items:center;font-size:11.5px;color:${esFugaAd?'var(--amber)':'var(--muted)'}"><span style="font-family:monospace">🖼️ ${_esc(A.adId)}</span>${_btnCopy(A.adId,'ID del anuncio')}${_gastoTxt(A.gasto)}${esFugaAd?`<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap" title="Gastó plata en sus días y no vendió NADA. Pura fuga: revísalo o apágalo.">🚨 gastó y no vendió</span>`:_cpaPill(A.cpaT,'sm')}<span style="margin-left:auto;color:${esFugaAd?'var(--amber)':'var(--text)'};font-weight:700;padding-left:10px" title="Ventas totales del anuncio sumando sus días">${A.count}</span></div>
+          <div style="margin:2px 0 0 14px;border-left:1px solid ${esFugaAd?'var(--amber)':'var(--border)'};padding-left:8px">${_dias.map(d=>_filaDia(d,A.dias[d.k],'sm')).join('')}</div>
+        </div>`
+      }).join('')
+      // Cuadre de la plata de la campaña: suma del gasto de todos sus ads vs gasto total campaña
+      const _gAdsTot=Object.keys(F.ads).reduce((s,k)=>s+(F.ads[k].gasto||0),0)
+      const _difF=Math.round((F.gasto||0)-_gAdsTot)
+      const _plataOkF=Math.abs(_difF)<=Math.max(500,Math.round((F.gasto||0)*0.01))
+      const _cuadrePlataF=(F.gasto>0&&_gAdsTot>0)?`<div style="display:flex;align-items:center;gap:6px;font-size:10.5px;margin-top:6px;padding:5px 8px;border-radius:5px;background:${_plataOkF?'var(--green-bg)':'rgba(245,158,11,.08)'};color:${_plataOkF?'var(--green)':'var(--amber)'}" title="Suma del gasto de TODOS los anuncios (incluidos los que no vendieron) vs gasto total de la campaña en sus días."><span>${_plataOkF?'✅':'⚠️'}</span><span>💸 Anuncios $${fmt(_gAdsTot)} vs campaña $${fmt(F.gasto)}${_plataOkF?' · LA PLATA CUADRA':' · diferencia $'+fmt(Math.abs(_difF))+' (redondeo Meta o ads de otro rango)'}</span></div>`:''
+      return`<div id="${_ccid}-box" style="padding:6px 8px;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-radius:6px;border-bottom:1px solid rgba(255,255,255,.04)">
         <div onclick="window._rpToggleCuadre('${_ccid}')" style="cursor:pointer;display:flex;align-items:center;font-size:12px;color:var(--text);min-height:24px;flex-wrap:wrap" title="Toca para ver esta campaña día por día y sus anuncios agrupados por ID">
           <span id="${_ccid}-chev" style="display:inline-block;width:12px;font-size:9px;color:var(--muted)">▸</span>
           <span style="margin-left:3px">📣 ${_esc(F.nombre)}</span>
@@ -14266,10 +14442,32 @@ function _renderProductoCardResumen(data,ranking){
           ${_dias.map(d=>_filaDia(d,F.dias[d.k])).join('')}
           <div style="font-size:10px;color:var(--subtle);padding:8px 8px 0;letter-spacing:.3px">2️⃣ Sus anuncios (mismo ID = mismo bloque), cada uno día por día:</div>
           ${_adsF}
+          ${_cuadrePlataF}
         </div>
       </div>`
     }).join('')
     const _totVentasF=_lista.reduce((s,F)=>s+F.count,0)
+    // NUEVO: contexto para el MODO RANGO (queries solo al tocar Aplicar; por defecto cero queries).
+    if(typeof window!=='undefined'){
+      window._rpFusionCtx=window._rpFusionCtx||{}
+      window._rpFusionCtx[_slugProd]={nombre:data.nombre,margenBE:_BE,campIds:(data.producto&&Array.isArray(data.producto.campaign_ids))?data.producto.campaign_ids.map(String):[]}
+    }
+    const _isoLocal=(d)=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+    const _hoyF=new Date(),_d3F=new Date();_d3F.setDate(_d3F.getDate()-3)
+    const _optsCampF=_lista.map(F=>`<option value="${_esc(F.campId)}">📣 ${_esc(F.nombre)}</option>`).join('')
+    const _ctrlRango=`<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:6px 0 8px;padding:7px 9px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--muted)" title="Por defecto ves hoy/ayer/antier/trasantier SIN gastar llamados. Si quieres otro rango: elige fechas (y una campaña si quieres ahorrar llamados) y toca Aplicar.">
+        <span>🗓 Otro rango:</span>
+        <input type="date" id="${_cidF}-desde" value="${_isoLocal(_d3F)}" style="background:var(--card2);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:11px;padding:2px 5px">
+        <span>→</span>
+        <input type="date" id="${_cidF}-hasta" value="${_isoLocal(_hoyF)}" style="background:var(--card2);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:11px;padding:2px 5px">
+        <select id="${_cidF}-camp" style="background:var(--card2);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:11px;padding:2px 5px;max-width:240px" title="Elige UNA campaña para gastar menos llamados, o Todas para ver todo">
+          <option value="">🌐 Todas las campañas</option>
+          ${_optsCampF}
+        </select>
+        <button onclick="event.stopPropagation();window._rpFusionRango('${_slugProd}','${_cidF}')" style="background:rgba(167,139,250,.12);border:1px solid var(--purple);border-radius:5px;color:var(--purple);font-size:11px;font-weight:700;padding:2px 10px;cursor:pointer">🔍 Aplicar</button>
+        <button onclick="event.stopPropagation();window._rpFusionVolver('${_cidF}')" style="background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:5px;color:var(--muted);font-size:11px;padding:2px 10px;cursor:pointer" title="Volver a la vista normal de los 4 días (sin llamados)">↩️ Volver a los 4 días</button>
+        <span id="${_cidF}-rango-status" style="font-size:10.5px"></span>
+      </div>`
     return`<div style="margin-top:10px;padding:12px 13px;background:rgba(0,0,0,.18);border-radius:8px;border-left:3px solid var(--purple)">
       <div style="font-size:11px;color:var(--muted);margin-bottom:8px;letter-spacing:.2px">🧩 <strong style="color:var(--text)">Todas las campañas JUNTAS</strong> — la misma info de los bloques de arriba pero fusionada: cada campaña aparece UNA sola vez y adentro ves cómo le fue cada día. Ya no toca buscarla bloque por bloque. 👶✨</div>
       <div onclick="window._rpToggleCuadre('${_cidF}')" style="cursor:pointer;display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0;flex-wrap:wrap" title="Toca para abrir/cerrar · Orden: mejor CPA total arriba, peor abajo">
@@ -14277,7 +14475,9 @@ function _renderProductoCardResumen(data,ranking){
         <span style="margin-left:4px">🧬 ${_lista.length} campaña${_lista.length===1?'':'s'} fusionada${_lista.length===1?'':'s'} en ${_diasConDatos} día${_diasConDatos===1?'':'s'}</span>
         <span style="margin-left:auto;font-weight:700" title="Suma de las ventas 'En campañas' de todos los días de arriba — debe cuadrar con ellos">${_totVentasF}</span>
       </div>
+      ${_ctrlRango}
       <div id="${_cidF}-sub" style="display:none;margin:2px 0 6px 20px;border-left:1px solid var(--border);padding-left:12px">${_campsF}</div>
+      <div id="${_cidF}-rango" style="display:none;margin:2px 0 6px 20px;border-left:1px solid var(--purple);padding-left:12px"></div>
     </div>`
   }
   try{_cuadreHtml+=_mkCuadreFusion()}catch(_){}
@@ -14344,6 +14544,15 @@ window._rpToggleCuadre=function(cid){
   const oculto=sub.style.display==='none'
   sub.style.display=oculto?'block':'none'
   if(chev)chev.textContent=oculto?'▼':'▸'
+  // NUEVO: si el bloque tiene contenedor -box (campañas del cuadre y de la fusión),
+  // al ABRIR se resalta con borde morado para identificar cuál está abierta; al cerrar vuelve a normal.
+  const box=document.getElementById(cid+'-box')
+  if(box){
+    if(oculto){
+      if(box.dataset.bgOrig===undefined)box.dataset.bgOrig=box.style.background||''
+      box.style.boxShadow='inset 0 0 0 2px var(--purple)';box.style.background='rgba(167,139,250,.06)'
+    }else{box.style.boxShadow='';box.style.background=box.dataset.bgOrig||''}
+  }
 }
 
 // Copia un ID (campaña o anuncio) al portapapeles y deja una marca verde PERSISTENTE
@@ -14374,6 +14583,208 @@ window._rpCopiarId=function(id,btn){
       btn.style.color=ahora?'var(--green)':'var(--muted)'
     }
   }catch(_){}
+}
+
+// ── NUEVO: MODO RANGO de la fusión de campañas ──────────────────────────────
+// Por defecto la fusión usa los 4 días ya cargados (CERO queries). Estas funciones
+// solo corren cuando el usuario toca "Aplicar": consultan Supabase (mapeos +
+// meta_campanas + meta_insights) para el rango/campaña elegidos, con los MISMOS
+// filtros canónicos de _mkCuadre (confirmados; sin cancelados ni pendientes) y el
+// MISMO semáforo del break-even (_nexoSemColor). "Volver" regresa a los 4 días.
+window._rpFusionVolver=function(cidF){
+  const r=document.getElementById(cidF+'-rango')
+  const s=document.getElementById(cidF+'-sub')
+  const st=document.getElementById(cidF+'-rango-status')
+  if(r)r.style.display='none'
+  if(s){s.style.display='block';const ch=document.getElementById(cidF+'-chev');if(ch)ch.textContent='▼'}
+  if(st)st.textContent=''
+}
+window._rpFusionRango=async function(slug,cidF){
+  const st=document.getElementById(cidF+'-rango-status')
+  const _setSt=(t,col)=>{if(st){st.textContent=t;st.style.color=col||'var(--muted)'}}
+  try{
+    const ctx=(window._rpFusionCtx||{})[slug]
+    if(!ctx){_setSt('⚠️ Recarga el resumen e intenta de nuevo','var(--amber)');return}
+    const desde=(document.getElementById(cidF+'-desde')||{}).value||''
+    const hasta=(document.getElementById(cidF+'-hasta')||{}).value||''
+    if(!desde||!hasta){_setSt('⚠️ Elige las dos fechas','var(--amber)');return}
+    if(desde>hasta){_setSt('⚠️ "Desde" no puede ser después de "Hasta"','var(--amber)');return}
+    const _dDesde=new Date(desde+'T00:00:00'),_dHasta=new Date(hasta+'T00:00:00')
+    const _nDias=Math.round((_dHasta-_dDesde)/86400000)+1
+    if(_nDias>31){_setSt('⚠️ Máximo 31 días para que no explote la pantalla','var(--amber)');return}
+    const campSel=(document.getElementById(cidF+'-camp')||{}).value||''
+    const camps=campSel?[String(campSel)]:(ctx.campIds||[])
+    if(!camps.length){_setSt('⚠️ El producto no tiene campañas configuradas','var(--amber)');return}
+    _setSt('⏳ Buscando los días... no toques nada','var(--purple)')
+    // 1) Ventas confirmadas del producto en el rango (mismos filtros canónicos de _mkCuadre)
+    const{data:mp,error:eMp}=await sb.from('mapeos').select('cantidad,producto,estado_final,fecha,ad_id').gte('fecha',desde).lte('fecha',hasta).limit(20000)
+    if(eMp)throw eMp
+    const _conf=[]
+    for(const m of (mp||[])){
+      if(!m.estado_final||m.estado_final==='CANCELADO'||m.estado_final==='PENDIENTE CONFIRMACION')continue
+      const pn=(window.resolveProdName?window.resolveProdName(m.producto).nombre:(m.producto||''))||(m.producto||'')
+      if(pn!==ctx.nombre)continue
+      _conf.push(m)
+    }
+    // 2) Estructura de las campañas elegidas: adsets → ads (para clasificar ventas y ver ads sin venta)
+    const _adsetDeCamp={}
+    for(let i=0;i<camps.length;i+=300){
+      const{data:adsets}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','adset').in('parent_id',camps.slice(i,i+300))
+      for(const s of (adsets||[])){if(s.parent_id)_adsetDeCamp[String(s.meta_id)]=String(s.parent_id)}
+    }
+    const _asIds=Object.keys(_adsetDeCamp)
+    const _adDeCamp={}
+    for(let i=0;i<_asIds.length;i+=300){
+      const{data:adsB}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','ad').in('parent_id',_asIds.slice(i,i+300))
+      for(const a of (adsB||[])){const cmp=_adsetDeCamp[String(a.parent_id)];if(cmp)_adDeCamp[String(a.meta_id)]=cmp}
+    }
+    // 3) Nombres de campaña y cuenta
+    const _cInfo={}
+    for(let i=0;i<camps.length;i+=300){
+      const{data:cRows}=await sb.from('meta_campanas').select('meta_id,account_id,nombre').eq('nivel','campaign').in('meta_id',camps.slice(i,i+300))
+      for(const cp of (cRows||[]))_cInfo[String(cp.meta_id)]={nombre:cp.nombre||String(cp.meta_id),acc:cp.account_id?String(cp.account_id):''}
+    }
+    const{data:_ctasR}=await sb.from('meta_cuentas').select('account_id,nombre')
+    const _accNomR={}
+    for(const cc of (_ctasR||[]))_accNomR[String(cc.account_id)]=cc.nombre||String(cc.account_id)
+    // 4) Gasto por día: nivel ad (de los ads de estas campañas) + nivel campaña
+    const _adIdsAll=Object.keys(_adDeCamp)
+    const _gAdDia={} // adId → {fecha: gasto}
+    for(let i=0;i<_adIdsAll.length;i+=300){
+      const{data:insA}=await sb.from('meta_insights').select('meta_id,fecha,spend').eq('nivel','ad').in('meta_id',_adIdsAll.slice(i,i+300)).gte('fecha',desde).lte('fecha',hasta)
+      for(const r of (insA||[])){
+        const id=String(r.meta_id);if(!_gAdDia[id])_gAdDia[id]={}
+        _gAdDia[id][r.fecha]=(_gAdDia[id][r.fecha]||0)+(r.spend||0)
+      }
+    }
+    const _gCampDia={} // campId → {fecha: gasto}
+    for(let i=0;i<camps.length;i+=300){
+      const{data:insC}=await sb.from('meta_insights').select('meta_id,fecha,spend').eq('nivel','campaign').in('meta_id',camps.slice(i,i+300)).gte('fecha',desde).lte('fecha',hasta)
+      for(const r of (insC||[])){
+        const id=String(r.meta_id);if(!_gCampDia[id])_gCampDia[id]={}
+        _gCampDia[id][r.fecha]=(_gCampDia[id][r.fecha]||0)+(r.spend||0)
+      }
+    }
+    // 5) Fusionar: campId → {dias, ads}; ventas desde _conf, gasto desde insights
+    const _fusR={}
+    const _mkF=(ck)=>{
+      if(!_fusR[ck]){
+        const inf=_cInfo[ck]||{nombre:ck,acc:''}
+        _fusR[ck]={campId:ck,nombre:inf.nombre,accNombre:_accNomR[inf.acc]||inf.acc||'?',count:0,gasto:0,dias:{},ads:{}}
+      }
+      return _fusR[ck]
+    }
+    let _fueraCamp=0
+    for(const m of _conf){
+      const aid=m.ad_id?String(m.ad_id):''
+      const ck=aid?_adDeCamp[aid]:null
+      if(!ck){_fueraCamp++;continue}
+      const F=_mkF(ck)
+      F.count++
+      if(!F.dias[m.fecha])F.dias[m.fecha]={count:0,gasto:0,cpa:0}
+      F.dias[m.fecha].count++
+      if(!F.ads[aid])F.ads[aid]={count:0,gasto:0,dias:{}}
+      if(!F.ads[aid].dias[m.fecha])F.ads[aid].dias[m.fecha]={n:0,g:0,cpa:0}
+      F.ads[aid].count++;F.ads[aid].dias[m.fecha].n++
+    }
+    for(const ck of camps){
+      const gd=_gCampDia[ck]||{}
+      const tieneGasto=Object.values(gd).some(x=>x>0)
+      if(!tieneGasto&&!_fusR[ck])continue
+      const F=_mkF(ck)
+      for(const f of Object.keys(gd)){
+        if(!F.dias[f])F.dias[f]={count:0,gasto:0,cpa:0}
+        F.dias[f].gasto+=gd[f];F.gasto+=gd[f]
+      }
+    }
+    for(const aid of _adIdsAll){
+      const ck=_adDeCamp[aid],gd=_gAdDia[aid]||{}
+      const F=_fusR[ck]
+      if(!F)continue
+      for(const f of Object.keys(gd)){
+        const g=gd[f];if(g<=0)continue
+        if(!F.ads[aid])F.ads[aid]={count:0,gasto:0,dias:{}}
+        if(!F.ads[aid].dias[f])F.ads[aid].dias[f]={n:0,g:0,cpa:0}
+        F.ads[aid].dias[f].g+=g;F.ads[aid].gasto+=g
+      }
+    }
+    for(const F of Object.values(_fusR)){
+      F.cpa=(F.count>0&&F.gasto>0)?F.gasto/F.count:0
+      for(const f of Object.keys(F.dias)){const d=F.dias[f];d.cpa=(d.count>0&&d.gasto>0)?d.gasto/d.count:0}
+      for(const aid of Object.keys(F.ads)){for(const f of Object.keys(F.ads[aid].dias)){const x=F.ads[aid].dias[f];x.cpa=(x.n>0&&x.g>0)?x.g/x.n:0}}
+    }
+    const _listaR=Object.values(_fusR).sort((a,b)=>{const x=a.cpa>0?a.cpa:Infinity,y=b.cpa>0?b.cpa:Infinity;return x!==y?x-y:b.count-a.count})
+    // 6) Render — mismo lenguaje visual de la fusión, semáforo canónico, días con actividad
+    const BE=ctx.margenBE||0
+    const _esc=s=>String(s==null?'':s).replace(/</g,'&lt;').replace(/"/g,'&quot;')
+    const _pill=(cpa,sz)=>{
+      if(!cpa||cpa<=0)return''
+      const col=window._nexoSemColor?window._nexoSemColor(cpa,BE):'var(--muted)'
+      return`<span style="margin-left:8px;font-size:${sz==='sm'?'10px':'11px'};font-weight:700;color:${col};border:1px solid ${col};border-radius:999px;padding:1px 8px;white-space:nowrap" title="CPA real = gasto ÷ ventas · Break-even: $${fmt(BE)} · 🟢 ≤70% del BE va bien · 🟡 cuidado · 🔴 pierde plata">🎯 $${fmt(cpa)}</span>`
+    }
+    const _gTxt=g=>g>0?`<span style="margin-left:8px;font-size:10px;color:var(--muted);white-space:nowrap">💸 $${fmt(g)}</span>`:''
+    const _btnC=(id,label)=>{
+      const on=window._rpIdCopiado&&window._rpIdCopiado(id)
+      return`<button onclick="event.stopPropagation();window._rpCopiarId('${_esc(id)}',this)" title="Copiar ${label}: ${_esc(id)}" style="margin-left:6px;background:${on?'var(--green-bg)':'rgba(255,255,255,.06)'};border:1px solid ${on?'var(--green)':'var(--border)'};border-radius:5px;color:${on?'var(--green)':'var(--muted)'};font-size:10px;padding:1px 7px;cursor:pointer;flex-shrink:0">${on?'✅':'📋'}</button>`
+    }
+    const _MES=['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic']
+    const _fLab=f=>{const p=String(f).split('-');return p.length===3?(p[2]+' '+(_MES[parseInt(p[1],10)-1]||p[1])):f}
+    const _filaF=(f,n,g,cpa,sz)=>{
+      const fs=sz==='sm'?'11px':'11.5px'
+      if(n===0&&g>0)return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--amber);padding:3px 8px;background:rgba(245,158,11,.06);border-radius:5px" title="Ese día gastó plata pero vendió CERO: fuga."><span style="width:72px;flex-shrink:0;font-weight:600">📅 ${_fLab(f)}</span>${_gTxt(g)}<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap">🚨 0 ventas</span><span style="margin-left:auto;font-weight:700;padding-left:10px">0</span></div>`
+      return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--muted);padding:3px 8px"><span style="width:72px;flex-shrink:0;color:var(--text)">📅 ${_fLab(f)}</span>${_gTxt(g)}${_pill(cpa,'sm')}<span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px" title="Ventas de este día">${n}</span></div>`
+    }
+    const _totVR=_listaR.reduce((s,F)=>s+F.count,0)
+    let html=`<div style="font-size:11px;color:var(--purple);padding:4px 0 6px;font-weight:600">🗓 Rango: ${_fLab(desde)} → ${_fLab(hasta)} (${_nDias} día${_nDias===1?'':'s'})${campSel?' · solo 1 campaña':' · todas las campañas'} · ${_listaR.length} campaña${_listaR.length===1?'':'s'} · ${_totVR} venta${_totVR===1?'':'s'}${_fueraCamp>0?` · <span style=\"color:var(--amber)\" title=\"Ventas confirmadas del producto cuyo anuncio no pertenece a estas campañas (otra campaña o sin sincronizar)\">⚠️ ${_fueraCamp} fuera de estas campañas</span>`:''}</div>`
+    if(!_listaR.length){
+      html+=`<div style="font-size:11.5px;color:var(--subtle);font-style:italic;padding:6px 0">— Nada que mostrar en este rango: ni ventas ni gasto en estas campañas. —</div>`
+    }
+    html+=_listaR.map((F,i)=>{
+      const _rcid=cidF+'_r_c'+i
+      const _fechasF=Object.keys(F.dias).sort().reverse()
+      const _adsR=Object.keys(F.ads).map(aid=>{
+        const A=F.ads[aid]
+        return{adId:aid,count:A.count,gasto:A.gasto,dias:A.dias,cpaT:(A.count>0&&A.gasto>0)?A.gasto/A.count:0}
+      }).sort((a,b)=>{const x=a.cpaT>0?a.cpaT:Infinity,y=b.cpaT>0?b.cpaT:Infinity;return x!==y?x-y:b.count-a.count})
+        .map((A,j)=>{
+          const esFugaAd=A.count===0&&A.gasto>0
+          const _fA=Object.keys(A.dias).sort().reverse()
+          return`<div style="margin-top:6px;padding:6px 8px;background:${esFugaAd?'rgba(245,158,11,.05)':(j%2===0?'rgba(255,255,255,.025)':'transparent')};border-radius:5px;${esFugaAd?'border:1px solid rgba(245,158,11,.35)':''}">
+            <div style="display:flex;align-items:center;font-size:11.5px;color:${esFugaAd?'var(--amber)':'var(--muted)'}"><span style="font-family:monospace">🖼️ ${_esc(A.adId)}</span>${_btnC(A.adId,'ID del anuncio')}${_gTxt(A.gasto)}${esFugaAd?`<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap">🚨 gastó y no vendió</span>`:_pill(A.cpaT,'sm')}<span style="margin-left:auto;color:${esFugaAd?'var(--amber)':'var(--text)'};font-weight:700;padding-left:10px">${A.count}</span></div>
+            <div style="margin:2px 0 0 14px;border-left:1px solid ${esFugaAd?'var(--amber)':'var(--border)'};padding-left:8px">${_fA.map(f=>_filaF(f,A.dias[f].n,A.dias[f].g,A.dias[f].cpa,'sm')).join('')}</div>
+          </div>`
+        }).join('')
+      const _gAdsTotR=Object.keys(F.ads).reduce((s,k)=>s+(F.ads[k].gasto||0),0)
+      const _difR=Math.round((F.gasto||0)-_gAdsTotR)
+      const _okR=Math.abs(_difR)<=Math.max(500,Math.round((F.gasto||0)*0.01))
+      const _cuadreR=(F.gasto>0&&_gAdsTotR>0)?`<div style="display:flex;align-items:center;gap:6px;font-size:10.5px;margin-top:6px;padding:5px 8px;border-radius:5px;background:${_okR?'var(--green-bg)':'rgba(245,158,11,.08)'};color:${_okR?'var(--green)':'var(--amber)'}"><span>${_okR?'✅':'⚠️'}</span><span>💸 Anuncios $${fmt(_gAdsTotR)} vs campaña $${fmt(F.gasto)}${_okR?' · LA PLATA CUADRA':' · diferencia $'+fmt(Math.abs(_difR))+' (redondeo Meta)'}</span></div>`:''
+      return`<div id="${_rcid}-box" style="padding:6px 8px;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-radius:6px;border-bottom:1px solid rgba(255,255,255,.04)">
+        <div onclick="window._rpToggleCuadre('${_rcid}')" style="cursor:pointer;display:flex;align-items:center;font-size:12px;color:var(--text);min-height:24px;flex-wrap:wrap" title="Toca para ver esta campaña día por día">
+          <span id="${_rcid}-chev" style="display:inline-block;width:12px;font-size:9px;color:var(--muted)">▸</span>
+          <span style="margin-left:3px">📣 ${_esc(F.nombre)}</span>
+          <span style="margin-left:6px;font-size:10px;color:var(--subtle)">🏢 ${_esc(F.accNombre)}</span>
+          ${_btnC(F.campId,'ID de la campaña')}<span style="margin-left:6px;font-size:9px;color:var(--subtle)">🗓 ${_fechasF.length} día${_fechasF.length===1?'':'s'} con actividad</span>${_gTxt(F.gasto)}${_pill(F.cpa)}
+          <span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px">${F.count}</span>
+        </div>
+        <div id="${_rcid}-sub" style="display:none;margin:3px 0 2px 16px;border-left:1px solid var(--border);padding-left:10px">
+          <div style="font-size:10px;color:var(--subtle);padding:4px 8px 2px;letter-spacing:.3px">1️⃣ La campaña completa, día por día (solo días con actividad):</div>
+          ${_fechasF.map(f=>_filaF(f,F.dias[f].count,F.dias[f].gasto,F.dias[f].cpa)).join('')}
+          <div style="font-size:10px;color:var(--subtle);padding:8px 8px 0;letter-spacing:.3px">2️⃣ Sus anuncios (mismo ID = mismo bloque), cada uno día por día:</div>
+          ${_adsR}
+          ${_cuadreR}
+        </div>
+      </div>`
+    }).join('')
+    const cont=document.getElementById(cidF+'-rango')
+    const sub=document.getElementById(cidF+'-sub')
+    if(cont){cont.innerHTML=html;cont.style.display='block'}
+    if(sub)sub.style.display='none'
+    const ch=document.getElementById(cidF+'-chev');if(ch)ch.textContent='▼'
+    _setSt(`✅ Listo: ${_listaR.length} campaña${_listaR.length===1?'':'s'}, ${_totVR} venta${_totVR===1?'':'s'}`,'var(--green)')
+  }catch(e){
+    console.warn('[fusión rango] error:',e&&e.message)
+    _setSt('⚠️ No se pudo cargar el rango: '+((e&&e.message)||'error desconocido'),'var(--amber)')
+  }
 }
 
 // Pinta en el header de cada cuenta el total de ventas (en campañas) desglosado por producto.

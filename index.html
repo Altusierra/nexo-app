@@ -10102,6 +10102,18 @@ const DROPI_STATUS={
 }
 window.DROPI_STATUS=DROPI_STATUS
 
+// ⭐ REGLA ÚNICA DE VENTA CONFIRMADA (validada con el owner · misma del Resumen por producto):
+// CANCELADO → cancelada · PENDIENTE CONFIRMACION o sin estado → pendiente · TODO lo demás → venta.
+// La usan las cards de campaña/adset/ad del portafolio para que su conteo de VENTAS coincida
+// EXACTO con el Resumen por producto y el cuadre "¿De dónde salen los pedidos?".
+// (Antes esas cards usaban DROPI_STATUS.cat y los estados CONFIRMADO/PENDIENTE caían a
+//  "pendientes", descontando ventas reales → CPA de campaña inflado. Bug sección 10 del doc.)
+window._nexoClasifVenta=function(estadoFinal){
+  if(estadoFinal==='CANCELADO')return 'canc'
+  if(estadoFinal==='PENDIENTE CONFIRMACION'||!estadoFinal)return 'pend'
+  return 'venta'
+}
+
 // ════════ ETAPAS DEL SEMÁFORO DE ÓRDENES (capa de SOLO visualización · Cruce Dropi) ════════
 // Agrupa los estados crudos de Dropi en 9 etapas del viaje de una orden (nace → entrega/pierde).
 // NO modifica DROPI_STATUS ni la lógica de cat/costos existente. Cubre TODOS los estados vistos.
@@ -15522,10 +15534,13 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const v=ventasByCamp[campId]
     v._src='mapeos'
     // Días anteriores: ya conciliado, mostrar solo el estado final
-    const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
-    if(cat==='cancelado')v.canceladas++
-    else if(cat==='pendiente'||!m.estado_final)v.pendientes++
-    else v.ventas++  // confirmadas (entregadas, en proceso, devueltas, etc.)
+    // ⭐ FIX: regla única _nexoClasifVenta (igual al Resumen por producto). Antes la regla
+    // cat-based mandaba CONFIRMADO/PENDIENTE a "pendientes" y la card mostraba MENOS ventas
+    // que el cuadre (ej: 4 vs 6) → CPA inflado. Ahora ambos cuentan igual.
+    const cls=window._nexoClasifVenta(m.estado_final)
+    if(cls==='canc')v.canceladas++
+    else if(cls==='pend')v.pendientes++
+    else v.ventas++  // confirmadas (entregadas, en proceso, devueltas, CONFIRMADO, PENDIENTE, etc.)
   }
 
   // Reporte diario (ad_ids manuales del auxiliar)
@@ -15577,9 +15592,8 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   const ventasRealesByCampAyer={}
   const ventasRealesByAdAyer={}   // por ad_id (para columnas "Ventas ayer" en adset/ad)
   for(const m of mapeosAyer){
-    const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
-    if(cat==='cancelado')continue
-    if(cat==='pendiente'||!m.estado_final)continue
+    // ⭐ FIX: regla única _nexoClasifVenta (antes cat-based descontaba CONFIRMADO/PENDIENTE)
+    if(window._nexoClasifVenta(m.estado_final)!=='venta')continue
     if(m.ad_id)ventasRealesByAdAyer[m.ad_id]=(ventasRealesByAdAyer[m.ad_id]||0)+1
     const campId=adToCamp[m.ad_id]
     if(!campId)continue
@@ -15608,9 +15622,8 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       }
     }
     for(const m of (mapeosArr||[])){
-      const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
-      if(cat==='cancelado')continue
-      if(cat==='pendiente'||!m.estado_final)continue
+      // ⭐ FIX: regla única _nexoClasifVenta (igual al Resumen por producto)
+      if(window._nexoClasifVenta(m.estado_final)!=='venta')continue
       if(m.ad_id)realesByAd[m.ad_id]=(realesByAd[m.ad_id]||0)+1
       const campId=adToCamp[m.ad_id]
       if(!campId)continue
@@ -17639,9 +17652,10 @@ async function _calcMetricasPorAdIds(adIds,desde,hasta,gasto,ctx){
     if(m.fecha===hoy){
       out.pendientes++
     }else{
-      const cat=DROPI_STATUS[m.estado_final]?.cat||'otro'
-      if(cat==='cancelado')out.canceladas++
-      else if(cat==='pendiente'||!m.estado_final)out.pendientes++
+      // ⭐ FIX: regla única _nexoClasifVenta (igual al Resumen por producto y a renderCamp)
+      const cls=window._nexoClasifVenta(m.estado_final)
+      if(cls==='canc')out.canceladas++
+      else if(cls==='pend')out.pendientes++
       else out.ventas++
     }
   }

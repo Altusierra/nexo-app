@@ -13534,26 +13534,62 @@ async function _renderResumenProductos(desde,hasta,hoy){
   //     meta_insights (nivel='ad') por todos los ad_ids ya juntados — 0 llamadas a Meta API.
   //     ADITIVO: no altera ningún cálculo existente; solo alimenta el desglose visual.
   const _adGastoBloques={p:{},a:{},b:{},c:{}}
+  // NUEVO (Mejora 4): métricas Meta por bloque de fechas, a nivel AD y a nivel CAMPAÑA.
+  // Mismos rangos p/a/b/c. Los campos YA están sincronizados en meta_insights (la sync los guarda):
+  // impressions, clicks, reach, conversions (=conversaciones iniciadas), cost_per_result (=CPA Meta),
+  // unique_clicks, unique_outbound_clicks. CERO llamadas a Meta API; solo BD.
+  const _adMetBloques={p:{},a:{},b:{},c:{}}
+  const _campMetBloques={p:{},a:{},b:{},c:{}}
   try{
     const _adsG=Object.keys(adToCuenta)
-    if(_adsG.length&&nDiasRango>0){
+    if(nDiasRango>0){
       // Rangos de cada bloque (misma aritmética de los días extra):
       const _rangoAntes=(refDesde)=>{const d=new Date(refDesde+'T00:00:00');const h=new Date(d);h.setDate(h.getDate()-1);const dd=new Date(h);dd.setDate(dd.getDate()-(nDiasRango-1));return{desde:_isoDate(dd),hasta:_isoDate(h)}}
       const _rB=desdePrev?_rangoAntes(desdePrev):null      // antier
       const _rC=_rB?_rangoAntes(_rB.desde):null            // trasantier
       const _gDesde=_rC?_rC.desde:(desdePrev||desde)
-      const _spendRows=[]
-      for(let i=0;i<_adsG.length;i+=300){
-        const{data:insAd}=await sb.from('meta_insights').select('meta_id,fecha,spend').eq('nivel','ad').in('meta_id',_adsG.slice(i,i+300)).gte('fecha',_gDesde).lte('fecha',hasta)
-        for(const r of (insAd||[]))_spendRows.push(r)
-      }
       const _enRango=(f,d,h)=>f>=d&&f<=h
-      for(const r of _spendRows){
-        const id=String(r.meta_id),f=r.fecha,sp=r.spend||0
-        if(_enRango(f,desde,hasta))_adGastoBloques.p[id]=(_adGastoBloques.p[id]||0)+sp
-        if(desdePrev&&_enRango(f,desdePrev,hastaPrev))_adGastoBloques.a[id]=(_adGastoBloques.a[id]||0)+sp
-        if(_rB&&_enRango(f,_rB.desde,_rB.hasta))_adGastoBloques.b[id]=(_adGastoBloques.b[id]||0)+sp
-        if(_rC&&_enRango(f,_rC.desde,_rC.hasta))_adGastoBloques.c[id]=(_adGastoBloques.c[id]||0)+sp
+      const _METSEL='meta_id,fecha,spend,impressions,clicks,reach,conversions,cost_per_result,unique_clicks,unique_outbound_clicks'
+      // Acumula métricas de una fila de insights en el mapa destino (por id)
+      const _accMet=(tgt,id,r)=>{
+        const o=tgt[id]||(tgt[id]={sp:0,imp:0,clk:0,reach:0,conv:0,cprSum:0,cprN:0,uoclk:0})
+        o.sp+=r.spend||0;o.imp+=r.impressions||0;o.clk+=r.clicks||0;o.reach+=r.reach||0;o.conv+=r.conversions||0
+        if((r.cost_per_result||0)>0){o.cprSum+=r.cost_per_result;o.cprN++}
+        o.uoclk+=((r.unique_outbound_clicks||0)>0?r.unique_outbound_clicks:(r.unique_clicks||0))
+      }
+      // Reparte una fila en los bloques p/a/b/c según su fecha
+      const _porBloque=(r,fn)=>{
+        const f=r.fecha
+        if(_enRango(f,desde,hasta))fn('p')
+        if(desdePrev&&_enRango(f,desdePrev,hastaPrev))fn('a')
+        if(_rB&&_enRango(f,_rB.desde,_rB.hasta))fn('b')
+        if(_rC&&_enRango(f,_rC.desde,_rC.hasta))fn('c')
+      }
+      if(_adsG.length){
+        const _spendRows=[]
+        for(let i=0;i<_adsG.length;i+=300){
+          const{data:insAd}=await sb.from('meta_insights').select(_METSEL).eq('nivel','ad').in('meta_id',_adsG.slice(i,i+300)).gte('fecha',_gDesde).lte('fecha',hasta)
+          for(const r of (insAd||[]))_spendRows.push(r)
+        }
+        for(const r of _spendRows){
+          const id=String(r.meta_id),f=r.fecha,sp=r.spend||0
+          if(_enRango(f,desde,hasta))_adGastoBloques.p[id]=(_adGastoBloques.p[id]||0)+sp
+          if(desdePrev&&_enRango(f,desdePrev,hastaPrev))_adGastoBloques.a[id]=(_adGastoBloques.a[id]||0)+sp
+          if(_rB&&_enRango(f,_rB.desde,_rB.hasta))_adGastoBloques.b[id]=(_adGastoBloques.b[id]||0)+sp
+          if(_rC&&_enRango(f,_rC.desde,_rC.hasta))_adGastoBloques.c[id]=(_adGastoBloques.c[id]||0)+sp
+          _porBloque(r,(k)=>_accMet(_adMetBloques[k],id,r))
+        }
+      }
+      // Métricas a nivel CAMPAÑA: todas las campañas configuradas de todos los productos
+      const _campIdsMet=[...new Set((productos||[]).flatMap(p=>Array.isArray(p.campaign_ids)?p.campaign_ids.map(String):[]))]
+      if(_campIdsMet.length){
+        for(let i=0;i<_campIdsMet.length;i+=300){
+          const{data:insC}=await sb.from('meta_insights').select(_METSEL).eq('nivel','campaign').in('meta_id',_campIdsMet.slice(i,i+300)).gte('fecha',_gDesde).lte('fecha',hasta)
+          for(const r of (insC||[])){
+            const id=String(r.meta_id)
+            _porBloque(r,(k)=>_accMet(_campMetBloques[k],id,r))
+          }
+        }
       }
     }
   }catch(e){console.warn('[cuadre ventas] no se pudo cargar gasto por ad:',e&&e.message)}
@@ -13563,7 +13599,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
   const esSoloHoy=(desde===hoy&&hasta===hoy)
   const productosResumen=[]
   for(const prod of productos){
-    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd,reportesPrevByProd,_extrasDias,adToCuenta,reportesAdIdsListByProd,_adGastoBloques)
+    const data=_calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd,reportesPrevByProd,_extrasDias,adToCuenta,reportesAdIdsListByProd,_adGastoBloques,_campMetBloques,_adMetBloques)
     if(data)productosResumen.push(data)
   }
 
@@ -13677,7 +13713,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
 
 // Calcula las metricas consolidadas de un producto en el rango.
 // Devuelve null si no hay actividad relevante (sin gasto y sin pedidos).
-function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd,reportesPrevByProd,extrasDias,adToCuenta,reportesAdIdsListByProd,adGastoBloques){
+function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esSoloHoy,reportesAdIdsByProd,metricsByCampId,estadoByCampId,mapeosPrevByProd,gastoPrevByCampId,nDiasRango,conversacionesByProd,conversacionesPrevByProd,reportesPrevByProd,extrasDias,adToCuenta,reportesAdIdsListByProd,adGastoBloques,campMetBloques,adMetBloques){
   // Gasto desde campaign_ids configurados del producto
   let gasto=0
   const campIds=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
@@ -13798,8 +13834,10 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
       const gastoCamp=gastoByCampId[k]||0
       if(gastoCamp<=0)continue // sin actividad en el rango → no se cuenta
       const e=(_liveEstadosProd&&_liveEstadosProd[k])||estadoByCampId[k]||''
-      if(e==='ACTIVE')_activas++
-      else _pausadas++ // con gasto pero estado actual no-ACTIVE (pausada/finalizada/etc.)
+      // NUEVO (Mejora 5): activa REAL = ACTIVE + entrega en cascada (misma fuente del header)
+      const _entC=(typeof window!=='undefined'&&window._nexoEntregaByCampId)?window._nexoEntregaByCampId[k]:undefined
+      if(e==='ACTIVE'&&_entC!==false)_activas++
+      else _pausadas++ // con gasto pero no entrega de verdad (pausada, o hijos apagados)
     }
   }
   const ctrProd=_imp>0?(_clk/_imp)*100:0
@@ -13977,6 +14015,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
 
   return{
     producto:prod,
+    metCamp:campMetBloques||null,metAd:adMetBloques||null,
     nombre:prod.nombre,
     inicial:(prod.nombre||'?').charAt(0).toUpperCase(),
     gasto,totalPedidos,pedidosConfirmados:pConf,canc,pend,totalMapeos,
@@ -14231,7 +14270,10 @@ function _renderProductoCardResumen(data,ranking){
         <span id="${_cid}_h-chev" style="display:inline-block;width:14px;font-size:10px;color:var(--amber)">▸</span>
         <span style="margin-left:4px">⚠️ Anuncios huérfanos (cadena rota)</span><span style="margin-left:auto;font-weight:700">${_huerN}</span>
       </div>
-      <div id="${_cid}_h-sub" style="display:none;margin:2px 0 6px 20px;border-left:1px solid var(--amber);padding-left:12px">${_huerRows}</div>`:''
+      <div id="${_cid}_h-sub" style="display:none;margin:2px 0 6px 20px;border-left:1px solid var(--amber);padding-left:12px">${_huerRows}</div>`
+      :`<div style="display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0 5px 18px" title="Anuncios con ad_id cuya cadena ad→conjunto→campaña está rota en la base. Hoy hay 0: todo bien. Este es el 3er número de la suma de abajo.">
+        <span>⚠️ Anuncios huérfanos (cadena rota)</span><span style="margin-left:auto;font-weight:700">0</span>
+      </div>`
     // Sin sincronizar: el ad_id NO existe en meta_campanas (falta sync o ID mal escrito). CERRADO al inicio.
     const _sinRows=Object.entries(cu.sinSyncIds||{}).sort((a,b)=>b[1]-a[1]).map(([adId,n],i)=>`<div style="display:flex;align-items:center;font-size:11.5px;color:var(--muted);padding:6px 8px;background:${i%2===0?'rgba(255,255,255,.025)':'transparent'};border-radius:5px"><span style="font-family:monospace">🖼️ ${_esc(adId)}</span>${_btnCopy(adId,'ID del anuncio')}<span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px">${n}</span></div>`).join('')
     const _sinHtml=cu.sinSync>0?`
@@ -14242,7 +14284,11 @@ function _renderProductoCardResumen(data,ranking){
       <div id="${_cid}_s-sub" style="display:none;margin:2px 0 6px 20px;border-left:1px solid var(--border);padding-left:12px">${_sinRows}</div>`
       :`<div style="display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0 5px 18px"><span>🔌 Sin sincronizar con Meta</span><span style="margin-left:auto;font-weight:700">0</span></div>`
     return`<div style="margin-top:10px;padding:12px 13px;background:rgba(0,0,0,.18);border-radius:8px;border-left:3px solid ${acento||'var(--border)'}">
-      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;letter-spacing:.2px">🔎 ¿De dónde salen los <strong style="color:var(--text)">${cu.total}</strong> pedidos de <strong style="color:var(--text)">${titulo}</strong>?</div>
+      <div style="display:flex;align-items:center;flex-wrap:wrap;gap:2px;font-size:11px;color:var(--muted);margin-bottom:8px;letter-spacing:.2px">
+        <span>🔎 ¿De dónde salen los <strong style="color:var(--text)">${cu.total}</strong> pedidos de <strong style="color:var(--text)">${titulo}</strong>?</span>
+        ${_gastoTxt(cu.gastoTotal||0)}${_cpaPill(cu.cpaTotal||0)}
+        <span style="margin-left:8px;font-size:10px;font-weight:700;white-space:nowrap;border-radius:999px;padding:1px 8px;background:${_ok?'var(--green-bg)':'var(--red-bg)'};color:${_ok?'var(--green)':'var(--red)'};border:1px solid ${_ok?'var(--green)':'var(--red)'}" title="La misma verificación de abajo, sin abrir nada: campañas + orgánicas + huérfanos + sin sync = total. ✅ cuadra · ⚠️ revisar">${_ok?'✅':'⚠️'} ${cu.enCampanas}+${cu.organicas}+${_huerN}+${cu.sinSync}=${_suma}${_ok?' · CUADRA':''}</span>
+      </div>
       <div onclick="window._rpToggleCuadre('${_cid}')" style="cursor:pointer;display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0;flex-wrap:wrap" title="Toca para ver/ocultar las campañas y sus anuncios · CPA real de todo = gasto total de estas campañas ÷ ventas en campañas">
         <span id="${_cid}-chev" style="display:inline-block;width:14px;font-size:10px;color:var(--muted)">▸</span>
         <span style="margin-left:4px">📊 En campañas</span>
@@ -14388,15 +14434,97 @@ function _renderProductoCardResumen(data,ranking){
       const _on=window._rpIdCopiado&&window._rpIdCopiado(id)
       return`<button onclick="event.stopPropagation();window._rpCopiarId('${_esc(id)}',this)" title="Copiar ${label}: ${_esc(id)} · Queda marcado en verde (aunque recargues) hasta que lo toques de nuevo" style="margin-left:6px;background:${_on?'var(--green-bg)':'rgba(255,255,255,.06)'};border:1px solid ${_on?'var(--green)':'var(--border)'};border-radius:5px;color:${_on?'var(--green)':'var(--muted)'};font-size:10px;padding:1px 7px;cursor:pointer;flex-shrink:0">${_on?'✅':'📋'}</button>`
     }
-    // Fila de UN día (sirve para campaña y para anuncio): día + gasto + CPA + ventas. Sin datos → rayita.
-    // NUEVO: si gastó y vendió 0 ese día → fila ámbar de FUGA 🚨 (antes salía como "no corrió").
-    const _filaDia=(d,obj,sz)=>{
+    // ── NUEVO (Mejora 4): GRILLA DE MÉTRICAS con columnas de ancho FIJO ──
+    // Así cada fila y columna COINCIDEN: miras de arriba a abajo toda la columna de CPA Real
+    // (o cualquiera) de una sola pasada. El contenedor hace scroll horizontal si no cabe.
+    // REGLA DE COLOR: el semáforo 🟢🟡🔴 es EXCLUSIVO del CPA Real. Las demás métricas se
+    // identifican por el color suave del ENCABEZADO (pastel), los valores van en gris neutro.
+    const _cw={vts:54,gto:88,cpr:100,cpmt:88,conv:56,cxv:84,cli:72,ctr:62,cpc:80,cpmil:80,frec:56}
+    const _cell=(w,html,tip)=>`<span style="display:inline-block;width:${w}px;flex-shrink:0;text-align:right;padding-right:10px;white-space:nowrap" ${tip?`title="${tip}"`:''}>${html}</span>`
+    // Pill de CPA Real para la grilla (sin margen, compacta) — mismo semáforo canónico
+    const _cpaPillG=(cpa)=>{
+      if(!cpa||cpa<=0)return'—'
+      const col=(typeof window!=='undefined'&&window._nexoSemColor)?window._nexoSemColor(cpa,_BE):(_BE>0?(cpa<=_BE?'var(--green)':'var(--red)'):'var(--muted)')
+      return`<span style="font-size:9.5px;font-weight:700;color:${col};border:1px solid ${col};border-radius:999px;padding:0 6px;white-space:nowrap">🎯 $${fmt(Math.round(cpa))}</span>`
+    }
+    // Deriva todas las métricas de un objeto acumulado de meta_insights {sp,imp,reach,conv,cprSum,cprN,uoclk}
+    const _metCalc=(m,n)=>{
+      if(!m)return null
+      const conv=m.conv||0
+      return{
+        conv,
+        cpaMeta:conv>0?(m.sp/conv):(m.cprN>0?m.cprSum/m.cprN:0),
+        cxv:(conv>0&&n>0)?conv/n:0,
+        cli:(m.uoclk>0&&conv>0)?(m.uoclk/conv)*100:0,
+        ctr:(m.reach>0)?(m.uoclk/m.reach)*100:0,
+        cpc:(m.uoclk>0)?(m.sp/m.uoclk):0,
+        cpmil:(m.imp>0)?(m.sp/m.imp)*1000:0,
+        frec:(m.reach>0)?(m.imp/m.reach):0
+      }
+    }
+    // Celdas de métricas de UNA fila (día, total de campaña o total de anuncio)
+    const _metCells=(n,g,cpa,met,fuga)=>{
+      const x=_metCalc(met,n)
+      const cN=fuga?'var(--amber)':'var(--text)'
+      const v=(cond,html)=>cond?html:'—'
+      return _cell(_cw.vts,`<strong style="color:${cN}">${n}</strong>`,'🛒 Ventas de esta fila')
+        +_cell(_cw.gto,v(g>0,'$'+fmt(Math.round(g||0))),'💸 Gasto en Meta de esta fila')
+        +_cell(_cw.cpr,fuga?`<span style="font-size:9px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:0 6px;white-space:nowrap">🚨 0 vts</span>`:_cpaPillG(cpa),'🚦 CPA Real = gasto ÷ ventas · el ÚNICO con semáforo: 🟢 va bien · 🟡 cuidado · 🔴 pierde plata')
+        +_cell(_cw.cpmt,v(x&&x.cpaMeta>0,x?'$'+fmt(Math.round(x.cpaMeta)):''),'🎯 CPA Meta: lo que Meta dice que cuesta cada resultado (gasto ÷ conversaciones)')
+        +_cell(_cw.conv,v(x&&x.conv>0,x?fmt(x.conv):''),'💬 Conversaciones por mensajes iniciadas')
+        +_cell(_cw.cxv,v(x&&x.cxv>0,x?x.cxv.toFixed(1)+' c/v':''),'🤝 Conversaciones ÷ ventas: cuántos chats cuesta UNA venta. Menos = mejor. HOY las ventas son por IDs (T. Cierre) y en días pasados son confirmadas Dropi (T. Conversión)')
+        +_cell(_cw.cli,v(x&&x.cli>0,x?(x.cli>300?'⚠️ ':'')+Math.round(x.cli)+'%':''),'⚖️ CLI/CON: clics únicos en el enlace ÷ conversaciones ×100. Si pasa de 300% sale ⚠️: mucha gente hace clic pero poquitos escriben')
+        +_cell(_cw.ctr,v(x&&x.ctr>0,x?x.ctr.toFixed(2)+'%':''),'👆 CTR único: % de cuentas alcanzadas que hicieron clic en el enlace')
+        +_cell(_cw.cpc,v(x&&x.cpc>0,x?'$'+fmt(Math.round(x.cpc)):''),'💲 CPC: costo por cada clic único en el enlace')
+        +_cell(_cw.cpmil,v(x&&x.cpmil>0,x?'$'+fmt(Math.round(x.cpmil)):''),'📡 CPM: costo por cada 1.000 impresiones')
+        +_cell(_cw.frec,v(x&&x.frec>0,x?x.frec.toFixed(1):''),'🔁 Frecuencia: veces que cada persona vio el anuncio en promedio')
+    }
+    // Encabezado de columnas: cada métrica con SU color pastel suave (solo el título, no los valores)
+    const _metHeadCells=[
+      {w:_cw.vts,e:'🛒',l:'VENTAS',c:'#e2e8f0',tip:'Ventas de cada fila. HOY = por IDs del aux · días pasados = confirmadas Dropi'},
+      {w:_cw.gto,e:'💸',l:'GASTO',c:'#94a3b8',tip:'Plata gastada en Meta'},
+      {w:_cw.cpr,e:'🚦',l:'CPA REAL',c:'#cbd5e1',tip:'Gasto ÷ ventas. El ÚNICO con colores de semáforo: 🟢 va bien · 🟡 cuidado · 🔴 pierde plata'},
+      {w:_cw.cpmt,e:'🎯',l:'CPA META',c:'#7dd3fc',tip:'Lo que Meta dice que cuesta cada resultado (gasto ÷ conversaciones)'},
+      {w:_cw.conv,e:'💬',l:'CONV',c:'#f9a8d4',tip:'Conversaciones por mensajes iniciadas'},
+      {w:_cw.cxv,e:'🤝',l:'CONV/VTA',c:'#c4b5fd',tip:'Conversaciones ÷ ventas: cuántos chats cuesta UNA venta. Menos = mejor'},
+      {w:_cw.cli,e:'⚖️',l:'CLI/CON',c:'#fda4af',tip:'Clics únicos ÷ conversaciones ×100 · si pasa de 300% es alerta ⚠️'},
+      {w:_cw.ctr,e:'👆',l:'CTR',c:'#5eead4',tip:'% de cuentas alcanzadas que hicieron clic en el enlace'},
+      {w:_cw.cpc,e:'💲',l:'CPC',c:'#a5b4fc',tip:'Costo por clic único en el enlace'},
+      {w:_cw.cpmil,e:'📡',l:'CPM',c:'#93c5fd',tip:'Costo por 1.000 impresiones'},
+      {w:_cw.frec,e:'🔁',l:'FREC',c:'#d8b4fe',tip:'Veces que cada persona vio el anuncio en promedio'}
+    ]
+    const _metHeader=(padIzq)=>`<div style="display:flex;align-items:center;min-width:max-content;padding:3px 8px 1px;border-bottom:1px dashed rgba(255,255,255,.08)"><span style="width:${padIzq}px;flex-shrink:0"></span>${_metHeadCells.map(h=>`<span style="display:inline-block;width:${h.w}px;flex-shrink:0;text-align:right;padding-right:10px;font-size:8.5px;font-weight:700;letter-spacing:.3px;color:${h.c};white-space:nowrap;cursor:help" title="${h.tip}">${h.e} ${h.l}</span>`).join('')}</div>`
+    // Suma métricas de varios días en un solo acumulado (para filas Σ TOTAL)
+    const _aggMet=(arr)=>{
+      let out=null
+      for(const m of arr){
+        if(!m)continue
+        if(!out)out={sp:0,imp:0,clk:0,reach:0,conv:0,cprSum:0,cprN:0,uoclk:0}
+        out.sp+=m.sp||0;out.imp+=m.imp||0;out.clk+=m.clk||0;out.reach+=m.reach||0
+        out.conv+=m.conv||0;out.cprSum+=m.cprSum||0;out.cprN+=m.cprN||0;out.uoclk+=m.uoclk||0
+      }
+      return out
+    }
+    // Atajos para leer métricas del día k: campaña y anuncio (mapas cargados en 6.9, 0 llamadas extra)
+    const _metCampDe=(k,campId)=>(data.metCamp&&data.metCamp[k]&&data.metCamp[k][String(campId)])||null
+    const _metAdDe=(k,adId)=>(data.metAd&&data.metAd[k]&&data.metAd[k][String(adId)])||null
+    // Fila Σ TOTAL (campaña o anuncio): mismas columnas, en negrita suave
+    const _filaTotal=(n,g,cpa,met,sz)=>{
+      const wL=sz==='sm'?73:96
       const fs=sz==='sm'?'11px':'11.5px'
-      if(!obj)return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--subtle);padding:3px 8px"><span style="width:92px;flex-shrink:0">${d.emo} ${d.lab}</span><span style="font-style:italic">— no corrió ese día —</span></div>`
+      return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--text);padding:3px 8px;min-width:max-content;background:rgba(167,139,250,.07);border-radius:5px" title="Suma de todos los días de arriba — los ratios (CPA, CTR, etc.) se calculan sobre los totales, no promediando días"><span style="width:${wL}px;flex-shrink:0;font-weight:700">Σ TOTAL</span>${_metCells(n,g,cpa,met,n===0&&(g||0)>0)}</div>`
+    }
+    // Fila de UN día (sirve para campaña y para anuncio): etiqueta + grilla de métricas alineada.
+    // Mantiene la regla de FUGA: si gastó y vendió 0 ese día → fila ámbar 🚨 (no "no corrió").
+    const _filaDia=(d,obj,sz,met)=>{
+      const fs=sz==='sm'?'11px':'11.5px'
+      const wL=sz==='sm'?73:96
+      if(!obj)return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--subtle);padding:3px 8px;min-width:max-content"><span style="width:${wL}px;flex-shrink:0">${d.emo} ${d.lab}</span><span style="font-style:italic">— no corrió ese día —</span></div>`
       const n=obj.count!=null?obj.count:obj.n
       const g=obj.gasto!=null?obj.gasto:obj.g
-      if(n===0&&(g||0)>0)return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--amber);padding:3px 8px;background:rgba(245,158,11,.06);border-radius:5px" title="Ese día gastó plata pero vendió CERO: fuga. Revísalo."><span style="width:92px;flex-shrink:0;font-weight:600">${d.emo} ${d.lab}</span>${_gastoTxt(g)}<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap">🚨 0 ventas</span><span style="margin-left:auto;color:var(--amber);font-weight:700;padding-left:10px">0</span></div>`
-      return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--muted);padding:3px 8px"><span style="width:92px;flex-shrink:0;color:var(--text)">${d.emo} ${d.lab}</span>${_gastoTxt(g)}${_cpaPill(obj.cpa,'sm')}<span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px" title="Ventas de este día">${n}</span></div>`
+      const esFuga=n===0&&(g||0)>0
+      if(esFuga)return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--amber);padding:3px 8px;background:rgba(245,158,11,.06);border-radius:5px;min-width:max-content" title="Ese día gastó plata pero vendió CERO: fuga. Revísalo."><span style="width:${wL}px;flex-shrink:0;font-weight:600">${d.emo} ${d.lab}</span>${_metCells(n,g,0,met,true)}</div>`
+      return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--muted);padding:3px 8px;min-width:max-content"><span style="width:${wL}px;flex-shrink:0;color:var(--text)">${d.emo} ${d.lab}</span>${_metCells(n,g,obj.cpa,met,false)}</div>`
     }
     const _cidF='cuadf_'+_slugProd
     const _campsF=_lista.map((F,i)=>{
@@ -14421,7 +14549,7 @@ function _renderProductoCardResumen(data,ranking){
         const esFugaAd=A.count===0&&A.gasto>0
         return`<div style="margin-top:6px;padding:6px 8px;background:${esFugaAd?'rgba(245,158,11,.05)':(j%2===0?'rgba(255,255,255,.025)':'transparent')};border-radius:5px;${esFugaAd?'border:1px solid rgba(245,158,11,.35)':''}">
           <div style="display:flex;align-items:center;font-size:11.5px;color:${esFugaAd?'var(--amber)':'var(--muted)'}"><span style="font-family:monospace">🖼️ ${_esc(A.adId)}</span>${_btnCopy(A.adId,'ID del anuncio')}${_gastoTxt(A.gasto)}${esFugaAd?`<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap" title="Gastó plata en sus días y no vendió NADA. Pura fuga: revísalo o apágalo.">🚨 gastó y no vendió</span>`:_cpaPill(A.cpaT,'sm')}<span style="margin-left:auto;color:${esFugaAd?'var(--amber)':'var(--text)'};font-weight:700;padding-left:10px" title="Ventas totales del anuncio sumando sus días">${A.count}</span></div>
-          <div style="margin:2px 0 0 14px;border-left:1px solid ${esFugaAd?'var(--amber)':'var(--border)'};padding-left:8px">${_dias.map(d=>_filaDia(d,A.dias[d.k],'sm')).join('')}</div>
+          <div style="margin:2px 0 0 14px;border-left:1px solid ${esFugaAd?'var(--amber)':'var(--border)'};padding-left:8px">${_metHeader(73)}${_dias.map(d=>_filaDia(d,A.dias[d.k],'sm',_metAdDe(d.k,A.adId))).join('')}${_filaTotal(A.count,A.gasto,A.cpaT,_aggMet(_dias.map(d=>_metAdDe(d.k,A.adId))),'sm')}</div>
         </div>`
       }).join('')
       // Cuadre de la plata de la campaña: suma del gasto de todos sus ads vs gasto total campaña
@@ -14434,12 +14562,24 @@ function _renderProductoCardResumen(data,ranking){
           <span id="${_ccid}-chev" style="display:inline-block;width:12px;font-size:9px;color:var(--muted)">▸</span>
           <span style="margin-left:3px">📣 ${_esc(F.nombre)}</span>
           <span style="margin-left:6px;font-size:10px;color:var(--subtle)">🏢 ${_esc(F.accNombre)}</span>
-          ${_btnCopy(F.campId,'ID de la campaña')}${_chips}${_gastoTxt(F.gasto)}${_cpaPill(F.cpa)}
+          ${_btnCopy(F.campId,'ID de la campaña')}${(()=>{
+            // NUEVO (Mejora 5): estado REAL de la campaña — botón + entrega en cascada
+            const _w=(typeof window!=='undefined')?window:null
+            const _est=(_w&&_w._nexoLiveEstadoByCampId&&_w._nexoLiveEstadoByCampId[String(F.campId)])||''
+            const _ent=(_w&&_w._nexoEntregaByCampId)?_w._nexoEntregaByCampId[String(F.campId)]:undefined
+            if(!_est&&_ent===undefined)return''
+            if(_est&&_est!=='ACTIVE')return`<span style="margin-left:6px;font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)" title="El botón de la campaña está APAGADO en Meta: no corre.">⏸ APAGADA</span>`
+            if(_ent===false)return`<span style="margin-left:6px;font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.05);color:var(--text);border:1px solid var(--border)" title="TRAMPA de Meta: el botón de la campaña está prendido, pero sus conjuntos o anuncios están apagados → NO entrega ni gasta. Revisa adentro qué está apagado.">🔕 NO ENTREGA</span>`
+            if(_est==='ACTIVE'&&_ent===true)return`<span style="margin-left:6px;font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:var(--green-bg);color:var(--green);border:1px solid var(--green)" title="Activa DE VERDAD: botón prendido y con ≥1 conjunto activo que tiene ≥1 anuncio activo. Está entregando.">🟢 ACTIVA</span>`
+            return''
+          })()}${_chips}${_gastoTxt(F.gasto)}${_cpaPill(F.cpa)}
           <span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px" title="Ventas totales de la campaña sumando sus días">${F.count}</span>
         </div>
-        <div id="${_ccid}-sub" style="display:none;margin:3px 0 2px 16px;border-left:1px solid var(--border);padding-left:10px">
-          <div style="font-size:10px;color:var(--subtle);padding:4px 8px 2px;letter-spacing:.3px">1️⃣ La campaña completa, día por día:</div>
-          ${_dias.map(d=>_filaDia(d,F.dias[d.k])).join('')}
+        <div id="${_ccid}-sub" style="display:none;margin:3px 0 2px 16px;border-left:1px solid var(--border);padding-left:10px;overflow-x:auto">
+          <div style="font-size:10px;color:var(--subtle);padding:4px 8px 2px;letter-spacing:.3px">1️⃣ La campaña completa, día por día: <span style="opacity:.7">(desliza ➡️ para ver todas las métricas · pasa el cursor por cada título para entenderla)</span></div>
+          ${_metHeader(96)}
+          ${_dias.map(d=>_filaDia(d,F.dias[d.k],null,_metCampDe(d.k,F.campId))).join('')}
+          ${_filaTotal(F.count,F.gasto,F.cpa,_aggMet(_dias.map(d=>_metCampDe(d.k,F.campId))))}
           <div style="font-size:10px;color:var(--subtle);padding:8px 8px 0;letter-spacing:.3px">2️⃣ Sus anuncios (mismo ID = mismo bloque), cada uno día por día:</div>
           ${_adsF}
           ${_cuadrePlataF}
@@ -14447,6 +14587,8 @@ function _renderProductoCardResumen(data,ranking){
       </div>`
     }).join('')
     const _totVentasF=_lista.reduce((s,F)=>s+F.count,0)
+    // NUEVO: total de ventas por día (HOY/AYER/ANTIER/TRASANTIER) — los días en 0 también se muestran
+    const _totPorDiaF=_dias.map(d=>({lab:d.lab,n:_lista.reduce((s,F)=>s+((F.dias[d.k]&&F.dias[d.k].count)||0),0)}))
     // NUEVO: contexto para el MODO RANGO (queries solo al tocar Aplicar; por defecto cero queries).
     if(typeof window!=='undefined'){
       window._rpFusionCtx=window._rpFusionCtx||{}
@@ -14473,6 +14615,10 @@ function _renderProductoCardResumen(data,ranking){
       <div onclick="window._rpToggleCuadre('${_cidF}')" style="cursor:pointer;display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0;flex-wrap:wrap" title="Toca para abrir/cerrar · Orden: mejor CPA total arriba, peor abajo">
         <span id="${_cidF}-chev" style="display:inline-block;width:14px;font-size:10px;color:var(--muted)">▸</span>
         <span style="margin-left:4px">🧬 ${_lista.length} campaña${_lista.length===1?'':'s'} fusionada${_lista.length===1?'':'s'} en ${_diasConDatos} día${_diasConDatos===1?'':'s'}</span>
+        <span style="margin-left:8px;display:inline-flex;flex-wrap:wrap;gap:3px;align-items:center" title="De dónde sale el total: ventas de cada día sumando todas las campañas. Si un día está en 0 igual se muestra, para que sepas que ese día no se vendió NADA.">
+          ${_totPorDiaF.map(t=>`<span style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;${t.n>0?'background:var(--green-bg);color:var(--green);border:1px solid var(--green)':'background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)'}" title="${t.lab}: ${t.n} venta${t.n===1?'':'s'}${t.n===0?' — ese día no se vendió nada':''}">${t.lab}: ${t.n}</span>`).join('')}
+          <span style="font-size:9px;color:var(--subtle)">= ${_totVentasF}</span>
+        </span>
         <span style="margin-left:auto;font-weight:700" title="Suma de las ventas 'En campañas' de todos los días de arriba — debe cuadrar con ellos">${_totVentasF}</span>
       </div>
       ${_ctrlRango}
@@ -15001,6 +15147,41 @@ async function renderMetaPortafolio(el,isAdmin){
     }catch(_){}
   }
 
+  // ── NUEVO (Mejora 5): ENTREGA REAL en cascada (campaña→conjunto→anuncio) ──
+  // El botón azul de Meta NO alcanza: una campaña "ACTIVA" con todos sus conjuntos o
+  // anuncios apagados NO entrega (la trampa clásica). Regla de abajo hacia arriba:
+  //   anuncio entrega = estado ACTIVE · conjunto entrega = ACTIVE y ≥1 ad ACTIVE ·
+  //   campaña entrega = ≥1 conjunto que entrega.
+  // Datos de meta_campanas.estado por nivel (ya sincronizados) — 0 llamadas a Meta API.
+  const entregaByCampId={}
+  const entregaByAdsetId={}
+  try{
+    const _campsConGasto=(campanas||[]).filter(c=>(gastoRangoByCampId[String(c.meta_id)]||0)>0).map(c=>String(c.meta_id))
+    if(_campsConGasto.length){
+      const _adsetsC=[]
+      for(let i=0;i<_campsConGasto.length;i+=300){
+        const{data:asx}=await sb.from('meta_campanas').select('meta_id,parent_id,estado').eq('nivel','adset').in('parent_id',_campsConGasto.slice(i,i+300))
+        for(const a of (asx||[]))_adsetsC.push(a)
+      }
+      const _asIdsC=_adsetsC.map(a=>String(a.meta_id))
+      const _adsActivosPorAdset={}
+      for(let i=0;i<_asIdsC.length;i+=300){
+        const{data:adx}=await sb.from('meta_campanas').select('parent_id,estado').eq('nivel','ad').in('parent_id',_asIdsC.slice(i,i+300))
+        for(const ad of (adx||[])){
+          if((ad.estado||'')==='ACTIVE')_adsActivosPorAdset[String(ad.parent_id)]=true
+        }
+      }
+      for(const a of _adsetsC){
+        const asId=String(a.meta_id)
+        entregaByAdsetId[asId]=!!_adsActivosPorAdset[asId] // el conjunto tiene ≥1 anuncio ACTIVE
+        const ck=String(a.parent_id)
+        if((a.estado||'')==='ACTIVE'&&_adsActivosPorAdset[asId])entregaByCampId[ck]=true
+      }
+      for(const ck of _campsConGasto){if(entregaByCampId[ck]===undefined)entregaByCampId[ck]=false}
+    }
+  }catch(e){console.warn('[entrega cascada] no se pudo calcular:',e&&e.message)}
+  try{window._nexoEntregaByCampId=entregaByCampId;window._nexoEntregaByAdsetId=entregaByAdsetId}catch(_){}
+
   // ── Conteo "Con actividad" por cuenta (misma lógica del expand de cada cuenta) ──
   // Una campaña "tuvo actividad" en el rango si su gasto > 0.
   // De esas, activas = estado actual ACTIVE; pausadas = estado actual ≠ ACTIVE.
@@ -15014,7 +15195,9 @@ async function renderMetaPortafolio(el,isAdmin){
     if(!tuvoGasto)continue
     conActByAcc[accId].con++
     const estadoReal=liveEstadoByCampId[String(camp.meta_id)]||camp.estado||''
-    if(estadoReal==='ACTIVE')conActByAcc[accId].activas++
+    // NUEVO (Mejora 5): activa REAL = botón ACTIVE + ENTREGA en cascada (≥1 conjunto activo con ≥1 anuncio activo)
+    const _entOk=entregaByCampId[String(camp.meta_id)]!==false
+    if(estadoReal==='ACTIVE'&&_entOk)conActByAcc[accId].activas++
     else conActByAcc[accId].pausadas++
   }
 
@@ -16607,7 +16790,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const _tcProm3=_vidsTot3>0?_convTot3/_vidsTot3:0
     const _tcvProm3=_vrTot3>0?_convTot3/_vrTot3:0
 
-    return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" data-campid="${camp.meta_id}" data-estado="${camp.estado||''}" data-urgencia="${camp._urgenciaCode||''}" data-vendenogasta="${camp._vendeNoGasta?1:0}" style="margin-bottom:5px;${opacity}">
+    return`<div class="meta-camp-item" data-hasdata="${camp._hasData?1:0}" data-campid="${camp.meta_id}" data-estado="${camp.estado||''}" data-entrega="${(typeof window!=='undefined'&&window._nexoEntregaByCampId&&window._nexoEntregaByCampId[String(camp.meta_id)]===false)?0:1}" data-urgencia="${camp._urgenciaCode||''}" data-vendenogasta="${camp._vendeNoGasta?1:0}" style="margin-bottom:5px;${opacity}">
       <div class="nx-camp-sentinel" style="height:0"></div>
       <div class="nx-camp-bar" style="position:sticky;top:34px;z-index:8;background:var(--card);border:1px solid var(--border);border-left:3px solid var(--hier-camp);border-radius:6px;padding:4px 9px;margin-bottom:-26px;opacity:0;pointer-events:none;transition:opacity .12s ease;display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;overflow:hidden;white-space:nowrap"><span style="flex-shrink:0">🎯</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${camp.nombre||camp.meta_id}</span><span style="flex-shrink:0;color:${camp.estado==='ACTIVE'?'var(--green)':'var(--muted)'}">· ${camp.estado||''}</span></div>
       <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-camp)">
@@ -16615,7 +16798,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       ${camp._vendeNoGasta?`<div style="background:var(--red-bg);border:1px solid var(--red);border-radius:6px;padding:5px 9px;margin-bottom:6px;display:flex;align-items:center;gap:7px;font-size:11px;font-weight:600;color:var(--red)"><span style="font-size:14px">🔔</span><span>VENDE Y NO GASTA → $0 de gasto hoy. Está apagada en Meta — ¿prenderla?</span></div>`:''}
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
         <div style="flex:1;min-width:0;cursor:pointer" onclick="viewCampDetail('${camp.meta_id}')">
-          <div style="font-weight:600;font-size:12px;line-height:1.25"><span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:${camp.estado==='ACTIVE'?'#22c55e':'#1a1a1a'};border:1.5px solid ${camp.estado==='ACTIVE'?'#16a34a':'#525252'};${camp.estado==='ACTIVE'?'box-shadow:0 0 6px rgba(34,197,94,.7);':''}vertical-align:middle;margin-right:6px" title="${camp.estado==='ACTIVE'?'🟢 Activa en Meta':'⚫ Inactiva ('+(camp.estado||'desconocido')+')'}"></span><span class="nexo-hier-pill" style="background:var(--hier-camp-bg);color:var(--hier-camp);border:1px solid var(--hier-camp)">🎯 Campaña</span>${camp.nombre||camp.meta_id}</div>
+          <div style="font-weight:600;font-size:12px;line-height:1.25"><span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:${camp.estado==='ACTIVE'?'#22c55e':'#1a1a1a'};border:1.5px solid ${camp.estado==='ACTIVE'?'#16a34a':'#525252'};${camp.estado==='ACTIVE'?'box-shadow:0 0 6px rgba(34,197,94,.7);':''}vertical-align:middle;margin-right:6px" title="${camp.estado==='ACTIVE'?'🟢 Activa en Meta':'⚫ Inactiva ('+(camp.estado||'desconocido')+')'}"></span><span class="nexo-hier-pill" style="background:var(--hier-camp-bg);color:var(--hier-camp);border:1px solid var(--hier-camp)">🎯 Campaña</span>${camp.nombre||camp.meta_id}${(camp.estado==='ACTIVE'&&typeof window!=='undefined'&&window._nexoEntregaByCampId&&window._nexoEntregaByCampId[String(camp.meta_id)]===false)?`<span style="margin-left:6px;font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.05);color:var(--text);border:1px solid var(--border);vertical-align:middle" title="TRAMPA: el botón de la campaña está prendido pero sus conjuntos o anuncios están apagados → NO entrega. Abre la campaña y mira qué está apagado.">🔕 NO ENTREGA</span>`:''}</div>
           <div style="font-size:10px;color:var(--muted);margin-top:1px">${camp.objetivo||''} · ${camp.estado}${ctxCamp.esGlobal?' · <span style="color:var(--amber)">⚠️ sin producto</span>':' · <span style="color:var(--green)" title="Producto enlazado · se actualiza automáticamente si cambias el Nombre actual del producto">📦 '+ctxCamp.nombre+'</span>'}${window.metaIdChip(camp.meta_id,'campaña')}${window._cambiosHoyHTML(camp.meta_id)}<span onclick="event.stopPropagation()" style="display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center;margin-left:8px;vertical-align:middle">${camp._hasData?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();toggleCampDesglose('${camp.meta_id}','${accountId}')" style="padding:5px 10px;font-size:12px" title="Ver conjuntos y anuncios">📊 Desglose</button>`:''}${_esCBO?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();modalPresupuesto('${camp.meta_id}','campaign','${_campNomEsc}',${_campBudget},'${accountId}')" style="padding:5px 10px;font-size:12px;border-color:var(--accent);color:var(--accent)" title="Cambiar presupuesto de la campaña (CBO)">💰 $${fmt(_campBudget)}</button>`:''}<button class="btn-sm btn-outline" onclick="event.stopPropagation();modalEstado('${camp.meta_id}','campaign','${_campNomEsc}','${camp.estado||''}','${accountId}')" style="padding:5px 10px;font-size:12px;${_campActiva?'border-color:var(--amber);color:var(--amber)':'border-color:var(--green);color:var(--green)'}" title="${_campActiva?'Pausar campaña':'Activar campaña'}">${_campActiva?'⏸️ Pausar':'▶️ Activar'}</button><button class="btn-sm btn-outline" onclick="event.stopPropagation();modalDuplicar('${camp.meta_id}','campaign','${_campNomEsc}',${_campBudget},'${accountId}')" style="padding:5px 10px;font-size:12px;border-color:var(--blue);color:var(--blue)" title="Duplicar campaña">📄 Duplicar</button><button class="btn-sm btn-outline" onclick="event.stopPropagation();modalAsignarProductoCamp('${camp.meta_id}','${(camp.nombre||'').replace(/'/g,"\\'")}','${accountId}')" style="padding:5px 10px;font-size:12px;${ctxCamp.esGlobal?'border-color:var(--amber);color:var(--amber)':'border-color:var(--green);color:var(--green)'}" title="${ctxCamp.esGlobal?'⚠️ Sin producto · clic para asignar':'Producto: '+ctxCamp.nombre+' · clic para cambiar'}">${ctxCamp.esGlobal?'⚠️ Producto':'📦 Cambiar'}</button><button class="btn-sm btn-outline" onclick="event.stopPropagation();analizarConIA('campana','${camp.meta_id}','${(camp.nombre||'').replace(/'/g,"\\'")}','${desde}','${hasta}')" style="padding:5px 9px;font-size:12px" title="Analizar con IA">🤖</button></span></div></div>
         <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
           ${camp._hasData&&heroVal>0?`<div class="nexo-cpa-hero"><div class="nch-lbl">${heroLbl}</div><div class="nch-val" style="color:${cpaColorCss}" title="${heroTitle}">$${fmt(heroVal)}</div></div>`:''}
@@ -16811,8 +16994,11 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   }
 
   if(conActividad.length){
-    const _camActivas=conActividad.filter(c=>c.estado==='ACTIVE'&&!c._vendeNoGasta)
-    const _camInactivas=conActividad.filter(c=>c.estado!=='ACTIVE'||c._vendeNoGasta)
+    // NUEVO (Mejora 5): activa REAL = botón ACTIVE + ENTREGA en cascada (≥1 conjunto activo con ≥1 anuncio activo)
+    const _entMapX=(typeof window!=='undefined'&&window._nexoEntregaByCampId)?window._nexoEntregaByCampId:{}
+    const _entregaOkX=(c)=>_entMapX[String(c.meta_id)]!==false
+    const _camActivas=conActividad.filter(c=>c.estado==='ACTIVE'&&!c._vendeNoGasta&&_entregaOkX(c))
+    const _camInactivas=conActividad.filter(c=>c.estado!=='ACTIVE'||c._vendeNoGasta||!_entregaOkX(c))
     campHtml+=`<div class="section-title" style="color:var(--green)">Con actividad (${conActividad.length})</div>`
     campHtml+=`<div style="margin:4px 0 8px 0;display:flex;gap:4px;flex-wrap:wrap;align-items:center">
       <button class="btn-sm btn-primary cs-btn" data-sub="active" onclick="filterCampSubtab('${accountId}','active',this)">🟢 Activas (${_camActivas.length})</button>
@@ -16885,7 +17071,9 @@ window.filterCampsInAccount=(accountId,filter,btn)=>{
   }
 }
 
-// Sub-filtro dentro de "Con actividad": Activas (estado=ACTIVE) vs Inactivas (estado!=ACTIVE).
+// Sub-filtro dentro de "Con actividad": Activas (ACTIVE + entrega real) vs Inactivas.
+// NUEVO (Mejora 5): una campaña ACTIVE pero con conjuntos/anuncios apagados (data-entrega=0)
+// cuenta como INACTIVA — el botón azul solo no alcanza.
 // Solo afecta a .meta-camp-item con data-hasdata="1" (campañas con gasto).
 window.filterCampSubtab=(accountId,sub,btn)=>{
   const accEl=document.getElementById('meta-acc-'+accountId)
@@ -16898,7 +17086,7 @@ window.filterCampSubtab=(accountId,sub,btn)=>{
     if(target)target.className='btn-sm btn-primary cs-btn'
   }
   accEl.querySelectorAll('.meta-camp-item[data-hasdata="1"]').forEach(el=>{
-    const isActiva=el.dataset.estado==='ACTIVE'&&el.dataset.vendenogasta!=='1'
+    const isActiva=el.dataset.estado==='ACTIVE'&&el.dataset.vendenogasta!=='1'&&el.dataset.entrega!=='0'
     if(sub==='all')el.style.display=''
     else if(sub==='active')el.style.display=isActiva?'':'none'
     else if(sub==='inactive')el.style.display=!isActiva?'':'none'
@@ -18572,7 +18760,7 @@ window.toggleCampDesglose=async(campId,accountId)=>{
           <div class="card" style="padding:8px 10px;border-left:4px solid var(--hier-adset)">
             <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:${hasAnySpend?'6px':'0'}">
               <div style="flex:1;min-width:0">
-                <div style="font-weight:500;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.25" title="${as.nombre}"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${as.estado==='ACTIVE'?'#22c55e':'#1a1a1a'};border:1.5px solid ${as.estado==='ACTIVE'?'#16a34a':'#525252'};${as.estado==='ACTIVE'?'box-shadow:0 0 5px rgba(34,197,94,.7);':''}vertical-align:middle;margin-right:5px" title="${as.estado==='ACTIVE'?'🟢 Activo en Meta':'⚫ Inactivo ('+(as.estado||'desconocido')+')'}"></span><span class="nexo-hier-pill" style="background:var(--hier-adset-bg);color:var(--hier-adset);border:1px solid var(--hier-adset)">📦 Adset</span>${as.nombre}</div>
+                <div style="font-weight:500;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.25" title="${as.nombre}"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${as.estado==='ACTIVE'?'#22c55e':'#1a1a1a'};border:1.5px solid ${as.estado==='ACTIVE'?'#16a34a':'#525252'};${as.estado==='ACTIVE'?'box-shadow:0 0 5px rgba(34,197,94,.7);':''}vertical-align:middle;margin-right:5px" title="${as.estado==='ACTIVE'?'🟢 Activo en Meta':'⚫ Inactivo ('+(as.estado||'desconocido')+')'}"></span><span class="nexo-hier-pill" style="background:var(--hier-adset-bg);color:var(--hier-adset);border:1px solid var(--hier-adset)">📦 Adset</span>${as.nombre}${(as.estado==='ACTIVE'&&typeof window!=='undefined'&&window._nexoEntregaByAdsetId&&window._nexoEntregaByAdsetId[String(as.meta_id)]===false)?`<span style="margin-left:6px;font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.05);color:var(--text);border:1px solid var(--border);vertical-align:middle" title="TRAMPA: el conjunto está prendido pero TODOS sus anuncios están apagados → no entrega. Prende al menos un anuncio.">🔕 SIN ADS ACTIVOS</span>`:''}</div>
                 <div style="font-size:9px;color:var(--muted);margin-top:1px">${as.estado}${window.metaIdChip(as.meta_id,'adset')}${window._cambiosHoyHTML(as.meta_id)}<span style="display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center;margin-left:8px;vertical-align:middle">${hasAnySpend?`<button class="btn-sm btn-outline" onclick="toggleAdsetDesglose('${as.meta_id}','${accountId}')" style="padding:5px 10px;font-size:12px" title="Ver anuncios">📌 Ads</button>`:''}${_esABO?`<button class="btn-sm btn-outline" onclick="modalPresupuesto('${as.meta_id}','adset','${_asNomEsc}',${_asBudget},'${accountId}')" style="padding:5px 10px;font-size:12px;border-color:var(--accent);color:var(--accent)" title="Cambiar presupuesto del adset (ABO)">💰 $${fmt(_asBudget)}</button>`:''}<button class="btn-sm btn-outline" onclick="modalEstado('${as.meta_id}','adset','${_asNomEsc}','${as.estado||''}','${accountId}')" style="padding:5px 10px;font-size:12px;${_asActiva?'border-color:var(--amber);color:var(--amber)':'border-color:var(--green);color:var(--green)'}" title="${_asActiva?'Pausar adset':'Activar adset'}">${_asActiva?'⏸️ Pausar':'▶️ Activar'}</button><button class="btn-sm btn-outline" onclick="modalDuplicar('${as.meta_id}','adset','${_asNomEsc}',${_asBudget},'${accountId}')" style="padding:5px 10px;font-size:12px;border-color:var(--blue);color:var(--blue)" title="Duplicar conjunto">📄 Duplicar</button><button class="btn-sm btn-outline" onclick="analizarConIA('adset','${as.meta_id}','${(as.nombre||'').replace(/'/g,"\\'")}')" style="padding:5px 9px;font-size:12px" title="Analizar con IA">🤖</button></span></div>
               </div>
               <div style="display:flex;gap:8px;align-items:center">

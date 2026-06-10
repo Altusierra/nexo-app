@@ -13424,6 +13424,9 @@ async function _renderResumenProductos(desde,hasta,hoy){
     const _adSet=new Set()
     for(const arr of Object.values(mapeosByProd)){for(const m of (arr||[])){if(m.ad_id)_adSet.add(String(m.ad_id))}}
     for(const s of Object.values(reportesAdIdsByProd)){for(const id of (s||[])){if(id)_adSet.add(String(id))}}
+    for(const arr of Object.values(mapeosPrevByProd||{})){for(const m of (arr||[])){if(m.ad_id)_adSet.add(String(m.ad_id))}}
+    for(const arr of Object.values(mapeosAntierByProd||{})){for(const m of (arr||[])){if(m.ad_id)_adSet.add(String(m.ad_id))}}
+    for(const arr of Object.values(mapeosTrasByProd||{})){for(const m of (arr||[])){if(m.ad_id)_adSet.add(String(m.ad_id))}}
     const _adIds=[..._adSet]
     if(_adIds.length){
       const _adToAdset={}
@@ -13439,18 +13442,33 @@ async function _renderResumenProductos(desde,hasta,hoy){
       }
       const _campIds=[...new Set(Object.values(_adsetToCamp))]
       const _campToAcc={}
+      const _campNombre={}
       for(let i=0;i<_campIds.length;i+=300){
-        const{data:camps}=await sb.from('meta_campanas').select('meta_id,account_id').eq('nivel','campaign').in('meta_id',_campIds.slice(i,i+300))
-        for(const cp of (camps||[])){if(cp.account_id)_campToAcc[String(cp.meta_id)]=String(cp.account_id)}
+        const{data:camps}=await sb.from('meta_campanas').select('meta_id,account_id,nombre').eq('nivel','campaign').in('meta_id',_campIds.slice(i,i+300))
+        for(const cp of (camps||[])){if(cp.account_id)_campToAcc[String(cp.meta_id)]=String(cp.account_id);_campNombre[String(cp.meta_id)]=cp.nombre||String(cp.meta_id)}
       }
       const{data:_ctas}=await sb.from('meta_cuentas').select('account_id,nombre')
       const _accNombre={}
       for(const cc of (_ctas||[]))_accNombre[String(cc.account_id)]=cc.nombre||String(cc.account_id)
       for(const adId of _adIds){
-        const adset=_adToAdset[adId];if(!adset)continue
-        const camp=_adsetToCamp[adset];if(!camp)continue
-        const acc=_campToAcc[camp];if(!acc)continue
-        adToCuenta[adId]={accId:acc,accNombre:_accNombre[acc]||acc}
+        const adset=_adToAdset[adId]
+        if(!adset){
+          // ad_id NO está en meta_campanas (nivel ad) → sin sincronizar (no entry)
+          continue
+        }
+        const camp=_adsetToCamp[adset]
+        if(!camp){
+          // HUÉRFANO: el ad existe pero su conjunto no está en BD → falta sync del adset
+          adToCuenta[adId]={huerfano:true,paso:'El anuncio existe en Meta pero falta su conjunto (sync incompleto)'}
+          continue
+        }
+        const acc=_campToAcc[camp]
+        if(!acc){
+          // HUÉRFANO: ad y adset existen pero la campaña no está en BD → falta sync de la campaña
+          adToCuenta[adId]={huerfano:true,paso:'El anuncio y su conjunto existen pero falta la campaña (sync incompleto)',campId:camp}
+          continue
+        }
+        adToCuenta[adId]={accId:acc,accNombre:_accNombre[acc]||acc,campId:camp,campNombre:_campNombre[camp]||camp}
       }
     }
   }catch(e){console.warn('[cuadre ventas] no se pudo armar ad→cuenta:',e&&e.message)}
@@ -13704,6 +13722,45 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
   // CPA Meta: prioriza Σ gasto / Σ conversiones (Meta agregado); si no hay conversiones, cae al promedio de cost_per_result diario
   const cpaMetaProd=_conv>0?(gasto/_conv):(_cprN>0?(_cprSum/_cprN):0)
 
+  // ── NUEVO: helper de "cuadre por origen" reutilizable para HOY y cada día previo ──
+  // Recibe una lista de ad_ids y los clasifica en campañas (con desglose por cuenta) / orgánicas
+  // (ad_id vacío) / sin sincronizar (ad_id que no está en meta_campanas), usando adToCuenta.
+  const _atcCuadre=adToCuenta||{}
+  const _mkCuadre=(adList)=>{
+    let _enCamp=0,_org=0,_sin=0,_huer=0
+    const _pcMap={}
+    const _campMap={}   // campId → {campId, nombre, accNombre, count, ads:{adId:count}}
+    const _huerMap={}   // adId → {count, paso}
+    const _sinMap={}    // adId → count
+    for(const raw of (adList||[])){
+      const id=(raw!=null&&raw!=='')?String(raw):''
+      if(!id){_org++;continue}
+      const info=_atcCuadre[id]
+      if(info&&info.accId){
+        _enCamp++
+        if(!_pcMap[info.accId])_pcMap[info.accId]={accId:info.accId,nombre:info.accNombre||info.accId,count:0}
+        _pcMap[info.accId].count++
+        const ck=String(info.campId)
+        if(!_campMap[ck])_campMap[ck]={campId:ck,nombre:info.campNombre||ck,accNombre:info.accNombre||info.accId,count:0,ads:{}}
+        _campMap[ck].count++
+        _campMap[ck].ads[id]=(_campMap[ck].ads[id]||0)+1
+      }else if(info&&info.huerfano){
+        _huer++
+        if(!_huerMap[id])_huerMap[id]={count:0,paso:info.paso||'Cadena rota en meta_campanas'}
+        _huerMap[id].count++
+      }else{
+        _sin++
+        _sinMap[id]=(_sinMap[id]||0)+1
+      }
+    }
+    const _pc=Object.values(_pcMap).sort((a,b)=>b.count-a.count)
+    const _porCampana=Object.values(_campMap).sort((a,b)=>b.count-a.count)
+    const _t=(adList||[]).length
+    return{total:_t,enCampanas:_enCamp,organicas:_org,sinSync:_sin,huerfanos:_huer,porCuenta:_pc,porCampana:_porCampana,huerfanosIds:_huerMap,sinSyncIds:_sinMap,cuadra:(_enCamp+_org+_huer+_sin)===_t}
+  }
+  // Lista de ad_ids de los mapeos CONFIRMADOS de un día (lo que muestra el número grande).
+  const _confDeMps=(arr)=>(arr||[]).filter(m=>m.estado_final&&m.estado_final!=='CANCELADO'&&m.estado_final!=='PENDIENTE CONFIRMACION').map(m=>m.ad_id)
+
   // ── Período previo (misma duración, justo antes) ──
   let prevData=null
   if(mapeosPrevByProd&&gastoPrevByCampId&&nDiasRango>0){
@@ -13733,7 +13790,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
       const cpaP=pConfP>0?gastoP/pConfP:0
       const roasP=gastoP>0?ventaP/gastoP:0
       const pedidosIdsP=(reportesPrevByProd&&reportesPrevByProd[prod.nombre])||0
-      prevData={gasto:gastoP,pedidos:pConfP,ganancia:gananciaP,cpa:cpaP,roas:roasP,pedidosIds:pedidosIdsP,conversaciones:_convPrev}
+      prevData={gasto:gastoP,pedidos:pConfP,ganancia:gananciaP,cpa:cpaP,roas:roasP,pedidosIds:pedidosIdsP,conversaciones:_convPrev,cuadre:_mkCuadre(_confDeMps(mpsP))}
     }
   }
 
@@ -13765,7 +13822,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     const cpaX=pCX>0?gP/pCX:0
     const roasX=gP>0?ventaX/gP:0
     const idsX=(repMap&&repMap[prod.nombre])||0
-    return{gasto:gP,pedidos:pCX,ganancia:gananciaX,cpa:cpaX,roas:roasX,pedidosIds:idsX,conversaciones:convX}
+    return{gasto:gP,pedidos:pCX,ganancia:gananciaX,cpa:cpaX,roas:roasX,pedidosIds:idsX,conversaciones:convX,cuadre:_mkCuadre(_confDeMps(mpsX))}
   }
   const _ex=extrasDias||{}
   const prevData2=(nDiasRango>0)?_calcDiaExtra(_ex.mapeosAntierByProd&&_ex.mapeosAntierByProd[prod.nombre],_ex.gastoAntierByCampId,_ex.conversacionesAntierByProd,_ex.reportesAntierByProd):null
@@ -13784,30 +13841,15 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
   //   - HOY o sin confirmados: los ad_ids reportados por el aux (cada id = 1 venta, con repeticiones)
   let cuadre=null
   try{
-    const _atc=adToCuenta||{}
     let _adList=[]
     if(!esSoloHoy&&pConf>0){
       // SOLO mapeos confirmados: es el número grande que la card muestra en días pasados.
-      _adList=mps.filter(m=>m.estado_final&&m.estado_final!=='CANCELADO'&&m.estado_final!=='PENDIENTE CONFIRMACION').map(m=>m.ad_id)
+      _adList=_confDeMps(mps)
     }else{
       const lst=(reportesAdIdsListByProd&&reportesAdIdsListByProd[prod.nombre])||null
       _adList=lst?lst.slice():[]
     }
-    let _enCamp=0,_org=0,_sin=0
-    const _porCuentaMap={}
-    for(const raw of _adList){
-      const id=(raw!=null&&raw!=='')?String(raw):''
-      if(!id){_org++;continue}
-      const info=_atc[id]
-      if(info&&info.accId){
-        _enCamp++
-        if(!_porCuentaMap[info.accId])_porCuentaMap[info.accId]={accId:info.accId,nombre:info.accNombre||info.accId,count:0}
-        _porCuentaMap[info.accId].count++
-      }else{_sin++}
-    }
-    const _porCuenta=Object.values(_porCuentaMap).sort((a,b)=>b.count-a.count)
-    const _totalCuadre=_adList.length
-    cuadre={total:_totalCuadre,enCampanas:_enCamp,organicas:_org,sinSync:_sin,porCuenta:_porCuenta,cuadra:(_enCamp+_org+_sin)===_totalCuadre}
+    cuadre=_mkCuadre(_adList)
   }catch(_){cuadre=null}
 
   return{
@@ -13979,35 +14021,74 @@ function _renderProductoCardResumen(data,ranking){
   // ── NUEVO: bloque "cuadre de ventas por origen" (En campañas / Orgánicas / Sin sincronizar) ──
   // Descompone el número grande de la card por origen, con "En campañas" desplegable por cuenta.
   // Pensado en lenguaje simple: si las 3 sumas dan el total → verde (todo cuadra), sino → rojo.
-  let _cuadreHtml=''
-  if(data.cuadre&&data.cuadre.total>0){
-    const cu=data.cuadre
-    const _cid='cuad_'+String(data.nombre||'x').replace(/[^a-zA-Z0-9]/g,'')
-    const _suma=cu.enCampanas+cu.organicas+cu.sinSync
-    const _ok=cu.cuadra
-    const _ctasHtml=cu.porCuenta.length
-      ? cu.porCuenta.map(pc=>`<div style="display:flex;align-items:center;font-size:12px;color:var(--muted);padding:3px 0"><span>🏢 ${pc.nombre}</span><span style="margin-left:auto;color:var(--text);font-weight:600">${pc.count}</span></div>`).join('')
+  // Se pinta para HOY/período y para cada día previo con datos (Ayer / Antier / Trasantier).
+  const _slugProd=String(data.nombre||'x').replace(/[^a-zA-Z0-9]/g,'')
+  const _mkCuadreBlock=(cu,titulo,sufijo,acento)=>{
+    if(!cu||!cu.total)return''
+    const _cid='cuad_'+_slugProd+'_'+sufijo
+    const _huerN=cu.huerfanos||0
+    const _suma=cu.enCampanas+cu.organicas+_huerN+cu.sinSync
+    const _ok=cu.cuadra&&_huerN===0&&cu.sinSync===0
+    const _esc=s=>String(s==null?'':s).replace(/</g,'&lt;').replace(/"/g,'&quot;')
+    const _btnCopy=(id,label)=>`<button onclick="event.stopPropagation();window._rpCopiarId('${_esc(id)}',this)" title="Copiar ${label}: ${_esc(id)}" style="margin-left:6px;background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:5px;color:var(--muted);font-size:10px;padding:1px 7px;cursor:pointer;flex-shrink:0">📋</button>`
+    const _adRows=(adsObj)=>Object.entries(adsObj||{}).sort((a,b)=>b[1]-a[1]).map(([adId,n])=>`<div style="display:flex;align-items:center;font-size:11.5px;color:var(--muted);padding:3px 0"><span style="font-family:monospace">🖼️ ${_esc(adId)}</span>${_btnCopy(adId,'ID del anuncio')}<span style="margin-left:auto;color:var(--text);font-weight:600">${n}</span></div>`).join('')
+    // Campañas (jerarquía real ad→adset→campaña), cada una desplegable a sus ad_ids
+    const _campsHtml=(cu.porCampana&&cu.porCampana.length)
+      ? cu.porCampana.map((cp,i)=>{
+          const _ccid=_cid+'_c'+i
+          return`<div style="padding:3px 0">
+            <div onclick="window._rpToggleCuadre('${_ccid}')" style="cursor:pointer;display:flex;align-items:center;font-size:12px;color:var(--text)" title="Toca para ver los IDs de anuncio de esta campaña">
+              <span id="${_ccid}-chev" style="display:inline-block;width:12px;font-size:9px;color:var(--muted)">▼</span>
+              <span style="margin-left:3px">📣 ${_esc(cp.nombre)}</span>
+              <span style="margin-left:6px;font-size:10px;color:var(--subtle)">🏢 ${_esc(cp.accNombre)}</span>
+              ${_btnCopy(cp.campId,'ID de la campaña')}
+              <span style="margin-left:auto;color:var(--text);font-weight:600">${cp.count}</span>
+            </div>
+            <div id="${_ccid}-sub" style="margin:1px 0 2px 16px;border-left:1px solid var(--border);padding-left:10px">${_adRows(cp.ads)}</div>
+          </div>`
+        }).join('')
       : `<div style="font-size:11px;color:var(--subtle);padding:3px 0">— ninguna —</div>`
-    _cuadreHtml=`<div style="margin-top:10px;padding:12px 13px;background:rgba(0,0,0,.18);border-radius:8px">
-      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;letter-spacing:.2px">🔎 ¿De dónde salen los ${cu.total} pedidos?</div>
-      <div onclick="window._rpToggleCuadre('${_cid}')" style="cursor:pointer;display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0" title="Toca para ver/ocultar el detalle por cuenta">
+    // Huérfanos: tienen ad_id pero la cadena ad→adset→campaña se rompió en BD (con motivo)
+    const _huerRows=Object.entries(cu.huerfanosIds||{}).sort((a,b)=>b[1].count-a[1].count).map(([adId,o])=>`<div style="padding:3px 0"><div style="display:flex;align-items:center;font-size:11.5px;color:var(--amber)"><span style="font-family:monospace">🖼️ ${_esc(adId)}</span>${_btnCopy(adId,'ID del anuncio')}<span style="margin-left:auto;color:var(--text);font-weight:600">${o.count}</span></div><div style="font-size:10px;color:var(--muted);padding-left:2px">↳ ${_esc(o.paso)}</div></div>`).join('')
+    const _huerHtml=_huerN>0?`
+      <div onclick="window._rpToggleCuadre('${_cid}_h')" style="cursor:pointer;display:flex;align-items:center;font-size:13px;color:var(--amber);padding:5px 0" title="Anuncios con ad_id cuya cadena ad→conjunto→campaña está incompleta en la base. Corre un Sync de la cuenta para arreglarlo.">
+        <span id="${_cid}_h-chev" style="display:inline-block;width:14px;font-size:10px;color:var(--amber)">▼</span>
+        <span style="margin-left:4px">⚠️ Anuncios huérfanos (cadena rota)</span><span style="margin-left:auto;font-weight:700">${_huerN}</span>
+      </div>
+      <div id="${_cid}_h-sub" style="margin:2px 0 6px 20px;border-left:1px solid var(--amber);padding-left:12px">${_huerRows}</div>`:''
+    // Sin sincronizar: el ad_id NO existe en meta_campanas (falta sync o ID mal escrito)
+    const _sinRows=Object.entries(cu.sinSyncIds||{}).sort((a,b)=>b[1]-a[1]).map(([adId,n])=>`<div style="display:flex;align-items:center;font-size:11.5px;color:var(--muted);padding:3px 0"><span style="font-family:monospace">🖼️ ${_esc(adId)}</span>${_btnCopy(adId,'ID del anuncio')}<span style="margin-left:auto;color:var(--text);font-weight:600">${n}</span></div>`).join('')
+    const _sinHtml=cu.sinSync>0?`
+      <div onclick="window._rpToggleCuadre('${_cid}_s')" style="cursor:pointer;display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0" title="El ad_id no aparece en meta_campanas: falta correr Sync de la cuenta o el ID quedó mal escrito en el reporte.">
+        <span id="${_cid}_s-chev" style="display:inline-block;width:14px;font-size:10px;color:var(--muted)">▼</span>
+        <span style="margin-left:4px">🔌 Sin sincronizar con Meta</span><span style="margin-left:auto;font-weight:700">${cu.sinSync}</span>
+      </div>
+      <div id="${_cid}_s-sub" style="margin:2px 0 6px 20px;border-left:1px solid var(--border);padding-left:12px">${_sinRows}</div>`
+      :`<div style="display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0 5px 18px"><span>🔌 Sin sincronizar con Meta</span><span style="margin-left:auto;font-weight:700">0</span></div>`
+    return`<div style="margin-top:10px;padding:12px 13px;background:rgba(0,0,0,.18);border-radius:8px;border-left:3px solid ${acento||'var(--border)'}">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;letter-spacing:.2px">🔎 ¿De dónde salen los <strong style="color:var(--text)">${cu.total}</strong> pedidos de <strong style="color:var(--text)">${titulo}</strong>?</div>
+      <div onclick="window._rpToggleCuadre('${_cid}')" style="cursor:pointer;display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0" title="Toca para ver/ocultar las campañas y sus anuncios">
         <span id="${_cid}-chev" style="display:inline-block;width:14px;font-size:10px;color:var(--muted)">▼</span>
         <span style="margin-left:4px">📊 En campañas</span>
         <span style="margin-left:auto;font-weight:700">${cu.enCampanas}</span>
       </div>
-      <div id="${_cid}-sub" style="margin:2px 0 6px 20px;border-left:1px solid var(--border);padding-left:12px">${_ctasHtml}</div>
+      <div id="${_cid}-sub" style="margin:2px 0 6px 20px;border-left:1px solid var(--border);padding-left:12px">${_campsHtml}</div>
       <div style="display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0 5px 18px">
         <span>🌱 Orgánicas (sin anuncio)</span><span style="margin-left:auto;font-weight:700">${cu.organicas}</span>
       </div>
-      <div style="display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0 5px 18px">
-        <span>🔌 Sin sincronizar con Meta</span><span style="margin-left:auto;font-weight:700">${cu.sinSync}</span>
-      </div>
+      ${_huerHtml}
+      ${_sinHtml}
       <div style="margin-top:9px;padding:9px 11px;border-radius:7px;font-size:12.5px;display:flex;align-items:center;gap:7px;background:${_ok?'var(--green-bg)':'var(--red-bg)'};color:${_ok?'var(--green)':'var(--red)'};border:1px solid ${_ok?'var(--green)':'var(--red)'}">
         <span style="font-size:15px">${_ok?'✅':'⚠️'}</span>
-        <span><strong>${cu.enCampanas} + ${cu.organicas} + ${cu.sinSync} = ${_suma}</strong>${_ok?' · TODO CUADRA':' · faltan '+(cu.total-_suma)+' · HAY BUG, REVISAR'}</span>
+        <span><strong>${cu.enCampanas} + ${cu.organicas} + ${_huerN} + ${cu.sinSync} = ${_suma}</strong>${_ok?' · TODO CUADRA':(cu.cuadra?' · CUADRA pero hay '+(_huerN+cu.sinSync)+' sin campaña — revisa huérfanos/sin sync':' · faltan '+(cu.total-_suma)+' · HAY BUG, REVISAR')}</span>
       </div>
     </div>`
   }
+  let _cuadreHtml=''
+  _cuadreHtml+=_mkCuadreBlock(data.cuadre,(data.esSoloHoy?'hoy':'el período'),'p','var(--amber)')
+  _cuadreHtml+=_mkCuadreBlock(data.prevData&&data.prevData.cuadre,(data.esSoloHoy?'ayer':'el período anterior'),'a','var(--green)')
+  _cuadreHtml+=_mkCuadreBlock(data.prevData2&&data.prevData2.cuadre,(data.esSoloHoy?'antier':'el 2º período'),'b','var(--subtle)')
+  _cuadreHtml+=_mkCuadreBlock(data.prevData3&&data.prevData3.cuadre,(data.esSoloHoy?'trasantier':'el 3º período'),'c','var(--subtle)')
 
   return`
   <details class="rp-card" data-sem-code="${data.semCode}" style="background:${c.bg};border:1px solid ${c.border};border-radius:10px;margin-bottom:8px;overflow:hidden">
@@ -14071,6 +14152,19 @@ window._rpToggleCuadre=function(cid){
   const oculto=sub.style.display==='none'
   sub.style.display=oculto?'block':'none'
   if(chev)chev.textContent=oculto?'▼':'▸'
+}
+
+// Copia un ID (campaña o anuncio) al portapapeles y muestra ✅ 1.2s en el botón.
+window._rpCopiarId=function(id,btn){
+  try{
+    const txt=String(id||'')
+    if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(txt)}
+    else{
+      const ta=document.createElement('textarea');ta.value=txt;ta.style.position='fixed';ta.style.opacity='0'
+      document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta)
+    }
+    if(btn){const prev=btn.textContent;btn.textContent='✅';setTimeout(()=>{btn.textContent=prev},1200)}
+  }catch(_){}
 }
 
 // Pinta en el header de cada cuenta el total de ventas (en campañas) desglosado por producto.

@@ -12659,11 +12659,13 @@ window.runRefrescarDropi=async(btn)=>{
         erroresMeta++
         continue // saltar a la siguiente cuenta
       }
-      // 3) Por cada día, procesar si NO existe ya punto cruce_dropi
+      // 3) Por cada día, procesar los ad_ids cruzados que AÚN NO tengan su punto cruce_dropi
       for(const f of fechas){
-        // ¿Ya existe algún punto cruce_dropi en esta cuenta+fecha?
-        const{data:yaExiste}=await sb.from('semaforo_historial').select('id').eq('account_id',cuenta.account_id).eq('fecha',f).eq('triggered_by','cruce_dropi').limit(1)
-        if(yaExiste&&yaExiste.length){diasOmitidos++;continue}
+        // FIX: antes, si existía UN solo punto cruce_dropi en la cuenta+fecha, se saltaba TODA la cuenta
+        // → las campañas que no entraron en el primer cruce se quedaban "esperando cruce" para siempre.
+        // Ahora se mira QUÉ ad_ids ya tienen su punto y solo se procesan los que faltan.
+        const{data:yaExiste}=await sb.from('semaforo_historial').select('meta_id').eq('account_id',cuenta.account_id).eq('fecha',f).eq('triggered_by','cruce_dropi').eq('nivel','ad').limit(5000)
+        const _yaCerrados=new Set((yaExiste||[]).map(r=>String(r.meta_id)))
         // Buscar ad_ids con cruce hecho de esta fecha
         // Cruce hecho = estado_final no NULL Y no es 'PENDIENTE CONFIRMACION'
         const{data:mapeosCruzados}=await sb.from('mapeos').select('ad_id').eq('fecha',f).not('estado_final','is',null).neq('estado_final','PENDIENTE CONFIRMACION').limit(5000)
@@ -12672,8 +12674,8 @@ window.runRefrescarDropi=async(btn)=>{
         const adIdsRaw=[...new Set(mapeosCruzados.map(m=>m.ad_id).filter(Boolean))]
         if(!adIdsRaw.length)continue
         const{data:adsCta}=await sb.from('meta_campanas').select('meta_id').eq('account_id',cuenta.account_id).eq('nivel','ad').in('meta_id',adIdsRaw)
-        const adIdsCta=(adsCta||[]).map(a=>a.meta_id)
-        if(!adIdsCta.length)continue // ningún ad_id es de esta cuenta
+        const adIdsCta=(adsCta||[]).map(a=>a.meta_id).filter(id=>!_yaCerrados.has(String(id)))
+        if(!adIdsCta.length){diasOmitidos++;continue} // todos ya tienen su cierre → nada que hacer
         // Disparar el cálculo del semáforo cruce_dropi anclado a esta fecha
         try{
           await _calcularYGuardarSemaforos(adIdsCta,'cruce_dropi',f)
@@ -13159,6 +13161,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
   const ayerBg=new Date(todayBogota+'T12:00:00Z');ayerBg.setDate(ayerBg.getDate()-1)
   const ayerBogota=_isoDate(ayerBg)
   const incluyeVivos=hasta>=ayerBogota
+  // Reset del cache de gasto live por AD: solo una pasada en vivo exitosa lo vuelve a llenar
+  try{window._nexoLiveGastoByAdId=null}catch(_){}
   if(!incluyeVivos){
     // Rango solo histórico cerrado → BD directo (Meta no agrega nada nuevo)
     const{data:insByCamp}=await sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
@@ -13171,6 +13175,10 @@ async function _renderResumenProductos(desde,hasta,hoy){
     if(!token)throw new Error('Sin token')
     const{data:cuentasAll}=await sb.from('meta_cuentas').select('account_id')
     const timeRange=JSON.stringify({since:desde,until:hasta})
+    // NUEVO FIX gasto a nivel ID: traer también el gasto EN VIVO por ANUNCIO (ad_id,spend — liviano).
+    // Antes solo se traía en vivo el de campaña → la campaña marcaba el gasto fresco (ej: $93.040)
+    // pero su ID se quedaba con el último sync de BD (ej: $25.315). Mismo patrón y mismo fallback.
+    const _gastoLiveAdByAdId={}
     for(const cuenta of (cuentasAll||[])){
       try{
         const ins=await metaGet(`/act_${cuenta.account_id}/insights`,token,{fields:'campaign_id,spend',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
@@ -13178,6 +13186,14 @@ async function _renderResumenProductos(desde,hasta,hoy){
           if(!i.campaign_id)continue
           gastoByCampId[String(i.campaign_id)]=(gastoByCampId[String(i.campaign_id)]||0)+(parseFloat(i.spend)||0)
         }
+        // Gasto en vivo por anuncio de esta cuenta (si falla, sus ads quedan con el dato de BD)
+        try{
+          const insAdLive=await metaGet(`/act_${cuenta.account_id}/insights`,token,{fields:'ad_id,spend',time_range:timeRange,level:'ad',time_increment:'1',limit:'500'})
+          for(const i of (insAdLive||[])){
+            if(!i.ad_id)continue
+            _gastoLiveAdByAdId[String(i.ad_id)]=(_gastoLiveAdByAdId[String(i.ad_id)]||0)+(parseFloat(i.spend)||0)
+          }
+        }catch(eAd){console.warn(`[resumen producto] gasto ad en vivo falló cuenta ${cuenta.account_id} (sus IDs usan BD):`,eAd.message)}
       }catch(e){
         console.warn(`[resumen producto] Meta API fallo cuenta ${cuenta.account_id}, fallback BD:`,e.message)
         const{data:insBD}=await sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').eq('account_id',cuenta.account_id).gte('fecha',desde).lte('fecha',hasta)
@@ -13187,6 +13203,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
         }
       }
     }
+    try{window._nexoLiveGastoByAdId=_gastoLiveAdByAdId}catch(_){}
   }catch(e){
     console.warn('[resumen producto] sin token Meta, fallback BD completa:',e.message)
     const{data:insByCamp}=await sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
@@ -13591,6 +13608,19 @@ async function _renderResumenProductos(desde,hasta,hoy){
           if(_rC&&_enRango(f,_rC.desde,_rC.hasta))_adGastoBloques.c[id]=(_adGastoBloques.c[id]||0)+sp
           _porBloque(r,(k)=>_accMet(_adMetBloques[k],id,r))
         }
+        // NUEVO FIX gasto a nivel ID: el bloque del PERÍODO (p) usa el gasto EN VIVO de Meta cuando se
+        // trajo arriba (mismo dato fresco que ya usa la campaña). Sin esto, el ID se quedaba con el último
+        // sync de BD y marcaba menos que su campaña (ej: ID $25.315 vs campaña $93.040 → ahora cuadran).
+        // Los ads sin dato live (su cuenta falló o no entregaron en el rango) conservan el valor de BD.
+        try{
+          const _liveAds=window._nexoLiveGastoByAdId
+          if(_liveAds&&typeof _liveAds==='object'){
+            for(const idLA of Object.keys(_liveAds)){
+              _adGastoBloques.p[idLA]=_liveAds[idLA]
+              if(_adMetBloques.p[idLA])_adMetBloques.p[idLA].sp=_liveAds[idLA]
+            }
+          }
+        }catch(_){}
       }
       // Métricas a nivel CAMPAÑA: todas las campañas configuradas de todos los productos
       const _campIdsMet=[...new Set((productos||[]).flatMap(p=>Array.isArray(p.campaign_ids)?p.campaign_ids.map(String):[]))]
@@ -14727,6 +14757,10 @@ function _renderProductoCardResumen(data,ranking){
     ].map(h=>`<span style="display:inline-block;width:${h[0]}px;flex-shrink:0;font-size:8.5px;font-weight:700;letter-spacing:.3px;color:${h[2]};white-space:nowrap;cursor:help;padding-right:6px" title="${h[3]}">${h[1]}</span>`).join('')}</div>`
     const _campsF=_lista.map((F,i)=>{
       const _ccid=_cidF+'_c'+i
+      // NUEVO: registro para cargar las tiras de semáforo al expandir (campaña + cada ID)
+      // Incluye BE y los números de AYER (ya cruzados Dropi) para poder pintar el cierre ⭐ aunque
+      // el punto del cruce no se haya guardado en BD.
+      try{window._rpFusionSemReg=window._rpFusionSemReg||{};window._rpFusionSemReg[_ccid]={campId:String(F.campId),adIds:Object.keys(F.ads||{}).map(String),be:data.margenBE||0,esSoloHoy:!!data.esSoloHoy,ayer:{n:(F.dias['a']&&F.dias['a'].count)||0,g:(F.dias['a']&&F.dias['a'].gasto)||0},adsAyer:Object.keys(F.ads||{}).reduce((oA,kA)=>{const dA=F.ads[kA]&&F.ads[kA].dias&&F.ads[kA].dias['a'];if(dA&&(((dA.n||0)>0)||((dA.g||0)>0)))oA[String(kA)]={n:dA.n||0,g:dA.g||0};return oA},{})}}catch(_){}
       // NUEVO (Mejora 8): cuenta de la campaña (para modalPresupuesto/modalEstado de campaña y ads)
       const _accIdF=(()=>{for(const d of _dias){const ci=d.cu&&d.cu.campInfo;const x=ci&&ci[String(F.campId)];if(x&&x.accId)return x.accId}return ''})()
       // Chips de días: verde = corrió y vendió · ámbar = gastó y 0 ventas (fuga) · gris = no corrió
@@ -14763,6 +14797,7 @@ function _renderProductoCardResumen(data,ranking){
         return`<div style="margin-top:6px;padding:6px 8px;background:${esFugaAd?'rgba(245,158,11,.05)':(j%2===0?'rgba(255,255,255,.025)':'transparent')};border-radius:5px;${esFugaAd?'border:1px solid rgba(245,158,11,.35)':''}">
           <div style="display:flex;align-items:center;font-size:11.5px;color:${esFugaAd?'var(--amber)':'var(--muted)'}">${_dotAd}<span style="font-family:monospace">🖼️ ${_esc(A.adId)}</span>${_btnCopy(A.adId,'ID del anuncio')}${_pyBadgeAd}${_btnsAd}${_gastoTxt(A.gasto)}${esFugaAd?`<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap" title="Gastó plata en sus días y no vendió NADA. Pura fuga: revísalo o apágalo.">🚨 gastó y no vendió</span>`:_cpaPill(A.cpaT,'sm')}<span style="margin-left:auto;color:${esFugaAd?'var(--amber)':'var(--text)'};font-weight:700;padding-left:10px" title="Ventas totales del anuncio sumando sus días">${A.count}</span></div>
           <div style="margin:2px 0 0 14px;border-left:1px solid ${esFugaAd?'var(--amber)':'var(--border)'};padding-left:8px">${_metHeader(73)}${_dias.map(d=>_filaDia(d,A.dias[d.k],'sm',_metAdDe(d.k,A.adId),_idsAdDiaF(d.k,A.adId))).join('')}${_filaTotal(A.count,A.gasto,A.cpaT,_aggMet(_dias.map(d=>_metAdDe(d.k,A.adId))),'sm',_splitCpaF(A.dias),_dias.reduce((s,d)=>s+_idsAdDiaF(d.k,A.adId),0),_idsAdDiaF('p',A.adId))}</div>
+          <div id="${_ccid}-sem-${A.adId}" style="margin:4px 0 0 14px"></div>
         </div>`
       }).join('')
       // Cuadre de la plata de la campaña: suma del gasto de todos sus ads vs gasto total campaña
@@ -14826,7 +14861,7 @@ function _renderProductoCardResumen(data,ranking){
       // NUEVO: días en que esta campaña VENDIÓ (mismas claves p/a/b/c de las pills de arriba) — para el filtro por día
       const _diasVtaF=_dias.filter(d=>F.dias[d.k]&&(F.dias[d.k].count||0)>0).map(d=>d.k).join(',')
       return`<div id="${_ccid}-box" class="rp-fus-box" style="padding:4px 0;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-radius:6px;border-bottom:1px solid rgba(255,255,255,.04)">
-        <div class="rp-fus-row" data-fsem="${_fsemF}" data-factiva="${_activaRealF===true?1:0}" data-fdias="${_diasVtaF}" data-fcampid="${_esc(F.campId)}" onclick="window._rpToggleCuadre('${_ccid}')" style="cursor:pointer;display:flex;align-items:center;font-size:12px;color:var(--text);min-height:28px;min-width:max-content;padding:2px 8px" title="Toca para ver esta campaña día por día y sus anuncios agrupados por ID">
+        <div class="rp-fus-row" data-fsem="${_fsemF}" data-factiva="${_activaRealF===true?1:0}" data-fdias="${_diasVtaF}" data-fcampid="${_esc(F.campId)}" onclick="window._rpToggleCuadre('${_ccid}');try{window._rpFusionSemLoad('${_ccid}')}catch(_){}" style="cursor:pointer;display:flex;align-items:center;font-size:12px;color:var(--text);min-height:28px;min-width:max-content;padding:2px 8px" title="Toca para ver esta campaña día por día y sus anuncios agrupados por ID">
           ${_cF(_cwF.nom,`<span id="${_ccid}-chev" style="display:inline-block;width:12px;font-size:9px;color:var(--muted)">▸</span><span style="margin-left:3px">${_dotF}📣 ${_esc(F.nombre)}</span>`,false,_esc(F.nombre))}
           ${_cF(_cwF.acc,`<span style="font-size:10px;color:var(--subtle)">🏢 ${_esc(F.accNombre)}</span>`,false,'Cuenta: '+_esc(F.accNombre))}
           ${_cF(_cwF.id,`<span style="font-family:monospace;font-size:10.5px;color:var(--muted)">${_esc(F.campId)}</span>`,false,'ID de la campaña: '+_esc(F.campId))}
@@ -14847,6 +14882,7 @@ function _renderProductoCardResumen(data,ranking){
           ${_metHeader(96)}
           ${_dias.map(d=>_filaDia(d,F.dias[d.k],null,_metCampDe(d.k,F.campId),_idsCampDiaF(d.k,F.campId))).join('')}
           ${_filaTotal(F.count,F.gasto,F.cpa,_aggMet(_dias.map(d=>_metCampDe(d.k,F.campId))),null,_splitCpaF(F.dias),_dias.reduce((s,d)=>s+_idsCampDiaF(d.k,F.campId),0),_idsCampDiaF('p',F.campId))}
+          <div id="${_ccid}-semwrap" style="margin:6px 4px 2px"></div>
           <div style="font-size:10px;color:var(--subtle);padding:8px 8px 0;letter-spacing:.3px">2️⃣ Sus anuncios (mismo ID = mismo bloque), cada uno día por día:</div>
           ${_adsF}
           ${_cuadrePlataF}
@@ -16420,6 +16456,72 @@ window._rpFusionMassPausa=(slugProd)=>{
     return
   }
   window.massStart('','pausar',camps)
+}
+// NUEVO: SEMÁFOROS EN LA FUSIÓN — al expandir una campaña carga su tira y la de cada ID (anuncio).
+// · HOY: un punto por cada subida del reporte de IDs del aux (+Refrescar) — la MISMA tira del desglose.
+// · AYER: su cadena del día + el punto ⭐ del cruce Dropi de HOY que CIERRA el día de ayer
+//   (si el cruce aún no se corre, muestra el slot punteado "esperando cruce").
+// Carga perezosa: 1 sola consulta por campaña la primera vez que la abres; no toca nada más.
+window._rpFusionSemLoad=async function(ccid){
+  try{
+    const reg=window._rpFusionSemReg&&window._rpFusionSemReg[ccid]
+    if(!reg||reg._cargado)return
+    reg._cargado=true
+    const wrap=document.getElementById(ccid+'-semwrap')
+    if(wrap)wrap.innerHTML='<div style="font-size:10px;color:var(--subtle);padding:2px 8px">⏳ cargando semáforos...</div>'
+    const _d2=(dt)=>`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`
+    const _hoyL=_d2(new Date())
+    const _ayerL=_d2(new Date(Date.now()-86400000))
+    const metas=[String(reg.campId),...((reg.adIds||[]).map(String))]
+    let rows=[]
+    for(let i=0;i<metas.length;i+=100){
+      const{data}=await sb.from('semaforo_historial')
+        .select('meta_id,nivel,fecha,hora_calculo,semaforo,semaforo_label,cpa_real,ventas,canceladas,pendientes,gasto,triggered_by,cambio_vs_anterior,semaforo_anterior,ventas_efectivas,cpa_real_efectivas')
+        .in('meta_id',metas.slice(i,i+100)).gte('fecha',_ayerL).lte('fecha',_hoyL)
+        .order('hora_calculo',{ascending:true}).limit(4000)
+      if(data)rows=rows.concat(data)
+    }
+    window._metaPort=window._metaPort||{}
+    window._metaPort.semaforosByMeta=window._metaPort.semaforosByMeta||{}
+    const _porMeta={}
+    for(const r of rows){const k=String(r.meta_id);if(!_porMeta[k])_porMeta[k]=[];_porMeta[k].push(r)}
+    for(const k of metas)window._metaPort.semaforosByMeta[k]=_porMeta[k]||window._metaPort.semaforosByMeta[k]||[]
+    // Clasificación canónica (mismas reglas 45/70/100 del BE + fuga) para el cierre sintético de AYER
+    const _semDeAyerF=(g,n,be)=>{
+      if(!(g>0)&&!(n>0))return null
+      if(!(g>0)&&n>0)return{sem:'pendiente_sync',label:'⏳ Ventas sin sync de gasto',cpa:0}
+      if(n===0&&be>0){const p=g/be;return p>=1?{sem:'stop',label:'⏳🔴 APAGAR',cpa:0}:(p>=0.5?{sem:'precaucion',label:'⏳🟡 CUIDADO',cpa:0}:{sem:'esperar',label:'⏳🟢 DEJAR CORRER',cpa:0})}
+      const c=n>0?g/n:0
+      if(!(be>0))return{sem:'sin_ventas',label:'⏳ Sin ventas',cpa:c}
+      if(c>be)return{sem:'stop',label:'🔴 STOP',cpa:c}
+      if(c>be*0.7)return{sem:'precaucion',label:'🟡 Precaución',cpa:c}
+      if(c>be*0.45)return{sem:'escalar',label:'🟢 Escalar',cpa:c}
+      return{sem:'fuego',label:'🟣 Fuego',cpa:c}
+    }
+    const _mkVivoAyerF=(g,n)=>{
+      const s=_semDeAyerF(g,n,reg.be||0)
+      return s?{sem:s.sem,label:s.label,cpa:s.cpa,cpaEfect:s.cpa,gasto:g,ventas:n,pendientes:0}:null
+    }
+    // Tira de la CAMPAÑA: HOY + AYER (con su cierre del cruce — guardado o sintético — o "esperando cruce")
+    if(wrap){
+      const _hHoy=window._renderSemHistorialBlock(String(reg.campId),'campaign',null)||''
+      const _vivoAyerC=(reg.esSoloHoy&&reg.ayer&&(((reg.ayer.n||0)>0)||((reg.ayer.g||0)>0)))?_mkVivoAyerF(reg.ayer.g||0,reg.ayer.n||0):null
+      const _hAyer=window._renderSemHistorialBlock(String(reg.campId),'campaign',_vivoAyerC,_ayerL)||''
+      wrap.innerHTML=(_hHoy||_hAyer)?(_hHoy+_hAyer):'<div style="font-size:10px;color:var(--subtle);padding:2px 8px">🚥 Sin semáforos guardados para esta campaña (hoy/ayer) — se crean cuando el aux sube el reporte de IDs y le das 🔄 Refrescar</div>'
+    }
+    // Tira de cada ID (anuncio): HOY siempre que haya datos · AYER si tiene registros guardados O datos cruzados para sintetizar el cierre
+    for(const aId of (reg.adIds||[])){
+      const el=document.getElementById(ccid+'-sem-'+aId)
+      if(!el)continue
+      const _listA=_porMeta[String(aId)]||[]
+      const _hHoyA=window._renderSemHistorialBlock(String(aId),'ad',null)||''
+      const _tieneAyerA=_listA.some(r=>r.fecha===_ayerL)
+      const _ayerAdDat=(reg.esSoloHoy&&reg.adsAyer&&reg.adsAyer[String(aId)])||null
+      const _vivoAyerA=_ayerAdDat?_mkVivoAyerF(_ayerAdDat.g||0,_ayerAdDat.n||0):null
+      const _hAyerA=(_tieneAyerA||_vivoAyerA)?(window._renderSemHistorialBlock(String(aId),'ad',_vivoAyerA,_ayerL)||''):''
+      el.innerHTML=_hHoyA+_hAyerA
+    }
+  }catch(e){console.warn('[fusion-sem] error:',e&&e.message)}
 }
 window.massStart=async(accountId,action,listaOverride)=>{
   // NUEVO (Mejora 10): listaOverride = lista explícita de campañas [{campId,nombre}] (p.ej. desde la vista fusionada,
@@ -18278,7 +18380,7 @@ window._nexoSemColor=function(cpa,margenBE){
 // vivoData (opcional): {sem, label, cpa, gasto, ventas, pendientes} — estado real
 // calculado por el badge superior. Si está presente, sobrescribe el último punto
 // para que la tira coincida visualmente con el badge.
-window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
+window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride){
   try{
     const semsRaw=(window._metaPort?.semaforosByMeta||{})[metaId]||[]
     // FIX timezone: filtrar por día LOCAL usando hora_calculo (no por columna 'fecha' que es UTC).
@@ -18288,8 +18390,8 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
     // ── Detectar día visualizado en Meta Ads (desde/hasta de la UI) ──
     // Si es un día único anterior a hoy → mostrar puntos de ese día (por columna 'fecha') + slot final Dropi.
     // Si es hoy o rango → mantener comportamiento original (por hora_calculo en hoy local) y excluir cruce_dropi.
-    const _desdeUI=document.getElementById('meta-desde')?.value||''
-    const _hastaUI=document.getElementById('meta-hasta')?.value||''
+    const _desdeUI=diaOverride||document.getElementById('meta-desde')?.value||''
+    const _hastaUI=diaOverride||document.getElementById('meta-hasta')?.value||''
     const _esDiaUnico=_desdeUI&&_hastaUI&&_desdeUI===_hastaUI
     const _diaVista=_esDiaUnico?_desdeUI:_hoyLocal
     const _esVistaHoy=_diaVista===_hoyLocal
@@ -18302,9 +18404,15 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
       :semsRaw.filter(s=>s.hora_calculo&&_localDay(s.hora_calculo)===_hoyLocal&&s.triggered_by!=='cruce_dropi')
     if(!sems.length&&!vivoData&&!_esDiaAnterior)return ''
     const COLOR_MAP=window._semColorMap
-    // Mostrar TODOS los registros del día — cada subida de ventas del aux es un punto
-    // (antes filtraba solo cambios; ahora cada reporte_dia, asignador, cruce_dropi, etc. cuenta)
-    let eventos=sems.slice()
+    // FIX (regla del dueño): 1 punto de la tira = 1 subida del reporte de IDs del aux (+ Refrescar).
+    // Solo pintan punto: 📝 reporte_dia (cada subida del aux) · ⭐ cruce_dropi (cierre REAL del día)
+    // · ⚙️ cambio_presupuesto (marcador aparte con su ícono) · 📡 vivo / 🔧 manual.
+    // Los triggers internos (asignador, reservados, seguimiento) YA NO pintan punto — por eso salían
+    // más semáforos de los que eran. Siguen completos en el modal 📊 Historial.
+    const _DOT_TRIGGERS=new Set(['reporte_dia','cruce_dropi','cambio_presupuesto','vivo','manual'])
+    let eventos=sems.filter(s=>_DOT_TRIGGERS.has(s.triggered_by||'manual'))
+    // Respaldo: si el filtro deja la tira vacía pero SÍ hay registros del día (data vieja), mostrarlos.
+    if(!eventos.length&&sems.length)eventos=sems.slice()
     const seen=new Set()
     // Dedup permisivo: solo descarta registros 100% idénticos (misma hora + mismo semáforo + mismo gasto + mismas ventas)
     // Antes filtraba solo por hora_calculo → si 2 inserts caían en el mismo segundo, perdías uno
@@ -18314,6 +18422,27 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
       seen.add(k)
       return true
     })
+    // Dedup 2 (anti doble-disparo): si un punto normal trae el MISMO semáforo, gasto y ventas que el
+    // inmediatamente anterior, es el mismo evento insertado dos veces → se queda solo el primero.
+    // (cruce_dropi y cambio_presupuesto nunca se descartan: son eventos fijos)
+    eventos=eventos.filter((s,i,arr)=>{
+      if(i===0)return true
+      if(s.triggered_by==='cruce_dropi'||s.triggered_by==='cambio_presupuesto')return true
+      const p=arr[i-1]
+      if(!p)return true
+      const mismo=p.semaforo===s.semaforo&&Math.round(p.gasto||0)===Math.round(s.gasto||0)&&((p.ventas||0)+(p.pendientes||0))===((s.ventas||0)+(s.pendientes||0))
+      return !mismo
+    })
+    // Si hay VARIOS puntos cruce_dropi del mismo día (recálculos parciales del backfill), se deja SOLO el último.
+    const _lastCruceIdx=(()=>{let li=-1;eventos.forEach((s,i)=>{if(s.triggered_by==='cruce_dropi')li=i});return li})()
+    if(_lastCruceIdx>=0)eventos=eventos.filter((s,i)=>s.triggered_by!=='cruce_dropi'||i===_lastCruceIdx)
+    // NUEVO FIX: CIERRE SINTÉTICO del día anterior — la vista es de un día pasado, NO hay punto del
+    // cruce guardado, pero los DATOS del día YA están cruzados (vivoData de la card: ventas confirmadas,
+    // 0 pendientes). En vez de dejar la cadena abierta "esperando cruce", se pinta el cierre ⭐ calculado
+    // al vuelo con los mismos números de la card. (Si quedan pendientes, sí se sigue esperando el cruce.)
+    if(_esDiaAnterior&&vivoData&&vivoData.sem&&!eventos.some(s=>s.triggered_by==='cruce_dropi')&&(vivoData.pendientes||0)===0&&(((vivoData.ventas||0)>0)||((vivoData.gasto||0)>0))){
+      eventos.push({hora_calculo:new Date().toISOString(),semaforo:vivoData.sem,semaforo_label:vivoData.label,cpa_real:vivoData.cpa,cpa_real_efectivas:vivoData.cpaEfect!=null?vivoData.cpaEfect:vivoData.cpa,gasto:vivoData.gasto,ventas:vivoData.ventas,pendientes:0,canceladas:vivoData.canceladas||0,triggered_by:'cruce_dropi',_sintetico:true})
+    }
     // Obtener pctConf del producto de esta meta (para calcular Ventas Efectivas + CPA Efectivo en tooltip)
     let pctConfMeta=0.62
     try{
@@ -18338,8 +18467,9 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
             eventos[eventos.length-1]={..._ult,semaforo:vivoData.sem,semaforo_label:vivoData.label}
           }
         }
-      }else{
-        // No hay sems en BD pero tenemos estado vivo: crear un punto virtual
+      }else if(_esVistaHoy){
+        // No hay sems en BD pero tenemos estado vivo: crear un punto virtual (solo aplica en vista HOY;
+        // en días anteriores el cierre lo pinta la síntesis del cruce más abajo)
         eventos=[{
           hora_calculo:new Date().toISOString(),
           semaforo:vivoData.sem,
@@ -18354,8 +18484,11 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
         }]
       }
     }
-    if(!eventos.length)return ''
-    const cambios=sems.filter(s=>s.cambio_vs_anterior).length
+    if(!eventos.length&&!_esDiaAnterior)return ''
+    // FIX: "N cambios" = cambios de color ENTRE los puntos visibles de la tira (antes contaba
+    // sobre registros crudos y decía "3 cambios" con 8 puntos pintados — no cuadraba)
+    let cambios=0
+    for(let _ci=1;_ci<eventos.length;_ci++){if(eventos[_ci].semaforo!==eventos[_ci-1].semaforo)cambios++}
     // Mapa de fuente legible
     const FUENTE_LABEL={
       reporte_dia:'📝 Reporte del día',
@@ -18403,7 +18536,7 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
         ?`Cambio de presupuesto: $${fmt(s.presupuesto_anterior||0)} → $${fmt(s.presupuesto_nuevo||0)} (${(s.presupuesto_pct_cambio||0)>0?'+':''}${(s.presupuesto_pct_cambio||0).toFixed(0)}%)\nHora: ${hora}`
         :`${s.semaforo_label||s.semaforo}\n🕐 ${hora}\n💸 Gasto: $${fmt(s.gasto||0)}\n📦 Ventas: ${ventasPunto}${detalleDropi}\n🟣 V. Efectivas: ${vEfectPunto.toFixed(2)} (${Math.round(pctConfMeta*100)}%)\n🎯 CPA Real: $${fmt(s.cpa_real||0)}\n🟣 CPA Efectivo: $${fmt(cpaEfectPunto)}\n${fuenteLbl}`
       const label=isDropi
-        ?`<div style="font-size:8px;color:${cFinal.cssVar};font-weight:700;margin-top:3px;line-height:1.1">REAL · Dropi</div>`
+        ?`<div style="font-size:8px;color:${cFinal.cssVar};font-weight:700;margin-top:3px;line-height:1.1">REAL · Dropi${s._sintetico?' ⚡':''}</div>`
         :isPresupuesto
         ?`<div style="font-size:8px;color:${cFinal.cssVar};font-weight:700;margin-top:3px;line-height:1.1">Budget</div><div style="font-size:8px;color:var(--muted);line-height:1.1">${hora}</div>`
         :`<div style="font-size:8px;color:${isUltimo?'var(--text)':'var(--muted)'};margin-top:3px;font-weight:${isUltimo?'600':'400'}">${hora}</div>`
@@ -18419,10 +18552,9 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData){
       tiraHtml+=p
       if(i<puntos.length-1)tiraHtml+=`<div style="height:1px;background:var(--border);flex:0.5;margin-top:8px;align-self:flex-start"></div>`
     })
-    // ── Slot "esperando cruce" para día anterior sin cruce_dropi todavía ──
-    // Si la vista es de un día anterior y no hay punto cruce_dropi, mostrar slot vacío con label.
-    const _yaTieneCruce=eventos.some(s=>s.triggered_by==='cruce_dropi')
-    const _mostrarEsperando=_esDiaAnterior&&!_yaTieneCruce
+    // ── Slot "esperando cruce" para día anterior cuya cadena sigue abierta ──
+    // (la síntesis del cierre y el dedup del último cruce corren ARRIBA, antes de dibujar los puntos)
+    const _mostrarEsperando=_esDiaAnterior&&!eventos.some(s=>s.triggered_by==='cruce_dropi')
     if(_mostrarEsperando){
       if(puntos.length>0)tiraHtml+=`<div style="height:1px;background:var(--border);flex:0.5;margin-top:8px;align-self:flex-start"></div>`
       tiraHtml+=`<div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0">

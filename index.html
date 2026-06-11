@@ -15044,6 +15044,7 @@ function _renderProductoCardResumen(data,ranking){
         </span>
         <button onclick="event.stopPropagation();window._rpFusionMassBud('${_slugProd}')" style="margin-left:8px;background:rgba(99,102,241,.1);border:1px solid var(--accent);border-radius:6px;color:var(--accent);font-size:10px;font-weight:700;padding:2px 9px;cursor:pointer;flex-shrink:0" title="Cambiar el presupuesto de VARIAS campañas de esta fusión a la vez (mismo modal del expand de cuenta, precargado con estas campañas)">💰 Presupuesto a varias</button>
         <button onclick="event.stopPropagation();window._rpFusionMassPausa('${_slugProd}')" style="margin-left:6px;background:var(--red-bg);border:1px solid var(--red);border-radius:6px;color:var(--red);font-size:10px;font-weight:700;padding:2px 9px;cursor:pointer;flex-shrink:0" title="APAGAR (pausar) VARIAS campañas de esta fusión a la vez — mismo modal en lote del expand de cuenta, precargado con estas campañas. Las activas salen resaltadas para marcar cuáles apagar.">🔴 Apagar varias</button>
+        <button onclick="event.stopPropagation();window._rpFusionRefreshSem('${_slugProd}',this)" style="margin-left:6px;background:rgba(167,139,250,.1);border:1px solid var(--purple);border-radius:6px;color:var(--purple);font-size:10px;font-weight:700;padding:2px 9px;cursor:pointer;flex-shrink:0" title="Recalcula los puntos CONSOLIDADOS (⭐Dropi y 🆔 IDs) de AYER, ANTIER y TRASANTIER de TODAS las campañas de este producto: primero trae el gasto exacto de cada día desde Meta (mini-sync autoverificado) y luego guarda un punto ⭐Dropi nuevo anclado a ese día — la tira muestra solo el último ⭐, y el 🆔 IDs se recalcula solo porque usa el gasto del ⭐. El punto viejo queda en el Historial 📊 como evidencia. HOY no se toca porque su gasto sigue cambiando.">🔄 Refrescar semáforos</button>
         <span style="margin-left:auto;font-weight:700" title="Suma de las ventas 'En campañas' de todos los días de arriba — debe cuadrar con ellos">${_totVentasF}</span>
       </div>
       ${_ctrlRango}
@@ -15487,6 +15488,56 @@ window._rpFusionVolver=function(cidF){
   if(st)st.textContent=''
   // NUEVO RANGO+: devolver los chips de días del encabezado a su versión de 4 días
   try{const _chipsV=document.getElementById(cidF+'-diachips');if(_chipsV&&window._rpFusionChipsOrig&&window._rpFusionChipsOrig[cidF]!==undefined)_chipsV.innerHTML=window._rpFusionChipsOrig[cidF]}catch(_){}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 🔄 REFRESCAR SEMÁFOROS (fusión) — recalcula el último semáforo de AYER,
+// ANTIER y TRASANTIER de TODAS las campañas del producto con el gasto
+// CORRECTO: primero mini-sync del día exacto desde Meta (con autoverificación
+// anti-RLS), luego snapshot NUEVO anclado a ese día en semaforo_historial.
+// El punto viejo queda como evidencia. HOY no se toca (su gasto sigue vivo).
+// ═══════════════════════════════════════════════════════════════════════
+window._rpFusionRefreshSem=async function(slug,btn){
+  const ctx=window._rpFusionCtx&&window._rpFusionCtx[slug]
+  if(!ctx||!ctx.campIds||!ctx.campIds.length){alert('Recarga el resumen e intenta de nuevo');return}
+  if(!confirm('🔄 Esto recalcula el último semáforo de AYER, ANTIER y TRASANTIER de TODAS las campañas de este producto con el gasto corregido de Meta. HOY no se toca porque su gasto sigue cambiando. El punto viejo queda en el historial como evidencia. ¿Dale?'))return
+  const _txtOrig=btn?btn.textContent:''
+  const _setB=(t)=>{if(btn){btn.textContent=t;btn.disabled=true}}
+  try{
+    // 1) Resolver TODOS los anuncios de las campañas del producto (campaña → adset → ad)
+    _setB('⏳ Buscando anuncios...')
+    const camps=ctx.campIds.map(String)
+    const _asSet={},_adIdsRS=[]
+    for(let i=0;i<camps.length;i+=300){
+      const{data:asR}=await sb.from('meta_campanas').select('meta_id').eq('nivel','adset').in('parent_id',camps.slice(i,i+300))
+      for(const s of (asR||[]))_asSet[String(s.meta_id)]=1
+    }
+    const _asKeysRS=Object.keys(_asSet)
+    for(let i=0;i<_asKeysRS.length;i+=300){
+      const{data:adR}=await sb.from('meta_campanas').select('meta_id').eq('nivel','ad').in('parent_id',_asKeysRS.slice(i,i+300))
+      for(const a of (adR||[]))_adIdsRS.push(String(a.meta_id))
+    }
+    if(!_adIdsRS.length){if(btn){btn.disabled=false;btn.textContent=_txtOrig}alert('No encontré anuncios en las campañas de este producto');return}
+    // 2) Por cada día pasado: gasto exacto desde Meta + snapshot nuevo anclado a ese día
+    const _fRS=(n)=>{const d=new Date();d.setDate(d.getDate()-n);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
+    const _diasRS=[{f:_fRS(1),lab:'AYER'},{f:_fRS(2),lab:'ANTIER'},{f:_fRS(3),lab:'TRASANTIER'}]
+    const _fallasRS=[]
+    for(let i=0;i<_diasRS.length;i++){
+      const D=_diasRS[i]
+      _setB(`⏳ ${i+1}/3 ${D.lab}: gasto de Meta...`)
+      let okSync=false
+      try{okSync=await window._miniSyncInsightsDiaParaAds(_adIdsRS,D.f)}catch(_){}
+      if(!okSync)_fallasRS.push(D.lab)
+      _setB(`⏳ ${i+1}/3 ${D.lab}: guardando semáforo...`)
+      try{await _calcularYGuardarSemaforos(_adIdsRS,'cruce_dropi',D.f)}catch(_eS){if(_fallasRS.indexOf(D.lab)<0)_fallasRS.push(D.lab+' (semáforo)')}
+    }
+    if(btn){btn.disabled=false;btn.textContent=_txtOrig}
+    if(_fallasRS.length)alert('⚠️ Terminó con avisos en: '+_fallasRS.join(', ')+'. En esos días el gasto en vivo no se pudo traer/verificar desde Meta y el semáforo se guardó con el gasto que había en BD. Revisa con 🧪 Probar gasto en vivo (Meta Ads → Credenciales).')
+    else alert('✅ Listo: AYER, ANTIER y TRASANTIER recalculados con el gasto correcto. En cada tira el punto ⭐Dropi nuevo REEMPLAZA al viejo (el viejo queda en el Historial 📊 como evidencia) y el punto 🆔 IDs se recalcula solo con ese gasto corregido. Abre una campaña para verlos.')
+  }catch(e){
+    if(btn){btn.disabled=false;btn.textContent=_txtOrig}
+    alert('⚠️ No se pudo: '+((e&&e.message)||'error desconocido'))
+  }
 }
 window._rpFusionRango=async function(slug,cidF){
   const st=document.getElementById(cidF+'-rango-status')
@@ -18981,6 +19032,7 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride,compa
       seguimiento:'🔁 Seguimiento',
       cambio_presupuesto:'⚙️ Cambio de presupuesto',
       vivo:'📡 Estado en vivo',
+      refresco_manual:'🔄 Refresco con gasto corregido',
       manual:'🔧 Manual'
     }
     // Construir cada punto de la tira

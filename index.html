@@ -6058,7 +6058,20 @@ window.saveReporteV2=async(fecha)=>{
     }
     const adIdsUnicos=[...new Set(adIdsAfectados)]
     if(adIdsUnicos.length){
-      setTimeout(()=>{_calcularYGuardarSemaforos(adIdsUnicos,'reporte_dia').catch(()=>{})},0)
+      // Mejora 4: si el reporte es de un día anterior (ej: IDs finales de AYER subidos hoy en la
+      // mañana), el snapshot se ancla a ESA fecha — así el semáforo aparece en el día correcto
+      // y se calcula con el gasto de ese día (ya cerrado), no con el de hoy.
+      const _fxRep=(typeof fecha==='string'&&fecha&&fecha!==today())?fecha:undefined
+      // Mejora 5: ANTES de calcular el semáforo, traer el gasto EXACTO de ese día desde Meta API
+      // y guardarlo como snapshot en meta_insights. Así la captura del semáforo queda con gasto
+      // real del momento sin depender del botón 🔄 Refrescar. Si el sync falla, el semáforo se
+      // calcula igual con el gasto que haya en BD (comportamiento de siempre).
+      setTimeout(async()=>{
+        let _msOk=false
+        try{_msOk=await window._miniSyncInsightsDiaParaAds(adIdsUnicos,_fxRep||today())}catch(_){}
+        if(!_msOk){const _mw=document.getElementById('rep-msg');if(_mw)_mw.innerHTML+='<div class="alert alert-amber" style="margin-top:8px;font-size:12px">⚠️ El gasto en vivo no se pudo guardar (permisos o Meta no respondió). El semáforo quedó con el gasto del último sync. Avísale a Leidy o corre el 🧪 Probar gasto en vivo en Meta Ads → Credenciales.</div>'}
+        _calcularYGuardarSemaforos(adIdsUnicos,'reporte_dia',_fxRep).catch(()=>{})
+      },0)
     }
   }catch(_){}
 }
@@ -11357,7 +11370,15 @@ window.actualizarEstadosDropi=async()=>{
         if(f)_fechasCruce[f]=(_fechasCruce[f]||0)+1
       }
       const _fechaCruce=Object.keys(_fechasCruce).sort((a,b)=>_fechasCruce[b]-_fechasCruce[a])[0]||null
-      setTimeout(()=>{_calcularYGuardarSemaforos(adIdsAfectados,'cruce_dropi',_fechaCruce).catch(()=>{})},0)
+      // Mejora 5: traer el gasto EXACTO del día cruzado desde Meta API y guardarlo como snapshot
+      // antes de calcular el semáforo ★Dropi. Como ese día ya cerró, el gasto no vuelve a cambiar
+      // → la captura queda definitiva. Si el sync falla, se calcula igual con el gasto de BD.
+      setTimeout(async()=>{
+        let _msOk=false
+        try{_msOk=await window._miniSyncInsightsDiaParaAds(adIdsAfectados,_fechaCruce||today())}catch(_){}
+        if(!_msOk){const _mw=document.getElementById('dropi-upd-msg');if(_mw)_mw.innerHTML+='<span style="color:var(--amber);font-size:12px;margin-left:8px">⚠️ El gasto en vivo no se pudo guardar (permisos o Meta no respondió). El semáforo ★Dropi quedó con el gasto del último sync.</span>'}
+        _calcularYGuardarSemaforos(adIdsAfectados,'cruce_dropi',_fechaCruce).catch(()=>{})
+      },0)
     }
   }catch(_){}
   // Recargar registros del día
@@ -12443,6 +12464,7 @@ async function pageAdminMeta(c){
       <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn-sm btn-primary" onclick="saveMetaConfig()">💾 Guardar</button>
         <button class="btn-sm btn-outline" onclick="testMetaToken()">🔍 Probar conexión</button>
+        <button class="btn-sm btn-outline" onclick="probarGastoVivoMiniSync()">🧪 Probar gasto en vivo</button>
       </div>
       <div id="cfg-msg" style="margin-top:10px"></div>
     </div>
@@ -14769,7 +14791,7 @@ function _renderProductoCardResumen(data,ranking){
       // NUEVO: registro para cargar las tiras de semáforo al expandir (campaña + cada ID)
       // Incluye BE y los números de AYER (ya cruzados Dropi) para poder pintar el cierre ⭐ aunque
       // el punto del cruce no se haya guardado en BD.
-      try{window._rpFusionSemReg=window._rpFusionSemReg||{};window._rpFusionSemReg[_ccid]={campId:String(F.campId),adIds:Object.keys(F.ads||{}).map(String),be:data.margenBE||0,esSoloHoy:!!data.esSoloHoy,pctConf:_pctConfF,hoy:{n:(F.dias['p']&&F.dias['p'].count)||0,g:(F.dias['p']&&F.dias['p'].gasto)||0},ayer:{n:(F.dias['a']&&F.dias['a'].count)||0,g:(F.dias['a']&&F.dias['a'].gasto)||0},antier:{n:(F.dias['b']&&F.dias['b'].count)||0,g:(F.dias['b']&&F.dias['b'].gasto)||0,ids:_idsCampDiaF('b',F.campId)},trasantier:{n:(F.dias['c']&&F.dias['c'].count)||0,g:(F.dias['c']&&F.dias['c'].gasto)||0,ids:_idsCampDiaF('c',F.campId)},adsHoy:Object.keys(F.ads||{}).reduce((oH,kH)=>{const dH=F.ads[kH]&&F.ads[kH].dias&&F.ads[kH].dias['p'];if(dH&&(((dH.n||0)>0)||((dH.g||0)>0)))oH[String(kH)]={n:dH.n||0,g:dH.g||0};return oH},{}),adsAyer:Object.keys(F.ads||{}).reduce((oA,kA)=>{const dA=F.ads[kA]&&F.ads[kA].dias&&F.ads[kA].dias['a'];if(dA&&(((dA.n||0)>0)||((dA.g||0)>0)))oA[String(kA)]={n:dA.n||0,g:dA.g||0};return oA},{}),adsAntier:Object.keys(F.ads||{}).reduce((oB,kB)=>{const dB=F.ads[kB]&&F.ads[kB].dias&&F.ads[kB].dias['b'];const iB=_idsAdDiaF('b',kB);if((dB&&(((dB.n||0)>0)||((dB.g||0)>0)))||iB>0)oB[String(kB)]={n:(dB&&dB.n)||0,g:(dB&&dB.g)||0,ids:iB};return oB},{}),adsTras:Object.keys(F.ads||{}).reduce((oC,kC)=>{const dC=F.ads[kC]&&F.ads[kC].dias&&F.ads[kC].dias['c'];const iC=_idsAdDiaF('c',kC);if((dC&&(((dC.n||0)>0)||((dC.g||0)>0)))||iC>0)oC[String(kC)]={n:(dC&&dC.n)||0,g:(dC&&dC.g)||0,ids:iC};return oC},{})}}catch(_){}
+      try{window._rpFusionSemReg=window._rpFusionSemReg||{};window._rpFusionSemReg[_ccid]={campId:String(F.campId),adIds:Object.keys(F.ads||{}).map(String),be:data.margenBE||0,esSoloHoy:!!data.esSoloHoy,pctConf:_pctConfF,hoy:{n:(F.dias['p']&&F.dias['p'].count)||0,g:(F.dias['p']&&F.dias['p'].gasto)||0},ayer:{n:(F.dias['a']&&F.dias['a'].count)||0,g:(F.dias['a']&&F.dias['a'].gasto)||0,ids:_idsCampDiaF('a',F.campId)},antier:{n:(F.dias['b']&&F.dias['b'].count)||0,g:(F.dias['b']&&F.dias['b'].gasto)||0,ids:_idsCampDiaF('b',F.campId)},trasantier:{n:(F.dias['c']&&F.dias['c'].count)||0,g:(F.dias['c']&&F.dias['c'].gasto)||0,ids:_idsCampDiaF('c',F.campId)},adsHoy:Object.keys(F.ads||{}).reduce((oH,kH)=>{const dH=F.ads[kH]&&F.ads[kH].dias&&F.ads[kH].dias['p'];if(dH&&(((dH.n||0)>0)||((dH.g||0)>0)))oH[String(kH)]={n:dH.n||0,g:dH.g||0};return oH},{}),adsAyer:Object.keys(F.ads||{}).reduce((oA,kA)=>{const dA=F.ads[kA]&&F.ads[kA].dias&&F.ads[kA].dias['a'];const iA=_idsAdDiaF('a',kA);if((dA&&(((dA.n||0)>0)||((dA.g||0)>0)))||iA>0)oA[String(kA)]={n:(dA&&dA.n)||0,g:(dA&&dA.g)||0,ids:iA};return oA},{}),adsAntier:Object.keys(F.ads||{}).reduce((oB,kB)=>{const dB=F.ads[kB]&&F.ads[kB].dias&&F.ads[kB].dias['b'];const iB=_idsAdDiaF('b',kB);if((dB&&(((dB.n||0)>0)||((dB.g||0)>0)))||iB>0)oB[String(kB)]={n:(dB&&dB.n)||0,g:(dB&&dB.g)||0,ids:iB};return oB},{}),adsTras:Object.keys(F.ads||{}).reduce((oC,kC)=>{const dC=F.ads[kC]&&F.ads[kC].dias&&F.ads[kC].dias['c'];const iC=_idsAdDiaF('c',kC);if((dC&&(((dC.n||0)>0)||((dC.g||0)>0)))||iC>0)oC[String(kC)]={n:(dC&&dC.n)||0,g:(dC&&dC.g)||0,ids:iC};return oC},{})}}catch(_){}
       // NUEVO (Mejora 8): cuenta de la campaña (para modalPresupuesto/modalEstado de campaña y ads)
       const _accIdF=(()=>{for(const d of _dias){const ci=d.cu&&d.cu.campInfo;const x=ci&&ci[String(F.campId)];if(x&&x.accId)return x.accId}return ''})()
       // Chips de días: verde = corrió y vendió · ámbar = gastó y 0 ventas (fuga) · gris = no corrió
@@ -16686,15 +16708,19 @@ window._rpFusionSemLoad=async function(ccid){
       const _vivoAyerC=(reg.esSoloHoy&&reg.ayer&&(((reg.ayer.n||0)>0)||((reg.ayer.g||0)>0)))?_mkVivoAyerF(reg.ayer.g||0,reg.ayer.n||0):null
       const _rowsAyerC=(_porMeta[String(reg.campId)]||[]).filter(r=>r.fecha===_ayerL)
       const _ayerUtilC=_rowsAyerC.some(r=>((r.gasto||0)>0)||(((r.ventas||0)+(r.pendientes||0))>0)||r.triggered_by==='cruce_dropi')
-      const _hAyer=(_vivoAyerC||_ayerUtilC)?(window._renderSemHistorialBlock(String(reg.campId),'campaign',_vivoAyerC,_ayerL,true)||''):''
+      const _idsAyerC=(reg.ayer&&reg.ayer.ids)||0
+      const _hAyer=(_vivoAyerC||_ayerUtilC||_idsAyerC>0)?(window._renderSemHistorialBlock(String(reg.campId),'campaign',_vivoAyerC,_ayerL,true,{ids:_idsAyerC,gasto:(reg.ayer&&reg.ayer.g)||0,be:reg.be||0})||''):''
       // NUEVO: tiras de ANTIER y TRASANTIER — misma regla de AYER. Las ventas usan el cuadre (Dropi)
       // y si el cruce no llegó, caen a las ventas por IDs del aux (así el día con IDs SÍ pinta su semáforo).
       const _mkDiaPrevC=(dObj,fechaL)=>{
-        const _nU=((dObj&&dObj.n)||0)>0?dObj.n:((dObj&&dObj.ids)||0)
+        // Mejora 4: el cierre ★Dropi se sintetiza SOLO con ventas Dropi (n); las ventas por IDs
+        // ya no se disfrazan de Dropi — van en su propio punto 🆔 (idsData).
+        const _nU=(dObj&&dObj.n)||0
         const _gU=(dObj&&dObj.g)||0
+        const _idsU=(dObj&&dObj.ids)||0
         const _vivo=(reg.esSoloHoy&&dObj&&((_nU>0)||(_gU>0)))?_mkVivoAyerF(_gU,_nU):null
         const _util=(_porMeta[String(reg.campId)]||[]).some(r=>r.fecha===fechaL&&(((r.gasto||0)>0)||(((r.ventas||0)+(r.pendientes||0))>0)||r.triggered_by==='cruce_dropi'))
-        return(_vivo||_util)?(window._renderSemHistorialBlock(String(reg.campId),'campaign',_vivo,fechaL,true)||''):''
+        return(_vivo||_util||_idsU>0)?(window._renderSemHistorialBlock(String(reg.campId),'campaign',_vivo,fechaL,true,{ids:_idsU,gasto:_gU,be:reg.be||0})||''):''
       }
       const _hAntier=_mkDiaPrevC(reg.antier,_antierL)
       const _hTras=_mkDiaPrevC(reg.trasantier,_trasL)
@@ -16711,15 +16737,19 @@ window._rpFusionSemLoad=async function(ccid){
       const _ayerAdDat=(reg.esSoloHoy&&reg.adsAyer&&reg.adsAyer[String(aId)])||null
       const _vivoAyerA=_ayerAdDat?_mkVivoAyerF(_ayerAdDat.g||0,_ayerAdDat.n||0):null
       const _ayerUtilA=_listA.some(r=>r.fecha===_ayerL&&(((r.gasto||0)>0)||(((r.ventas||0)+(r.pendientes||0))>0)||r.triggered_by==='cruce_dropi'))
-      const _hAyerA=(_vivoAyerA||_ayerUtilA)?(window._renderSemHistorialBlock(String(aId),'ad',_vivoAyerA,_ayerL,true)||''):''
+      const _idsAyerA=(_ayerAdDat&&_ayerAdDat.ids)||0
+      const _hAyerA=(_vivoAyerA||_ayerUtilA||_idsAyerA>0)?(window._renderSemHistorialBlock(String(aId),'ad',_vivoAyerA,_ayerL,true,{ids:_idsAyerA,gasto:(_ayerAdDat&&_ayerAdDat.g)||0,be:reg.be||0})||''):''
       // NUEVO: tiras de ANTIER y TRASANTIER del anuncio — misma regla, con fallback a ventas por IDs
       const _mkDiaPrevA=(mapDia,fechaL)=>{
         const dD=(mapDia&&mapDia[String(aId)])||null
-        const _nU=((dD&&dD.n)||0)>0?dD.n:((dD&&dD.ids)||0)
+        // Mejora 4: igual que en la campaña — el cierre sintético usa SOLO ventas Dropi (n);
+        // las ventas por IDs van en su propio punto 🆔 (idsData).
+        const _nU=(dD&&dD.n)||0
         const _gU=(dD&&dD.g)||0
+        const _idsU=(dD&&dD.ids)||0
         const _vivo=(reg.esSoloHoy&&dD&&((_nU>0)||(_gU>0)))?_mkVivoAyerF(_gU,_nU):null
         const _util=_listA.some(r=>r.fecha===fechaL&&(((r.gasto||0)>0)||(((r.ventas||0)+(r.pendientes||0))>0)||r.triggered_by==='cruce_dropi'))
-        return(_vivo||_util)?(window._renderSemHistorialBlock(String(aId),'ad',_vivo,fechaL,true)||''):''
+        return(_vivo||_util||_idsU>0)?(window._renderSemHistorialBlock(String(aId),'ad',_vivo,fechaL,true,{ids:_idsU,gasto:_gU,be:reg.be||0})||''):''
       }
       const _hAntierA=_mkDiaPrevA(reg.adsAntier,_antierL)
       const _hTrasA=_mkDiaPrevA(reg.adsTras,_trasL)
@@ -17559,6 +17589,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   window._metaPort.ventasRealesByAdAntier=ventasRealesByAdAntier
   window._metaPort.ventasIdsByAdTrasantier=ventasIdsByAdTrasantier
   window._metaPort.ventasRealesByAdTrasantier=ventasRealesByAdTrasantier
+  // Mejora 4 (semáforos completos): mapas por CAMPAÑA de antier/trasantier — los usa el punto 🆔 IDs de la tira
+  window._metaPort.ventasIdsByCampAntier=ventasIdsByCampAntier
+  window._metaPort.ventasIdsByCampTrasantier=ventasIdsByCampTrasantier
   window._metaPort.adToAdset=adToAdset
 
   // ── Clasificar: con/sin actividad (gasto > 0 en el rango) ──
@@ -18151,6 +18184,111 @@ async function _insertarEventosCambioPresupuesto(cambios){
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// MEJORA 5 — GASTO FRESCO ANTES DEL SEMÁFORO
+// Trae de Meta API el gasto EXACTO del día indicado para las cuentas de los
+// ads involucrados y lo guarda en meta_insights (snapshot). Así el semáforo
+// que se calcula justo después usa gasto real del momento, sin depender del
+// botón 🔄 Refrescar ni del cron de las 2 AM. Si el día es pasado (ej: ayer
+// en el cruce Dropi), ese gasto ya no cambia → el snapshot queda definitivo.
+// Misma lógica del mini-sync probado de refrescarSemaforosCuenta.
+// Devuelve true si sincronizó, false si no pudo (NUNCA lanza error: si falla,
+// el semáforo se calcula igual con el gasto que haya en BD, como siempre).
+// ═══════════════════════════════════════════════════════════════════════
+window._miniSyncInsightsDiaParaAds=async function(adIds,fecha){
+  try{
+    const adIdsUnicos=[...new Set((adIds||[]).filter(Boolean).map(String))]
+    if(!adIdsUnicos.length)return false
+    const dia=fecha||today()
+    // 1) Resolver las CUENTAS de esos ads (vía meta_campanas)
+    const cuentas=new Set()
+    for(let i=0;i<adIdsUnicos.length;i+=100){
+      const batch=adIdsUnicos.slice(i,i+100)
+      const{data}=await sb.from('meta_campanas').select('account_id').eq('nivel','ad').in('meta_id',batch)
+      for(const r of (data||[])){if(r.account_id)cuentas.add(String(r.account_id))}
+    }
+    if(!cuentas.size){console.warn('[mini-sync] 0 cuentas resueltas para los ads');return false}
+    // 2) Token de lectura
+    const token=await getConfig('meta_access_token')
+    if(!token){console.warn('[mini-sync] sin token de Meta (¿permisos de la tabla config?)');return false}
+    const timeRange=JSON.stringify({since:dia,until:dia})
+    // Blindaje anti "RLS en silencio": marca de inicio + fila testigo para verificar al final
+    const _t0=Date.now()
+    let _verif=null
+    // 3) Por cada cuenta: insights del día (campaign + adset + ad) → upsert meta_insights
+    for(const accountId of cuentas){
+      const actId='act_'+accountId
+      const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
+      for(const i of (cIns||[])){
+        if(!i.campaign_id)continue
+        await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        _verif={meta_id:String(i.campaign_id),nivel:'campaign',fecha:i.date_start||dia}
+      }
+      const sIns=await metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'adset',time_increment:'1',limit:'500'})
+      for(const i of (sIns||[])){
+        if(!i.adset_id)continue
+        await sb.from('meta_insights').upsert({meta_id:i.adset_id,nivel:'adset',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        _verif={meta_id:String(i.adset_id),nivel:'adset',fecha:i.date_start||dia}
+      }
+      const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'ad',time_increment:'1',limit:'500'})
+      for(const i of (aIns||[])){
+        if(!i.ad_id)continue
+        await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        _verif={meta_id:String(i.ad_id),nivel:'ad',fecha:i.date_start||dia}
+      }
+      console.log(`[mini-sync] ✅ ${dia} · cuenta ${accountId}: ${(cIns?.length||0)} camp, ${(sIns?.length||0)} adset, ${(aIns?.length||0)} ad`)
+    }
+    // Verificación anti "RLS en silencio": releer la fila testigo y confirmar que la escritura quedó en BD.
+    // Si el upsert "pasó" pero synced_at no es reciente, la BD NO guardó nada → devolver false para que se vea.
+    if(_verif&&_verif.fecha){
+      const{data:_chk}=await sb.from('meta_insights').select('synced_at').eq('meta_id',_verif.meta_id).eq('nivel',_verif.nivel).eq('fecha',_verif.fecha).maybeSingle()
+      if(!(_chk&&_chk.synced_at&&(new Date(_chk.synced_at).getTime()>=_t0-5000))){
+        console.warn('[mini-sync] ⚠️ verificación falló: el upsert no quedó en BD (RLS en silencio / permisos). El semáforo usará el gasto del último sync.')
+        return false
+      }
+    }
+    return true
+  }catch(e){
+    console.warn('[mini-sync] falló (el semáforo se calcula con el gasto de BD):',e&&e.message)
+    return false
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 🧪 PROBADOR DE GASTO EN VIVO (mini-sync) — botón en Meta Ads → Credenciales.
+// Prueba de punta a punta CON LA SESIÓN ACTUAL: 1) leer token de config,
+// 2) pedir insights de HOY a Meta, 3) upsert de 1 fila REAL en meta_insights,
+// 4) releer la fila para confirmar que la escritura quedó (detecta RLS en silencio).
+// OJO: valida los permisos de la sesión con la que estés logueada. Para validar
+// al AUXILIAR hay que correrlo logueado como auxiliar (o esperar la alerta
+// amarilla automática del próximo guardado, que se autoverifica sola).
+// ═══════════════════════════════════════════════════════════════════════
+window.probarGastoVivoMiniSync=async function(){
+  const m=document.getElementById('cfg-msg')
+  const paso=(t)=>{if(m)m.innerHTML+='<div style="font-size:12px;margin-top:4px">'+t+'</div>'}
+  if(m)m.innerHTML=''
+  try{
+    const token=await getConfig('meta_access_token')
+    if(!token){paso('❌ 1/4 Token: esta sesión NO pudo leer meta_access_token de la tabla config (permisos RLS o token vacío).');return}
+    paso('✅ 1/4 Token leído de config')
+    const{data:_c}=await sb.from('meta_campanas').select('account_id').not('account_id','is',null).limit(1)
+    const accountId=_c&&_c[0]&&_c[0].account_id
+    if(!accountId){paso('❌ 2/4 Cuenta: no hay cuentas en meta_campanas para probar.');return}
+    const dia=today()
+    const ins=await metaGet(`/act_${accountId}/insights`,token,{fields:'campaign_id,spend',time_range:JSON.stringify({since:dia,until:dia}),level:'campaign',time_increment:'1',limit:'1'})
+    if(!ins||!ins.length||!ins[0].campaign_id){paso('⚠️ 2/4 Meta respondió pero HOY no hay gasto en la cuenta '+accountId+' — no hay fila para probar la escritura. Inténtalo cuando haya gasto del día.');return}
+    paso('✅ 2/4 Meta API respondió (cuenta '+accountId+')')
+    const _t0=Date.now()
+    const fila=ins[0]
+    const{error:_eUp}=await sb.from('meta_insights').upsert({meta_id:fila.campaign_id,nivel:'campaign',account_id:accountId,fecha:fila.date_start||dia,spend:parseFloat(fila.spend)||0,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+    if(_eUp){paso('❌ 3/4 Escritura: upsert en meta_insights rechazado → '+_eUp.message);return}
+    paso('✅ 3/4 Upsert en meta_insights aceptado')
+    const{data:_chk}=await sb.from('meta_insights').select('synced_at').eq('meta_id',String(fila.campaign_id)).eq('nivel','campaign').eq('fecha',fila.date_start||dia).maybeSingle()
+    if(_chk&&_chk.synced_at&&(new Date(_chk.synced_at).getTime()>=_t0-5000)){paso('✅ 4/4 Verificado: la fila quedó escrita en BD. El gasto en vivo FUNCIONA con esta sesión.')}
+    else{paso('❌ 4/4 RLS EN SILENCIO: el upsert "pasó" pero la fila NO quedó actualizada en BD. Hay que aplicar el SQL de permisos en Supabase.')}
+  }catch(e){paso('❌ Error: '+(e&&e.message||e))}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // ENTREGA 3B — HISTÓRICO DE SEMÁFOROS
 // Cada vez que el auxiliar actualiza ventas, recalcula y guarda el
 // semáforo de las campañas/adsets/ads afectados en `semaforo_historial`.
@@ -18586,10 +18724,36 @@ window._nexoSemColor=function(cpa,margenBE){
   if(cpa>margenBE*0.7)return 'var(--amber)'
   return 'var(--green)'
 }
+// ── Mejora 4: ventas por IDs del aux para un meta y un día anterior (AYER/ANTIER/TRASANTIER) ──
+// Devuelve cuántas ventas por IDs (T. Cierre) tiene ese meta ese día, según el nivel,
+// usando los mapas ya cacheados en _metaPort (0 llamadas extra). Días fuera de la ventana → 0.
+window._idsDelDiaMeta=function(metaId,nivel,fechaLocal){
+  try{
+    const port=window._metaPort||{}
+    const _d=(n)=>{const d=new Date();d.setDate(d.getDate()-n);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
+    let suf=null
+    if(fechaLocal===_d(1))suf='Ayer'
+    else if(fechaLocal===_d(2))suf='Antier'
+    else if(fechaLocal===_d(3))suf='Trasantier'
+    if(!suf)return 0
+    const byAd=port['ventasIdsByAd'+suf]||{}
+    if(nivel==='ad')return byAd[String(metaId)]||0
+    if(nivel==='campaign'){const byCamp=port['ventasIdsByCamp'+suf]||{};return byCamp[String(metaId)]||0}
+    if(nivel==='adset'){
+      const a2s=port.adToAdset||{}
+      let t=0
+      for(const aId in byAd){if(String(a2s[aId]||'')===String(metaId))t+=byAd[aId]||0}
+      return t
+    }
+    return 0
+  }catch(_){return 0}
+}
 // vivoData (opcional): {sem, label, cpa, gasto, ventas, pendientes} — estado real
 // calculado por el badge superior. Si está presente, sobrescribe el último punto
 // para que la tira coincida visualmente con el badge.
-window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride,compacto){
+// idsData (opcional, Mejora 4): {ids, gasto, be} — ventas por IDs del día (días anteriores).
+// Si no viene, se resuelve solo con _idsDelDiaMeta desde el cache del portafolio.
+window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride,compacto,idsData){
   try{
     const semsRaw=(window._metaPort?.semaforosByMeta||{})[metaId]||[]
     // FIX timezone: filtrar por día LOCAL usando hora_calculo (no por columna 'fecha' que es UTC).
@@ -18652,6 +18816,41 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride,compa
     if(_esDiaAnterior&&vivoData&&vivoData.sem&&!eventos.some(s=>s.triggered_by==='cruce_dropi')&&(vivoData.pendientes||0)===0&&(((vivoData.ventas||0)>0)||((vivoData.gasto||0)>0))){
       eventos.push({hora_calculo:new Date().toISOString(),semaforo:vivoData.sem,semaforo_label:vivoData.label,cpa_real:vivoData.cpa,cpa_real_efectivas:vivoData.cpaEfect!=null?vivoData.cpaEfect:vivoData.cpa,gasto:vivoData.gasto,ventas:vivoData.ventas,pendientes:0,canceladas:vivoData.canceladas||0,triggered_by:'cruce_dropi',_sintetico:true})
     }
+    // ── Mejora 4: PUNTO 🆔 IDS del día anterior ──
+    // Regla: en un día pasado SIEMPRE va el semáforo del cruce Dropi (real, sintético o
+    // "esperando cruce") y, SI ese día tuvo ventas por IDs del aux, TAMBIÉN se pinta un
+    // punto 🆔 con el semáforo calculado con esas ventas: gasto del día ÷ ventas por IDs vs BE.
+    // Va justo ANTES del punto ★Dropi (el cierre real siempre queda de último).
+    if(_esDiaAnterior){
+      try{
+        const _idsN=(idsData&&idsData.ids!=null)?(+idsData.ids||0):(window._idsDelDiaMeta?window._idsDelDiaMeta(metaId,nivel,_diaVista):0)
+        if(_idsN>0&&!eventos.some(s=>s._esIdsDia)){
+          // Gasto del día: el del cruce si existe (día cerrado), sino el mayor snapshot guardado, sino el de la card
+          const _crucesIds=eventos.filter(s=>s.triggered_by==='cruce_dropi')
+          const _gCruce=_crucesIds.length?(+_crucesIds[_crucesIds.length-1].gasto||0):0
+          const _gMax=sems.reduce((mx,s)=>Math.max(mx,+s.gasto||0),0)
+          const _gIds=_gCruce>0?_gCruce:Math.max(_gMax,(idsData&&+idsData.gasto)||0)
+          // BE de referencia: del último registro del día que lo tenga, sino el que venga de la card
+          let _beIds=0
+          for(let _bi=sems.length-1;_bi>=0;_bi--){const _rb=+(sems[_bi].margenbe_referencia)||0;if(_rb>0){_beIds=_rb;break}}
+          if(!(_beIds>0)&&idsData&&+idsData.be>0)_beIds=+idsData.be
+          // Clasificación canónica (mismas reglas 45/70/100 del BE del semáforo)
+          let _semI='sin_ventas',_lblI='⏳ Sin ventas'
+          const _cpaI=_gIds>0?_gIds/_idsN:0
+          if(!(_gIds>0)){_semI='pendiente_sync';_lblI='⏳ Ventas sin sync de gasto'}
+          else if(_beIds>0){
+            if(_cpaI>_beIds){_semI='stop';_lblI='🔴 STOP'}
+            else if(_cpaI>_beIds*0.7){_semI='precaucion';_lblI='🟡 Precaución'}
+            else if(_cpaI>_beIds*0.45){_semI='escalar';_lblI='🟢 Escalar'}
+            else{_semI='fuego';_lblI='🟣 Fuego'}
+          }
+          const _ptoIds={hora_calculo:new Date().toISOString(),semaforo:_semI,semaforo_label:_lblI,cpa_real:_cpaI,cpa_real_efectivas:_cpaI,gasto:_gIds,ventas:_idsN,pendientes:0,canceladas:0,triggered_by:'ids_dia',_esIdsDia:true}
+          const _idxCruceIds=eventos.findIndex(s=>s.triggered_by==='cruce_dropi')
+          if(_idxCruceIds>=0)eventos.splice(_idxCruceIds,0,_ptoIds)
+          else eventos.push(_ptoIds)
+        }
+      }catch(_eIds){console.warn('[SEM] punto IDs falló:',_eIds&&_eIds.message)}
+    }
     // Obtener pctConf del producto de esta meta (para calcular Ventas Efectivas + CPA Efectivo en tooltip)
     let pctConfMeta=0.62
     try{
@@ -18704,6 +18903,7 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride,compa
       asignador:'📥 Asignador',
       reservados:'📦 Reservados',
       cruce_dropi:'⭐ Cruce Dropi',
+      ids_dia:'🆔 IDs del día',
       seguimiento:'🔁 Seguimiento',
       cambio_presupuesto:'⚙️ Cambio de presupuesto',
       vivo:'📡 Estado en vivo',
@@ -18714,6 +18914,7 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride,compa
       const c=COLOR_MAP[s.semaforo]||COLOR_MAP.sin_ventas
       const isUltimo=i===eventos.length-1
       const isDropi=s.triggered_by==='cruce_dropi'
+      const isIds=!!s._esIdsDia
       const isPresupuesto=s.triggered_by==='cambio_presupuesto'
       const hora=new Date(s.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
       const size=compacto?(isUltimo?'13':'10'):(isUltimo?'16':'12')
@@ -18743,9 +18944,13 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride,compa
       // Tooltip enriquecido (multilínea con saltos reales)
       const tooltip=isPresupuesto
         ?`Cambio de presupuesto: $${fmt(s.presupuesto_anterior||0)} → $${fmt(s.presupuesto_nuevo||0)} (${(s.presupuesto_pct_cambio||0)>0?'+':''}${(s.presupuesto_pct_cambio||0).toFixed(0)}%)\nHora: ${hora}`
+        :isIds
+        ?`🆔 Semáforo con IDs del día (T. Cierre)\n${s.semaforo_label||s.semaforo}\n💸 Gasto del día: $${fmt(s.gasto||0)}\n🆔 Ventas por IDs: ${s.ventas||0}\n🎯 CPA IDs: $${fmt(Math.round(s.cpa_real||0))}\n${fuenteLbl}`
         :`${s.semaforo_label||s.semaforo}\n🕐 ${hora}\n💸 Gasto: $${fmt(s.gasto||0)}\n📦 Ventas: ${ventasPunto}${detalleDropi}\n🟣 V. Efectivas: ${vEfectPunto.toFixed(2)} (${Math.round(pctConfMeta*100)}%)\n🎯 CPA Real: $${fmt(s.cpa_real||0)}\n🟣 CPA Efectivo: $${fmt(cpaEfectPunto)}\n${fuenteLbl}`
       const label=isDropi
         ?`<div style="font-size:8px;color:${cFinal.cssVar};font-weight:700;margin-top:3px;line-height:1.1">REAL · Dropi${s._sintetico?' ⚡':''}</div>`
+        :isIds
+        ?`<div style="font-size:8px;color:#fcd34d;font-weight:700;margin-top:3px;line-height:1.1">🆔 IDs</div>`
         :isPresupuesto
         ?`<div style="font-size:8px;color:${cFinal.cssVar};font-weight:700;margin-top:3px;line-height:1.1">Budget</div><div style="font-size:8px;color:var(--muted);line-height:1.1">${hora}</div>`
         :`<div style="font-size:8px;color:${isUltimo?'var(--text)':'var(--muted)'};margin-top:3px;font-weight:${isUltimo?'600':'400'}">${hora}</div>`
@@ -18754,6 +18959,8 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride,compa
         // Mejora: hora de registro MUY pequeña bajo cada punto (Dropi → ★Dropi en su color real)
         const lblC=isDropi
           ?`<div style="font-size:7px;color:${cFinal.cssVar};font-weight:700;margin-top:2px;line-height:1;white-space:nowrap">★Dropi</div>`
+          :isIds
+          ?`<div style="font-size:7px;color:#fcd34d;font-weight:700;margin-top:2px;line-height:1;white-space:nowrap">🆔IDs</div>`
           :`<div style="font-size:7px;color:${isUltimo?'var(--text)':'var(--subtle)'};margin-top:2px;line-height:1;white-space:nowrap;font-weight:${isUltimo?'600':'400'}">${hora}</div>`
         return`<div style="display:flex;flex-direction:column;align-items:center;flex:none"><div title="${tooltip}" style="width:${size}px;height:${size}px;border-radius:50%;background:${cFinal.bg};border:2px solid ${cFinal.bd};cursor:help;flex-shrink:0;box-shadow:0 0 0 1px rgba(0,0,0,.2);display:flex;align-items:center;justify-content:center">${innerIcon}</div>${lblC}</div>`
       }
@@ -18848,8 +19055,9 @@ window._renderSemHistorialMultiDia=function(metaId,nivel,vivoData){
     for(const n of[1,2,3]){
       const dia=_dDe(n)
       if(dia===diaVista)continue // ese día ya lo pinta el bloque principal
-      // Solo si ese día tuvo algo REAL: gasto, ventas/pendientes o el cierre del cruce Dropi
-      const tieneReal=sems.some(s=>s.fecha===dia&&(((s.gasto||0)>0)||(((s.ventas||0)+(s.pendientes||0))>0)||s.triggered_by==='cruce_dropi'))
+      // Solo si ese día tuvo algo REAL: gasto, ventas/pendientes, el cierre del cruce Dropi
+      // o ventas por IDs del aux (Mejora 4: el día con IDs SÍ pinta su tira con el punto 🆔)
+      const tieneReal=sems.some(s=>s.fecha===dia&&(((s.gasto||0)>0)||(((s.ventas||0)+(s.pendientes||0))>0)||s.triggered_by==='cruce_dropi'))||(window._idsDelDiaMeta&&window._idsDelDiaMeta(metaId,nivel,dia)>0)
       if(!tieneReal)continue
       extras+=window._renderSemHistorialBlock(metaId,nivel,null,dia,true)||''
     }

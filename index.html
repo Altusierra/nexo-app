@@ -16502,23 +16502,26 @@ window._rpFusionSemLoad=async function(ccid){
       const s=_semDeAyerF(g,n,reg.be||0)
       return s?{sem:s.sem,label:s.label,cpa:s.cpa,cpaEfect:s.cpa,gasto:g,ventas:n,pendientes:0}:null
     }
-    // Tira de la CAMPAÑA: HOY + AYER (con su cierre del cruce — guardado o sintético — o "esperando cruce")
+    // Tira de la CAMPAÑA: HOY + AYER — ambas COMPACTAS. La de AYER solo si ese día hubo algo REAL
+    // (ventas, gasto o cierre del cruce); los registros "reportado sin datos" solos NO ameritan tira.
     if(wrap){
-      const _hHoy=window._renderSemHistorialBlock(String(reg.campId),'campaign',null)||''
+      const _hHoy=window._renderSemHistorialBlock(String(reg.campId),'campaign',null,null,true)||''
       const _vivoAyerC=(reg.esSoloHoy&&reg.ayer&&(((reg.ayer.n||0)>0)||((reg.ayer.g||0)>0)))?_mkVivoAyerF(reg.ayer.g||0,reg.ayer.n||0):null
-      const _hAyer=window._renderSemHistorialBlock(String(reg.campId),'campaign',_vivoAyerC,_ayerL)||''
+      const _rowsAyerC=(_porMeta[String(reg.campId)]||[]).filter(r=>r.fecha===_ayerL)
+      const _ayerUtilC=_rowsAyerC.some(r=>((r.gasto||0)>0)||(((r.ventas||0)+(r.pendientes||0))>0)||r.triggered_by==='cruce_dropi')
+      const _hAyer=(_vivoAyerC||_ayerUtilC)?(window._renderSemHistorialBlock(String(reg.campId),'campaign',_vivoAyerC,_ayerL,true)||''):''
       wrap.innerHTML=(_hHoy||_hAyer)?(_hHoy+_hAyer):'<div style="font-size:10px;color:var(--subtle);padding:2px 8px">🚥 Sin semáforos guardados para esta campaña (hoy/ayer) — se crean cuando el aux sube el reporte de IDs y le das 🔄 Refrescar</div>'
     }
-    // Tira de cada ID (anuncio): HOY siempre que haya datos · AYER si tiene registros guardados O datos cruzados para sintetizar el cierre
+    // Tira de cada ID (anuncio): HOY siempre que haya datos · AYER solo si ese día tuvo algo real
     for(const aId of (reg.adIds||[])){
       const el=document.getElementById(ccid+'-sem-'+aId)
       if(!el)continue
       const _listA=_porMeta[String(aId)]||[]
-      const _hHoyA=window._renderSemHistorialBlock(String(aId),'ad',null)||''
-      const _tieneAyerA=_listA.some(r=>r.fecha===_ayerL)
+      const _hHoyA=window._renderSemHistorialBlock(String(aId),'ad',null,null,true)||''
       const _ayerAdDat=(reg.esSoloHoy&&reg.adsAyer&&reg.adsAyer[String(aId)])||null
       const _vivoAyerA=_ayerAdDat?_mkVivoAyerF(_ayerAdDat.g||0,_ayerAdDat.n||0):null
-      const _hAyerA=(_tieneAyerA||_vivoAyerA)?(window._renderSemHistorialBlock(String(aId),'ad',_vivoAyerA,_ayerL)||''):''
+      const _ayerUtilA=_listA.some(r=>r.fecha===_ayerL&&(((r.gasto||0)>0)||(((r.ventas||0)+(r.pendientes||0))>0)||r.triggered_by==='cruce_dropi'))
+      const _hAyerA=(_vivoAyerA||_ayerUtilA)?(window._renderSemHistorialBlock(String(aId),'ad',_vivoAyerA,_ayerL,true)||''):''
       el.innerHTML=_hHoyA+_hAyerA
     }
   }catch(e){console.warn('[fusion-sem] error:',e&&e.message)}
@@ -18380,7 +18383,7 @@ window._nexoSemColor=function(cpa,margenBE){
 // vivoData (opcional): {sem, label, cpa, gasto, ventas, pendientes} — estado real
 // calculado por el badge superior. Si está presente, sobrescribe el último punto
 // para que la tira coincida visualmente con el badge.
-window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride){
+window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride,compacto){
   try{
     const semsRaw=(window._metaPort?.semaforosByMeta||{})[metaId]||[]
     // FIX timezone: filtrar por día LOCAL usando hora_calculo (no por columna 'fecha' que es UTC).
@@ -18507,7 +18510,7 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride){
       const isDropi=s.triggered_by==='cruce_dropi'
       const isPresupuesto=s.triggered_by==='cambio_presupuesto'
       const hora=new Date(s.hora_calculo).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
-      const size=isUltimo?'16':'12'
+      const size=compacto?(isUltimo?'13':'10'):(isUltimo?'16':'12')
       const borderW=isUltimo?'2':'2'
       // Si es cambio_presupuesto, usar color ámbar fijo + icono ⚙️ adentro
       const cFinal=isPresupuesto
@@ -18541,6 +18544,7 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride){
         ?`<div style="font-size:8px;color:${cFinal.cssVar};font-weight:700;margin-top:3px;line-height:1.1">Budget</div><div style="font-size:8px;color:var(--muted);line-height:1.1">${hora}</div>`
         :`<div style="font-size:8px;color:${isUltimo?'var(--text)':'var(--muted)'};margin-top:3px;font-weight:${isUltimo?'600':'400'}">${hora}</div>`
       const innerIcon=isPresupuesto?'<span style="font-size:9px;color:#412402;line-height:1">⚙️</span>':''
+      if(compacto)return`<div style="display:flex;align-items:center;flex:none"><div title="${tooltip}" style="width:${size}px;height:${size}px;border-radius:50%;background:${cFinal.bg};border:2px solid ${cFinal.bd};cursor:help;flex-shrink:0;box-shadow:0 0 0 1px rgba(0,0,0,.2);display:flex;align-items:center;justify-content:center">${innerIcon}</div></div>`
       return`<div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0">
         <div title="${tooltip}" style="width:${size}px;height:${size}px;border-radius:50%;background:${cFinal.bg};border:${borderW}px solid ${cFinal.bd};cursor:help;flex-shrink:0;box-shadow:0 0 0 1px rgba(0,0,0,.2);display:flex;align-items:center;justify-content:center">${innerIcon}</div>
         ${label}
@@ -18550,17 +18554,22 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride){
     let tiraHtml=''
     puntos.forEach((p,i)=>{
       tiraHtml+=p
-      if(i<puntos.length-1)tiraHtml+=`<div style="height:1px;background:var(--border);flex:0.5;margin-top:8px;align-self:flex-start"></div>`
+      if(i<puntos.length-1)tiraHtml+=compacto?`<div style="height:1px;background:var(--border);width:10px;flex:none;align-self:center"></div>`:`<div style="height:1px;background:var(--border);flex:0.5;margin-top:8px;align-self:flex-start"></div>`
     })
     // ── Slot "esperando cruce" para día anterior cuya cadena sigue abierta ──
     // (la síntesis del cierre y el dedup del último cruce corren ARRIBA, antes de dibujar los puntos)
     const _mostrarEsperando=_esDiaAnterior&&!eventos.some(s=>s.triggered_by==='cruce_dropi')
     if(_mostrarEsperando){
-      if(puntos.length>0)tiraHtml+=`<div style="height:1px;background:var(--border);flex:0.5;margin-top:8px;align-self:flex-start"></div>`
-      tiraHtml+=`<div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0">
+      if(compacto){
+        if(puntos.length>0)tiraHtml+=`<div style="height:1px;background:var(--border);width:10px;flex:none;align-self:center"></div>`
+        tiraHtml+=`<div style="display:flex;align-items:center;flex:none"><div title="⏳ Esperando el cruce con Dropi para cerrar este día" style="width:11px;height:11px;border-radius:50%;background:transparent;border:2px dashed var(--muted);flex-shrink:0"></div></div>`
+      }else{
+        if(puntos.length>0)tiraHtml+=`<div style="height:1px;background:var(--border);flex:0.5;margin-top:8px;align-self:flex-start"></div>`
+        tiraHtml+=`<div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0">
         <div title="Esperando cruce con Dropi para cerrar el día" style="width:16px;height:16px;border-radius:50%;background:transparent;border:2px dashed var(--muted);flex-shrink:0"></div>
         <div style="font-size:8px;color:var(--muted);font-weight:600;margin-top:3px;line-height:1.1">esperando cruce</div>
       </div>`
+      }
     }
     // Footer: estado actual o final + botón "Ver historial" con color del semáforo
     // Caso especial: día anterior sin eventos (solo "esperando cruce") → sin último válido
@@ -18574,8 +18583,25 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride){
       :esCruceDropi
       ?`<span style="color:${colorUltimo.cssVar};font-weight:600">★ REAL · Dropi:</span> ${ultimo.semaforo_label||ultimo.semaforo} · CPA $${fmt(ultimo.cpa_real||0)}`
       :`Actual: <span style="color:${colorUltimo.cssVar};font-weight:600">${ultimo.semaforo_label||ultimo.semaforo}</span>${_esVistaHoy?'':' · sin Dropi'}`
-    // Label del wrapper: "Hoy" si es vista de hoy, sino la fecha visualizada
-    const _labelDia=_esVistaHoy?'Hoy':(_diaVista||'Día anterior')
+    // Label del wrapper: HOY / AYER / ANTIER / TRASANTIER (fácil de leer) — la fecha solo si es más viejo
+    const _labelDia=(()=>{
+      if(_esVistaHoy)return'HOY'
+      const _dDe=(n)=>{const d=new Date();d.setDate(d.getDate()-n);return _localDay(d.toISOString())}
+      if(_diaVista===_dDe(1))return'AYER'
+      if(_diaVista===_dDe(2))return'ANTIER'
+      if(_diaVista===_dDe(3))return'TRASANTIER'
+      return _diaVista||'Día anterior'
+    })()
+    // ── MODO COMPACTO: todo en UNA línea — 🚦 DÍA · puntos · estado actual · 📊 ──
+    // Pensado para la fusión: fácil de leer de un vistazo y sin ocupar espacio.
+    if(compacto){
+      return`<div style="margin-top:3px;background:var(--card2);border-radius:5px;padding:3px 8px;border-left:2px solid ${colorUltimo.cssVar};display:flex;align-items:center;gap:8px;flex-wrap:wrap" title="Cada punto = una subida del reporte de IDs del aux (+ Refrescar). Pasa el cursor por cada punto para ver su captura (hora, gasto, ventas, CPA). El punto punteado = esperando el cruce Dropi que cierra el día.">
+        <span style="font-size:9.5px;color:var(--muted);white-space:nowrap;flex:none">🚦 <strong style="color:var(--text)">${_labelDia}</strong></span>
+        <div style="display:flex;align-items:center;gap:0;flex:none">${tiraHtml}</div>
+        <span style="font-size:9px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:80px">${footerTxt}</span>
+        <button onclick="event.stopPropagation();verHistorialSemaforos('${metaId}','${nivel}')" title="Ver historial completo de semáforos" style="padding:1px 5px;font-size:9px;background:transparent;border:1px solid ${colorUltimo.cssVar};color:${colorUltimo.cssVar};border-radius:4px;cursor:pointer;flex:none">📊</button>
+      </div>`
+    }
     return`<div style="margin-top:4px;background:var(--card2);border-radius:5px;padding:6px 10px;border-left:2px solid ${colorUltimo.cssVar}">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;flex-wrap:wrap;gap:6px">
         <span style="font-size:10px;color:var(--muted)">🚦 <strong style="color:var(--text);font-weight:600">${_labelDia}</strong>${cambios>0?` · ${cambios} cambio${cambios>1?'s':''}`:' · sin cambios'}</span>

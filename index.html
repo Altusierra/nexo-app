@@ -17294,9 +17294,11 @@ window.modalDuplicarMulti=async(campId,nombre,accId)=>{
     campaign:dTree.campaign||{},
     adsets:Array.isArray(dTree.adsets)?dTree.adsets:[],
     cuentas:(ctasR&&ctasR.data)||[],
-    statusSel:'PAUSED',fallidas:[],lastCfg:null
+    statusSel:'PAUSED',fallidas:[],lastCfg:null,
+    skipAdset:{},skipAds:{},tosInfo:null
   }
   window._dupMultiRender()
+  window._dupMultiTosCheck()
 }
 window._dupMultiRender=()=>{
   const st=window._dupMultiState;if(!st)return
@@ -17307,14 +17309,22 @@ window._dupMultiRender=()=>{
   const ctasHtml=st.cuentas.map(c=>{
     const cid=String(c.account_id||'').replace(/^act_/,'')
     const esOrigen=cid===st.accId
-    return `<label style="display:flex;align-items:center;gap:7px;background:var(--card);border:1px ${esOrigen?'dashed':'solid'} var(--border);border-radius:8px;padding:7px 9px;cursor:${esOrigen?'default':'pointer'};font-size:11.5px;font-weight:600;${esOrigen?'opacity:.45':''}"><input type="checkbox" class="dm-cta" data-acc="${_dmEsc(cid)}" data-nom="${_dmEsc(c.nombre||cid)}" ${esOrigen?'disabled':''} onchange="window._dupMultiCount()" style="accent-color:var(--green);width:15px;height:15px;flex-shrink:0"> <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_dmEsc(c.nombre||cid)}</span>${esOrigen?'<span style="font-size:9px;color:var(--subtle);flex-shrink:0">(origen)</span>':''}</label>`
+    return `<label style="display:flex;align-items:center;flex-wrap:wrap;gap:7px;background:var(--card);border:1px ${esOrigen?'dashed':'solid'} var(--border);border-radius:8px;padding:7px 9px;cursor:${esOrigen?'default':'pointer'};font-size:11.5px;font-weight:600;${esOrigen?'opacity:.45':''}"><input type="checkbox" class="dm-cta" data-acc="${_dmEsc(cid)}" data-nom="${_dmEsc(c.nombre||cid)}" ${esOrigen?'disabled':''} onchange="window._dupMultiCount()" style="accent-color:var(--green);width:15px;height:15px;flex-shrink:0"> <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_dmEsc(c.nombre||cid)}</span>${esOrigen?'<span style="font-size:9px;color:var(--subtle);flex-shrink:0">(origen)</span>':''}<span class="dm-tosw" data-acc="${_dmEsc(cid)}" style="display:none;width:100%;font-size:9px;color:var(--amber);line-height:1.35;font-weight:600;white-space:normal"></span></label>`
   }).join('')
   // PASO 3 · tabla por adset (CBO: mín/máx día · ABO: presupuesto por adset)
+  // + switch ✅ Va / 🗑 NO va por adset · desglose expandible de anuncios con switch por ad
   const filasAdsets=st.adsets.map((a,i)=>{
-    const vid=a.tiene_video?`<div style="margin-top:3px;font-size:9.5px;color:var(--amber);white-space:normal;max-width:240px">🎥 tiene video subido directo: esos anuncios se OMITEN en la copia (tip: publícalo como post de página y sí se copia)</div>`:''
+    const adsArr=Array.isArray(a.ads)?a.ads:[]
+    const vid=a.tiene_video?`<div style="margin-top:3px;font-size:9.5px;color:var(--amber);white-space:normal;max-width:260px">🎥 tiene video subido directo: esos anuncios se OMITEN en la copia (tip: publícalo como post de página y sí se copia)</div>`:''
+    const aud=a.tiene_audiencias?`<div style="margin-top:3px;font-size:9.5px;color:var(--amber);white-space:normal;max-width:260px">👥 usa audiencias personalizadas: se comparten SOLAS con la cuenta destino — si no se puede, la copia sale SIN ellas (con nota)</div>`:''
     const colsCbo=`<td style="padding:6px 8px;white-space:nowrap"><input id="dm-min-${i}" type="number" inputmode="numeric" ${Number(a.daily_min_spend_target_human)>0?`value="${Number(a.daily_min_spend_target_human)}"`:''} placeholder="$ — (la original no tiene)" style="width:140px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px;padding:4px 7px"></td><td style="padding:6px 8px;white-space:nowrap"><input id="dm-max-${i}" type="number" inputmode="numeric" ${Number(a.daily_spend_cap_human)>0?`value="${Number(a.daily_spend_cap_human)}"`:''} placeholder="$ — (la original no tiene)" style="width:140px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px;padding:4px 7px"></td>`
     const colAbo=`<td style="padding:6px 8px;white-space:nowrap"><input id="dm-bud-${i}" type="number" inputmode="numeric" value="${Number(a.daily_budget_human)||0}" style="width:140px;background:var(--card);border:1px solid var(--accent);border-radius:6px;color:var(--text);font-size:11px;padding:4px 7px;font-weight:700"></td>`
-    return `<tr><td style="padding:6px 8px;font-weight:700;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${_dmEsc(a.name)} · ${a.n_ads||0} anuncio(s)">🧩 ${_dmEsc(a.name)}<span style="font-size:9px;color:var(--subtle);font-weight:600"> · ${a.n_ads||0} ads</span>${vid}</td><td style="padding:6px 8px;white-space:nowrap"><input id="dm-st-${i}" type="datetime-local" value="${_defST}" style="background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px;padding:4px 7px"></td>${st.esCbo?colsCbo:colAbo}</tr>`
+    const nAds=adsArr.length||a.n_ads||0
+    const adsBtn=adsArr.length
+      ?`<button id="dm-adsbtn-${i}" onclick="window._dupMultiTglAds(${i})" style="flex-shrink:0;background:none;border:none;color:var(--blue);font-size:9.5px;font-weight:700;cursor:pointer;padding:0 2px">▸ ver ${nAds} ads</button>`
+      :`<span style="flex-shrink:0;font-size:9px;color:var(--subtle);font-weight:600">· ${nAds} ads</span>`
+    const filaAds=adsArr.length?`<tr id="dm-adsrow-${i}" style="display:none"><td colspan="${st.esCbo?4:3}" style="padding:2px 8px 8px 24px"><div style="display:flex;flex-direction:column;gap:4px">${adsArr.map((ad,j)=>`<div id="dm-adrow-${i}-${j}" style="display:flex;align-items:center;gap:8px;font-size:10.5px;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:4px 8px"><span style="font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📣 ${_dmEsc(ad.name)}</span><span style="font-size:9px;color:#fcd34d;font-family:monospace;flex-shrink:0">🆔 ${_dmEsc(ad.id)}</span>${ad.tiene_video?'<span style="font-size:9px;color:var(--amber);flex-shrink:0">🎥 video: se omite solo</span>':''}<button id="dm-adtg-${i}-${j}" onclick="window._dupMultiTglAd(${i},${j})" style="margin-left:auto;flex-shrink:0;background:rgba(74,222,128,.1);border:1px solid var(--green);border-radius:5px;color:var(--green);font-size:9.5px;font-weight:700;padding:1px 8px;cursor:pointer">✅ Va</button></div>`).join('')}</div></td></tr>`:''
+    return `<tr id="dm-asrow-${i}"><td style="padding:6px 8px;font-weight:700;max-width:280px"><div style="display:flex;align-items:center;gap:6px"><button id="dm-astg-${i}" onclick="window._dupMultiTglAdset(${i})" style="flex-shrink:0;background:rgba(74,222,128,.1);border:1px solid var(--green);border-radius:5px;color:var(--green);font-size:9.5px;font-weight:700;padding:1px 8px;cursor:pointer" title="Clic para alternar: ✅ se copia / 🗑 NO se copia en las copias">✅ Va</button><span id="dm-asnm-${i}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${_dmEsc(a.name)} · ${nAds} anuncio(s)">🧩 ${_dmEsc(a.name)}</span>${adsBtn}</div>${vid}${aud}</td><td style="padding:6px 8px;white-space:nowrap"><input id="dm-st-${i}" type="datetime-local" value="${_defST}" style="background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px;padding:4px 7px"></td>${st.esCbo?colsCbo:colAbo}</tr>${filaAds}`
   }).join('')
   const headAdsets=st.esCbo
     ?`<th style="font-size:9px;font-weight:800;color:var(--muted);text-align:left;padding:4px 8px;border-bottom:1px dashed var(--border);white-space:nowrap">⬇️ MÍN DÍA (opcional)</th><th style="font-size:9px;font-weight:800;color:var(--muted);text-align:left;padding:4px 8px;border-bottom:1px dashed var(--border);white-space:nowrap">⬆️ MÁX DÍA (opcional)</th>`
@@ -17376,6 +17386,56 @@ window._dupMultiToggleAll=(on)=>{
   document.querySelectorAll('.dm-cta').forEach(c=>{if(!c.disabled)c.checked=!!on})
   window._dupMultiCount()
 }
+// Business Manager de NEXO — para el link directo de "aceptar Términos de audiencias"
+const _DM_BIZID='1005446264953467'
+// Chequeo silencioso: ¿cada cuenta destino aceptó los Términos de audiencias personalizadas?
+// Pinta aviso ámbar + link directo en el PASO 1 (la cuenta sigue seleccionable, solo avisa).
+window._dupMultiTosCheck=async()=>{
+  const st=window._dupMultiState;if(!st||!st.cuentas||!st.cuentas.length)return
+  const ids=st.cuentas.map(c=>String(c.account_id||'').replace(/^act_/,''))
+  const r=await window._metaClone({action:'check_tos',account_ids:ids})
+  if(!r.ok||!r.data||!Array.isArray(r.data.cuentas))return // Edge Function viejo o error → sin aviso, todo sigue normal
+  const stN=window._dupMultiState;if(!stN||stN!==st)return // el modal cambió mientras tanto
+  st.tosInfo={};for(const c of r.data.cuentas)st.tosInfo[String(c.account_id)]=c.ca_tos
+  document.querySelectorAll('.dm-tosw').forEach(sp=>{
+    if(st.tosInfo[sp.dataset.acc]===false){
+      sp.style.display='block'
+      sp.innerHTML=`⚠️ falta aceptar Términos de audiencias → <a href="https://business.facebook.com/ads/manage/customaudiences/tos/?act=${sp.dataset.acc}&business_id=${_DM_BIZID}" target="_blank" rel="noopener" style="color:var(--amber);text-decoration:underline;font-weight:700" onclick="event.stopPropagation()">aceptar aquí</a> (clic en "Aceptar" allá y listo) — si no, las copias salen SIN audiencias`
+    }
+  })
+}
+// Switch por ADSET: ✅ Va (se copia) / 🗑 NO va (se omite en TODAS las copias)
+window._dupMultiTglAdset=(i)=>{
+  const st=window._dupMultiState;if(!st)return
+  st.skipAdset[i]=!st.skipAdset[i]
+  const sk=!!st.skipAdset[i]
+  const row=document.getElementById(`dm-asrow-${i}`);if(row)row.style.opacity=sk?'.4':''
+  const nm=document.getElementById(`dm-asnm-${i}`);if(nm)nm.style.textDecoration=sk?'line-through':''
+  const b=document.getElementById(`dm-astg-${i}`)
+  if(b){b.textContent=sk?'🗑 NO va':'✅ Va';b.style.borderColor=sk?'var(--red)':'var(--green)';b.style.color=sk?'var(--red)':'var(--green)';b.style.background=sk?'rgba(248,113,113,.12)':'rgba(74,222,128,.1)'}
+  if(sk){const ar=document.getElementById(`dm-adsrow-${i}`);if(ar)ar.style.display='none';const ab=document.getElementById(`dm-adsbtn-${i}`);if(ab&&st.adsets[i])ab.textContent=`▸ ver ${(st.adsets[i].ads||[]).length} ads`}
+}
+// Expandir/contraer el desglose de anuncios de un adset
+window._dupMultiTglAds=(i)=>{
+  const st=window._dupMultiState;if(!st)return
+  if(st.skipAdset[i])return // adset quitado: no expandir
+  const ar=document.getElementById(`dm-adsrow-${i}`);if(!ar)return
+  const abrir=ar.style.display==='none'
+  ar.style.display=abrir?'':'none'
+  const ab=document.getElementById(`dm-adsbtn-${i}`)
+  if(ab&&st.adsets[i])ab.textContent=`${abrir?'▾ ocultar':'▸ ver'} ${(st.adsets[i].ads||[]).length} ads`
+}
+// Switch por ANUNCIO: ✅ Va / 🗑 NO va (se omite ese ad en TODAS las copias)
+window._dupMultiTglAd=(i,j)=>{
+  const st=window._dupMultiState;if(!st)return
+  const k=i+':'+j
+  st.skipAds[k]=!st.skipAds[k]
+  const sk=!!st.skipAds[k]
+  const row=document.getElementById(`dm-adrow-${i}-${j}`)
+  if(row){row.style.opacity=sk?'.45':'';const s=row.querySelector('span');if(s)s.style.textDecoration=sk?'line-through':''}
+  const b=document.getElementById(`dm-adtg-${i}-${j}`)
+  if(b){b.textContent=sk?'🗑 NO va':'✅ Va';b.style.borderColor=sk?'var(--red)':'var(--green)';b.style.color=sk?'var(--red)':'var(--green)';b.style.background=sk?'rgba(248,113,113,.12)':'rgba(74,222,128,.1)'}
+}
 window._dupMultiCount=()=>{
   const n=document.querySelectorAll('.dm-cta:checked').length
   const el=document.getElementById('dm-cnt');if(el)el.textContent=`${n} cuenta${n===1?'':'s'} elegida${n===1?'':'s'} → ${n} copia${n===1?'':'s'}`
@@ -17399,6 +17459,8 @@ window._dupMultiApply=async()=>{
   const cboBud=st.esCbo?(Number(document.getElementById('dm-cbobud')?.value)||0):0
   const adsetsCfg=st.adsets.map((a,i)=>{
     const cfg={source_adset_id:String(a.id)}
+    // 🗑 Adset marcado "NO va" → el Edge Function lo omite en TODAS las copias
+    if(st.skipAdset[i]){cfg.omitir=true;return cfg}
     const stL=document.getElementById(`dm-st-${i}`)?.value||''
     if(stL)cfg.start_time=(stL.length===16?stL+':00':stL)+'-0500'
     if(st.esCbo){
@@ -17410,8 +17472,15 @@ window._dupMultiApply=async()=>{
       const bd=Number(document.getElementById(`dm-bud-${i}`)?.value)||0
       if(bd>0)cfg.daily_budget=bd
     }
+    // 🗑 Anuncios puntuales marcados "NO va" → se excluyen en TODAS las copias
+    const exIds=(Array.isArray(a.ads)?a.ads:[]).filter((ad,j)=>st.skipAds[i+':'+j]).map(ad=>String(ad.id))
+    if(exIds.length)cfg.excluir_ads=exIds
     return cfg
   })
+  if(adsetsCfg.length&&adsetsCfg.every(c=>c.omitir===true)){
+    const w=document.getElementById('dm-warn');if(w){w.textContent='⚠️ Quitaste TODOS los adsets — la copia quedaría vacía. Deja al menos uno en ✅ Va.';w.style.color='var(--red)';w.style.fontWeight='700'}
+    return
+  }
   st.lastCfg={patron,cboBud,adsetsCfg,status:st.statusSel}
   await window._dupMultiRun(marcadas)
 }

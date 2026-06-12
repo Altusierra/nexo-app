@@ -17298,11 +17298,21 @@ window._rpFusionSemLoad=async function(ccid){
     const _trasL=_d2(new Date(Date.now()-3*86400000))
     const metas=[String(reg.campId),...((reg.adIds||[]).map(String))]
     let rows=[]
+    // NUEVO (12jun26 · captura completa): traer también metricas_extra para el tooltip del desglose completo.
+    // Blindaje: si la BD aún no tiene la columna, se reintenta sin ella (las tiras nunca se rompen).
+    let _colsSemF='meta_id,nivel,fecha,hora_calculo,semaforo,semaforo_label,cpa_real,ventas,canceladas,pendientes,gasto,triggered_by,cambio_vs_anterior,semaforo_anterior,ventas_efectivas,cpa_real_efectivas,metricas_extra'
     for(let i=0;i<metas.length;i+=100){
-      const{data}=await sb.from('semaforo_historial')
-        .select('meta_id,nivel,fecha,hora_calculo,semaforo,semaforo_label,cpa_real,ventas,canceladas,pendientes,gasto,triggered_by,cambio_vs_anterior,semaforo_anterior,ventas_efectivas,cpa_real_efectivas')
+      let{data,error:_eSemF}=await sb.from('semaforo_historial')
+        .select(_colsSemF)
         .in('meta_id',metas.slice(i,i+100)).gte('fecha',_trasL).lte('fecha',_hoyL)
         .order('hora_calculo',{ascending:true}).limit(4000)
+      if(_eSemF&&String(_eSemF.message||'').indexOf('metricas_extra')>=0){
+        _colsSemF=_colsSemF.replace(',metricas_extra','')
+        ;({data}=await sb.from('semaforo_historial')
+          .select(_colsSemF)
+          .in('meta_id',metas.slice(i,i+100)).gte('fecha',_trasL).lte('fecha',_hoyL)
+          .order('hora_calculo',{ascending:true}).limit(4000))
+      }
       if(data)rows=rows.concat(data)
     }
     window._metaPort=window._metaPort||{}
@@ -18073,11 +18083,22 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     // registros extra NO contaminan la tira de HOY (que filtra por hora_calculo local
     // y excluye cruce_dropi). Limit sube 5000→8000 para cubrir los días extra.
     const _semDesde3=_isoDate(new Date(new Date(desde+'T12:00').getTime()-3*86400000))
-    const{data:semData}=await sb.from('semaforo_historial')
-      .select('meta_id,nivel,fecha,hora_calculo,semaforo,semaforo_label,cpa_real,ventas,pendientes,gasto,triggered_by,cambio_vs_anterior,semaforo_anterior,ventas_efectivas,cpa_real_efectivas')
+    // NUEVO (12jun26 · captura completa): traer también metricas_extra para el tooltip del desglose completo.
+    // Blindaje: si la BD aún no tiene la columna, se reintenta sin ella (las tiras nunca se rompen).
+    let _colsSemA='meta_id,nivel,fecha,hora_calculo,semaforo,semaforo_label,cpa_real,ventas,pendientes,gasto,triggered_by,cambio_vs_anterior,semaforo_anterior,ventas_efectivas,cpa_real_efectivas,metricas_extra'
+    let{data:semData,error:_eSemA}=await sb.from('semaforo_historial')
+      .select(_colsSemA)
       .eq('account_id',accountId).gte('fecha',_semDesde3).lte('fecha',hasta)
       .order('hora_calculo',{ascending:true})
       .limit(8000)
+    if(_eSemA&&String(_eSemA.message||'').indexOf('metricas_extra')>=0){
+      _colsSemA=_colsSemA.replace(',metricas_extra','')
+      ;({data:semData}=await sb.from('semaforo_historial')
+        .select(_colsSemA)
+        .eq('account_id',accountId).gte('fecha',_semDesde3).lte('fecha',hasta)
+        .order('hora_calculo',{ascending:true})
+        .limit(8000))
+    }
     for(const r of (semData||[])){
       if(!semaforosByMeta[r.meta_id])semaforosByMeta[r.meta_id]=[]
       semaforosByMeta[r.meta_id].push(r)
@@ -19008,17 +19029,23 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
     let insightsHoy=[]
     for(let i=0;i<todosMetaIds.length;i+=100){
       const batch=todosMetaIds.slice(i,i+100)
-      const{data,error:errIns}=await sb.from('meta_insights').select('meta_id,nivel,spend,conversions').in('meta_id',batch).gte('fecha',desde).lte('fecha',hasta)
+      const{data,error:errIns}=await sb.from('meta_insights').select('meta_id,nivel,spend,conversions,impressions,reach,unique_outbound_clicks').in('meta_id',batch).gte('fecha',desde).lte('fecha',hasta)
       if(errIns)console.warn('[SEM] error insights:',errIns.message)
       if(data)insightsHoy=insightsHoy.concat(data)
     }
     console.log('[SEM] insights traídos:',insightsHoy.length,'desde',desde,'hasta',hasta)
     const gastoBy={}
     const convBy={}
+    // NUEVO (12jun26 · captura completa): acumular también imp/reach/uoclk para guardar
+    // el snapshot con TODAS las columnas del desglose (CTR, CPC, CPM, Frec, CLI/CON salen de aquí)
+    const impBy={},reachBy={},uoclkBy={}
     for(const ins of insightsHoy){
       const k=`${ins.meta_id}|${ins.nivel}`
       gastoBy[k]=(gastoBy[k]||0)+(parseFloat(ins.spend)||0)
       convBy[k]=(convBy[k]||0)+(parseInt(ins.conversions)||0)
+      impBy[k]=(impBy[k]||0)+(parseInt(ins.impressions)||0)
+      reachBy[k]=(reachBy[k]||0)+(parseInt(ins.reach)||0)
+      uoclkBy[k]=(uoclkBy[k]||0)+(parseInt(ins.unique_outbound_clicks)||0)
     }
     console.log('[SEM] gastoBy keys:',Object.keys(gastoBy).length,'sample:',Object.entries(gastoBy).slice(0,5))
 
@@ -19163,6 +19190,8 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
       const ultimo=ultimosByMeta[it.meta_id]
       const cambio=ultimo?(ultimo.semaforo!==sem):false
       const semAnterior=ultimo?ultimo.semaforo:null
+      // NUEVO (12jun26 · captura completa): VTS IDS del aux del día para este ítem (suma de sus ads)
+      const idsAux=it.adIds.reduce((s,aId)=>s+(ventasReportadasByAd[aId]||0),0)
 
       registros.push({
         meta_id:it.meta_id,
@@ -19187,7 +19216,10 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
         semaforo_anterior:semAnterior,
         // ── Nuevas columnas: V. Efectivas + CPA Efectivo (guardadas en BD) ──
         ventas_efectivas:ventasEfectivas,
-        cpa_real_efectivas:cpaRealEfectivas
+        cpa_real_efectivas:cpaRealEfectivas,
+        // NUEVO (12jun26 · captura completa): crudos para derivar TODO el desglose en el tooltip
+        // (CPA IDS = gasto÷ids · CPA Meta = gasto÷conv · CLI/CON, CTR, CPC, CPM, Frec salen de imp/reach/uoclk)
+        metricas_extra:{imp:Math.round(impBy[k]||0),reach:Math.round(reachBy[k]||0),uoclk:Math.round(uoclkBy[k]||0),ids:idsAux,conv}
       })
     }
 
@@ -19204,7 +19236,7 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
         console.warn('[SEM-refresh] no se encontró registro recalculado para',target.metaId)
         return
       }
-      const{error:uErr}=await sb.from('semaforo_historial').update({
+      const _updS={
         semaforo:reg.semaforo,
         semaforo_label:reg.semaforo_label,
         cpa_real:reg.cpa_real,
@@ -19216,8 +19248,15 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
         margenbe_referencia:reg.margenbe_referencia,
         ventas_efectivas:reg.ventas_efectivas,
         cpa_real_efectivas:reg.cpa_real_efectivas,
-        hora_calculo:reg.hora_calculo
-      }).eq('id',target.puntoId)
+        hora_calculo:reg.hora_calculo,
+        metricas_extra:reg.metricas_extra
+      }
+      let{error:uErr}=await sb.from('semaforo_historial').update(_updS).eq('id',target.puntoId)
+      // Blindaje: si la BD aún no tiene la columna metricas_extra, reintenta SIN ella (captura de siempre intacta)
+      if(uErr&&String(uErr.message||'').indexOf('metricas_extra')>=0){
+        delete _updS.metricas_extra
+        ;({error:uErr}=await sb.from('semaforo_historial').update(_updS).eq('id',target.puntoId))
+      }
       if(uErr)console.warn('[SEM-refresh] update falló:',uErr.message)
       else console.log('[SEM-refresh] ✅ punto',target.puntoId,'actualizado para',target.metaId)
       return
@@ -19233,7 +19272,7 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
       for(const reg of registros){
         const target=batch[reg.meta_id]
         if(!target||!target.id){skipped++;continue}
-        const{error:uErr}=await sb.from('semaforo_historial').update({
+        const _updB={
           semaforo:reg.semaforo,
           semaforo_label:reg.semaforo_label,
           cpa_real:reg.cpa_real,
@@ -19245,8 +19284,15 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
           margenbe_referencia:reg.margenbe_referencia,
           ventas_efectivas:reg.ventas_efectivas,
           cpa_real_efectivas:reg.cpa_real_efectivas,
-          hora_calculo:reg.hora_calculo
-        }).eq('id',target.id)
+          hora_calculo:reg.hora_calculo,
+          metricas_extra:reg.metricas_extra
+        }
+        let{error:uErr}=await sb.from('semaforo_historial').update(_updB).eq('id',target.id)
+        // Blindaje: si la BD aún no tiene la columna metricas_extra, reintenta SIN ella
+        if(uErr&&String(uErr.message||'').indexOf('metricas_extra')>=0){
+          delete _updB.metricas_extra
+          ;({error:uErr}=await sb.from('semaforo_historial').update(_updB).eq('id',target.id))
+        }
         if(uErr){console.warn('[SEM-refresh-batch] update falló para',reg.meta_id,':',uErr.message);skipped++}
         else updated++
       }
@@ -19254,7 +19300,14 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
       return
     }
 
-    const{error}=await sb.from('semaforo_historial').insert(registros)
+    let{error}=await sb.from('semaforo_historial').insert(registros)
+    // Blindaje: si la BD aún no tiene la columna metricas_extra, reintenta SIN ella —
+    // la captura de siempre queda intacta (corre el ALTER TABLE para guardar el desglose completo)
+    if(error&&String(error.message||'').indexOf('metricas_extra')>=0){
+      console.warn('[SEM] BD sin columna metricas_extra — insertando sin ella. Corre: ALTER TABLE semaforo_historial ADD COLUMN IF NOT EXISTS metricas_extra JSONB;')
+      const _sinExtra=registros.map(r=>{const{metricas_extra,..._rest}=r;return _rest})
+      ;({error}=await sb.from('semaforo_historial').insert(_sinExtra))
+    }
     if(error){console.warn('[SEM] inserción falló:',error.message,error);console.warn('[semaforo_historial] inserción falló:',error.message)}
     else{console.log('[SEM] ✅ insertados',registros.length,'registros')}
   }catch(e){
@@ -19591,12 +19644,29 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride,compa
         ?Number(s.cpa_real_efectivas)
         :(vEfectPunto>0&&s.gasto>0?s.gasto/vEfectPunto:0)
       const fuenteLbl=FUENTE_LABEL[s.triggered_by]||s.triggered_by||'manual'
+      // NUEVO (12jun26 · captura completa): si el punto guardó metricas_extra {imp,reach,uoclk,ids,conv},
+      // el tooltip muestra TODAS las columnas del desglose derivadas con las MISMAS fórmulas de la tabla:
+      // CPA IDS = gasto÷ids · CPA Meta = gasto÷conv · Conv/Vta = conv÷ventas · CLI/CON = uoclk÷conv×100 ·
+      // CTR = uoclk÷reach×100 · CPC = gasto÷uoclk · CPM = gasto÷imp×1000 · Frec = imp÷reach.
+      // Puntos viejos (sin el dato) muestran el tooltip de siempre.
+      const _exTip=(()=>{
+        const _ex=s.metricas_extra
+        if(!_ex||typeof _ex!=='object')return''
+        const _g=+s.gasto||0
+        const _cv=+(_ex.conv!=null?_ex.conv:0)||0
+        const _im=+_ex.imp||0,_rc=+_ex.reach||0,_uo=+_ex.uoclk||0,_idN=+_ex.ids||0
+        return`\n──────────`
+          +`\n🆔 VTS IDS: ${_idN}${(_idN>0&&_g>0)?` · 🎯 CPA IDS: $${fmt(Math.round(_g/_idN))}`:''}`
+          +`\n🎯 CPA Meta: ${(_cv>0&&_g>0)?'$'+fmt(Math.round(_g/_cv)):'—'} · 💬 Conv: ${_cv}${(_cv>0&&ventasPunto>0)?` · 🤝 ${(_cv/ventasPunto).toFixed(1)} c/v`:''}`
+          +`\n⚖️ CLI/CON: ${(_uo>0&&_cv>0)?Math.round(_uo/_cv*100)+'%':'—'} · 👆 CTR: ${(_rc>0)?(_uo/_rc*100).toFixed(2)+'%':'—'}`
+          +`\n💲 CPC: ${(_uo>0&&_g>0)?'$'+fmt(Math.round(_g/_uo)):'—'} · 📡 CPM: ${(_im>0&&_g>0)?'$'+fmt(Math.round(_g/_im*1000)):'—'} · 🔁 Frec: ${(_rc>0)?(_im/_rc).toFixed(1):'—'}`
+      })()
       // Tooltip enriquecido (multilínea con saltos reales)
       const tooltip=isPresupuesto
         ?`Cambio de presupuesto: $${fmt(s.presupuesto_anterior||0)} → $${fmt(s.presupuesto_nuevo||0)} (${(s.presupuesto_pct_cambio||0)>0?'+':''}${(s.presupuesto_pct_cambio||0).toFixed(0)}%)\nHora: ${hora}`
         :isIds
         ?`🆔 Semáforo con IDs del día (T. Cierre)\n${s.semaforo_label||s.semaforo}\n💸 Gasto del día: $${fmt(s.gasto||0)}\n🆔 Ventas por IDs: ${s.ventas||0}\n🎯 CPA IDs: $${fmt(Math.round(s.cpa_real||0))}\n${fuenteLbl}`
-        :`${s.semaforo_label||s.semaforo}\n🕐 ${hora}\n💸 Gasto: $${fmt(s.gasto||0)}\n📦 Ventas: ${ventasPunto}${detalleDropi}\n🟣 V. Efectivas: ${vEfectPunto.toFixed(2)} (${Math.round(pctConfMeta*100)}%)\n🎯 CPA Real: $${fmt(s.cpa_real||0)}\n🟣 CPA Efectivo: $${fmt(cpaEfectPunto)}\n${fuenteLbl}`
+        :`${s.semaforo_label||s.semaforo}\n🕐 ${hora}\n💸 Gasto: $${fmt(s.gasto||0)}\n📦 Ventas: ${ventasPunto}${detalleDropi}\n🟣 V. Efectivas: ${vEfectPunto.toFixed(2)} (${Math.round(pctConfMeta*100)}%)\n🎯 CPA Real: $${fmt(s.cpa_real||0)}\n🟣 CPA Efectivo: $${fmt(cpaEfectPunto)}${_exTip}\n${fuenteLbl}`
       const label=isDropi
         ?`<div style="font-size:8px;color:${cFinal.cssVar};font-weight:700;margin-top:3px;line-height:1.1">REAL · Dropi${s._sintetico?' ⚡':''}</div>`
         :isIds

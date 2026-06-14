@@ -12616,6 +12616,17 @@ window.runMetaSyncAllAccounts=async(days,btn)=>{
   try{
     let token=await getConfig('meta_access_token')
     if(!token){alert('Token no configurado');return}
+    // ── NUEVO: refrescar nombres (y descubrir cuentas nuevas) desde Meta antes de sincronizar el gasto.
+    //    Mismo patrón canónico que runMetaSync: upsert por account_id con el nombre fresco de /me/adaccounts.
+    //    Robusto: si Meta falla aquí, NO abortamos — seguimos con lo que ya hay en BD.
+    try{
+      if(btn)btn.textContent='⏳ Actualizando cuentas...'
+      const _accsFresh=await metaGet('/me/adaccounts',token,{fields:'account_id,name,currency,timezone_name,account_status'})
+      for(const a of (_accsFresh||[])){
+        const _aid=a.account_id||a.id.replace('act_','')
+        await sb.from('meta_cuentas').upsert({account_id:_aid,nombre:a.name||'',moneda:a.currency||'COP',timezone:a.timezone_name||'',estado:a.account_status===1?'ACTIVE':'INACTIVE',synced_at:new Date().toISOString()},{onConflict:'account_id'})
+      }
+    }catch(eNom){console.warn('[sync todas] no se pudieron refrescar nombres:',eNom&&eNom.message)}
     const{data:cuentas}=await sb.from('meta_cuentas').select('account_id,nombre').order('nombre')
     if(!cuentas?.length){alert('Sin cuentas');return}
     let ok=0,fail=0

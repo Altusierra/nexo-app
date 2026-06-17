@@ -3003,22 +3003,30 @@ async function pageAdminProductos(c){
       const cambio=!vig||Number(vig.precio)!==o.precio||Number(vig.costo)!==o.costo
       if(cambio){
         try{
-          if(vig){
+          const _mismoDia=vig&&vig.vigente_desde&&String(vig.vigente_desde).slice(0,10)===String(_vigenteDesdeIso).slice(0,10)
+          if(_mismoDia){
+            // Misma fecha de inicio que el precio vigente → solo corregir precio/costo en sitio (sin registro de duración cero)
             await sb.from('producto_precios_historial')
-              .update({vigente_hasta:_vigenteDesdeIso})
+              .update({precio:o.precio,costo:o.costo})
               .eq('id',vig.id)
+          }else{
+            if(vig){
+              await sb.from('producto_precios_historial')
+                .update({vigente_hasta:_vigenteDesdeIso})
+                .eq('id',vig.id)
+            }
+            const _histInsert={
+              producto_id:id,
+              cantidad:cantNum,
+              precio:o.precio,
+              costo:o.costo,
+              vigente_desde:_vigenteDesdeIso,
+              usuario_id:me?.id||null,
+              motivo:'Edición desde Productos'
+            }
+            if(!o.ofId.startsWith('legacy_'))_histInsert.oferta_id=o.ofId
+            await sb.from('producto_precios_historial').insert(_histInsert)
           }
-          const _histInsert={
-            producto_id:id,
-            cantidad:cantNum,
-            precio:o.precio,
-            costo:o.costo,
-            vigente_desde:_vigenteDesdeIso,
-            usuario_id:me?.id||null,
-            motivo:'Edición desde Productos'
-          }
-          if(!o.ofId.startsWith('legacy_'))_histInsert.oferta_id=o.ofId
-          await sb.from('producto_precios_historial').insert(_histInsert)
         }catch(e){console.warn('historial precio fail:',e)}
       }
     }
@@ -3931,6 +3939,15 @@ async function renderProdBody(id,maestrosList){
     }
   }
 
+  // Historial de precios: para mostrar desde cuándo está vigente el precio actual + el botón de historial
+  let _precHistList=[]
+  try{
+    const{data:_ph}=await sb.from('producto_precios_historial').select('cantidad,precio,costo,vigente_desde,vigente_hasta').eq('producto_id',id).order('vigente_desde',{ascending:false})
+    if(_ph)_precHistList=_ph
+  }catch(_){}
+  let _vigDesdeActualISO=''
+  for(const r of _precHistList){if(r.vigente_desde&&!r.vigente_hasta){const d=String(r.vigente_desde).slice(0,10);if(!_vigDesdeActualISO||d>_vigDesdeActualISO)_vigDesdeActualISO=d}}
+
   body.innerHTML=`<div style="padding-top:14px">
     <div style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:14px">
       <button id="prod-tab-config-btn-${id}" onclick="switchProdTab('${id}','config')" style="background:transparent;border:none;color:var(--text);padding:10px 16px;cursor:pointer;font-size:14px;font-weight:500;border-bottom:2px solid var(--primary);outline:none">⚙️ Configuración</button>
@@ -3960,17 +3977,21 @@ async function renderProdBody(id,maestrosList){
       <div style="font-size:11px;color:var(--muted);margin-top:4px">Solo afecta los badges verdes del asignador. Todos los aliases siguen funcionando internamente.</div>
     </div>
     <div class="divider"></div>
-    <div class="section-title">🏷️ Ofertas (cantidades de unidades)</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap">
+      <div class="section-title" style="margin:0">🏷️ Ofertas (cantidades de unidades)</div>
+      <button class="btn-sm" onclick="verHistorialPrecios('${id}')" style="background:rgba(167,139,250,.12);border:1px solid var(--purple);color:var(--purple);font-size:12px">📜 Historial de precios</button>
+    </div>
     <div id="ofertas-list-${id}" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:10px">
       ${ofertasDB.map(o=>renderOfertaCard(id,o)).join('')}
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
       <button class="btn-sm btn-primary" onclick="modalAgregarOferta('${id}')">➕ Agregar oferta</button>
     </div>
-    <div class="fld" style="margin-bottom:14px;max-width:360px;background:rgba(167,139,250,.06);border:1px solid var(--purple);border-radius:8px;padding:10px">
-      <label>📅 Si cambiaste un precio o costo: ¿desde qué día aplica?</label>
-      <input type="date" id="pfecha-precio-${id}" value="${(()=>{const _d=new Date();return _d.getFullYear()+'-'+String(_d.getMonth()+1).padStart(2,'0')+'-'+String(_d.getDate()).padStart(2,'0')})()}" style="font-size:12px;padding:6px 8px">
-      <div style="font-size:11px;color:var(--muted);margin-top:4px">Default HOY. Si el proveedor te bajó el precio y ya despachaste AYER con el nuevo, pon AYER. Los días ANTERIORES a esta fecha siguen con el precio viejo.</div>
+    <div class="fld" style="margin-bottom:14px;max-width:380px;background:rgba(167,139,250,.06);border:1px solid var(--purple);border-radius:8px;padding:10px">
+      <label>📅 ¿Desde qué día aplica el precio?</label>
+      <input type="date" id="pfecha-precio-${id}" value="${_vigDesdeActualISO||(()=>{const _d=new Date();return _d.getFullYear()+'-'+String(_d.getMonth()+1).padStart(2,'0')+'-'+String(_d.getDate()).padStart(2,'0')})()}" style="font-size:12px;padding:6px 8px">
+      <div style="font-size:11px;color:var(--purple);margin-top:5px;font-weight:600">${_vigDesdeActualISO?`✅ El precio actual está vigente desde el ${_vigDesdeActualISO.split('-').reverse().join('/')}`:'ℹ️ Sin cambios de precio registrados todavía'}</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">Si cambiaste un precio/costo arriba, pon la fecha desde la que aplica (default HOY). Al guardar, el precio anterior queda en el 📜 Historial. Los días ANTERIORES a esta fecha siguen con el precio viejo.</div>
     </div>
     <div class="divider"></div>
     <div class="fld" style="margin-bottom:10px">
@@ -4173,6 +4194,42 @@ window.modalAgregarOferta=(prodId)=>{
   </div>`
   div.onclick=closeModal
   document.body.appendChild(div)
+}
+
+window.verHistorialPrecios=async(prodId)=>{
+  closeModal()
+  const prod=productos.find(p=>p.id===prodId)
+  const div=document.createElement('div')
+  div.id='user-modal';div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:560px">
+    <div class="modal-title">📜 Historial de precios</div>
+    <div class="modal-sub">${prod?(prod.nombre||''):''} — cada precio y desde/hasta cuándo estuvo vigente</div>
+    <div id="hist-precios-body" style="margin-top:14px;max-height:60vh;overflow:auto"><div class="loading">Cargando...</div></div>
+    <div class="modal-actions"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>
+  </div>`
+  div.onclick=closeModal
+  document.body.appendChild(div)
+  const cont=document.getElementById('hist-precios-body')
+  try{
+    const{data:rows}=await sb.from('producto_precios_historial').select('cantidad,precio,costo,vigente_desde,vigente_hasta,motivo').eq('producto_id',prodId).order('cantidad',{ascending:true}).order('vigente_desde',{ascending:false})
+    if(!rows||!rows.length){cont.innerHTML='<div style="color:var(--muted);font-size:13px;padding:8px">Todavía no hay cambios de precio registrados. Cuando cambies un precio y elijas la fecha, aparecerá aquí.</div>';return}
+    const _fmtF=(v)=>v?String(v).slice(0,10).split('-').reverse().join('/'):'?'
+    const porCant={}
+    for(const r of rows){(porCant[r.cantidad]=porCant[r.cantidad]||[]).push(r)}
+    let html=''
+    for(const cant of Object.keys(porCant).sort((a,b)=>a-b)){
+      html+=`<div style="font-weight:700;color:var(--text);margin:10px 0 6px">📦 Oferta ${cant}u</div>`
+      for(const r of porCant[cant]){
+        const vigente=!r.vigente_hasta
+        const hasta=vigente?'HOY':_fmtF(r.vigente_hasta)
+        html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 10px;border-radius:7px;margin-bottom:5px;background:${vigente?'rgba(34,197,94,.08)':'rgba(255,255,255,.03)'};border:1px solid ${vigente?'var(--green)':'var(--border)'}">
+          <div><div style="font-weight:700;font-size:13px">$${fmt(r.precio||0)} <span style="color:var(--muted);font-weight:400">· costo $${fmt(r.costo||0)}</span></div>${r.motivo?`<div style="font-size:10px;color:var(--muted)">${r.motivo}</div>`:''}</div>
+          <div style="text-align:right;font-size:12px;white-space:nowrap">${_fmtF(r.vigente_desde)} → <b style="color:${vigente?'var(--green)':'var(--text)'}">${hasta}</b>${vigente?' <span style="font-size:10px;color:var(--green)">✅ vigente</span>':''}</div>
+        </div>`
+      }
+    }
+    cont.innerHTML=html
+  }catch(e){cont.innerHTML=`<div class="alert alert-red">No se pudo cargar el historial: ${(e&&e.message)||e}</div>`}
 }
 
 window.guardarOferta=async(prodId)=>{

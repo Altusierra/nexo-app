@@ -2976,6 +2976,10 @@ async function pageAdminProductos(c){
         .is('vigente_hasta',null)
       for(const v of (vigentes||[]))_vigenteByCant[v.cantidad]=v
     }catch(_){}
+    // Fecha desde la que aplica el precio nuevo (la elige el usuario; default HOY)
+    const _fechaPrecioEl=document.getElementById('pfecha-precio-'+id)
+    const _fechaPrecioStr=(_fechaPrecioEl&&_fechaPrecioEl.value)?_fechaPrecioEl.value:null
+    const _vigenteDesdeIso=_fechaPrecioStr?new Date(_fechaPrecioStr+'T00:00:00').toISOString():new Date().toISOString()
     for(const cant of Object.keys(ofertasMap)){
       const o=ofertasMap[cant]
       if(o.ofId.startsWith('legacy_')){
@@ -2989,6 +2993,9 @@ async function pageAdminProductos(c){
       }else{
         // Tabla nueva
         try{await sb.from('producto_ofertas').update({precio:o.precio,costo:o.costo}).eq('id',o.ofId)}catch(_){}
+        // ESPEJO: cantidades 1-4 también escriben las columnas viejas de productos
+        // (el break-even y otros cálculos leen productos.precio_Nu/costo_Nu, no producto_ofertas)
+        if(cant>=1&&cant<=4){const updM={};updM['precio_'+cant+'u']=o.precio;updM['costo_'+cant+'u']=o.costo;try{await sb.from('productos').update(updM).eq('id',id)}catch(_){}}
       }
       // Fase 2.2: si precio o costo cambiaron, cerrar registro vigente y abrir uno nuevo
       const cantNum=parseInt(cant)
@@ -2998,7 +3005,7 @@ async function pageAdminProductos(c){
         try{
           if(vig){
             await sb.from('producto_precios_historial')
-              .update({vigente_hasta:new Date().toISOString()})
+              .update({vigente_hasta:_vigenteDesdeIso})
               .eq('id',vig.id)
           }
           const _histInsert={
@@ -3006,6 +3013,7 @@ async function pageAdminProductos(c){
             cantidad:cantNum,
             precio:o.precio,
             costo:o.costo,
+            vigente_desde:_vigenteDesdeIso,
             usuario_id:me?.id||null,
             motivo:'Edición desde Productos'
           }
@@ -3958,6 +3966,11 @@ async function renderProdBody(id,maestrosList){
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
       <button class="btn-sm btn-primary" onclick="modalAgregarOferta('${id}')">➕ Agregar oferta</button>
+    </div>
+    <div class="fld" style="margin-bottom:14px;max-width:360px;background:rgba(167,139,250,.06);border:1px solid var(--purple);border-radius:8px;padding:10px">
+      <label>📅 Si cambiaste un precio o costo: ¿desde qué día aplica?</label>
+      <input type="date" id="pfecha-precio-${id}" value="${(()=>{const _d=new Date();return _d.getFullYear()+'-'+String(_d.getMonth()+1).padStart(2,'0')+'-'+String(_d.getDate()).padStart(2,'0')})()}" style="font-size:12px;padding:6px 8px">
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">Default HOY. Si el proveedor te bajó el precio y ya despachaste AYER con el nuevo, pon AYER. Los días ANTERIORES a esta fecha siguen con el precio viejo.</div>
     </div>
     <div class="divider"></div>
     <div class="fld" style="margin-bottom:10px">
@@ -13471,6 +13484,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
   const mapeosTrasByProd={},gastoTrasByCampId={},reportesTrasByProd={},conversacionesTrasByProd={}
   // NUEVO: listas de ad_ids reportados de ANTIER y TRASANTIER por producto (para clasificar IDs por campaña/anuncio)
   const reportesAntierAdIdsListByProd={},reportesTrasAdIdsListByProd={}
+  // PARTE 2: fecha representativa de cada día (fin del rango) para buscar el precio vigente de ese día
+  const _fechasDiasG={p:hasta,a:hastaPrev,b:null,c:null}
   if(desdePrev&&hastaPrev&&nDiasRango>0){
     const _mkRango=(refDesde)=>{
       const d=new Date(refDesde+'T00:00:00')
@@ -13480,6 +13495,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
     }
     const _r2=_mkRango(desdePrev)   // antier
     const _r3=_mkRango(_r2.desde)   // trasantier
+    _fechasDiasG.b=_r2.hasta;_fechasDiasG.c=_r3.hasta
     const _cargarDiaExtra=async(rg,mapeosOut,gastoOut,repsOut,convOut,repsListOut)=>{
       const{data:mp}=await sb.from('mapeos').select('cantidad,producto,estado_final,fecha,ad_id').gte('fecha',rg.desde).lte('fecha',rg.hasta).limit(10000)
       for(const m of (mp||[])){
@@ -13533,7 +13549,23 @@ async function _renderResumenProductos(desde,hasta,hoy){
       }
     }catch(_){}
   }
-  const _extrasDias={mapeosAntierByProd,gastoAntierByCampId,reportesAntierByProd,conversacionesAntierByProd,mapeosTrasByProd,gastoTrasByCampId,reportesTrasByProd,conversacionesTrasByProd,reportesPrevAdIdsListByProd,reportesAntierAdIdsListByProd,reportesTrasAdIdsListByProd}
+  // PARTE 2: historial de precios por producto (cada día usa el precio vigente de ese día). Aditivo.
+  const precioHistByProd={}
+  try{
+    const _prodIdsHist=(productos||[]).map(p=>p.id).filter(Boolean)
+    if(_prodIdsHist.length){
+      const{data:_histRows}=await sb.from('producto_precios_historial')
+        .select('producto_id,cantidad,precio,costo,vigente_desde,vigente_hasta')
+        .in('producto_id',_prodIdsHist)
+      for(const r of (_histRows||[])){
+        if(r.producto_id==null||r.cantidad==null)continue
+        if(!precioHistByProd[r.producto_id])precioHistByProd[r.producto_id]={}
+        if(!precioHistByProd[r.producto_id][r.cantidad])precioHistByProd[r.producto_id][r.cantidad]=[]
+        precioHistByProd[r.producto_id][r.cantidad].push(r)
+      }
+    }
+  }catch(_){}
+  const _extrasDias={mapeosAntierByProd,gastoAntierByCampId,reportesAntierByProd,conversacionesAntierByProd,mapeosTrasByProd,gastoTrasByCampId,reportesTrasByProd,conversacionesTrasByProd,reportesPrevAdIdsListByProd,reportesAntierAdIdsListByProd,reportesTrasAdIdsListByProd,precioHist:precioHistByProd,fechasDias:_fechasDiasG}
 
   // 6.8 NUEVO: Mapa ad_id → cuenta (para el "cuadre de ventas por origen" y el strip de cuenta).
   //      Sigue la cadena ad → adset → campaña → cuenta usando meta_campanas (igual que
@@ -13926,9 +13958,38 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
   // Si no hay gasto NI pedidos, no mostramos este producto
   if(gasto===0&&totalPedidos===0)return null
 
-  // Venta por oferta (solo confirmados, con precios reales del producto)
-  const venta=(o1*(prod.precio_1u||0))+(o2*(prod.precio_2u||0))+(o3*(prod.precio_3u||0))+(o4*(prod.precio_4u||0))
-  const costoProv=(o1*(prod.costo_1u||0))+(o2*(prod.costo_2u||0))+(o3*(prod.costo_3u||0))+(o4*(prod.costo_4u||0))
+  // PARTE 2: precio/costo vigente por día (historial). Aditivo: sin historial usa el precio actual del producto.
+  const _phist=(extrasDias&&extrasDias.precioHist)||null
+  const _fechasD=(extrasDias&&extrasDias.fechasDias)||{}
+  const _precVig=(cant,fechaISO)=>{
+    if(!_phist||!fechaISO)return null
+    const arr=_phist[prod.id]&&_phist[prod.id][cant]
+    if(!arr||!arr.length)return null
+    const _dDia=String(fechaISO).slice(0,10)
+    let best=null,bestVD=''
+    for(const r of arr){
+      const _vd=r.vigente_desde?String(r.vigente_desde).slice(0,10):''
+      const _vh=r.vigente_hasta?String(r.vigente_hasta).slice(0,10):''
+      if(_vd&&_vd>_dDia)continue
+      if(_vh&&_vh<=_dDia)continue
+      if(!best||_vd>bestVD){best=r;bestVD=_vd}
+    }
+    return best?{precio:Number(best.precio)||0,costo:Number(best.costo)||0}:null
+  }
+  const _vcDia=(fechaISO,oa)=>{
+    let v=0,c=0
+    for(let q=1;q<=4;q++){
+      const pv=_precVig(q,fechaISO)
+      v+=(oa[q-1]||0)*(pv?pv.precio:(prod['precio_'+q+'u']||0))
+      c+=(oa[q-1]||0)*(pv?pv.costo:(prod['costo_'+q+'u']||0))
+    }
+    return{venta:v,costo:c}
+  }
+
+  // Venta por oferta (solo confirmados; cada día con el precio vigente de ese día)
+  const _vcH=_vcDia(_fechasD.p,[o1,o2,o3,o4])
+  const venta=_vcH.venta
+  const costoProv=_vcH.costo
 
   // Fletes y devoluciones
   const devPct=prod.dev_pct||0.19
@@ -13951,6 +14012,13 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
   const _cvPM=prod.conversaciones_por_venta!=null?prod.conversaciones_por_venta:25
   const _ccvPM=(prod.costo_conversacion||100)*_cvPM
   const margenBE=p2*(1-devPct)-c2-fo-(fd*devPct)-_ccvPM
+  // PARTE 2: break-even por día (cada día con el precio_2u/costo_2u vigente ese día). Aditivo (fallback al BE actual).
+  const _beDiaF=(fechaISO)=>{
+    const pv=_precVig(2,fechaISO)
+    if(!pv)return margenBE
+    return (pv.precio||0)*(1-devPct)-(pv.costo||0)-fo-(fd*devPct)-_ccvPM
+  }
+  const margenBEDia={p:_beDiaF(_fechasD.p),a:_beDiaF(_fechasD.a),b:_beDiaF(_fechasD.b),c:_beDiaF(_fechasD.c)}
 
   // CPA real:
   //  - HOY: gasto / pedidos brutos del día (aún sin cruce Dropi → no esperar confirmados)
@@ -14118,8 +14186,9 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     }
     const totalMapeosP=mpsP.length
     if(gastoP>0||totalMapeosP>0){
-      const ventaP=(o1P*(prod.precio_1u||0))+(o2P*(prod.precio_2u||0))+(o3P*(prod.precio_3u||0))+(o4P*(prod.precio_4u||0))
-      const costoProvP=(o1P*(prod.costo_1u||0))+(o2P*(prod.costo_2u||0))+(o3P*(prod.costo_3u||0))+(o4P*(prod.costo_4u||0))
+      const _vcP=_vcDia(_fechasD.a,[o1P,o2P,o3P,o4P])
+      const ventaP=_vcP.venta
+      const costoProvP=_vcP.costo
       const costoFleteP=pConfP*(prod.flete_outbound||21000)
       const costoDevP=Math.round(pConfP*devPct*(prod.flete_devolucion||18000))
       const ventaEfP=Math.round(ventaP*(1-devPct))
@@ -14152,8 +14221,9 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     }
     const totX=mpsX.length
     if(gP<=0&&totX<=0)return null
-    const ventaX=(a1*(prod.precio_1u||0))+(a2*(prod.precio_2u||0))+(a3*(prod.precio_3u||0))+(a4*(prod.precio_4u||0))
-    const costoProvX=(a1*(prod.costo_1u||0))+(a2*(prod.costo_2u||0))+(a3*(prod.costo_3u||0))+(a4*(prod.costo_4u||0))
+    const _vcX=_vcDia(_fechasD[bloqueKey],[a1,a2,a3,a4])
+    const ventaX=_vcX.venta
+    const costoProvX=_vcX.costo
     const costoFleteX=pCX*(prod.flete_outbound||21000)
     const costoDevX=Math.round(pCX*devPct*(prod.flete_devolucion||18000))
     const ventaEfX=Math.round(ventaX*(1-devPct))
@@ -14226,7 +14296,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     inicial:(prod.nombre||'?').charAt(0).toUpperCase(),
     gasto,totalPedidos,pedidosConfirmados:pConf,canc,pend,totalMapeos,
     o1,o2,o3,o4,venta,costoProv,gananciaNeta,
-    cpaReal,margenBE,roas,semCode,
+    cpaReal,margenBE,margenBEDia,roas,semCode,
     pedidosEfectivos,cpaRealEfectivo,pctConf,esSoloHoy,
     ctrProd,cpmProd,cpaMetaProd,activas:_activas,pausadas:_pausadas,
     prevData,nDiasRango:nDiasRango||0,
@@ -14289,8 +14359,8 @@ function _renderProductoCardResumen(data,ranking){
   // Filas previas (Ayer / Antier / Trasantier) con color encadenado + borde semáforo en CPA.
   // Cada fila colorea su número comparándose con la fila de ABAJO (más antigua); la última es neutra.
   const _cmpRP=(a,b,dir)=>window._nexoCmpColor(a,b,dir)
-  const _semRP=(cpa)=>window._nexoSemColor(cpa,data.margenBE)
-  const _filaPrevHtml=(p,pNext,label,bg,bl,emo)=>{
+  const _semRP=(cpa,k)=>window._nexoSemColor(cpa,(data.margenBEDia&&k&&data.margenBEDia[k]!=null)?data.margenBEDia[k]:data.margenBE)
+  const _filaPrevHtml=(p,pNext,label,bg,bl,emo,diaKey)=>{
     const neutro=!pNext
     const colGan=neutro?(p.ganancia>=0?'var(--green)':'var(--red)'):_cmpRP(p.ganancia,pNext.ganancia,'up')
     const colCpa=neutro?'var(--muted)':_cmpRP(p.cpa,pNext.cpa,'down')
@@ -14299,11 +14369,11 @@ function _renderProductoCardResumen(data,ranking){
     const colGasto=neutro?'var(--muted)':_cmpRP(p.gasto,pNext.gasto,'up')
     const colConv=neutro?'var(--muted)':_cmpRP(p.conversaciones||0,pNext.conversaciones||0,'up')
     const pSign=p.ganancia>=0?'+':'−'
-    const cpaBorde=p.cpa>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${_semRP(p.cpa)};padding:2px 5px`:''
+    const cpaBorde=p.cpa>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${_semRP(p.cpa,diaKey)};padding:2px 5px`:''
     return`<div style="display:grid;grid-template-columns:${_gridCols};gap:10px;padding:10px 8px;align-items:center;background:${bg};border-left:3px solid ${bl};border-radius:6px;margin-top:4px;min-width:700px">
       <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);font-weight:500"><span style="font-size:13px">${emo||'⏪'}</span><span>${label}</span></div>
       <div style="text-align:right;font-size:14px;color:${colGan};font-weight:500">${pSign}$${fmt(Math.abs(p.ganancia))}</div>
-      <div style="text-align:right;font-size:14px;color:${colCpa};${cpaBorde}" title="Número = vs día más antiguo · Borde = semáforo break-even ($${fmt(data.margenBE)})">${p.cpa>0?'$'+fmt(Math.round(p.cpa)):'—'}</div>
+      <div style="text-align:right;font-size:14px;color:${colCpa};${cpaBorde}" title="Número = vs día más antiguo · Borde = semáforo break-even ($${fmt((data.margenBEDia&&diaKey&&data.margenBEDia[diaKey]!=null)?data.margenBEDia[diaKey]:data.margenBE)})">${p.cpa>0?'$'+fmt(Math.round(p.cpa)):'—'}</div>
       <div style="text-align:right"><div style="font-size:14px;color:${colPed}">${p.pedidos}</div><div style="font-size:11px;color:var(--blue);margin-top:2px" title="Pedidos por IDs reportados de ese día">🆔 IDs: ${p.pedidosIds||0}</div></div>
       <div style="text-align:right;font-size:14px;color:${colRoas}">${p.roas>0?p.roas.toFixed(2)+'x':'—'}</div>
       <div style="text-align:right;font-size:14px;color:${colGasto}">${p.gasto>0?'$'+fmt(p.gasto):'—'}</div>
@@ -14336,9 +14406,9 @@ function _renderProductoCardResumen(data,ranking){
   if(data.nDiasRango>0){
     const _prevLabel=data.nDiasRango===1?(data.esSoloHoy?'Ayer':'Día ant.'):`${data.nDiasRango}d ant.`
     if(data.prevData){
-      _filaPrev+=_filaPrevHtml(data.prevData,data.prevData2,_prevLabel,'rgba(34,197,94,.04)','var(--green)')
-      if(data.prevData2)_filaPrev+=_filaPrevHtml(data.prevData2,data.prevData3,data.esSoloHoy?'Antier':'2º ant.','rgba(255,255,255,.02)','var(--subtle)')
-      if(data.prevData3)_filaPrev+=_filaPrevHtml(data.prevData3,null,data.esSoloHoy?'Trasantier':'3º ant.','rgba(255,255,255,.02)','var(--subtle)')
+      _filaPrev+=_filaPrevHtml(data.prevData,data.prevData2,_prevLabel,'rgba(34,197,94,.04)','var(--green)',null,'a')
+      if(data.prevData2)_filaPrev+=_filaPrevHtml(data.prevData2,data.prevData3,data.esSoloHoy?'Antier':'2º ant.','rgba(255,255,255,.02)','var(--subtle)',null,'b')
+      if(data.prevData3)_filaPrev+=_filaPrevHtml(data.prevData3,null,data.esSoloHoy?'Trasantier':'3º ant.','rgba(255,255,255,.02)','var(--subtle)',null,'c')
       if(_prom3RP)_filaPrev+=_filaPrevHtml(_prom3RP,_hoyObjRP,data.esSoloHoy?'Prom 3 días':'Prom período','rgba(59,130,246,.06)','var(--blue)','📊')
     }else{
       _filaPrev=`<div style="margin-top:6px;padding:6px 10px;background:rgba(255,255,255,.02);border-left:2px solid var(--subtle);border-radius:6px;font-size:11px;color:var(--muted);font-style:italic">⏪ ${_prevLabel}: sin datos previos para comparar</div>`
@@ -14671,9 +14741,10 @@ function _renderProductoCardResumen(data,ranking){
     // (💸 plata | 🎯 costos | 🛒 ventas | 🔍 diagnóstico) — misma línea en encabezado y filas para no perderse al deslizar ➡️
     const _cell=(w,html,tip,sep)=>`<span style="display:inline-block;width:${w}px;flex-shrink:0;text-align:right;padding-right:10px;white-space:nowrap${sep?';border-right:1px dashed rgba(255,255,255,.13);margin-right:6px':''}" ${tip?`title="${tip}"`:''}>${html}</span>`
     // Pill de CPA Real para la grilla (sin margen, compacta) — mismo semáforo canónico
-    const _cpaPillG=(cpa)=>{
+    const _cpaPillG=(cpa,beOv)=>{
       if(!cpa||cpa<=0)return'—'
-      const col=(typeof window!=='undefined'&&window._nexoSemColor)?window._nexoSemColor(cpa,_BE):(_BE>0?(cpa<=_BE?'var(--green)':'var(--red)'):'var(--muted)')
+      const _b=(beOv!=null)?beOv:_BE
+      const col=(typeof window!=='undefined'&&window._nexoSemColor)?window._nexoSemColor(cpa,_b):(_b>0?(cpa<=_b?'var(--green)':'var(--red)'):'var(--muted)')
       return`<span style="font-size:9.5px;font-weight:700;color:${col};border:1px solid ${col};border-radius:999px;padding:0 6px;white-space:nowrap">🎯 $${fmt(Math.round(cpa))}</span>`
     }
     // Deriva todas las métricas de un objeto acumulado de meta_insights {sp,imp,reach,conv,cprSum,cprN,uoclk}
@@ -14694,7 +14765,7 @@ function _renderProductoCardResumen(data,ranking){
     // Celdas de métricas de UNA fila (día, total de campaña o total de anuncio)
     // NUEVO (Mejora 9): cpaIdsVal = CPA por IDs (gasto ÷ ventas por IDs, T. Cierre). Cada valor va en SU columna
     // (igual que las cards: CPA REAL = ventas Dropi · CPA IDS = ventas por IDs) — nunca el mismo número con dos nombres.
-    const _metCells=(n,g,cpa,met,fuga,cpaIdsVal,nIds,cpaEfVal,cmp,nDisp)=>{
+    const _metCells=(n,g,cpa,met,fuga,cpaIdsVal,nIds,cpaEfVal,cmp,nDisp,beDia)=>{
       const x=_metCalc(met,n)
       const cN=fuga?'var(--amber)':'var(--text)'
       const v=(cond,html)=>cond?html:'—'
@@ -14731,9 +14802,9 @@ function _renderProductoCardResumen(data,ranking){
       }
       const _cx=(kk)=>cmp&&cmp.x?cmp.x[kk]:null
       return _cell(_cw.gto,v(g>0,'<strong>$'+fmt(Math.round(g||0))+'</strong>'+_flGasto()),'💸 Gasto en Meta de esta fila · flecha = vs día anterior: 🚨 rojo gastó más y 0 ventas (fuga) · ⚠️ naranja gastó más y vendió menos · 💎 verde gastó menos y vendió más · gris = normal',1)
-        +_cell(_cw.cpr,fuga?`<span style="font-size:9px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:0 6px;white-space:nowrap">🚨 0 vts</span>`:(_cpaPillG(cpa)+_fl(cpa>0?cpa:null,cmp?cmp.cpa:null,'down')),'🚦 CPA REAL = gasto ÷ ventas confirmadas Dropi · MISMO nombre y cálculo del desglose de la cuenta · el ÚNICO con semáforo: 🟢 va bien · 🟡 cuidado · 🔴 pierde plata · flecha vs día anterior: 🔻 verde bajó (mejor) · 🔺 rojo subió (peor)')
-        +_cell(_cw.cpids,v(cpaIdsVal>0,_cpaPillG(cpaIdsVal)+_fl(cpaIdsVal,cmp?cmp.cpaIds:null,'down')),'🆔 CPA IDS = gasto del día ÷ ventas por IDs de ese día (CRUDO, sin ajuste) · MISMO nombre y cálculo de la columna CPA IDS del desglose de la cuenta · flecha vs día anterior: bajar es mejor')
-        +_cell(_cw.cpef,v(cpaEfVal>0,_cpaPillG(cpaEfVal)+_fl(cpaEfVal,cmp?cmp.cpaEf:null,'down')),'🎯 CPA REAL EFECTIVAS = gasto ÷ (ventas por IDs × % confirmación) · MISMO nombre y número del hero del desglose de la cuenta · solo aplica a HOY (las ventas de días pasados ya son confirmadas)',1)
+        +_cell(_cw.cpr,fuga?`<span style="font-size:9px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:0 6px;white-space:nowrap">🚨 0 vts</span>`:(_cpaPillG(cpa,beDia)+_fl(cpa>0?cpa:null,cmp?cmp.cpa:null,'down')),'🚦 CPA REAL = gasto ÷ ventas confirmadas Dropi · MISMO nombre y cálculo del desglose de la cuenta · el ÚNICO con semáforo: 🟢 va bien · 🟡 cuidado · 🔴 pierde plata · flecha vs día anterior: 🔻 verde bajó (mejor) · 🔺 rojo subió (peor)')
+        +_cell(_cw.cpids,v(cpaIdsVal>0,_cpaPillG(cpaIdsVal,beDia)+_fl(cpaIdsVal,cmp?cmp.cpaIds:null,'down')),'🆔 CPA IDS = gasto del día ÷ ventas por IDs de ese día (CRUDO, sin ajuste) · MISMO nombre y cálculo de la columna CPA IDS del desglose de la cuenta · flecha vs día anterior: bajar es mejor')
+        +_cell(_cw.cpef,v(cpaEfVal>0,_cpaPillG(cpaEfVal,beDia)+_fl(cpaEfVal,cmp?cmp.cpaEf:null,'down')),'🎯 CPA REAL EFECTIVAS = gasto ÷ (ventas por IDs × % confirmación) · MISMO nombre y número del hero del desglose de la cuenta · aplica a todos los días con IDs del aux (HOY y días atrás)',1)
         +_cell(_cw.vts,(nDisp!=null?`<strong style="color:${nDisp==='—'?'var(--subtle)':cN}">${nDisp}</strong>`:(`<strong style="color:${cN}">${n}</strong>`+_fl(n,cmp?cmp.n:null,'up',true))),'🛒 Ventas confirmadas Dropi de esta fila (HOY sale — hasta que el cruce confirme: las de hoy véelas en 🆔 VTS IDS) · flecha vs día anterior: 🔺 verde subieron (mejor) · 🔻 rojo bajaron (peor)')
         +_cell(_cw.vids,v(nIds>0,`<strong style="color:#fcd34d">${nIds||0}</strong>`+_fl(nIds||0,cmp?cmp.nIds:null,'up',true)),'🆔 VTS IDS: ventas por IDs del aux de esta fila ese día (T. Cierre, ANTES del cruce Dropi) — NO confundir con la columna VENTAS de la izquierda (confirmadas Dropi en días pasados) · flecha vs día anterior: subir es mejor',1)
         +_cell(_cw.cpmt,v(x&&x.cpaMeta>0,x?'<span style="font-size:10px;opacity:.9">$'+fmt(Math.round(x.cpaMeta))+'</span>'+_fl(x.cpaMeta,_cx('cpaMeta'),'down'):''),'🎯 CPA META: lo que Meta dice que cuesta cada resultado (gasto ÷ conversaciones) · MISMO nombre del desglose de la cuenta · flecha vs día anterior: bajar es mejor')
@@ -14751,7 +14822,7 @@ function _renderProductoCardResumen(data,ranking){
       {w:_cw.gto,e:'💸',l:'GASTO',c:'#94a3b8',tip:'Plata gastada en Meta',sep:1},
       {w:_cw.cpr,e:'🚦',l:'CPA REAL',c:'#cbd5e1',tip:'Gasto ÷ ventas confirmadas Dropi · MISMO nombre y cálculo del desglose de la cuenta · el ÚNICO con semáforo: 🟢 va bien · 🟡 cuidado · 🔴 pierde plata'},
       {w:_cw.cpids,e:'🆔',l:'CPA IDS',c:'#fcd34d',tip:'Gasto del día ÷ ventas por IDs de ese día (CRUDO, sin ajuste) · MISMO nombre y cálculo de la columna CPA IDS del desglose de la cuenta'},
-      {w:_cw.cpef,e:'🎯',l:'CPA R. EFECTIVAS',c:'#f9a8d4',tip:'CPA REAL EFECTIVAS = gasto ÷ (ventas por IDs × % confirmación) · MISMO nombre y número del hero del desglose de la cuenta · solo HOY (días pasados ya son ventas confirmadas)',sep:1},
+      {w:_cw.cpef,e:'🎯',l:'CPA R. EFECTIVAS',c:'#f9a8d4',tip:'CPA REAL EFECTIVAS = gasto ÷ (ventas por IDs × % confirmación) · MISMO nombre y número del hero del desglose de la cuenta · todos los días con IDs del aux (HOY y días atrás)',sep:1},
       {w:_cw.vts,e:'🛒',l:'VENTAS',c:'#e2e8f0',tip:'Ventas CONFIRMADAS Dropi de cada fila — HOY sale — hasta que el cruce confirme (las de hoy véelas en 🆔 VTS IDS)'},
       {w:_cw.vids,e:'🆔',l:'VTS IDS',c:'#fcd34d',tip:'Ventas por IDs del aux de cada día (T. Cierre, antes del cruce Dropi) — separadas para no confundirlas con las VENTAS normales',sep:1},
       {w:_cw.cpmt,e:'🎯',l:'CPA META',c:'#7dd3fc',tip:'Lo que Meta dice que cuesta cada resultado (gasto ÷ conversaciones) · MISMO nombre del desglose de la cuenta'},
@@ -14799,7 +14870,20 @@ function _renderProductoCardResumen(data,ranking){
       return sp
     }
     // Fila Σ TOTAL (campaña o anuncio): mismas columnas, en negrita suave
-    const _filaTotal=(n,g,cpa,met,sz,split,nIdsTot,nIdsP)=>{
+    // PARTE 2: BE del Σ TOTAL = promedio del BE de cada día PONDERADO por las ventas (IDs) de ese día.
+    // Así el total queda coherente cuando los días tienen precios distintos. Fallback al BE actual.
+    const _beDiaK=(k)=>(data.margenBEDia&&data.margenBEDia[k]!=null)?data.margenBEDia[k]:_BE
+    const _beTotF=(idsPorDia)=>{
+      const bd=data.margenBEDia
+      if(!bd||!idsPorDia)return _BE
+      let num=0,den=0
+      for(const k of ['p','a','b','c']){
+        const w=idsPorDia[k]||0
+        if(w>0&&bd[k]!=null){num+=bd[k]*w;den+=w}
+      }
+      return den>0?num/den:_BE
+    }
+    const _filaTotal=(n,g,cpa,met,sz,split,nIdsTot,nIdsP,beTot)=>{
       const wL=sz==='sm'?73:96
       const fs=sz==='sm'?'11px':'11.5px'
       // Mejora 9: con split, cada CPA sobre sus propios totales (REAL = días Dropi · IDS = días por IDs). Sin split, comportamiento de antes.
@@ -14809,14 +14893,14 @@ function _renderProductoCardResumen(data,ranking){
       // · CPA IDS Σ = gasto total ÷ IDs totales, CRUDO (igual a la columna de la cuenta)
       // · CPA R. EFECTIVAS Σ = gasto total ÷ ventas efectivas del período (días pasados confirmados completos + IDs de HOY × % confirmación) — solo cuando el período incluye HOY
       const _cpaIT=(nIdsTot>0&&(g||0)>0)?(g||0)/nIdsTot:_cpaI
-      const _vEfT=data.esSoloHoy?((n||0)-((nIdsP||0)*(1-_pctConfF))):0
+      const _vEfT=(nIdsTot>0)?(nIdsTot*_pctConfF):0
       const _cpaEfT=(_vEfT>0&&(g||0)>0)?(g||0)/_vEfT:0
       // NUEVO (12jun26): la columna 🛒 VENTAS del Σ TOTAL solo muestra confirmadas Dropi —
       // las de HOY (por IDs, sin cruce todavía) NO entran hasta confirmarse. Los CPAs NO se tocan.
       const _nDispT=(split&&_esDiaIdsF('p'))?((split.nDr>0)?split.nDr:'—'):null
       // NUEVO (12jun26 · carriles por día): Σ TOTAL en dorado intenso — barrita 4px + borde superior + banda dorada suave
       const _lnT=(typeof window!=='undefined'&&window._nexoDiaLaneTot)?window._nexoDiaLaneTot:null
-      return`<div class="nx-dia-row" style="display:flex;align-items:center;font-size:${fs};color:var(--text);padding:3px 8px;min-width:max-content;background:${_lnT?_lnT.bg:'rgba(167,139,250,.07)'};${_lnT?`border-left:4px solid ${_lnT.bd};border-top:2px solid rgba(252,211,77,.45);margin-top:2px;`:''}border-radius:5px" title="Suma de todos los días de arriba — los ratios (CPA, CTR, etc.) se calculan sobre los totales, no promediando días"><span style="width:${wL}px;flex-shrink:0;font-weight:700${_lnT?`;color:${_lnT.c}`:''}">Σ TOTAL</span>${_metCells(n,g,_cpaR,met,n===0&&(g||0)>0,_cpaIT,nIdsTot||0,_cpaEfT,null,_nDispT)}</div>`
+      return`<div class="nx-dia-row" style="display:flex;align-items:center;font-size:${fs};color:var(--text);padding:3px 8px;min-width:max-content;background:${_lnT?_lnT.bg:'rgba(167,139,250,.07)'};${_lnT?`border-left:4px solid ${_lnT.bd};border-top:2px solid rgba(252,211,77,.45);margin-top:2px;`:''}border-radius:5px" title="Suma de todos los días de arriba — los ratios (CPA, CTR, etc.) se calculan sobre los totales, no promediando días"><span style="width:${wL}px;flex-shrink:0;font-weight:700${_lnT?`;color:${_lnT.c}`:''}">Σ TOTAL</span>${_metCells(n,g,_cpaR,met,n===0&&(g||0)>0,_cpaIT,nIdsTot||0,_cpaEfT,null,_nDispT,beTot)}</div>`
     }
     // Fila de UN día (sirve para campaña y para anuncio): etiqueta + grilla de métricas alineada.
     // Mantiene la regla de FUGA: si gastó y vendió 0 ese día → fila ámbar 🚨 (no "no corrió").
@@ -14839,9 +14923,10 @@ function _renderProductoCardResumen(data,ranking){
       // · CPA IDS = gasto ÷ IDs del día, CRUDO (HOY incluido) — igual a la columna CPA IDS de la cuenta
       // · CPA R. EFECTIVAS = gasto ÷ (IDs × % confirmación) — igual al hero de la cuenta, SOLO el día por IDs (HOY)
       const _esIds=_esDiaIdsF(d.k)
+      const _beD=(data.margenBEDia&&data.margenBEDia[d.k]!=null)?data.margenBEDia[d.k]:_BE
       const _nIdsDia=_esIds?n:nIds
       const _cpaIdsDia=(_nIdsDia>0&&(g||0)>0)?(g||0)/_nIdsDia:0
-      const _cpaEfDia=(_esIds&&data.esSoloHoy)?_cpaSemHoyF((g||0),n):0
+      const _cpaEfDia=(_nIdsDia>0&&(g||0)>0)?(g||0)/(_nIdsDia*_pctConfF):0
       // cmp del día anterior — mismos cálculos de arriba aplicados al prev (cada flecha compara lo mismo)
       let _cmpD=null
       if(prev&&prev.obj){
@@ -14850,13 +14935,13 @@ function _renderProductoCardResumen(data,ranking){
         const _esIdsP=_esDiaIdsF(prev.k)
         const _nIdsDiaP=_esIdsP?pn:(prev.nIds||0)
         const pCpaIds=(_nIdsDiaP>0&&(pg||0)>0)?(pg||0)/_nIdsDiaP:0
-        const pCpaEf=(_esIdsP&&data.esSoloHoy)?_cpaSemHoyF((pg||0),pn):0
+        const pCpaEf=(_nIdsDiaP>0&&(pg||0)>0)?(pg||0)/(_nIdsDiaP*_pctConfF):0
         const pCpaR=_esIdsP?0:((pn>0&&(pg||0)>0)?(pg||0)/pn:0)
         _cmpD={n:pn,g:pg||0,nIds:prev.nIds||0,cpa:pCpaR,cpaIds:pCpaIds,cpaEf:pCpaEf,x:_metCalc(prev.met,pn)}
       }
-      if(esFuga)return`<div class="nx-dia-row" style="display:flex;align-items:center;font-size:${fs};color:var(--amber);padding:3px 8px;background:rgba(245,158,11,.06);${_bL}border-radius:5px;min-width:max-content" title="Ese día gastó plata pero vendió CERO: fuga. Revísalo."><span style="width:${wL}px;flex-shrink:0;font-weight:600">${d.emo} ${d.lab}</span>${_metCells(n,g,0,met,true,_cpaIdsDia,nIds||0,_cpaEfDia,_cmpD,_esIds?'—':null)}</div>`
+      if(esFuga)return`<div class="nx-dia-row" style="display:flex;align-items:center;font-size:${fs};color:var(--amber);padding:3px 8px;background:rgba(245,158,11,.06);${_bL}border-radius:5px;min-width:max-content" title="Ese día gastó plata pero vendió CERO: fuga. Revísalo."><span style="width:${wL}px;flex-shrink:0;font-weight:600">${d.emo} ${d.lab}</span>${_metCells(n,g,0,met,true,_cpaIdsDia,nIds||0,_cpaEfDia,_cmpD,_esIds?'—':null,_beD)}</div>`
       // Mejora 9: el CPA del día va en SU columna — día por IDs → 🆔 CPA IDS · día Dropi → 🚦 CPA REAL
-      return`<div class="nx-dia-row" style="display:flex;align-items:center;font-size:${fs};color:var(--muted);padding:3px 8px;${_ln?`background:${_ln.bg};`:''}${_bL}border-radius:5px;min-width:max-content"><span style="width:${wL}px;flex-shrink:0;font-weight:700;color:${_ln?_ln.c:'var(--text)'}">${d.emo} ${d.lab}</span>${_metCells(n,g,_esIds?0:obj.cpa,met,false,_cpaIdsDia,nIds||0,_cpaEfDia,_cmpD,_esIds?'—':null)}</div>`
+      return`<div class="nx-dia-row" style="display:flex;align-items:center;font-size:${fs};color:var(--muted);padding:3px 8px;${_ln?`background:${_ln.bg};`:''}${_bL}border-radius:5px;min-width:max-content"><span style="width:${wL}px;flex-shrink:0;font-weight:700;color:${_ln?_ln.c:'var(--text)'}">${d.emo} ${d.lab}</span>${_metCells(n,g,_esIds?0:obj.cpa,met,false,_cpaIdsDia,nIds||0,_cpaEfDia,_cmpD,_esIds?'—':null,_beD)}</div>`
     }
     const _cidF='cuadf_'+_slugProd
     // NUEVO: semáforo por CPA IDS de HOY (día 'p') para cada campaña de la fusión — mismas reglas canónicas
@@ -14976,7 +15061,7 @@ function _renderProductoCardResumen(data,ranking){
         const _badgeVendioAd=_vendioAd?`<span style="margin-left:6px;font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:var(--green-bg);color:var(--green);border:1px solid var(--green)" title="Este anuncio SÍ vendió en el período: ${A.count} venta${A.count===1?'':'s'}. Es de los buenos — míralo primero.">🏆 VENDIÓ</span>`:''
         return`<div${_hovAdJ} style="margin-top:6px;padding:6px 8px;background:${_bgAdJ};border-radius:5px;${_bordAdJ}">
           <div style="display:flex;align-items:center;font-size:${_vendioAd?'12px':'11.5px'};color:${esFugaAd?'var(--amber)':'var(--muted)'}">${_dotAd}<span style="font-family:monospace${_vendioAd?';font-size:12.5px;font-weight:700;color:var(--text)':''}">🖼️ ${_esc(A.adId)}</span>${_btnCopy(A.adId,'ID del anuncio')}${_badgeVendioAd}${_pyBadgeAd}${_btnsAd}${_gastoTxt(A.gasto)}${esFugaAd?`<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap" title="Gastó plata en sus días y no vendió NADA. Pura fuga: revísalo o apágalo.">🚨 gastó y no vendió</span>`:_cpaPill(A.cpaT,'sm')}<span style="margin-left:auto;color:${esFugaAd?'var(--amber)':'var(--text)'};font-weight:700;padding-left:10px" title="Ventas totales del anuncio sumando sus días">${A.count}</span></div>
-          <div style="margin:2px 0 0 14px;border-left:1px solid ${esFugaAd?'var(--amber)':'var(--border)'};padding-left:8px">${_metHeader(73)}${_dias.map((d,di)=>{const _pA=_dias.slice(di+1).find(dp=>A.dias[dp.k]);return _filaDia(d,A.dias[d.k],'sm',_metAdDe(d.k,A.adId),_idsAdDiaF(d.k,A.adId),_pA?{k:_pA.k,obj:A.dias[_pA.k],met:_metAdDe(_pA.k,A.adId),nIds:_idsAdDiaF(_pA.k,A.adId)}:null)}).join('')}${_filaTotal(A.count,A.gasto,A.cpaT,_aggMet(_dias.map(d=>_metAdDe(d.k,A.adId))),'sm',_splitCpaF(A.dias),_dias.reduce((s,d)=>s+_idsAdDiaF(d.k,A.adId),0),_idsAdDiaF('p',A.adId))}</div>
+          <div style="margin:2px 0 0 14px;border-left:1px solid ${esFugaAd?'var(--amber)':'var(--border)'};padding-left:8px">${_metHeader(73)}${_dias.map((d,di)=>{const _pA=_dias.slice(di+1).find(dp=>A.dias[dp.k]);return _filaDia(d,A.dias[d.k],'sm',_metAdDe(d.k,A.adId),_idsAdDiaF(d.k,A.adId),_pA?{k:_pA.k,obj:A.dias[_pA.k],met:_metAdDe(_pA.k,A.adId),nIds:_idsAdDiaF(_pA.k,A.adId)}:null)}).join('')}${_filaTotal(A.count,A.gasto,A.cpaT,_aggMet(_dias.map(d=>_metAdDe(d.k,A.adId))),'sm',_splitCpaF(A.dias),_dias.reduce((s,d)=>s+_idsAdDiaF(d.k,A.adId),0),_idsAdDiaF('p',A.adId),_beTotF({p:_idsAdDiaF('p',A.adId),a:_idsAdDiaF('a',A.adId),b:_idsAdDiaF('b',A.adId),c:_idsAdDiaF('c',A.adId)}))}</div>
           <div id="${_ccid}-sem-${A.adId}" style="margin:4px 0 0 14px"></div>
         </div>`
       }).join('')
@@ -15110,7 +15195,7 @@ function _renderProductoCardResumen(data,ranking){
               const _cpaDiaV=(_gN>0&&_vN>0)?Math.round(_gN/_vN):0
               const _cpaDiaI=(!_cpaDiaV&&_gN>0&&_iN>0)?Math.round(_gN/_iN):0
               const _cpaDiaN=_cpaDiaV||_cpaDiaI
-              const _cpaHtml=_cpaDiaN>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${(typeof window._nexoSemColor==='function')?window._nexoSemColor(_cpaDiaN,_BE):'var(--subtle)'}">${_cpaDiaV?'🎯':'🆔'}$${fmt(_cpaDiaN)}</span>`:''
+              const _cpaHtml=_cpaDiaN>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${(typeof window._nexoSemColor==='function')?window._nexoSemColor(_cpaDiaN,_beDiaK(k)):'var(--subtle)'}">${_cpaDiaV?'🎯':'🆔'}$${fmt(_cpaDiaN)}</span>`:''
               return _cF(wV,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_cV};font-weight:700;line-height:1.15">${_vN>0?_vN:'—'}</span>${_gHtml}${_cpaHtml}</span>`,true,_tipP,false,lane)
                 +_cF(wI,`<span style="color:${_cI};font-weight:700">${_iN>0?_iN:'—'}</span>`,true,_tipP,false,lane)
             }
@@ -15119,9 +15204,9 @@ function _renderProductoCardResumen(data,ranking){
             return _parDiaF('a',_cwF.vA,_cwF.iA,_dias[1].lab,'ayer')
               +_parDiaF('b',_cwF.vB,_cwF.iB,_dias[2].lab,'antier')
               +_parDiaF('c',_cwF.vC,_cwF.iC,_dias[3].lab,'tras')
-              +_cF(_cwF.iTot,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_descTot?'var(--amber)':(_iTotF>0?'#fcd34d':'var(--subtle)')};font-weight:700;line-height:1.15">${_iTotF>0?'🆔 '+_iTotF:'—'}</span>${(F.gasto>0&&_iTotF>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${(typeof window._nexoSemColor==='function')?window._nexoSemColor(Math.round(F.gasto/_iTotF),_BE):'var(--subtle)'}">🆔$${fmt(Math.round(F.gasto/_iTotF))}</span>`:''}</span>`,true,'Total ventas por IDs (4 días): '+_iTotF+(_descTot?' — no cuadra con las 🛒 VTS totales de al lado ('+F.count+')':' — cuadra con las 🛒 VTS totales'),false,'tot','l')
+              +_cF(_cwF.iTot,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_descTot?'var(--amber)':(_iTotF>0?'#fcd34d':'var(--subtle)')};font-weight:700;line-height:1.15">${_iTotF>0?'🆔 '+_iTotF:'—'}</span>${(F.gasto>0&&_iTotF>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${(typeof window._nexoSemColor==='function')?window._nexoSemColor(Math.round(F.gasto/_iTotF),_beTotF({p:_idsCampDiaF('p',F.campId),a:_idsCampDiaF('a',F.campId),b:_idsCampDiaF('b',F.campId),c:_idsCampDiaF('c',F.campId)})):'var(--subtle)'}">🆔$${fmt(Math.round(F.gasto/_iTotF))}</span>`:''}</span>`,true,'Total ventas por IDs (4 días): '+_iTotF+(_descTot?' — no cuadra con las 🛒 VTS totales de al lado ('+F.count+')':' — cuadra con las 🛒 VTS totales'),false,'tot','l')
           })()}
-          ${_cF(_cwF.vts,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_vtsConfRow>0?'var(--text)':'var(--subtle)'};font-weight:700;line-height:1.15">${_vtsConfRow>0?_vtsConfRow:'—'}</span>${(F.gasto>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${(typeof window._nexoSemColor==='function')?window._nexoSemColor(Math.round(F.gasto/F.count),_BE):'var(--subtle)'}">🎯$${fmt(Math.round(F.gasto/F.count))}</span>`:''}</span>`,true,'Ventas totales CONFIRMADAS Dropi de la campaña sumando sus días — las 🆔 de HOY no entran hasta que el cruce las confirme (véelas en 🆔 VTS HOY) · 🎯 abajo: CPA total = gasto ÷ ventas',false,'tot','r')}
+          ${_cF(_cwF.vts,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_vtsConfRow>0?'var(--text)':'var(--subtle)'};font-weight:700;line-height:1.15">${_vtsConfRow>0?_vtsConfRow:'—'}</span>${(F.gasto>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${(typeof window._nexoSemColor==='function')?window._nexoSemColor(Math.round(F.gasto/F.count),_beTotF({p:_idsCampDiaF('p',F.campId),a:_idsCampDiaF('a',F.campId),b:_idsCampDiaF('b',F.campId),c:_idsCampDiaF('c',F.campId)})):'var(--subtle)'}">🎯$${fmt(Math.round(F.gasto/F.count))}</span>`:''}</span>`,true,'Ventas totales CONFIRMADAS Dropi de la campaña sumando sus días — las 🆔 de HOY no entran hasta que el cruce las confirme (véelas en 🆔 VTS HOY) · 🎯 abajo: CPA total = gasto ÷ ventas',false,'tot','r')}
           ${_cF(_cwF.bud,_btnBudF+_btnDupF)}
           ${_cF(_cwF.id,`<span style="font-family:monospace;font-size:10.5px;color:var(--muted)">${_esc(F.campId)}</span>`,false,'ID de la campaña: '+_esc(F.campId))}
           ${_cF(_cwF.cp,_btnCopy(F.campId,'ID de la campaña'))}
@@ -15135,7 +15220,7 @@ function _renderProductoCardResumen(data,ranking){
           <div style="font-size:10px;color:var(--subtle);padding:4px 8px 2px;letter-spacing:.3px">1️⃣ La campaña completa, día por día: <span style="opacity:.7">(desliza ➡️ para ver todas las métricas · pasa el cursor por cada título para entenderla)</span></div>
           ${_metHeader(96)}
           ${_dias.map((d,di)=>{const _pD=_dias.slice(di+1).find(dp=>F.dias[dp.k]);return _filaDia(d,F.dias[d.k],null,_metCampDe(d.k,F.campId),_idsCampDiaF(d.k,F.campId),_pD?{k:_pD.k,obj:F.dias[_pD.k],met:_metCampDe(_pD.k,F.campId),nIds:_idsCampDiaF(_pD.k,F.campId)}:null)}).join('')}
-          ${_filaTotal(F.count,F.gasto,F.cpa,_aggMet(_dias.map(d=>_metCampDe(d.k,F.campId))),null,_splitCpaF(F.dias),_dias.reduce((s,d)=>s+_idsCampDiaF(d.k,F.campId),0),_idsCampDiaF('p',F.campId))}
+          ${_filaTotal(F.count,F.gasto,F.cpa,_aggMet(_dias.map(d=>_metCampDe(d.k,F.campId))),null,_splitCpaF(F.dias),_dias.reduce((s,d)=>s+_idsCampDiaF(d.k,F.campId),0),_idsCampDiaF('p',F.campId),_beTotF({p:_idsCampDiaF('p',F.campId),a:_idsCampDiaF('a',F.campId),b:_idsCampDiaF('b',F.campId),c:_idsCampDiaF('c',F.campId)}))}
           <div id="${_ccid}-semwrap" style="margin:6px 4px 2px"></div>
           <div style="font-size:10px;color:var(--subtle);padding:8px 8px 0;letter-spacing:.3px">2️⃣ Sus anuncios (mismo ID = mismo bloque), cada uno día por día:${_miniResJ}</div>
           ${_adsF}
@@ -18156,6 +18241,33 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   const _prev3Desde=_dt2ymd(new Date(_ymd2dt(_prev2Desde).getTime()-_nDiasRango*_MS_DIA))
   const antier=_prev2Hasta
   const trasantier=_prev3Hasta
+  // PARTE 2 (#3 portafolio): break-even por día por producto (precio_2u/costo_2u vigente de cada día). Aditivo.
+  const _beDiaPortByProd={}
+  try{
+    const _fDiasPort={a:_prevHasta,b:_prev2Hasta,c:_prev3Hasta}
+    const _prodIdsPort=(productos||[]).map(p=>p.id).filter(Boolean)
+    if(_prodIdsPort.length){
+      const{data:_hRowsP}=await sb.from('producto_precios_historial').select('producto_id,precio,costo,vigente_desde,vigente_hasta').in('producto_id',_prodIdsPort).eq('cantidad',2)
+      if(_hRowsP&&_hRowsP.length){
+        const _hByP={}
+        for(const r of _hRowsP){if(r.producto_id==null)continue;(_hByP[r.producto_id]=_hByP[r.producto_id]||[]).push(r)}
+        const _pvP=(pid,fechaISO)=>{
+          const arr=_hByP[pid];if(!arr||!arr.length||!fechaISO)return null
+          const _d=String(fechaISO).slice(0,10);let best=null,bvd=''
+          for(const r of arr){const vd=r.vigente_desde?String(r.vigente_desde).slice(0,10):'';const vh=r.vigente_hasta?String(r.vigente_hasta).slice(0,10):'';if(vd&&vd>_d)continue;if(vh&&vh<=_d)continue;if(!best||vd>bvd){best=r;bvd=vd}}
+          return best?{precio:Number(best.precio)||0,costo:Number(best.costo)||0}:null
+        }
+        for(const p of (productos||[])){
+          if(!_hByP[p.id])continue
+          const _foP=p.flete_outbound||21000,_fdP=p.flete_devolucion||18000,_dpP=p.dev_pct||0.19
+          const _cvPP=p.conversaciones_por_venta!=null?p.conversaciones_por_venta:25,_ccvPP=(p.costo_conversacion||100)*_cvPP
+          const _beActualP=(p.precio_2u||129900)*(1-_dpP)-(p.costo_2u||36000)-_foP-(_fdP*_dpP)-_ccvPP
+          const _beKP=(fk)=>{const pv=_pvP(p.id,_fDiasPort[fk]);if(!pv)return _beActualP;return (pv.precio||0)*(1-_dpP)-(pv.costo||0)-_foP-(_fdP*_dpP)-_ccvPP}
+          _beDiaPortByProd[p.id]={a:_beKP('a'),b:_beKP('b'),c:_beKP('c')}
+        }
+      }
+    }
+  }catch(_){}
   const ventasByCamp={}
 
   // ── 1) Cargar mapeos del rango y reportes del rango (en paralelo) ──
@@ -18604,6 +18716,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     // Leer desde window._metaPort porque renderCamp puede ejecutarse en otro scope
     const _fnCtx=(window._metaPort&&typeof window._metaPort._ctxProductoPorCamp==='function')?window._metaPort._ctxProductoPorCamp:null
     const ctxCamp=_fnCtx?_fnCtx(camp.meta_id):{p2:ctx.p2,c2:ctx.c2,fo:ctx.fo,fd:ctx.fd,dp:ctx.dp,margenBE:ctx.margenBE,roasBE:ctx.roasBE,nombre:'(global)',esGlobal:true,pctConf:0.62}
+    const _bdCampP=(window._metaPort&&window._metaPort.campToProd&&window._metaPort.campToProd[camp.meta_id])||null
+    const _bdCamp=(_bdCampP&&_beDiaPortByProd[_bdCampP.id])||null
+    const _beKp=(k)=>(_bdCamp&&_bdCamp[k]!=null)?_bdCamp[k]:ctxCamp.margenBE
     // ── Ventas Efectivas (solo HOY, sin cruce Dropi) ──
     // Estimación: ventas × pct_confirmacion del producto (default 0.62)
     const pctConf=ctxCamp.pctConf!=null?ctxCamp.pctConf:0.62
@@ -18780,8 +18895,8 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
         <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(ventasRealesAyer,ventasRealesAntier,'up')}">${ventasRealesAyer} ✅</div>
         <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(ventasIdsAyer,ventasIdsAntier,'up')}">${ventasIdsAyer}</div>
         <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(vEfectAyer,vEfectAntier,'up')}">${vEfectAyer>0?vEfectAyer.toFixed(2):'—'}</div>
-        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaRealAyer,cpaRealAntier,'down')};${cpaRealAyer>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaRealAyer,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Número = vs antier · Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaRealAyer>0?'$'+fmt(cpaRealAyer):'—'}</div>
-        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaIdsAyer,cpaIdsAntier,'down')};${cpaIdsAyer>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaIdsAyer,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Gasto ÷ Ventas IDs · Número = vs antier · Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaIdsAyer>0?'$'+fmt(cpaIdsAyer):'—'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaRealAyer,cpaRealAntier,'down')};${cpaRealAyer>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaRealAyer,_beKp('a'))};padding:2px 5px`:''}" title="Número = vs antier · Borde = semáforo break-even ($${fmt(_beKp('a'))})">${cpaRealAyer>0?'$'+fmt(cpaRealAyer):'—'}</div>
+        <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaIdsAyer,cpaIdsAntier,'down')};${cpaIdsAyer>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaIdsAyer,_beKp('a'))};padding:2px 5px`:''}" title="Gasto ÷ Ventas IDs · Número = vs antier · Borde = semáforo break-even ($${fmt(_beKp('a'))})">${cpaIdsAyer>0?'$'+fmt(cpaIdsAyer):'—'}</div>
         <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(_tcAyer,_tcAntier,'down')}" title="Conv ÷ Ventas IDs · vs antier">${_tcAyer>0?_tcAyer.toFixed(1):'—'}</div>
         <div style="border-top:1px solid var(--border);padding-top:5px;font-size:13px;font-weight:700;color:${window._nexoCmpColor(_tcvAyer,_tcvAntier,'down')}" title="Conv ÷ Ventas reales · vs antier">${_tcvAyer>0?_tcvAyer.toFixed(1):'—'}</div>
         <div><span style="font-size:9px;font-weight:700;color:var(--muted);background:var(--card2);padding:1px 7px;border-radius:5px" title="${_nDiasRango===1?'Hace 2 días ('+_prev2Hasta+')':'Período: '+_prev2Desde+' → '+_prev2Hasta}">${esSoloHoy?'ANTIER':'2º ANT.'}</span></div>
@@ -18792,8 +18907,8 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
         <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(ventasRealesAntier,ventasRealesTrasantier,'up')}">${ventasRealesAntier} ✅</div>
         <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(ventasIdsAntier,ventasIdsTrasantier,'up')}">${ventasIdsAntier}</div>
         <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(vEfectAntier,vEfectTrasantier,'up')}">${vEfectAntier>0?vEfectAntier.toFixed(2):'—'}</div>
-        <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaRealAntier,cpaRealTrasantier,'down')};${cpaRealAntier>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaRealAntier,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Número = vs trasantier · Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaRealAntier>0?'$'+fmt(cpaRealAntier):'—'}</div>
-        <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaIdsAntier,cpaIdsTrasantier,'down')};${cpaIdsAntier>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaIdsAntier,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Gasto ÷ Ventas IDs · Número = vs trasantier · Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaIdsAntier>0?'$'+fmt(cpaIdsAntier):'—'}</div>
+        <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaRealAntier,cpaRealTrasantier,'down')};${cpaRealAntier>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaRealAntier,_beKp('b'))};padding:2px 5px`:''}" title="Número = vs trasantier · Borde = semáforo break-even ($${fmt(_beKp('b'))})">${cpaRealAntier>0?'$'+fmt(cpaRealAntier):'—'}</div>
+        <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(cpaIdsAntier,cpaIdsTrasantier,'down')};${cpaIdsAntier>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaIdsAntier,_beKp('b'))};padding:2px 5px`:''}" title="Gasto ÷ Ventas IDs · Número = vs trasantier · Borde = semáforo break-even ($${fmt(_beKp('b'))})">${cpaIdsAntier>0?'$'+fmt(cpaIdsAntier):'—'}</div>
         <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(_tcAntier,_tcTras,'down')}" title="Conv ÷ Ventas IDs · vs trasantier">${_tcAntier>0?_tcAntier.toFixed(1):'—'}</div>
         <div style="font-size:13px;font-weight:700;color:${window._nexoCmpColor(_tcvAntier,_tcvTras,'down')}" title="Conv ÷ Ventas reales · vs trasantier">${_tcvAntier>0?_tcvAntier.toFixed(1):'—'}</div>
         <div><span style="font-size:9px;font-weight:700;color:var(--subtle);background:var(--card2);padding:1px 7px;border-radius:5px" title="${_nDiasRango===1?'Hace 3 días ('+_prev3Hasta+')':'Período: '+_prev3Desde+' → '+_prev3Hasta}">${esSoloHoy?'TRASANTIER':'3º ANT.'}</span></div>
@@ -18804,8 +18919,8 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
         <div style="font-size:13px;font-weight:700;color:var(--muted)">${ventasRealesTrasantier} ✅</div>
         <div style="font-size:13px;font-weight:700;color:var(--muted)">${ventasIdsTrasantier}</div>
         <div style="font-size:13px;font-weight:700;color:var(--muted)">${vEfectTrasantier>0?vEfectTrasantier.toFixed(2):'—'}</div>
-        <div style="font-size:13px;font-weight:700;color:var(--muted);${cpaRealTrasantier>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaRealTrasantier,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaRealTrasantier>0?'$'+fmt(cpaRealTrasantier):'—'}</div>
-        <div style="font-size:13px;font-weight:700;color:var(--muted);${cpaIdsTrasantier>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaIdsTrasantier,ctxCamp.margenBE)};padding:2px 5px`:''}" title="Gasto ÷ Ventas IDs · Borde = semáforo break-even ($${fmt(ctxCamp.margenBE)})">${cpaIdsTrasantier>0?'$'+fmt(cpaIdsTrasantier):'—'}</div>
+        <div style="font-size:13px;font-weight:700;color:var(--muted);${cpaRealTrasantier>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaRealTrasantier,_beKp('c'))};padding:2px 5px`:''}" title="Borde = semáforo break-even ($${fmt(_beKp('c'))})">${cpaRealTrasantier>0?'$'+fmt(cpaRealTrasantier):'—'}</div>
+        <div style="font-size:13px;font-weight:700;color:var(--muted);${cpaIdsTrasantier>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${window._nexoSemColor(cpaIdsTrasantier,_beKp('c'))};padding:2px 5px`:''}" title="Gasto ÷ Ventas IDs · Borde = semáforo break-even ($${fmt(_beKp('c'))})">${cpaIdsTrasantier>0?'$'+fmt(cpaIdsTrasantier):'—'}</div>
         <div style="font-size:13px;font-weight:700;color:var(--muted)" title="Conv ÷ Ventas IDs">${_tcTras>0?_tcTras.toFixed(1):'—'}</div>
         <div style="font-size:13px;font-weight:700;color:var(--muted)" title="Conv ÷ Ventas reales">${_tcvTras>0?_tcvTras.toFixed(1):'—'}</div>
         <div style="border-top:1px solid var(--border);padding-top:5px"><span style="font-size:9px;font-weight:700;color:var(--blue);background:var(--blue-bg);padding:1px 7px;border-radius:5px" title="Promedio por día de los últimos 3 días (ayer+antier+trasantier). Gasto/Conv/Ventas/IDs/V.Efect = total ÷ 3. CPA y ROAS recalculados sobre los totales. El color compara este promedio contra HOY.">PROM 3D</span></div>

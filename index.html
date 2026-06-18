@@ -353,6 +353,7 @@ tr:hover td{background:var(--card2)}
 .dropi-fab{position:fixed;right:20px;bottom:20px;z-index:60;display:inline-flex;align-items:center;gap:8px;background:linear-gradient(135deg,var(--accent),var(--purple));color:#fff;border:none;border-radius:999px;padding:13px 20px;font-size:14px;font-weight:800;font-family:inherit;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,.45)}
 .dropi-fab:hover{transform:translateY(-2px);box-shadow:0 12px 30px rgba(0,0,0,.5)}
 .dropi-fab .emoji{font-size:17px}
+.seller-fab{bottom:74px;background:linear-gradient(135deg,#0EA5E9,#6366F1)}
 .dropi-cred-row{display:flex;align-items:center;gap:10px;background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:10px 12px;margin-top:10px}
 .dropi-cred-row .lbl{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;min-width:78px}
 .dropi-cred-row .val{flex:1;font-size:14px;color:var(--text);font-weight:600;word-break:break-all}
@@ -518,12 +519,16 @@ async function loadMe(uid){
     if(!dentroDeHorario(bData?.rol,bData?.hora_inicio,bData?.hora_fin)){console.warn('Fuera de horario');return false}
     me=data
     me.modo_historico=bData?.modo_historico||false
-    // Credenciales Dropi (solo auxiliar las usa). Tolerante si las columnas aún no existen.
+    // Credenciales Dropi/SellerChat (solo auxiliar/admin las usan). Tolerante si las columnas aún no existen.
     try{
-      const{data:dData}=await sb.from('usuarios').select('dropi_email,dropi_password').eq('id',data.id).maybeSingle()
+      const{data:dData}=await sb.from('usuarios').select('dropi_email,dropi_password,dropi_cuentas,sellerchat_cuentas,dropi_url,sellerchat_url').eq('id',data.id).maybeSingle()
       me.dropi_email=dData?.dropi_email||''
       me.dropi_password=dData?.dropi_password||''
-    }catch(e){me.dropi_email='';me.dropi_password=''}
+      me.dropi_cuentas=Array.isArray(dData?.dropi_cuentas)?dData.dropi_cuentas:[]
+      me.sellerchat_cuentas=Array.isArray(dData?.sellerchat_cuentas)?dData.sellerchat_cuentas:[]
+      me.dropi_url=dData?.dropi_url||''
+      me.sellerchat_url=dData?.sellerchat_url||''
+    }catch(e){me.dropi_email='';me.dropi_password='';me.dropi_cuentas=[];me.sellerchat_cuentas=[];me.dropi_url='';me.sellerchat_url=''}
     return true
   }catch(e){console.error('loadMe exception:',e);return false}
 }
@@ -4791,7 +4796,34 @@ window.doCreateUser=async()=>{
   closeModal();loadUsuarios()
 }
 
+// Helpers para editar varias cuentas (Dropi/SellerChat) en el modal de usuario
+window._euCuentaRow=(tipo,c)=>{
+  c=c||{nombre:'',email:'',pwd:''}
+  const e=s=>(s==null?'':String(s)).replace(/"/g,'&quot;')
+  const ph=tipo==='dropi'?'Dropi 1':'SellerChat 1'
+  return `<div class="eu-cuenta-row" style="display:grid;grid-template-columns:1fr 1.2fr 1fr auto;gap:6px;align-items:center;margin-bottom:6px">
+    <input type="text" class="euc-nombre" value="${e(c.nombre)}" placeholder="${ph}" autocapitalize="off">
+    <input type="text" class="euc-email" value="${e(c.email)}" placeholder="correo" autocapitalize="off">
+    <input type="text" class="euc-pwd" value="${e(c.pwd)}" placeholder="contraseña">
+    <button type="button" class="btn-sm btn-outline" onclick="this.closest('.eu-cuenta-row').remove()" title="Quitar esta cuenta" style="padding:6px 9px">🗑️</button>
+  </div>`
+}
+window.euAddCuenta=(tipo)=>{
+  const cont=document.getElementById(tipo==='dropi'?'eu-dropi-cuentas':'eu-seller-cuentas')
+  if(cont)cont.insertAdjacentHTML('beforeend',window._euCuentaRow(tipo,null))
+}
+window._euReadCuentas=(tipo)=>{
+  const cont=document.getElementById(tipo==='dropi'?'eu-dropi-cuentas':'eu-seller-cuentas')
+  if(!cont)return []
+  return [...cont.querySelectorAll('.eu-cuenta-row')].map(r=>({
+    nombre:(r.querySelector('.euc-nombre')?.value||'').trim(),
+    email:(r.querySelector('.euc-email')?.value||'').trim(),
+    pwd:(r.querySelector('.euc-pwd')?.value||'')
+  })).filter(c=>c.nombre||c.email||c.pwd)
+}
 window.modalUserEdit=(u)=>{
+  const _dropiCtas=(Array.isArray(u.dropi_cuentas)&&u.dropi_cuentas.length)?u.dropi_cuentas:((u.dropi_email||u.dropi_password)?[{nombre:'Dropi 1',email:u.dropi_email||'',pwd:u.dropi_password||''}]:[{nombre:'Dropi 1',email:'',pwd:''}])
+  const _sellerCtas=(Array.isArray(u.sellerchat_cuentas)&&u.sellerchat_cuentas.length)?u.sellerchat_cuentas:[{nombre:'SellerChat 1',email:'',pwd:''}]
   openModal(`
     <div class="modal-title">Editar usuario</div>
     <div class="modal-sub">${u.nombre||u.username||u.id}</div>
@@ -4819,12 +4851,19 @@ window.modalUserEdit=(u)=>{
         <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-left:24px">Activa esta opción solo cuando necesites cargar datos viejos. Desactiva al terminar.</div>
       </div>
       <div id="eu-dropi-wrap" style="${u.rol==='auxiliar'?'':'display:none'}">
-        <div style="font-size:13px;font-weight:800;color:var(--text);margin-bottom:6px">🔑 Acceso Dropi (para el botón rápido)</div>
-        <div class="form-grid g2">
-          <div class="fld"><label>Correo Dropi</label><input type="text" id="eu-dropi-email" value="${(u.dropi_email||'').replace(/"/g,'&quot;')}" placeholder="correo@dropi.co" autocapitalize="off"></div>
-          <div class="fld"><label>Contraseña Dropi</label><input type="text" id="eu-dropi-pwd" value="${(u.dropi_password||'').replace(/"/g,'&quot;')}" placeholder="contraseña"></div>
-        </div>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">El auxiliar verá un botón "Dropi" que copia estos datos. No se rellena solo en Dropi (lo bloquea el navegador): copia y pega.</div>
+        <div style="font-size:13px;font-weight:800;color:var(--text);margin:10px 0 6px">🔑 Acceso Dropi (para el botón rápido)</div>
+        <div class="fld"><label>URL de Dropi (la pones tú · editable)</label><input type="text" id="eu-dropi-url" value="${(u.dropi_url||'').replace(/"/g,'&quot;')}" placeholder="https://app.dropi.co/auth/login" autocapitalize="off"></div>
+        <div style="font-size:11px;color:var(--muted);margin:8px 0 4px">Cuentas (puedes poner varias · el nombre es para diferenciarlas, ej: Dropi 1, Dropi 2):</div>
+        <div id="eu-dropi-cuentas">${_dropiCtas.map(c=>window._euCuentaRow('dropi',c)).join('')}</div>
+        <button type="button" class="btn-sm btn-outline" onclick="euAddCuenta('dropi')" style="margin-top:4px">➕ Agregar cuenta Dropi</button>
+
+        <div style="font-size:13px;font-weight:800;color:var(--text);margin:16px 0 6px">💬 Acceso SellerChat (para el botón rápido)</div>
+        <div class="fld"><label>URL de SellerChat (la pones tú · editable)</label><input type="text" id="eu-seller-url" value="${(u.sellerchat_url||'').replace(/"/g,'&quot;')}" placeholder="https://app.sellerchat.io/login" autocapitalize="off"></div>
+        <div style="font-size:11px;color:var(--muted);margin:8px 0 4px">Cuentas (puedes poner varias · ej: SellerChat 1, SellerChat 2):</div>
+        <div id="eu-seller-cuentas">${_sellerCtas.map(c=>window._euCuentaRow('seller',c)).join('')}</div>
+        <button type="button" class="btn-sm btn-outline" onclick="euAddCuenta('seller')" style="margin-top:4px">➕ Agregar cuenta SellerChat</button>
+
+        <div style="font-size:11px;color:var(--muted);margin-top:10px">El auxiliar verá botones "Dropi" y "SellerChat" que copian estos datos. No se rellena solo en la otra web (lo bloquea el navegador): copia y pega.</div>
       </div>
     </div>
     <div id="eu-msg" style="margin-top:10px"></div>
@@ -4874,13 +4913,20 @@ window.doEditUser=async(user_id)=>{
       btn.disabled=false;btn.textContent='Guardar cambios'
       return
     }
-    // 3. Credenciales Dropi directo en la tabla (tolerante: si las columnas no existen, no bloquea)
+    // 3. Cuentas Dropi/SellerChat + URLs directo en la tabla (tolerante: si las columnas no existen, no bloquea)
     try{
-      const dEmail=document.getElementById('eu-dropi-email')?.value.trim()||null
-      const dPwd=document.getElementById('eu-dropi-pwd')?.value||null
-      const{error:dErr}=await sb.from('usuarios').update({dropi_email:dEmail,dropi_password:dPwd}).eq('id',user_id)
-      if(dErr)console.warn('No se guardaron credenciales Dropi (¿faltan columnas dropi_email/dropi_password?):',dErr.message)
-    }catch(e){console.warn('Dropi update excepción:',e)}
+      const dCuentas=window._euReadCuentas('dropi')
+      const sCuentas=window._euReadCuentas('seller')
+      const dUrl=document.getElementById('eu-dropi-url')?.value.trim()||null
+      const sUrl=document.getElementById('eu-seller-url')?.value.trim()||null
+      const prim=dCuentas[0]||{} // compatibilidad: 1ra cuenta Dropi queda también en dropi_email/dropi_password
+      const{error:dErr}=await sb.from('usuarios').update({
+        dropi_cuentas:dCuentas,sellerchat_cuentas:sCuentas,
+        dropi_url:dUrl,sellerchat_url:sUrl,
+        dropi_email:prim.email||null,dropi_password:prim.pwd||null
+      }).eq('id',user_id)
+      if(dErr)console.warn('No se guardaron cuentas Dropi/SellerChat (¿faltan columnas?):',dErr.message)
+    }catch(e){console.warn('Cuentas update excepción:',e)}
     logAction('usuario_editado',{user_id,modo_historico:modoHistorico}).catch(()=>{})
     closeModal();loadUsuarios()
   }catch(e){
@@ -10664,45 +10710,118 @@ window.auxInjectProgressBar=async()=>{
 // con botones de copiar (el navegador NO permite rellenar el formulario de Dropi solo).
 const DROPI_LOGIN_URL='https://app.dropi.co/auth/login'
 window.auxInjectDropiBtn=()=>{
-  if(currentRol()!=='auxiliar'){const ex=document.getElementById('dropi-fab');if(ex)ex.remove();return}
-  if(document.getElementById('dropi-fab'))return // ya está
-  const b=document.createElement('button')
-  b.id='dropi-fab'
-  b.className='dropi-fab'
-  b.innerHTML='<span class="emoji">📦</span> Dropi'
-  b.onclick=openDropiPopup
-  document.body.appendChild(b)
+  const rol=currentRol()
+  const ver=(rol==='auxiliar'||rol==='admin')
+  if(!ver){['dropi-fab','seller-fab'].forEach(id=>{const ex=document.getElementById(id);if(ex)ex.remove()});return}
+  if(!document.getElementById('dropi-fab')){
+    const b=document.createElement('button')
+    b.id='dropi-fab'
+    b.className='dropi-fab'
+    b.innerHTML='<span class="emoji">📦</span> Dropi'
+    b.onclick=openDropiPopup
+    document.body.appendChild(b)
+  }
+  if(!document.getElementById('seller-fab')){
+    const s=document.createElement('button')
+    s.id='seller-fab'
+    s.className='dropi-fab seller-fab'
+    s.innerHTML='<span class="emoji">💬</span> SellerChat'
+    s.onclick=openSellerChatPopup
+    document.body.appendChild(s)
+  }
 }
-window.openDropiPopup=()=>{
-  const u=currentMe()||{}
-  const email=u.dropi_email||''
-  const pwd=u.dropi_password||''
-  // Abre Dropi en pestaña nueva de inmediato (gesto del usuario, no lo bloquea el navegador)
-  try{window.open(DROPI_LOGIN_URL,'_blank')}catch(e){}
-  if(!email&&!pwd){
+window.openDropiPopup=()=>_credPopup('dropi')
+window.openSellerChatPopup=()=>_credPopup('seller')
+
+// Escapa para HTML
+window._credEsc=s=>(s==null?'':String(s)).replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
+
+// Pinta el bloque de cuentas (nombre + correo/clave con botón copiar)
+window._credCuentasHtml=(cuentas,nombreApp,url)=>{
+  const esc=window._credEsc
+  const abrir=url?`<button class="btn-sm btn-primary" onclick="window.open('${esc(url)}','_blank')" style="width:100%;margin-bottom:12px">🔗 Abrir ${nombreApp} en otra pestaña</button>`:''
+  const filas=cuentas.map(c=>{
+    const nom=esc(c.nombre||nombreApp),em=esc(c.email||''),pw=esc(c.pwd||'')
+    return `<div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px">
+      <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:8px">${nom}</div>
+      ${em?`<div class="dropi-cred-row"><span class="lbl">Correo</span><span class="val">${em}</span><button class="btn-sm btn-primary" onclick="copiarTextoBtn('${em}',this)">📋 Copiar</button></div>`:''}
+      ${pw?`<div class="dropi-cred-row" style="margin-top:6px"><span class="lbl">Clave</span><span class="val">${pw}</span><button class="btn-sm btn-primary" onclick="copiarTextoBtn('${pw}',this)">📋 Copiar</button></div>`:''}
+    </div>`
+  }).join('')
+  return abrir+filas
+}
+
+// Normaliza las cuentas de Dropi tolerando el formato viejo (dropi_email/dropi_password)
+window._credCuentasDe=(obj,isDropi)=>{
+  let cuentas=isDropi?(obj.dropi_cuentas||[]):(obj.sellerchat_cuentas||[])
+  if(!Array.isArray(cuentas))cuentas=[]
+  if(isDropi&&!cuentas.length&&(obj.dropi_email||obj.dropi_password))cuentas=[{nombre:'Dropi 1',email:obj.dropi_email||'',pwd:obj.dropi_password||''}]
+  return cuentas.filter(c=>c&&(c.email||c.pwd||c.nombre))
+}
+
+window._credPopup=(tipo)=>{
+  const isDropi=tipo==='dropi'
+  const nombreApp=isDropi?'Dropi':'SellerChat'
+  const titulo=isDropi?'📦 Entrar a Dropi':'💬 Entrar a SellerChat'
+  // Admin (sin estar viendo-como): elige de qué auxiliar ver las cuentas
+  if(currentRol()==='admin'&&!impersonating){_credPopupAdmin(tipo);return}
+  // Auxiliar (o admin viendo-como): sus propias cuentas
+  const me_=currentMe()||{}
+  const cuentas=window._credCuentasDe(me_,isDropi)
+  const url=isDropi?(me_.dropi_url||DROPI_LOGIN_URL):(me_.sellerchat_url||'')
+  if(url&&cuentas.length){try{window.open(url,'_blank')}catch(e){}} // abre en el gesto del click
+  if(!cuentas.length){
     openModal(`
-      <div class="modal-title">📦 Dropi</div>
-      <div class="modal-sub">Aún no tienes tus datos de Dropi configurados.</div>
-      <div class="alert alert-amber" style="margin-top:10px">Pídele a tu administrador que cargue tu correo y contraseña de Dropi en <b>Equipo → Editar</b>.</div>
+      <div class="modal-title">${titulo}</div>
+      <div class="modal-sub">Aún no tienes cuentas de ${nombreApp} configuradas.</div>
+      <div class="alert alert-amber" style="margin-top:10px">Pídele a tu administrador que cargue tus cuentas de ${nombreApp} en <b>Equipo → Editar</b>.</div>
       <div class="modal-actions"><button class="btn-sm btn-primary" onclick="closeModal()">Entendido</button></div>`)
     return
   }
-  const esc=s=>(s||'').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
   openModal(`
-    <div class="modal-title">📦 Entrar a Dropi</div>
-    <div class="modal-sub">Dropi se abrió en otra pestaña. Copia y pega tus datos:</div>
-    <div class="dropi-cred-row">
-      <span class="lbl">Correo</span>
-      <span class="val">${esc(email)}</span>
-      <button class="btn-sm btn-primary" onclick="copiarTextoBtn('${esc(email)}',this)">📋 Copiar</button>
-    </div>
-    <div class="dropi-cred-row">
-      <span class="lbl">Contraseña</span>
-      <span class="val">${esc(pwd)}</span>
-      <button class="btn-sm btn-primary" onclick="copiarTextoBtn('${esc(pwd)}',this)">📋 Copiar</button>
-    </div>
-    <div style="font-size:12px;color:var(--muted);margin-top:10px">Copia el correo, pégalo en Dropi, vuelve aquí y copia la contraseña.</div>
+    <div class="modal-title">${titulo}</div>
+    <div class="modal-sub">${nombreApp} se abrió en otra pestaña. Copia el correo y la clave de la cuenta que necesites:</div>
+    ${window._credCuentasHtml(cuentas,nombreApp,url)}
+    <div style="font-size:12px;color:var(--muted);margin-top:6px">Copia el correo, pégalo en ${nombreApp}, vuelve aquí y copia la clave.</div>
     <div class="modal-actions"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>`)
+}
+
+// Vista admin: selector de auxiliar → muestra sus mismas cuentas (resuelve el bug de "no configurado")
+window._credPopupAdmin=async(tipo)=>{
+  const isDropi=tipo==='dropi'
+  const nombreApp=isDropi?'Dropi':'SellerChat'
+  const titulo=isDropi?'📦 Entrar a Dropi (admin)':'💬 Entrar a SellerChat (admin)'
+  let auxs=[]
+  try{
+    const{data}=await sb.from('usuarios').select('id,nombre,username,dropi_cuentas,sellerchat_cuentas,dropi_url,sellerchat_url,dropi_email,dropi_password').eq('rol','auxiliar').order('nombre')
+    auxs=data||[]
+  }catch(e){}
+  if(!auxs.length){
+    openModal(`<div class="modal-title">${titulo}</div><div class="modal-sub">No hay auxiliares creados.</div><div class="modal-actions"><button class="btn-sm btn-primary" onclick="closeModal()">Entendido</button></div>`)
+    return
+  }
+  window._credAdminData={tipo,auxs}
+  const opts=auxs.map((a,i)=>`<option value="${i}">${window._credEsc(a.nombre||a.username||'—')}</option>`).join('')
+  openModal(`
+    <div class="modal-title">${titulo}</div>
+    <div class="modal-sub">Elige de qué auxiliar quieres ver las cuentas:</div>
+    <div class="fld" style="margin-top:8px"><label>Auxiliar</label>
+      <select id="cred-admin-aux" onchange="_credAdminPick()"><option value="">— Selecciona —</option>${opts}</select>
+    </div>
+    <div id="cred-admin-body" style="margin-top:10px"></div>
+    <div class="modal-actions"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>`)
+}
+
+window._credAdminPick=()=>{
+  const d=window._credAdminData;if(!d)return
+  const sel=document.getElementById('cred-admin-aux'),body=document.getElementById('cred-admin-body')
+  if(!sel||!body)return
+  if(sel.value===''){body.innerHTML='';return}
+  const a=d.auxs[+sel.value],isDropi=d.tipo==='dropi',nombreApp=isDropi?'Dropi':'SellerChat'
+  const cuentas=window._credCuentasDe(a,isDropi)
+  const url=isDropi?(a.dropi_url||DROPI_LOGIN_URL):(a.sellerchat_url||'')
+  if(!cuentas.length){body.innerHTML=`<div class="alert alert-amber">Este auxiliar no tiene cuentas de ${nombreApp}.</div>`;return}
+  body.innerHTML=window._credCuentasHtml(cuentas,nombreApp,url)
 }
 
 // ════════ CONTEOS DE PENDIENTES + TABLERO "¿QUÉ HAGO HOY?" (auxiliar · solo lectura) ════════

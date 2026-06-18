@@ -5194,24 +5194,25 @@ function _parseFecha(s){
 }
 
 function _parseLineaAsignador(linea){
-  // Formato obligatorio: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_ANUNCIO, [carrier]
+  // Formato obligatorio: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_DROPI, ID_ANUNCIO, [carrier]
   const partes=linea.split(/[,;\t]/).map(p=>p.trim())
-  // Quitar partes vacías al final: para formato nuevo (8+) no bajar de 8, para viejo no bajar de 3
-  while(partes.length>8&&partes[partes.length-1]==='')partes.pop()
-  if(partes.length<=7)while(partes.length>3&&partes[partes.length-1]==='')partes.pop()
+  // Quitar partes vacías al final: para formato nuevo (9+) no bajar de 9, para viejo no bajar de 3
+  while(partes.length>9&&partes[partes.length-1]==='')partes.pop()
+  if(partes.length<=8)while(partes.length>3&&partes[partes.length-1]==='')partes.pop()
   const n=partes.length
   if(n===0)return{tipo:'vacio'}
-  if(n>=3&&n<=7){
+  if(n>=3&&n<=8){
     // Formato viejo o incompleto: faltan campos obligatorios
-    return{tipo:'invalido',campos:n,raw:linea,msg:'Faltan campos. Formato: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_ANUNCIO, [carrier]'}
+    return{tipo:'invalido',campos:n,raw:linea,msg:'Faltan campos. Formato: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_DROPI, ID_ANUNCIO, [carrier]'}
   }
-  if(n>=8&&n<=9){
-    // Formato nuevo: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_ANUNCIO, [carrier]
+  if(n>=9&&n<=10){
+    // Formato nuevo: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_DROPI, ID_ANUNCIO, [carrier]
     const ciudad=partes[0],qty=parseInt(partes[1])||1,dept=partes[2]
     const tel=partes[3].replace(/\D/g,''),fechaRaw=partes[4],producto=partes[5]
     const agente=partes[6]||''
-    const adId=partes[7]||''
-    const carrier=(n===9&&partes[8])?partes[8]:''
+    const idDropi=(partes[7]||'').trim()
+    const adId=partes[8]||''
+    const carrier=(n===10&&partes[9])?partes[9]:''
     const isI=carrier.toUpperCase().includes('INTERRAP')
     const errores=[]
     if(!ciudad)errores.push('CIUDAD')
@@ -5220,9 +5221,10 @@ function _parseLineaAsignador(linea){
     if(!tel||tel.length<7)errores.push('TELEFONO')
     if(!producto)errores.push('PRODUCTO')
     if(!agente)errores.push('AGENTE')
+    if(!idDropi)errores.push('ID_DROPI')
     const fechaIso=_parseFecha(fechaRaw)
     if(!fechaIso)errores.push('FECHA (use M/D/YYYY)')
-    return{tipo:'nuevo',ciudad,qty,dept,tel,fecha:fechaIso,fechaRaw,producto,agente,adId,isI,carrier,errores,raw:linea}
+    return{tipo:'nuevo',ciudad,qty,dept,tel,fecha:fechaIso,fechaRaw,producto,agente,idDropi,adId,isI,carrier,errores,raw:linea}
   }
   return{tipo:'invalido',campos:n,raw:linea}
 }
@@ -5271,8 +5273,54 @@ async function pageAuxAsignador(c){
     }
     const kwArray=[...allKw].sort()
     const kwArrayFull=[...allKwFull].sort()
-    const kwHtml=kwArray.length
-      ? kwArray.map(k=>`<span style="display:inline-block;padding:3px 9px;background:rgba(34,197,94,0.1);border:1px solid var(--green);color:var(--green);border-radius:14px;font-family:monospace;font-size:12px;margin:2px 4px 2px 0">🟢 ${k}</span>`).join('')
+    // Cargar agentes ACTIVOS por producto (para mostrarlos al lado de cada palabra reconocida)
+    const _prodAgentes={} // producto_id → [nombre, ...] (solo activos)
+    try{
+      const _prodIds=(productos||[]).map(p=>p.id).filter(Boolean)
+      if(_prodIds.length){
+        const{data:_relAg}=await sb.from('producto_agentes').select('producto_id,agente_id').in('producto_id',_prodIds)
+        const _agIds=[...new Set((_relAg||[]).map(r=>r.agente_id))]
+        const _agNombre={}
+        if(_agIds.length){
+          const{data:_agData}=await sb.from('agentes').select('id,nombre,activo').in('id',_agIds).eq('activo',true)
+          for(const a of (_agData||[]))_agNombre[a.id]=a.nombre
+        }
+        for(const r of (_relAg||[])){
+          const nom=_agNombre[r.agente_id]
+          if(!nom)continue // inactivo o inexistente → no se muestra
+          if(!_prodAgentes[r.producto_id])_prodAgentes[r.producto_id]=[]
+          _prodAgentes[r.producto_id].push(nom)
+        }
+      }
+    }catch(_){}
+    // Palabras visibles agrupadas POR PRODUCTO (misma regla de aliases_visibles de arriba) + sus agentes
+    const _palCubiertas=new Set()
+    const _prodPalabras=[]
+    for(const p of (productos||[])){
+      let _pals=[]
+      const _tieneVis=Array.isArray(p.aliases_visibles)&&p.aliases_visibles.length>0
+      if(_tieneVis){
+        _pals=p.aliases_visibles.filter(Boolean).map(a=>a.toLowerCase().trim())
+      }else{
+        const _als=Array.isArray(p.aliases)?p.aliases.filter(Boolean):[]
+        const _kws=p.keywords?p.keywords.split(',').map(k=>k.trim()).filter(Boolean):[]
+        _pals=[..._als.map(a=>a.toLowerCase().trim()),..._kws.map(k=>k.toLowerCase())]
+        if(!_als.length&&!_kws.length&&p.nombre)_pals=[p.nombre.toLowerCase().trim()]
+      }
+      _pals=[...new Set(_pals)]
+      _pals.forEach(w=>_palCubiertas.add(w))
+      if(!_pals.length)continue
+      _prodPalabras.push({nombre:p.nombre,palabras:_pals,agentes:(_prodAgentes[p.id]||[])})
+    }
+    _prodPalabras.sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||''))
+    // Palabras que el asignador reconoce pero NO pertenecen a un producto (ej: keywords de carriers) → se PRESERVAN, sin agentes
+    const _huerfanas=kwArray.filter(w=>!_palCubiertas.has(w))
+    const _chip=w=>`<span style="display:inline-block;padding:3px 9px;background:rgba(34,197,94,0.1);border:1px solid var(--green);color:var(--green);border-radius:14px;font-family:monospace;font-size:12px;margin:2px 4px 2px 0">🟢 ${w}</span>`
+    const _agChips=ags=>ags.length
+      ? ags.map(a=>`<span style="display:inline-block;padding:2px 8px;background:rgba(167,139,250,0.12);border:1px solid var(--purple,#A78BFA);color:var(--purple,#A78BFA);border-radius:12px;font-family:monospace;font-size:11.5px;margin:2px 3px 2px 0">🤖 ${a}</span>`).join('')
+      : '<span style="font-size:11px;color:var(--amber)">⚠️ sin agentes</span>'
+    const kwHtml=(_prodPalabras.length||_huerfanas.length)
+      ? `${_prodPalabras.map(pp=>`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--border)"><span style="display:inline-flex;flex-wrap:wrap;align-items:center">${pp.palabras.map(_chip).join('')}</span><span style="color:var(--muted);font-size:12px">→</span><span style="display:inline-flex;flex-wrap:wrap;align-items:center">${_agChips(pp.agentes)}</span></div>`).join('')}${_huerfanas.length?`<div style="padding:6px 0"><span style="font-size:11px;color:var(--muted)">Otras palabras reconocidas:</span> ${_huerfanas.map(_chip).join('')}</div>`:''}`
       : '<span style="color:var(--muted)">⚠️ No hay productos configurados. Configura productos con keywords en la sección Productos.</span>'
 
     // #7: lista de IDs de Dropi por producto (para que el auxiliar sepa qué cargar en Dropi)
@@ -5298,26 +5346,26 @@ async function pageAuxAsignador(c){
 
       ${modoHistorico?`<div class="alert alert-amber" style="margin-bottom:14px">⏳ <strong>Modo histórico activado.</strong> Puedes cargar datos de cualquier fecha sin restricción.</div>`:''}
 
-      <details style="margin-bottom:14px;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:10px 14px">
-        <summary style="cursor:pointer;font-size:13px;font-weight:700;color:var(--accent)">👀 ¿Cómo debe verse cada línea? (toca para ver un ejemplo)</summary>
+      <details open style="margin-bottom:14px;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:10px 14px">
+        <summary style="cursor:pointer;font-size:13px;font-weight:700;color:var(--accent)">👀 ¿Cómo debe verse cada línea? (toca para contraer)</summary>
         <div style="margin-top:10px;font-size:12.5px;line-height:1.7;color:var(--muted)">
           Cada línea es un pedido, con los datos separados por comas, en este orden:
           <div style="margin-top:8px;padding:10px;background:var(--card);border:1px solid var(--border);border-radius:8px;font-family:monospace;font-size:11.5px;overflow-x:auto">
-            <span style="color:#22C55E">MEDELLIN</span>, <span style="color:#F59E0B">2</span>, <span style="color:#3B82F6">ANTIOQUIA</span>, <span style="color:#A78BFA">3018022316</span>, <span style="color:#EC4899">5/17/2026</span>, <span style="color:#22C55E">Colageno</span>, <span style="color:#F59E0B">Neocell_X3_A1</span>, <span style="color:#3B82F6">120243626234290122</span>
+            <span style="color:#22C55E">MEDELLIN</span>, <span style="color:#F59E0B">2</span>, <span style="color:#3B82F6">ANTIOQUIA</span>, <span style="color:#A78BFA">3018022316</span>, <span style="color:#EC4899">5/17/2026</span>, <span style="color:#22C55E">Colageno</span>, <span style="color:#F59E0B">Neocell_X3_A1</span>, <span style="color:#06B6D4">2111472</span>, <span style="color:#3B82F6">120243626234290122</span>
           </div>
           <div style="margin-top:8px;font-size:11.5px">
-            <span style="color:#22C55E">Ciudad</span> · <span style="color:#F59E0B">Unidades</span> · <span style="color:#3B82F6">Departamento</span> · <span style="color:#A78BFA">Teléfono</span> · <span style="color:#EC4899">Fecha (M/D/AAAA)</span> · <span style="color:#22C55E">Producto</span> · <span style="color:#F59E0B">Agente</span> · <span style="color:#3B82F6">ID del anuncio</span>
+            <span style="color:#22C55E">Ciudad</span> · <span style="color:#F59E0B">Unidades</span> · <span style="color:#3B82F6">Departamento</span> · <span style="color:#A78BFA">Teléfono</span> · <span style="color:#EC4899">Fecha (M/D/AAAA)</span> · <span style="color:#22C55E">Producto</span> · <span style="color:#F59E0B">Agente</span> · <span style="color:#06B6D4">ID de Dropi</span> · <span style="color:#3B82F6">ID del anuncio</span>
           </div>
         </div>
       </details>
       <div class="card">
         <div style="font-size:12px;color:var(--muted);margin-bottom:8px">
-          <strong>Formato (1 línea por orden):</strong> <code>CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_ANUNCIO, [carrier]</code><br>
-          AGENTE = bot que generó la venta · ID_ANUNCIO vacío = orgánico · carrier opcional · fecha en formato M/D/YYYY${modoHistorico?'':'<br>📅 Fecha permitida: <strong>de hoy hasta 4 días atrás</strong>'}
+          <strong>Formato (1 línea por orden):</strong> <code>CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_DROPI, ID_ANUNCIO, [carrier]</code><br>
+          AGENTE = bot que generó la venta · ID_DROPI = número del producto en Dropi (obligatorio, debe coincidir) · ID_ANUNCIO vacío = orgánico · carrier opcional · fecha en formato M/D/YYYY${modoHistorico?'':'<br>📅 Fecha permitida: <strong>de hoy hasta 4 días atrás</strong>'}
         </div>
-        <textarea id="asign-input" placeholder="MEDELLIN, 2, ANTIOQUIA, 3018022316, 5/17/2026, Colageno, Neocell_X3_A1, 120243626234290122
-BOGOTA, 3, CUNDINAMARCA, 3018022317, 5/17/2026, Triflex, Triflex_X3_A1, ,
-CARTAGENA, 2, BOLIVAR, 3018022318, 5/17/2026, Colageno, Neocell_X3_A1, , INTERRAPIDISIMO" style="width:100%;min-height:140px;padding:10px;font-family:monospace;font-size:12px;border:1px solid var(--border);border-radius:8px;background:var(--card2);color:var(--text);resize:vertical"></textarea>
+        <textarea id="asign-input" placeholder="MEDELLIN, 2, ANTIOQUIA, 3018022316, 5/17/2026, Colageno, Neocell_X3_A1, 2111472, 120243626234290122
+BOGOTA, 3, CUNDINAMARCA, 3018022317, 5/17/2026, Triflex, Triflex_X3_A1, 2123836, ,
+CARTAGENA, 2, BOLIVAR, 3018022318, 5/17/2026, Colageno, Neocell_X3_A1, 2111472, , INTERRAPIDISIMO" style="width:100%;min-height:140px;padding:10px;font-family:monospace;font-size:12px;border:1px solid var(--border);border-radius:8px;background:var(--card2);color:var(--text);resize:vertical"></textarea>
         <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
           <button class="btn-sm btn-primary" onclick="procesarAsignador()">▶ Procesar y guardar</button>
           <button class="btn-sm btn-outline" onclick="limpiarAsignador()">Limpiar</button>
@@ -5407,7 +5455,7 @@ window.procesarAsignador=async()=>{
   const conErrores=[]
   parsed.forEach((p,i)=>{
     if(p.tipo==='nuevo'&&p.errores.length>0)conErrores.push({linea:i+1,raw:p.raw,faltan:p.errores})
-    else if(p.tipo==='invalido')conErrores.push({linea:i+1,raw:p.raw,faltan:[p.msg||`Número de campos inválido (${p.campos}). Formato: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_ANUNCIO, [carrier]`]})
+    else if(p.tipo==='invalido')conErrores.push({linea:i+1,raw:p.raw,faltan:[p.msg||`Número de campos inválido (${p.campos}). Formato: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_DROPI, ID_ANUNCIO, [carrier]`]})
   })
 
   // PASO 1.5: validar producto reconocido y fecha en rango
@@ -5521,6 +5569,31 @@ window.procesarAsignador=async()=>{
   if(erroresAgente.length>0){
     msg.innerHTML=`<div class="alert alert-red"><strong>❌ ${erroresAgente.length} línea(s) con errores de agente. Corrige antes de procesar:</strong><ul style="margin-top:6px;margin-left:14px;font-size:12px">
       ${erroresAgente.map(e=>`<li><strong>Línea ${e.linea}:</strong> ${e.faltan.join(', ')}<br><code style="font-size:10px;color:var(--muted)">${e.raw}</code></li>`).join('')}
+    </ul></div>`
+    return
+  }
+
+  // PASO 1.7 — Validar ID de Dropi: el ID escrito debe coincidir con el dropi_id ACTUAL del producto.
+  // Anclado al UUID interno del producto (_lineaProdId, resuelto por ad_id o por nombre): si el dropi_id
+  // cambia en Productos, esta validación SIEMPRE compara contra el valor de HOY y rechaza el viejo.
+  const erroresDropi=[]
+  parsed.forEach((p,i)=>{
+    if(p.tipo!=='nuevo'||p.errores.length>0)return
+    const pid=_lineaProdId[i]
+    if(!pid)return // producto no resuelto → ya lo capturan otras validaciones
+    const _prodD=productos.find(pp=>pp.id===pid)||{}
+    const _prodNombreD=_prodD.nombre||p.producto
+    const _dropiReal=String(_prodD.dropi_id||'').trim()
+    const _dropiEscrito=String(p.idDropi||'').trim()
+    if(!_dropiReal){
+      erroresDropi.push({linea:i+1,raw:p.raw,faltan:[`el producto "${_prodNombreD}" no tiene ID de Dropi configurado. Ponlo en Productos → tarjeta del producto → "🆔 ID de Dropi".`]})
+    }else if(_dropiEscrito!==_dropiReal){
+      erroresDropi.push({linea:i+1,raw:p.raw,faltan:[`ID de Dropi "${_dropiEscrito||'(vacío)'}" NO coincide con el del producto "${_prodNombreD}" (debe ser ${_dropiReal}).`]})
+    }
+  })
+  if(erroresDropi.length>0){
+    msg.innerHTML=`<div class="alert alert-red"><strong>❌ ${erroresDropi.length} línea(s) con ID de Dropi incorrecto. Corrige antes de procesar:</strong><ul style="margin-top:6px;margin-left:14px;font-size:12px">
+      ${erroresDropi.map(e=>`<li><strong>Línea ${e.linea}:</strong> ${e.faltan.join(', ')}<br><code style="font-size:10px;color:var(--muted)">${e.raw}</code></li>`).join('')}
     </ul></div>`
     return
   }
@@ -14788,7 +14861,12 @@ function _renderProductoCardResumen(data,ranking){
       const _on=window._rpIdCopiado&&window._rpIdCopiado(id)
       return`<button data-copyid="${_esc(id)}" onclick="event.stopPropagation();window._rpCopiarId('${_esc(id)}',this)" title="Copiar ${label}: ${_esc(id)} · Queda marcado en verde MIENTRAS estás aquí (al recargar se desmarca solo)" style="margin-left:6px;background:${_on?'var(--green-bg)':'rgba(255,255,255,.06)'};border:1px solid ${_on?'var(--green)':'var(--border)'};border-radius:5px;color:${_on?'var(--green)':'var(--muted)'};font-size:10px;padding:1px 7px;cursor:pointer;flex-shrink:0">${_on?'✅':'📋'}</button>`
     }
-    // ── NUEVO (Mejora 4): GRILLA DE MÉTRICAS con columnas de ancho FIJO ──
+    // NUEVO: chip del ID (ícono+número+botón copiar) que se marca/desmarca en VERDE COMPLETO al copiar.
+    // inner = el ícono+número con su propio estilo; el botón copiar va dentro del mismo chip.
+    const _idChip=(id,inner,label)=>{
+      const _on=window._rpIdCopiado&&window._rpIdCopiado(id)
+      return`<span data-idwrap="${_esc(id)}" style="display:inline-flex;align-items:center;border-radius:6px;padding:1px 3px 1px 5px;border:1px solid ${_on?'var(--green)':'transparent'};background:${_on?'var(--green-bg)':'transparent'}">${inner}${_btnCopy(id,label)}</span>`
+    }
     // Así cada fila y columna COINCIDEN: miras de arriba a abajo toda la columna de CPA Real
     // (o cualquiera) de una sola pasada. El contenedor hace scroll horizontal si no cabe.
     // REGLA DE COLOR: el semáforo 🟢🟡🔴 es EXCLUSIVO del CPA Real. Las demás métricas se
@@ -15038,7 +15116,7 @@ function _renderProductoCardResumen(data,ranking){
     // toda la columna de Presupuesto, Estado, Pausar, etc. de una sola pasada. Scroll horizontal si no cabe.
     // NUEVO: etiqueta corta del día para encabezados de columna (TRASANTIER no cabe en 66px)
     const _labCortoF=(lab)=>String(lab||'').replace('TRASANTIER','TRAS').replace('PERÍODO','PER.')
-    const _cwF={nom:330,acc:66,id:150,cp:34,est:120,alr:106,bud:120,dup:104,tog:90,dias:316,gto:96,cpa:102,ids:132,vids:84,vA:66,iA:66,vB:70,iB:70,vC:66,iC:66,iTot:64,vts:46}
+    const _cwF={nom:330,acc:66,id:188,cp:34,est:120,alr:106,bud:120,dup:104,tog:90,dias:316,gto:96,cpa:102,ids:132,vids:84,vA:66,iA:66,vB:70,iB:70,vC:66,iC:66,iTot:64,vts:46}
     // NUEVO (12jun26 · carriles de color): cada bloque de día tiene SU color para bajar por la columna
     // sin perderse — suave en las filas, MÁS intenso en encabezado y Σ TOTALES (misma familia de color).
     // HOY (morado) y el bloque TOTALES (dorado) llevan línea vertical gruesa que los separa del resto.
@@ -15067,9 +15145,8 @@ function _renderProductoCardResumen(data,ranking){
       [_cwF.iTot,'🆔 TOT','#fcd34d','Total de ventas por IDs del aux sumando los 4 días (hoy + '+_dias[1].lab+' + '+_dias[2].lab+' + '+_dias[3].lab+') — compáralo con 🛒 VTS de al lado','fitot','tot','l'],
       [_cwF.vts,'🛒 VTS','#e2e8f0','Ventas totales CONFIRMADAS Dropi de la campaña — las 🆔 de HOY no entran hasta que el cruce las confirme','fvtsc','tot','r'],
       [_cwF.bud,'💰 PRESUP.','#a5b4fc','Cambiar presupuesto (mismo modal de las cards)','budval'],
-      [_cwF.id,'🆔 ID','#fcd34d','ID de la campaña (cópialo con el botón 📋)'],
-      [_cwF.dup,'🔁 DUPLICAR','#c4b5fd','Duplicar la campaña COMPLETA a OTRAS cuentas publicitarias'],
-      [_cwF.cp,'📋','#94a3b8','Copiar el ID']
+      [_cwF.id,'🆔 ID · 📋','#fcd34d','ID de la campaña — toca el 📋 para copiarlo (queda en verde mientras estés aquí)'],
+      [_cwF.dup,'🔁 DUPLICAR','#c4b5fd','Duplicar la campaña COMPLETA a OTRAS cuentas publicitarias']
     ].map(h=>h[4]?`<span ${h[5]?`class="rp-laneh-${h[5]}" `:''}onclick="event.stopPropagation();window._rpFusionSort('${_cidF}','${h[4]}',this)" style="display:inline-block;width:${h[0]}px;flex-shrink:0;font-size:8.5px;font-weight:700;letter-spacing:.3px;color:${h[2]};white-space:nowrap;cursor:pointer;padding-right:6px;user-select:none${h[5]?`;background:${_laneHdF[h[5]]};${_laneEdgeF(h[5],h[6])}align-self:stretch;display:inline-flex;align-items:center`:''}" title="${h[3]} · CLIC: ordenar de mayor a menor · otro CLIC: de menor a mayor">${h[1]}<span class="rp-sort-arr" data-key="${h[4]}" style="color:var(--text)"></span></span>`:`<span ${h[5]?`class="rp-laneh-${h[5]}" `:''}style="display:inline-block;width:${h[0]}px;flex-shrink:0;font-size:8.5px;font-weight:700;letter-spacing:.3px;color:${h[2]};white-space:nowrap;cursor:help;padding-right:6px${h[5]?`;background:${_laneHdF[h[5]]};${_laneEdgeF(h[5],h[6])}align-self:stretch;display:inline-flex;align-items:center`:''}" title="${h[3]}">${h[1]}</span>`).join('')}</div>`
     const _campsF=_lista.map((F,i)=>{
       const _ccid=_cidF+'_c'+i
@@ -15118,7 +15195,8 @@ function _renderProductoCardResumen(data,ranking){
         const _hovAdJ=esFugaAd?` onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='.55'" title="🚨 Gastó y no vendió: bloque apagado a propósito para que el ojo se vaya a los verdes. Pasa el cursor para verlo completo."`:''
         const _badgeVendioAd=_vendioAd?`<span style="margin-left:6px;font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:var(--green-bg);color:var(--green);border:1px solid var(--green)" title="Este anuncio SÍ vendió en el período: ${A.count} venta${A.count===1?'':'s'}. Es de los buenos — míralo primero.">🏆 VENDIÓ</span>`:''
         return`<div${_hovAdJ} style="margin-top:6px;padding:6px 8px;background:${_bgAdJ};border-radius:5px;${_bordAdJ}">
-          <div style="display:flex;align-items:center;font-size:${_vendioAd?'12px':'11.5px'};color:${esFugaAd?'var(--amber)':'var(--muted)'}">${_dotAd}<span style="font-family:monospace${_vendioAd?';font-size:12.5px;font-weight:700;color:var(--text)':''}">🖼️ ${_esc(A.adId)}</span>${_btnCopy(A.adId,'ID del anuncio')}${_badgeVendioAd}${_pyBadgeAd}${_btnsAd}${_gastoTxt(A.gasto)}${esFugaAd?`<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap" title="Gastó plata en sus días y no vendió NADA. Pura fuga: revísalo o apágalo.">🚨 gastó y no vendió</span>`:_cpaPill(A.cpaT,'sm')}<span style="margin-left:auto;color:${esFugaAd?'var(--amber)':'var(--text)'};font-weight:700;padding-left:10px" title="Ventas totales del anuncio sumando sus días">${A.count}</span></div>
+          <div style="display:flex;align-items:center;font-size:${_vendioAd?'12px':'11.5px'};color:${esFugaAd?'var(--amber)':'var(--muted)'}">${_dotAd}${_idChip(A.adId,`<span style="font-family:monospace${_vendioAd?';font-size:12.5px;font-weight:700;color:var(--text)':''}">🖼️ ${_esc(A.adId)}</span>`,'ID del anuncio')}${_badgeVendioAd}${_pyBadgeAd}${_btnsAd}${_gastoTxt(A.gasto)}${esFugaAd?`<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap" title="Gastó plata en sus días y no vendió NADA. Pura fuga: revísalo o apágalo.">🚨 gastó y no vendió</span>`:_cpaPill(A.cpaT,'sm')}<span style="margin-left:auto;color:${esFugaAd?'var(--amber)':'var(--text)'};font-weight:700;padding-left:10px" title="Ventas totales del anuncio sumando sus días">${A.count}</span></div>
+          <div id="${_ccid}-adsetbox-${A.adId}" style="margin:1px 0 0 22px;font-size:9.5px;line-height:1.3"></div>
           <div style="margin:2px 0 0 14px;border-left:1px solid ${esFugaAd?'var(--amber)':'var(--border)'};padding-left:8px">${_metHeader(73)}${_dias.map((d,di)=>{const _pA=_dias.slice(di+1).find(dp=>A.dias[dp.k]);return _filaDia(d,A.dias[d.k],'sm',_metAdDe(d.k,A.adId),_idsAdDiaF(d.k,A.adId),_pA?{k:_pA.k,obj:A.dias[_pA.k],met:_metAdDe(_pA.k,A.adId),nIds:_idsAdDiaF(_pA.k,A.adId)}:null)}).join('')}${_filaTotal(A.count,A.gasto,A.cpaT,_aggMet(_dias.map(d=>_metAdDe(d.k,A.adId))),'sm',_splitCpaF(A.dias),_dias.reduce((s,d)=>s+_idsAdDiaF(d.k,A.adId),0),_idsAdDiaF('p',A.adId),_beTotF({p:_idsAdDiaF('p',A.adId),a:_idsAdDiaF('a',A.adId),b:_idsAdDiaF('b',A.adId),c:_idsAdDiaF('c',A.adId)}))}</div>
           <div id="${_ccid}-sem-${A.adId}" style="margin:4px 0 0 14px"></div>
         </div>`
@@ -15266,9 +15344,8 @@ function _renderProductoCardResumen(data,ranking){
           })()}
           ${_cF(_cwF.vts,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_vtsConfRow>0?'var(--text)':'var(--subtle)'};font-weight:700;line-height:1.15">${_vtsConfRow>0?_vtsConfRow:'—'}</span>${(F.gasto>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${(typeof window._nexoSemColor==='function')?window._nexoSemColor(Math.round(F.gasto/F.count),_beTotF({p:_idsCampDiaF('p',F.campId),a:_idsCampDiaF('a',F.campId),b:_idsCampDiaF('b',F.campId),c:_idsCampDiaF('c',F.campId)})):'var(--subtle)'}">🎯$${fmt(Math.round(F.gasto/F.count))}</span>`:''}</span>`,true,'Ventas totales CONFIRMADAS Dropi de la campaña sumando sus días — las 🆔 de HOY no entran hasta que el cruce las confirme (véelas en 🆔 VTS HOY) · 🎯 abajo: CPA total = gasto ÷ ventas',false,'tot','r')}
           ${_cF(_cwF.bud,_btnBudF)}
-          ${_cF(_cwF.id,`<span style="font-family:monospace;font-size:10.5px;color:var(--muted)">${_esc(F.campId)}</span>`,false,'ID de la campaña: '+_esc(F.campId))}
+          ${_cF(_cwF.id,_idChip(F.campId,`<span style="font-family:monospace;font-size:10.5px;color:var(--muted)">${_esc(F.campId)}</span>`,'ID de la campaña'),false,'ID de la campaña: '+_esc(F.campId),true)}
           ${_cF(_cwF.dup,_btnDupF)}
-          ${_cF(_cwF.cp,_btnCopy(F.campId,'ID de la campaña'))}
         </div>
         <div id="${_ccid}-sub" style="display:none;margin:3px 0 2px 16px;border-left:1px solid var(--border);padding-left:10px;overflow-x:auto;max-width:calc(100vw - 120px)">
           <div style="position:sticky;left:0;z-index:3;display:inline-flex;align-items:center;gap:8px;max-width:max-content;margin:5px 0 3px;padding:5px 10px;background:rgba(22,17,28,.97);border:1px solid var(--purple);border-radius:7px" title="Encabezado fijo: no se pierde al deslizar ➡️ — copia el ID desde aquí sin devolverte">
@@ -15401,7 +15478,7 @@ function _renderProductoCardResumen(data,ranking){
           ${_tdC(_cwF.iC,'ic',_tIc>0?_tIc:'—','#fcd34d','tras')}
           ${_tdC(_cwF.iTot,'itot',_tITot>0?'🆔 '+_tITot:'—','#fcd34d','tot','l')}
           ${_tdC(_cwF.vts,'vts',_tVtsConf>0?_tVtsConf:'—','var(--text)','tot','r')}
-          <span style="display:inline-block;width:${_cwF.bud+_cwF.id+_cwF.dup+_cwF.cp}px;flex-shrink:0"></span>
+          <span style="display:inline-block;width:${_cwF.bud+_cwF.id+_cwF.dup}px;flex-shrink:0"></span>
         </div>`
     }
     return`<div style="margin-top:10px;padding:12px 13px;background:rgba(0,0,0,.18);border-radius:8px;border-left:3px solid var(--purple)">
@@ -15426,6 +15503,9 @@ function _renderProductoCardResumen(data,ranking){
       ${_ctrlRango}
       ${_filtroRowF}
       <style>
+        .rp-fus-row{transition:background .08s}
+        .rp-fus-row:hover{background:rgba(124,92,250,.13)}
+        .rp-fus-row:hover [class*="rp-lane-"]{filter:brightness(1.4)}
         .rp-fus-sub:has(.rp-lane-hoy:hover,.rp-laneh-hoy:hover) .rp-lane-hoy{background:rgba(167,139,250,.15)!important}
         .rp-fus-sub:has(.rp-lane-ayer:hover,.rp-laneh-ayer:hover) .rp-lane-ayer{background:rgba(134,239,172,.12)!important}
         .rp-fus-sub:has(.rp-lane-antier:hover,.rp-laneh-antier:hover) .rp-lane-antier{background:rgba(125,211,252,.12)!important}
@@ -15737,6 +15817,13 @@ window._rpCopiarId=function(id,btn){
         b2.style.background=ahora?'var(--green-bg)':'rgba(255,255,255,.06)'
         b2.style.borderColor=ahora?'var(--green)':'var(--border)'
         b2.style.color=ahora?'var(--green)':'var(--muted)'
+      })
+    }catch(_){}
+    // NUEVO: marca/desmarca TODO el bloque del ID (chip ícono+número+botón), no solo el botón
+    try{
+      document.querySelectorAll(`[data-idwrap="${k}"]`).forEach(w=>{
+        w.style.background=ahora?'var(--green-bg)':'transparent'
+        w.style.borderColor=ahora?'var(--green)':'transparent'
       })
     }catch(_){}
   }catch(_){}
@@ -17753,6 +17840,25 @@ window._rpFusionSemLoad=async function(ccid){
     const _antierL=_d2(new Date(Date.now()-2*86400000))
     const _trasL=_d2(new Date(Date.now()-3*86400000))
     const metas=[String(reg.campId),...((reg.adIds||[]).map(String))]
+    // NUEVO: ID del ADSET (conjunto) de cada anuncio — se pinta debajo del ID del anuncio (mismo chip verde al copiar).
+    try{
+      const _adIdsF=(reg.adIds||[]).map(String)
+      if(_adIdsF.length){
+        const _adsetDe={}
+        for(let i=0;i<_adIdsF.length;i+=200){
+          const{data:_adR}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','ad').in('meta_id',_adIdsF.slice(i,i+200))
+          for(const a of (_adR||[]))if(a.parent_id)_adsetDe[String(a.meta_id)]=String(a.parent_id)
+        }
+        for(const adId of _adIdsF){
+          const box=document.getElementById(ccid+'-adsetbox-'+adId)
+          if(!box)continue
+          const asId=_adsetDe[adId]
+          if(!asId)continue
+          const _onAs=window._rpIdCopiado&&window._rpIdCopiado(asId)
+          box.innerHTML=`<span style="color:var(--subtle)">📦 Adset: </span><span data-idwrap="${asId}" style="display:inline-flex;align-items:center;border-radius:6px;padding:1px 3px 1px 5px;border:1px solid ${_onAs?'var(--green)':'transparent'};background:${_onAs?'var(--green-bg)':'transparent'}"><span style="font-family:monospace;color:var(--muted)">${asId}</span><button data-copyid="${asId}" onclick="event.stopPropagation();window._rpCopiarId('${asId}',this)" title="Copiar ID del adset: ${asId} · queda en verde mientras estés aquí" style="margin-left:6px;background:${_onAs?'var(--green-bg)':'rgba(255,255,255,.06)'};border:1px solid ${_onAs?'var(--green)':'var(--border)'};border-radius:5px;color:${_onAs?'var(--green)':'var(--muted)'};font-size:9.5px;padding:0px 6px;cursor:pointer">${_onAs?'✅':'📋'}</button></span>`
+        }
+      }
+    }catch(_){}
     let rows=[]
     // NUEVO (12jun26 · captura completa): traer también metricas_extra para el tooltip del desglose completo.
     // Blindaje: si la BD aún no tiene la columna, se reintenta sin ella (las tiras nunca se rompen).

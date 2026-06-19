@@ -6840,6 +6840,8 @@ async function pageAuxReservado(c){
       if(window._cancCache&&Array.isArray(window._cancCache.items)){window._cancCache.items=window._cancCache.items.filter(i=>String(i.id)!==String(_rid));if(typeof renderCancelados==='function')renderCancelados()}
       if(window._psfCache&&Array.isArray(window._psfCache.items)){window._psfCache.items=window._psfCache.items.filter(i=>String(i.id)!==String(_rid));if(typeof renderPendientesSinFecha==='function')renderPendientesSinFecha()}
     }catch(_){}
+    // Si era un CANCELADO recuperado con "Confirmar" → registrarlo en RESUELTAS HOY para poder deshacer
+    if(accion==='reactivar'&&estadoAnterior==='CANCELADO'&&typeof window._cancRegistrarResuelta==='function')window._cancRegistrarResuelta(m,'confirmado')
     if(typeof cargarPendientesConfirmacion==='function')cargarPendientesConfirmacion()
     if(typeof cargarPendientesSinFecha==='function')cargarPendientesSinFecha()
     if(typeof cargarCancelados==='function')cargarCancelados()
@@ -6964,6 +6966,8 @@ async function pageAuxReservado(c){
       if(window._cancCache&&Array.isArray(window._cancCache.items)){window._cancCache.items=window._cancCache.items.filter(i=>String(i.id)!==String(_rid));if(typeof renderCancelados==='function')renderCancelados()}
       if(window._psfCache&&Array.isArray(window._psfCache.items)){window._psfCache.items=window._psfCache.items.filter(i=>String(i.id)!==String(_rid));if(typeof renderPendientesSinFecha==='function')renderPendientesSinFecha()}
     }catch(_){}
+    // Si era un CANCELADO recuperado con "Agendar" → registrarlo en RESUELTAS HOY para poder deshacer
+    if(m.estado_final==='CANCELADO'&&typeof window._cancRegistrarResuelta==='function')window._cancRegistrarResuelta(m,'agendado',{programacionId:data?.id})
     setTimeout(()=>{
       // Refrescar lista de pendientes en la misma página
       if(typeof cargarPendientesConfirmacion==='function'){cargarPendientesConfirmacion()}
@@ -7428,7 +7432,7 @@ function renderPendientesConfirmacion(items,filtro){
   if(!el)return
   if(!items.length){
     const msg=filtro==='proximos'?'No hay pedidos para contactar en los próximos 2 días.':'Sin resultados para este filtro.'
-    el.innerHTML=`<div class="alert alert-blue">${msg}</div>`
+    el.innerHTML=`<div class="alert alert-blue">${msg}</div>`+(typeof _renderConfResueltas==='function'?_renderConfResueltas():'')
     return
   }
   const total=items.length
@@ -7527,6 +7531,7 @@ function renderPendientesConfirmacion(items,filtro){
       </div>
       ${conContactoHoyItems.map(renderCard).join('')}
     </div>`:''}
+    ${typeof _renderConfResueltas==='function'?_renderConfResueltas():''}
   `
 }
 
@@ -7768,7 +7773,7 @@ function renderCancelados(){
   const cache=window._cancCache||{items:[],limit:20}
   const items=cache.items||[]
   const limit=cache.limit||20
-  if(!items.length){el.innerHTML='<div class="alert alert-blue">No hay pedidos cancelados del cruce Dropi para recuperar.</div>';return}
+  if(!items.length){el.innerHTML='<div class="alert alert-blue">No hay pedidos cancelados del cruce Dropi para recuperar.</div>'+(typeof _renderCancResueltas==='function'?_renderCancResueltas():'');return}
   const total=items.length
   const visibles=items.slice(0,limit)
   const renderCard=(m)=>{
@@ -7916,6 +7921,7 @@ window.reCancelarPedido=async(mapeoId)=>{
   if(window._cancCache&&Array.isArray(window._cancCache.items)){
     window._cancCache.items=window._cancCache.items.filter(i=>String(i.id)!==String(mapeoId))
   }
+  if(typeof window._cancRegistrarResuelta==='function')window._cancRegistrarResuelta(m,'dijo_no')
   renderCancelados()
   setTimeout(()=>cargarCancelados(),500)
 }
@@ -8517,6 +8523,9 @@ window.aplicarResolucionPendiente=async(progId,nuevoEstado)=>{
   }).eq('id',progId)
   if(e1){if(msgEl)msgEl.innerHTML=`<div class="alert alert-red">${e1.message}</div>`;return}
   const estadoMapeo=nuevoEstado==='confirmado'?'CONFIRMADO':'CANCELADO'
+  // Leer el estado anterior del mapeo (para poder revertir con exactitud al deshacer)
+  let _estadoMapeoAnterior=null
+  try{const{data:_pm}=await sb.from('mapeos').select('estado_final').eq('id',item.mapeo_id).maybeSingle();_estadoMapeoAnterior=_pm?.estado_final||null}catch(_){}
   try{
     await sb.from('mapeos').update({estado_final:estadoMapeo}).eq('id',item.mapeo_id)
   }catch(_){}
@@ -8561,8 +8570,77 @@ window.aplicarResolucionPendiente=async(progId,nuevoEstado)=>{
       if(typeof renderPendientesConfirmacion==='function')renderPendientesConfirmacion(window._confCache.items,document.getElementById('conf-filtro')?.value||'proximos')
     }
   }catch(_){}
+  // Registrar en RESUELTAS HOY (Pendientes) para poder deshacer
+  if(typeof window._confRegistrarResuelta==='function')window._confRegistrarResuelta(item,nuevoEstado,{estadoMapeoAnterior:_estadoMapeoAnterior})
   closeModal()
   setTimeout(()=>cargarPendientesConfirmacion(),200)
+}
+
+// ════ RESUELTAS HOY (Pendientes con fecha) — registro de sesión + Deshacer con reversión en BD ════
+window._confResueltasHoy=window._confResueltasHoy||[]
+window._confRegistrarResuelta=(item,accion,extra)=>{
+  if(!item||!item.prog_id)return
+  try{
+    window._confResueltasHoy=(window._confResueltasHoy||[]).filter(r=>String(r.progId)!==String(item.prog_id))
+    window._confResueltasHoy.unshift(Object.assign({
+      progId:item.prog_id,accion:accion,cuando:Date.now(),
+      item:{prog_id:item.prog_id,mapeo_id:item.mapeo_id,telefono:item.telefono,nombre_cliente:item.nombre_cliente,producto:item.producto,cantidad:item.cantidad,ciudad:item.ciudad,carrier:item.carrier,fecha_compra:item.fecha_compra,fecha_envio_programada:item.fecha_envio_programada,nota:item.nota,dias_falta:item.dias_falta,envios_total:item.envios_total,envios_hoy:item.envios_hoy,ultimo_envio:item.ultimo_envio}
+    },extra||{}))
+    if(typeof renderPendientesConfirmacion==='function'&&window._confCache)renderPendientesConfirmacion(window._confCache.items||[],document.getElementById('conf-filtro')?.value||'proximos')
+  }catch(_){}
+}
+function _renderConfResueltas(){
+  const rh=window._confResueltasHoy||[]
+  if(!rh.length)return ''
+  const tagFor=(a)=>a==='confirmado'?['✅ Confirmado','var(--green)']:['❌ Cancelado','var(--red)']
+  const cards=rh.map(r=>{
+    const it=r.item;const[txt,col]=tagFor(r.accion)
+    return `<div class="card" style="margin-bottom:8px;border-left:3px solid var(--green)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="flex:1;min-width:200px">
+          <div style="font-size:14px;font-weight:600;font-family:monospace">${it.telefono||'—'}</div>
+          <div style="font-size:12.5px;color:var(--muted);margin-top:2px">${it.nombre_cliente||'—'} · <strong>${it.producto||'—'}</strong> ${it.cantidad?`(${it.cantidad}u)`:''}</div>
+          <span class="pill" style="background:${col}22;color:${col};border:1px solid ${col};font-size:11px;margin-top:6px;display:inline-block">${txt} · hoy</span>
+        </div>
+        <button class="btn-sm" onclick="_confDesmarcarResuelta('${it.prog_id}')" style="background:var(--card2);color:var(--text);border:1px solid var(--border);font-weight:700;padding:9px 13px">↩️ Deshacer</button>
+      </div>
+    </div>`
+  }).join('')
+  return `
+    <div style="margin-top:26px;margin-bottom:10px;font-size:13px;font-weight:800;letter-spacing:.04em;color:var(--green);display:flex;align-items:center;gap:8px">
+      <span style="width:9px;height:9px;border-radius:50%;background:var(--green)"></span>✅ RESUELTAS HOY (${rh.length})
+    </div>
+    <div class="alert" style="background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.25);font-size:11.5px;color:var(--muted);margin-bottom:10px">Lo que confirmaste o cancelaste hoy en esta sesión. <strong>↩️ Deshacer</strong> revierte y devuelve el pedido a la lista.</div>
+    ${cards}`
+}
+window._confDesmarcarResuelta=async(progId)=>{
+  const reg=(window._confResueltasHoy||[]).find(r=>String(r.progId)===String(progId))
+  if(!reg)return
+  const it=reg.item
+  const nombreAcc=reg.accion==='confirmado'?'Confirmar':'Cancelar'
+  if(!confirm(`¿Deshacer "${nombreAcc}" de ${it.nombre_cliente||it.telefono||''}?\n\nEl pedido vuelve a la lista de "Confirmar pedidos".`))return
+  try{
+    // Restaurar la programación a "programado" → el pedido vuelve a la lista
+    const{error:e1}=await sb.from('programaciones_envio').update({estado:'programado',updated_at:new Date().toISOString()}).eq('id',progId)
+    if(e1)throw e1
+    // Restaurar el estado del mapeo al que tenía antes de resolver
+    if(it.mapeo_id&&reg.estadoMapeoAnterior){
+      await sb.from('mapeos').update({estado_final:reg.estadoMapeoAnterior}).eq('id',it.mapeo_id)
+    }
+    if(it.mapeo_id){
+      await sb.from('mapeo_eventos').insert({mapeo_id:it.mapeo_id,evento:'resolucion_deshecha',fuente:'auxiliar_manual',usuario_id:me?.id||null,detalle:{revierte:reg.accion,programacion_id:progId,estado_restaurado:reg.estadoMapeoAnterior||null,desde_pagina:'pendientes_confirmacion'}})
+    }
+    logAction('pendiente_resolucion_deshecha',{prog_id:progId,mapeo_id:it.mapeo_id,accion:reg.accion,tel:it.telefono}).catch(()=>{})
+  }catch(e){alert('No se pudo deshacer: '+(e?.message||e));return}
+  window._confResueltasHoy=(window._confResueltasHoy||[]).filter(r=>String(r.progId)!==String(progId))
+  if(window._confCache&&Array.isArray(window._confCache.items)){
+    if(!window._confCache.items.some(i=>String(i.prog_id)===String(progId)))window._confCache.items.unshift(it)
+  }
+  if(typeof renderPendientesConfirmacion==='function')renderPendientesConfirmacion(window._confCache?.items||[],document.getElementById('conf-filtro')?.value||'proximos')
+  const t=document.createElement('div')
+  t.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--amber);color:#fff;padding:12px 18px;border-radius:8px;font-weight:600;z-index:9999;box-shadow:0 4px 14px rgba(0,0,0,.3)'
+  t.textContent='↩️ Deshecho · el pedido volvió a la lista'
+  document.body.appendChild(t);setTimeout(()=>t.remove(),2400)
 }
 
 

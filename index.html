@@ -397,6 +397,9 @@ tr:hover td{background:var(--card2)}
 .nx-tgrid-a>div:nth-child(12n+1){position:sticky;left:0;z-index:2;background:var(--card2)}
 /* NUEVO (12jun26 · carriles por día): hover sutil que ilumina la fila SIN cambiarle el fondo (respeta el ámbar de FUGA) */
 .nx-dia-row:hover{filter:brightness(1.28)}
+/* Feedback visual al dar clic en CUALQUIER botón — estilo A: borde blanco + brillo */
+.btn,.btn-sm,.btn-primary,.btn-green,.btn-blue,button{transition:box-shadow .13s ease,outline-color .1s ease,transform .09s ease,opacity .15s,background .12s,border-color .12s}
+.clicked{outline:3px solid #fff !important;outline-offset:1px !important;box-shadow:0 0 0 4px rgba(255,255,255,.28),0 0 18px rgba(255,255,255,.45) !important;transform:scale(.95) !important;position:relative;z-index:5}
 </style>
 </head>
 <body>
@@ -472,6 +475,14 @@ window.nfo=(color,tip)=>`<span class="nfo ${color||'n'}" onmouseenter="_nfoPlace
 document.addEventListener('click',e=>{if(!e.target.closest('.nfo'))document.querySelectorAll('.nfo.open').forEach(n=>n.classList.remove('open'))})
 // Al hacer scroll, cerrar los globos abiertos (evita que queden flotando descolocados)
 window.addEventListener('scroll',()=>document.querySelectorAll('.nfo.open').forEach(n=>n.classList.remove('open')),true)
+
+// Feedback visual al dar clic en CUALQUIER botón (estilo A: borde blanco + brillo · se quita solo a los 750ms)
+document.addEventListener('click',function(e){
+  const _b=e.target.closest('button')
+  if(!_b)return
+  _b.classList.remove('clicked');void _b.offsetWidth;_b.classList.add('clicked')
+  clearTimeout(_b._fxClick);_b._fxClick=setTimeout(()=>{_b.classList.remove('clicked')},750)
+},true)
 
 let me=null,productos=[],impersonating=null
 const currentRol=()=>impersonating?.rol||me?.rol
@@ -7814,6 +7825,7 @@ function renderCancelados(){
     </div>
     ${visibles.map(renderCard).join('')}
     ${controles}
+    ${typeof _renderCancResueltas==='function'?_renderCancResueltas():''}
   `
 }
 window.renderCancelados=renderCancelados
@@ -7906,6 +7918,81 @@ window.reCancelarPedido=async(mapeoId)=>{
   }
   renderCancelados()
   setTimeout(()=>cargarCancelados(),500)
+}
+
+// ════ RESUELTAS HOY (Cancelados) — registro de sesión + Deshacer con reversión en BD ════
+window._cancResueltasHoy=window._cancResueltasHoy||[]
+// Registra un pedido cancelado que se acaba de resolver (confirmado / agendado / dijo_no)
+window._cancRegistrarResuelta=(m,accion,extra)=>{
+  if(!m||!m.id)return
+  try{
+    window._cancResueltasHoy=(window._cancResueltasHoy||[]).filter(r=>String(r.id)!==String(m.id))
+    window._cancResueltasHoy.unshift(Object.assign({
+      id:m.id,accion:accion,cuando:Date.now(),
+      item:{id:m.id,telefono:m.telefono,nombre_cliente:m.nombre_cliente,producto:m.producto,producto_id:m.producto_id,cantidad:m.cantidad,ciudad:m.ciudad,transportadora:m.transportadora,precio_dropi:m.precio_dropi,fecha:m.fecha,fecha_dropi:m.fecha_dropi,estado_inicial:m.estado_inicial,estado_final:'CANCELADO',created_at:m.created_at,canc_envios:m.canc_envios||0,canc_envios_hoy:m.canc_envios_hoy||0,canc_ultimo:m.canc_ultimo||null}
+    },extra||{}))
+    if(typeof renderCancelados==='function')renderCancelados()
+  }catch(_){}
+}
+// HTML de la sección "RESUELTAS HOY" (se inyecta al final de renderCancelados)
+function _renderCancResueltas(){
+  const rh=window._cancResueltasHoy||[]
+  if(!rh.length)return ''
+  const tagFor=(a)=>a==='confirmado'?['✅ Confirmado','var(--green)']:a==='agendado'?['📅 Agendado','var(--blue)']:['🚫 Dijo que NO','var(--red)']
+  const cards=rh.map(r=>{
+    const it=r.item;const[txt,col]=tagFor(r.accion)
+    return `<div class="card" style="margin-bottom:8px;border-left:3px solid var(--green)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="flex:1;min-width:200px">
+          <div style="font-size:14px;font-weight:600;font-family:monospace">${it.telefono||'—'}</div>
+          <div style="font-size:12.5px;color:var(--muted);margin-top:2px">${it.nombre_cliente||'—'} · <strong>${it.producto||'—'}</strong> ${it.cantidad?`(${it.cantidad}u)`:''}</div>
+          <span class="pill" style="background:${col}22;color:${col};border:1px solid ${col};font-size:11px;margin-top:6px;display:inline-block">${txt} · hoy</span>
+        </div>
+        <button class="btn-sm" onclick="_cancDesmarcarResuelta('${it.id}')" style="background:var(--card2);color:var(--text);border:1px solid var(--border);font-weight:700;padding:9px 13px">↩️ Deshacer</button>
+      </div>
+    </div>`
+  }).join('')
+  return `
+    <div style="margin-top:26px;margin-bottom:10px;font-size:13px;font-weight:800;letter-spacing:.04em;color:var(--green);display:flex;align-items:center;gap:8px">
+      <span style="width:9px;height:9px;border-radius:50%;background:var(--green)"></span>✅ RESUELTAS HOY (${rh.length})
+    </div>
+    <div class="alert" style="background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.25);font-size:11.5px;color:var(--muted);margin-bottom:10px">Lo que resolviste hoy en esta sesión. <strong>↩️ Deshacer</strong> revierte la acción y devuelve el pedido a la lista.</div>
+    ${cards}`
+}
+// Deshacer (revierte en BD según la acción) y devuelve el pedido a Cancelados
+window._cancDesmarcarResuelta=async(id)=>{
+  const reg=(window._cancResueltasHoy||[]).find(r=>String(r.id)===String(id))
+  if(!reg)return
+  const m=reg.item
+  const nombreAcc=reg.accion==='confirmado'?'Confirmar':reg.accion==='agendado'?'Agendar':'Dijo NO'
+  if(!confirm(`¿Deshacer "${nombreAcc}" de ${m.nombre_cliente||m.telefono||''}?\n\nEl pedido vuelve a la lista de cancelados.`))return
+  try{
+    if(reg.accion==='dijo_no'){
+      const{error}=await sb.from('mapeo_eventos').delete().eq('mapeo_id',m.id).eq('evento','re_cancelado')
+      if(error)throw error
+    }else if(reg.accion==='confirmado'){
+      const{error}=await sb.from('mapeos').update({estado_final:'CANCELADO'}).eq('id',m.id)
+      if(error)throw error
+      await sb.from('mapeo_eventos').insert({mapeo_id:m.id,evento:'reactivado_deshecho',fuente:'auxiliar_manual',usuario_id:me?.id||null,detalle:{revierte:'confirmado',estado_nuevo:'CANCELADO',desde_pagina:'cancelados'}})
+    }else if(reg.accion==='agendado'){
+      if(reg.programacionId)await sb.from('programaciones_envio').update({estado:'cancelado',motivo:'Deshacer agendar (mismo día)',updated_at:new Date().toISOString()}).eq('id',reg.programacionId)
+      else await sb.from('programaciones_envio').update({estado:'cancelado',motivo:'Deshacer agendar (mismo día)',updated_at:new Date().toISOString()}).eq('mapeo_id',m.id).eq('estado','programado')
+      const{error}=await sb.from('mapeos').update({estado_final:'CANCELADO'}).eq('id',m.id)
+      if(error)throw error
+      await sb.from('mapeo_eventos').insert({mapeo_id:m.id,evento:'reactivado_deshecho',fuente:'auxiliar_manual',usuario_id:me?.id||null,detalle:{revierte:'agendado',estado_nuevo:'CANCELADO',desde_pagina:'cancelados'}})
+    }
+    logAction('canc_resuelta_deshecha',{mapeo_id:m.id,accion:reg.accion,tel:m.telefono}).catch(()=>{})
+  }catch(e){alert('No se pudo deshacer: '+(e?.message||e));return}
+  window._cancResueltasHoy=(window._cancResueltasHoy||[]).filter(r=>String(r.id)!==String(id))
+  if(window._cancCache&&Array.isArray(window._cancCache.items)){
+    if(!window._cancCache.items.some(i=>String(i.id)===String(m.id)))window._cancCache.items.unshift(m)
+    window._cancCache.items.sort((a,b)=>String(b.fecha||b.created_at||'').localeCompare(String(a.fecha||a.created_at||'')))
+  }
+  if(typeof renderCancelados==='function')renderCancelados()
+  const t=document.createElement('div')
+  t.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--amber);color:#fff;padding:12px 18px;border-radius:8px;font-weight:600;z-index:9999;box-shadow:0 4px 14px rgba(0,0,0,.3)'
+  t.textContent='↩️ Deshecho · el pedido volvió a la lista'
+  document.body.appendChild(t);setTimeout(()=>t.remove(),2400)
 }
 
 // ── ENVIAR MENSAJE A PENDIENTE SIN FECHA ─────────────────────────────────
@@ -8467,6 +8554,13 @@ window.aplicarResolucionPendiente=async(progId,nuevoEstado)=>{
     }catch(_){}
   }
 
+  // Update optimista: quitar el pedido de la lista AL INSTANTE (el cache de conf ya viene filtrado; el re-fetch solo confirma)
+  try{
+    if(window._confCache&&Array.isArray(window._confCache.items)){
+      window._confCache.items=window._confCache.items.filter(i=>String(i.prog_id)!==String(progId))
+      if(typeof renderPendientesConfirmacion==='function')renderPendientesConfirmacion(window._confCache.items,document.getElementById('conf-filtro')?.value||'proximos')
+    }
+  }catch(_){}
   closeModal()
   setTimeout(()=>cargarPendientesConfirmacion(),200)
 }
@@ -9084,21 +9178,39 @@ window.marcarResuelta=async(tel,ordenId)=>{
     })
     if(error){alert('Error marcando: '+error.message);return}
     logAction('novedad_marcada',{tel,orden_id:ordenId}).catch(()=>{})
+    // Update optimista: la novedad pasa a "resuelta" AL INSTANTE (el re-fetch de abajo solo confirma)
+    try{
+      const _m=((window._novCache&&window._novCache.items)||[]).find(i=>String(i.tel)===String(tel)&&String(i.orden_id||'')===String(ordenId||''))
+      if(_m){_m.resol={accion:'resuelta',usuario:me?.nombre||null,cuando:new Date().toISOString(),motivo:null};if(typeof renderNovedadesContent==='function')renderNovedadesContent(null,window._novCache.items)}
+    }catch(_){}
     cargarNovedadesPorFecha()
     cargarHistorialNovedades()
   }catch(e){alert('Error: '+e.message)}
 }
 
 window.desmarcarResuelta=async(tel,ordenId)=>{
-  const motivo=prompt('Motivo para desmarcar (obligatorio):')
-  if(!motivo||!motivo.trim()){alert('Motivo obligatorio para desmarcar.');return}
+  // ¿La resuelta es de HOY? → desmarcar directo, 1 clic, SIN pedir motivo (deshacer rápido del mismo día)
+  const _itNov=((window._novCache&&window._novCache.items)||[]).find(i=>String(i.tel)===String(tel)&&String(i.orden_id||'')===String(ordenId||''))
+  const _esHoyNov=_itNov&&_itNov.resol&&String(_itNov.resol.cuando||'').slice(0,10)===today()
+  let motivo
+  if(_esHoyNov){motivo='Deshacer rápido (mismo día)'}
+  else{
+    motivo=prompt('Motivo para desmarcar (obligatorio):')
+    if(!motivo||!motivo.trim()){alert('Motivo obligatorio para desmarcar.');return}
+    motivo=motivo.trim()
+  }
   try{
     const{error}=await sb.from('novedades_resoluciones').insert({
-      telefono:tel,orden_id:ordenId||null,accion:'desmarcada',motivo:motivo.trim(),
+      telefono:tel,orden_id:ordenId||null,accion:'desmarcada',motivo:motivo,
       usuario_id:me?.id||null,usuario_nombre:me?.nombre||null
     })
     if(error){alert('Error desmarcando: '+error.message);return}
-    logAction('novedad_desmarcada',{tel,orden_id:ordenId,motivo:motivo.trim()}).catch(()=>{})
+    logAction('novedad_desmarcada',{tel,orden_id:ordenId,motivo:motivo}).catch(()=>{})
+    // Update optimista: la novedad vuelve a pendiente AL INSTANTE
+    try{
+      const _m=((window._novCache&&window._novCache.items)||[]).find(i=>String(i.tel)===String(tel)&&String(i.orden_id||'')===String(ordenId||''))
+      if(_m){_m.resol={accion:'desmarcada',usuario:me?.nombre||null,cuando:new Date().toISOString(),motivo:motivo};if(typeof renderNovedadesContent==='function')renderNovedadesContent(null,window._novCache.items)}
+    }catch(_){}
     cargarNovedadesPorFecha()
     cargarHistorialNovedades()
   }catch(e){alert('Error: '+e.message)}
@@ -10068,6 +10180,8 @@ window.marcarReclameResuelta=async(tel,guia)=>{
     document.body.appendChild(toast)
     setTimeout(()=>toast.remove(),2200)
   }catch(e){alert('Error: '+e.message);return}
+  // Update optimista: el pedido pasa a "resuelta" AL INSTANTE (el re-fetch de abajo solo confirma)
+  try{m.resuelta=true;if(typeof renderReclameContent==='function')renderReclameContent(null,(window._reclameCache&&window._reclameCache.items)||[],(window._reclameCache&&window._reclameCache.arrastrados)||[])}catch(_){}
   setTimeout(()=>cargarReclamePorFecha(),400)
 }
 
@@ -10075,10 +10189,16 @@ window.desmarcarReclameResuelta=async(tel,guia)=>{
   const cache=window._reclameCache||{}
   const m=[...(cache.items||[]),...(cache.arrastrados||[])].find(i=>i.tel===tel&&(i.guia||'')===(guia||''))
   if(!m){alert('No se encontró el pedido');return}
-  const motivo=prompt('¿Por qué desmarcas esta resuelta? (obligatorio)')
-  if(motivo===null)return
-  const motivoTrim=(motivo||'').trim()
-  if(!motivoTrim){alert('Debes escribir un motivo');return}
+  // ¿La resuelta es de HOY? → desmarcar directo, 1 clic, SIN pedir motivo (deshacer rápido del mismo día)
+  const _esHoyRec=String(m.resueltaFecha||'').slice(0,10)===today()
+  let motivoTrim
+  if(_esHoyRec){motivoTrim='Deshacer rápido (mismo día)'}
+  else{
+    const motivo=prompt('¿Por qué desmarcas esta resuelta? (obligatorio)')
+    if(motivo===null)return
+    motivoTrim=(motivo||'').trim()
+    if(!motivoTrim){alert('Debes escribir un motivo');return}
+  }
   try{
     // Eliminar la marca (nivel_mensaje=99) más reciente para este telefono+guia
     let q=sb.from('reclame_envios').delete().eq('telefono',m.tel).eq('nivel_mensaje',99)
@@ -10093,6 +10213,8 @@ window.desmarcarReclameResuelta=async(tel,guia)=>{
     document.body.appendChild(toast)
     setTimeout(()=>toast.remove(),2200)
   }catch(e){alert('Error: '+e.message);return}
+  // Update optimista: el pedido vuelve al flujo AL INSTANTE (el re-fetch de abajo solo confirma)
+  try{m.resuelta=false;if(typeof renderReclameContent==='function')renderReclameContent(null,(window._reclameCache&&window._reclameCache.items)||[],(window._reclameCache&&window._reclameCache.arrastrados)||[])}catch(_){}
   setTimeout(()=>cargarReclamePorFecha(),400)
 }
 

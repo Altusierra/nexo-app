@@ -6823,6 +6823,12 @@ async function pageAuxReservado(c){
     // (no se reabre el buscador ni se salta arriba; queda justo donde iba).
     const _res=document.getElementById('res-result');if(_res)_res.innerHTML=''
     window._resOrden=null
+    // Update optimista: el pedido resuelto sale de las listas AL INSTANTE (el re-fetch de abajo solo confirma)
+    try{
+      const _rid=m.id
+      if(window._cancCache&&Array.isArray(window._cancCache.items)){window._cancCache.items=window._cancCache.items.filter(i=>String(i.id)!==String(_rid));if(typeof renderCancelados==='function')renderCancelados()}
+      if(window._psfCache&&Array.isArray(window._psfCache.items)){window._psfCache.items=window._psfCache.items.filter(i=>String(i.id)!==String(_rid));if(typeof renderPendientesSinFecha==='function')renderPendientesSinFecha()}
+    }catch(_){}
     if(typeof cargarPendientesConfirmacion==='function')cargarPendientesConfirmacion()
     if(typeof cargarPendientesSinFecha==='function')cargarPendientesSinFecha()
     if(typeof cargarCancelados==='function')cargarCancelados()
@@ -6941,6 +6947,12 @@ async function pageAuxReservado(c){
     // No se reabre el buscador (popup); el auxiliar queda donde iba. Solo se refrescan las listas.
     const _resP=document.getElementById('res-result');if(_resP)_resP.innerHTML=''
     window._resOrden=null
+    // Update optimista: el pedido programado sale de las listas AL INSTANTE (el re-fetch de abajo solo confirma)
+    try{
+      const _rid=m.id
+      if(window._cancCache&&Array.isArray(window._cancCache.items)){window._cancCache.items=window._cancCache.items.filter(i=>String(i.id)!==String(_rid));if(typeof renderCancelados==='function')renderCancelados()}
+      if(window._psfCache&&Array.isArray(window._psfCache.items)){window._psfCache.items=window._psfCache.items.filter(i=>String(i.id)!==String(_rid));if(typeof renderPendientesSinFecha==='function')renderPendientesSinFecha()}
+    }catch(_){}
     setTimeout(()=>{
       // Refrescar lista de pendientes en la misma página
       if(typeof cargarPendientesConfirmacion==='function'){cargarPendientesConfirmacion()}
@@ -7326,7 +7338,7 @@ async function cargarPendientesConfirmacion(){
   const el=document.getElementById('conf-content')
   if(!el)return
   const filtro=document.getElementById('conf-filtro')?.value||'proximos'
-  el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div>'
+  if(!(window._confCache&&window._confCache.items&&window._confCache.items.length))el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div>'
   try{
     const{data:progs,error}=await sb.from('programaciones_envio')
       .select('*').eq('estado','programado')
@@ -7514,7 +7526,7 @@ window._psfCache={items:[],limit:20}
 async function cargarPendientesSinFecha(){
   const el=document.getElementById('psf-content')
   if(!el)return
-  el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando pendientes...</div>'
+  if(!(window._psfCache&&window._psfCache.items&&window._psfCache.items.length))el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando pendientes...</div>'
   try{
     // 1) Traer mapeos con estado pendiente
     // Cualquiera de: estado_final IN ('PENDIENTE','PENDIENTE CONFIRMACION') OR estado_inicial='PENDIENTE CONFIRMACION'
@@ -7678,7 +7690,7 @@ window._cancCache={items:[],limit:20}
 async function cargarCancelados(){
   const el=document.getElementById('canc-content')
   if(!el)return
-  el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando cancelados...</div>'
+  if(!(window._cancCache&&window._cancCache.items&&window._cancCache.items.length))el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando cancelados...</div>'
   try{
     const hace90=_isoDate(new Date(Date.now()-90*24*60*60*1000))
     // 1) Cancelados de los últimos 90 días
@@ -8127,6 +8139,47 @@ function _pendColaRender(){
   const _enviosHoy=st.tipo==='canc'?(item.canc_envios_hoy||0):(esPsf?(item.psf_envios_hoy||0):(item.envios_hoy||0))
   const cupoLleno=_enviosHoy>=_cuotaModal
 
+  // ── Botones de acción rápida según la sección (resuelven el pedido y saltan al siguiente, sin recargar) ──
+  let accionesHTML=''
+  if(st.subform==='agendar'&&st.tipo==='canc'){
+    const _hoyA=new Date();const _minA=_isoDate(new Date(_hoyA.getTime()+86400000));const _sugA=_isoDate(new Date(_hoyA.getTime()+3*86400000))
+    accionesHTML=`<div class="card" style="padding:12px;border:1px solid var(--blue);margin-bottom:12px;text-align:left">
+      <div style="font-size:13px;font-weight:700;margin-bottom:8px;color:var(--blue)">📅 Agendar fecha de envío</div>
+      <input type="date" id="prog-fecha" value="${_sugA}" min="${_minA}" style="width:100%;font-size:14px;padding:9px;border-radius:8px;border:1px solid var(--border);background:var(--card2);color:var(--text);margin-bottom:8px;box-sizing:border-box">
+      <textarea id="prog-nota" rows="2" placeholder="Nota (opcional)" style="width:100%;resize:vertical;font-size:13px;padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--card2);color:var(--text);box-sizing:border-box"></textarea>
+      <div id="prog-modal-msg" style="margin-top:6px"></div>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button class="btn-sm btn-outline" onclick="_colaSubformCerrar()" style="flex:1">↩️ Volver</button>
+        <button class="btn-sm btn-primary" onclick="_colaCancAgendarGuardar()" style="flex:1;font-weight:700">📅 Guardar y siguiente ▶</button>
+      </div>
+    </div>`
+  }else if(st.subform==='cancelar'&&st.tipo==='conf'){
+    const _sugC=['Cliente se arrepintió','Cliente no responde','Precio muy alto','Ya tiene otro proveedor']
+    accionesHTML=`<div class="card" style="padding:12px;border:1px solid var(--red);margin-bottom:12px;text-align:left">
+      <div style="font-size:13px;font-weight:700;margin-bottom:8px;color:var(--red)">❌ Cancelar pedido</div>
+      <textarea id="conf-motivo" rows="2" placeholder="Motivo (obligatorio)" style="width:100%;resize:vertical;font-size:13px;padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--card2);color:var(--text);box-sizing:border-box"></textarea>
+      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:6px">
+        ${_sugC.map(s=>`<button class="btn-sm btn-outline" onclick="document.getElementById('conf-motivo').value='${s.replace(/'/g,"\\'")}'" style="padding:3px 8px;font-size:11px">${s}</button>`).join('')}
+      </div>
+      <div id="conf-modal-msg" style="margin-top:6px"></div>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button class="btn-sm btn-outline" onclick="_colaSubformCerrar()" style="flex:1">↩️ Volver</button>
+        <button class="btn-sm" onclick="_colaConfCancelarGuardar()" style="flex:1;background:rgba(239,68,68,.12);color:var(--red);border:1px solid var(--red);font-weight:700">🚫 Cancelar pedido</button>
+      </div>
+    </div>`
+  }else if(st.tipo==='canc'){
+    accionesHTML=`<div style="display:flex;gap:6px;margin-bottom:12px">
+      <button class="btn-sm btn-green" onclick="_colaCancConfirmar()" style="flex:1;font-weight:700;padding:11px 4px">✅ Confirmar</button>
+      <button class="btn-sm btn-primary" onclick="_colaSubformAbrir('agendar')" style="flex:1;font-weight:700;padding:11px 4px">📅 Agendar</button>
+      <button class="btn-sm" onclick="_colaCancNo()" style="flex:1;font-weight:700;padding:11px 4px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid var(--red)">🚫 Dijo NO</button>
+    </div>`
+  }else if(st.tipo==='conf'){
+    accionesHTML=`<div style="display:flex;gap:6px;margin-bottom:12px">
+      <button class="btn-sm btn-green" onclick="_colaConfConfirmar()" style="flex:1;font-weight:700;padding:11px 6px">✅ Confirmar</button>
+      <button class="btn-sm" onclick="_colaSubformAbrir('cancelar')" style="flex:1;font-weight:700;padding:11px 6px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid var(--red)">❌ Cancelar</button>
+    </div>`
+  }
+
   openModal(`<div style="max-width:440px;margin:0 auto;text-align:center">
     <div style="font-size:12px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin-bottom:4px">${tituloModo}</div>
     <div style="font-size:13px;font-weight:700;color:${acento};margin-bottom:6px">Pedido ${st.idx+1} de ${total} &nbsp; ${typeof _waPillHTML==='function'?_waPillHTML(st.tipo):''}</div>
@@ -8144,6 +8197,7 @@ function _pendColaRender(){
       ${btnEnviando?'⏳ Registrando...':(cupoLleno?`🚫 Ya tiene ${_cuotaModal}/${_cuotaModal} mensajes hoy`:`📩 Enviar ${etiqueta} y siguiente ▶`)}
     </button>
 
+    ${accionesHTML}
     <div style="display:flex;gap:6px;margin-bottom:8px">
       <input type="tel" inputmode="numeric" id="pend-cola-buscar" placeholder="🔍 Buscar teléfono…" style="flex:1;padding:9px 11px;border-radius:8px;border:1px solid var(--border);background:var(--card2);color:var(--text);font-size:13px" onkeydown="if(event.key==='Enter'){event.preventDefault();_pendColaSaltarATel(this.value)}">
       <button class="btn-sm btn-outline" onclick="_pendColaSaltarATel(document.getElementById('pend-cola-buscar').value)">Ir</button>
@@ -8207,6 +8261,99 @@ window._pendColaSalir=()=>{
   _pendColaPararTimer()
   window._pendColaState=null
   closeModal()
+}
+
+// ════ Acciones rápidas DENTRO del modo rápido (resuelven el pedido y saltan al siguiente, SIN recargar) ════
+window._colaSubformAbrir=(tipo)=>{
+  const st=window._pendColaState
+  if(!st)return
+  st.subform=tipo
+  _pendColaRender()
+}
+window._colaSubformCerrar=()=>{
+  const st=window._pendColaState
+  if(!st)return
+  st.subform=null
+  _pendColaRender()
+}
+function _colaAvanzarTrasResolver(){
+  const st=window._pendColaState
+  if(!st)return
+  st.subform=null
+  // Al quitar el item del cache, el siguiente pedido ocupa el mismo índice.
+  // El clamp de _pendColaRender evita pasarse del final (o muestra "cola terminada").
+  _pendColaRender()
+}
+// ── CANCELADOS · Confirmar (reactivar a CONFIRMADO) ──
+window._colaCancConfirmar=async()=>{
+  const st=window._pendColaState
+  if(!st||st.tipo!=='canc')return
+  const item=_pendColaItems('canc')[st.idx]
+  if(!item)return
+  window._resOrden=item
+  try{await aplicarCambioOrden('reactivar')}catch(e){console.warn('[cola canc] confirmar:',e?.message||e)}
+  if(window._cancCache&&Array.isArray(window._cancCache.items)){
+    window._cancCache.items=window._cancCache.items.filter(i=>String(i.id)!==String(item.id))
+  }
+  _colaAvanzarTrasResolver()
+}
+// ── CANCELADOS · Ya dijo que NO (re_cancelado, sale para siempre) ──
+window._colaCancNo=async()=>{
+  const st=window._pendColaState
+  if(!st||st.tipo!=='canc')return
+  const item=_pendColaItems('canc')[st.idx]
+  if(!item)return
+  try{await window.reCancelarPedido(item.id)}catch(e){console.warn('[cola canc] dijo no:',e?.message||e)}
+  // reCancelarPedido ya filtra _cancCache si el usuario confirmó el aviso.
+  _colaAvanzarTrasResolver()
+}
+// ── CANCELADOS · Agendar fecha (guarda desde el mini-form inline; reusa guardarFechaEnvio) ──
+window._colaCancAgendarGuardar=async()=>{
+  const st=window._pendColaState
+  if(!st||st.tipo!=='canc')return
+  const item=_pendColaItems('canc')[st.idx]
+  if(!item)return
+  const fecha=document.getElementById('prog-fecha')?.value
+  const msgEl=document.getElementById('prog-modal-msg')
+  if(!fecha){if(msgEl)msgEl.innerHTML='<div class="alert alert-red">Selecciona una fecha</div>';return}
+  const _h=new Date();_h.setHours(0,0,0,0)
+  if(new Date(fecha+'T00:00:00')<=_h){if(msgEl)msgEl.innerHTML='<div class="alert alert-red">La fecha debe ser futura</div>';return}
+  window._resOrden=item
+  try{await window.guardarFechaEnvio()}catch(e){console.warn('[cola canc] agendar:',e?.message||e)}
+  // guardarFechaEnvio cierra el modal SOLO si guardó bien. Si sigue abierto, hubo error → no avanzar.
+  if(document.getElementById('user-modal'))return
+  if(window._cancCache&&Array.isArray(window._cancCache.items)){
+    window._cancCache.items=window._cancCache.items.filter(i=>String(i.id)!==String(item.id))
+  }
+  _colaAvanzarTrasResolver()
+}
+// ── CONFIRMAR PEDIDOS · Confirmar ──
+window._colaConfConfirmar=async()=>{
+  const st=window._pendColaState
+  if(!st||st.tipo!=='conf')return
+  const item=_pendColaItems('conf')[st.idx]
+  if(!item)return
+  try{await window.aplicarResolucionPendiente(item.prog_id,'confirmado')}catch(e){console.warn('[cola conf] confirmar:',e?.message||e)}
+  if(window._confCache&&Array.isArray(window._confCache.items)){
+    window._confCache.items=window._confCache.items.filter(i=>i.prog_id!==item.prog_id)
+  }
+  _colaAvanzarTrasResolver()
+}
+// ── CONFIRMAR PEDIDOS · Cancelar (motivo desde el mini-form inline) ──
+window._colaConfCancelarGuardar=async()=>{
+  const st=window._pendColaState
+  if(!st||st.tipo!=='conf')return
+  const item=_pendColaItems('conf')[st.idx]
+  if(!item)return
+  const motivo=document.getElementById('conf-motivo')?.value?.trim()||''
+  const msgEl=document.getElementById('conf-modal-msg')
+  if(!motivo){if(msgEl)msgEl.innerHTML='<div class="alert alert-red">El motivo es obligatorio</div>';return}
+  try{await window.aplicarResolucionPendiente(item.prog_id,'cancelado')}catch(e){console.warn('[cola conf] cancelar:',e?.message||e)}
+  if(document.getElementById('user-modal'))return
+  if(window._confCache&&Array.isArray(window._confCache.items)){
+    window._confCache.items=window._confCache.items.filter(i=>i.prog_id!==item.prog_id)
+  }
+  _colaAvanzarTrasResolver()
 }
 
 window.confirmarPendiente=(progId)=>{
@@ -8441,7 +8588,7 @@ async function cargarNovedadesPorFecha(){
   const el=document.getElementById('nov-content')
   if(!el)return
   const fecha=document.getElementById('nov-fecha')?.value||today()
-  el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando novedades de '+fecha+'...</div>'
+  if(!(window._novCache&&window._novCache.fechaActiva===fecha&&window._novCache.items&&window._novCache.items.length))el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando novedades de '+fecha+'...</div>'
   try{
     const{data:rep}=await sb.from('novedades_reportes').select('*').eq('fecha_lote',fecha).maybeSingle()
     if(!rep){
@@ -9388,7 +9535,7 @@ async function cargarReclamePorFecha(){
   const el=document.getElementById('rec-content')
   if(!el)return
   const fecha=document.getElementById('rec-fecha')?.value||today()
-  el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando lote de '+fecha+'...</div>'
+  if(!(window._reclameCache&&window._reclameCache.fechaActiva===fecha&&window._reclameCache.items&&window._reclameCache.items.length))el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando lote de '+fecha+'...</div>'
   try{
     const{data:rep}=await sb.from('reclame_reportes').select('*').eq('fecha_lote',fecha).maybeSingle()
     if(!rep){

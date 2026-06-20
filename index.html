@@ -8645,7 +8645,7 @@ window._confDesmarcarResuelta=async(progId)=>{
 
 
 // ── NOVEDADES: Clasificador por protocolo ────────────────
-const NOV_RULES=[
+let NOV_RULES=[
   {pri:'URGENTE',tipo:'Se rehúsa / No pagará',keys:['rehusa','no pagara','no paga','rechaza','se niega','no quiere recibir','no recibe','devolver al remitente'],color:'var(--red)',bg:'var(--red-bg)',border:'#7f1d1d',idx:1},
   {pri:'URGENTE',tipo:'Coordinar entrega / Fija fecha',keys:['coordinar','fija fecha','programar','reprogramar','cambio de fecha','no estaba','visitas realizadas','coordinar la entrega','destinatario fija fecha','se visita','no se logra entrega','no se logra la entrega','visita no exitosa','intento de entrega fallido','no hay quien reciba','no hay quien resiva'],color:'var(--red)',bg:'var(--red-bg)',border:'#7f1d1d',idx:2},
   {pri:'URGENTE',tipo:'Pedido cancelado',keys:['cancelado','cancela','no lo pidio','no pidio','pedido cancelado'],color:'var(--red)',bg:'var(--red-bg)',border:'#7f1d1d',idx:3},
@@ -8664,7 +8664,7 @@ function clasificarNovedad(texto){
   return{pri:'NORMAL',tipo:'Otra novedad',color:'var(--muted)',bg:'var(--card2)',border:'var(--border)',idx:99}
 }
 
-const NOV_PROTO={
+let NOV_PROTO={
   1:{titulo:'Se rehúsa a recibir / No pagará',
     msg:`Buenos días/tardes, señor(a) [NOMBRE].\nLe escribo de [CARRIER] por su pedido de [PRODUCTO].\nEl transportador nos reportó una novedad con la entrega.\n¿Desea seguir con la entrega?\nSu pedido ya está listo y en camino a su dirección.\nQuedo pendiente de su respuesta para coordinar.`,
     resp:`CLIENTE CONTACTADO Y CONFIRMA QUE SÍ RECIBE.\nLLAMAR AL [TELÉFONO] AL LLEGAR.\nVA A PAGAR EN EFECTIVO.\n\nSI DICE QUE NO → ahí sí se autoriza la devolución.`},
@@ -8689,6 +8689,44 @@ const NOV_PROTO={
   8:{titulo:'Sin comunicación',
     msg:`Buenos días/tardes, señor(a) [NOMBRE].\nLe escribo de [CARRIER] por su pedido de [PRODUCTO].\nHemos intentado comunicarnos con usted para coordinar la entrega.\n¿Está disponible para recibirlo?\nEl transportador puede pasar cuando usted nos indique\nel horario que mejor le quede.`,
     resp:`INTENTAR ENTREGA EN: [DIRECCIÓN COMPLETA].\nLLAMAR AL [TELÉFONO] AL LLEGAR.\nSI NO CONTESTA: DEJAR AVISO Y REPROGRAMAR AL DÍA SIGUIENTE.\nNO DEVOLVER AÚN.`},
+}
+
+// ── Snapshots por defecto (respaldo si la tabla está vacía o falla) ──
+const NOV_RULES_DEFAULT=NOV_RULES.map(r=>({...r,keys:[...r.keys]}))
+const NOV_PROTO_DEFAULT=JSON.parse(JSON.stringify(NOV_PROTO))
+function _novPriColors(pri){
+  pri=String(pri||'NORMAL').toUpperCase()
+  if(pri==='URGENTE')return{color:'var(--red)',bg:'var(--red-bg)',border:'#7f1d1d'}
+  if(pri==='MEDIA')return{color:'var(--amber)',bg:'var(--amber-bg)',border:'#78350f'}
+  return{color:'var(--blue)',bg:'var(--blue-bg)',border:'#1e3a5f'}
+}
+function _novDefaults(){
+  return NOV_RULES_DEFAULT.map(r=>({
+    idx:r.idx, prioridad:r.pri, tipo:r.tipo,
+    keywords:(r.keys||[]).join(', '),
+    msg:(NOV_PROTO_DEFAULT[r.idx]||{}).msg||'',
+    resp:(NOV_PROTO_DEFAULT[r.idx]||{}).resp||'',
+    activo:true
+  }))
+}
+// Lee los protocolos de novedades desde Supabase y reconstruye NOV_RULES / NOV_PROTO.
+// Si la tabla está vacía o falla, deja los valores por defecto del código (cero riesgo).
+window._novProtoCargado=false
+async function cargarNovedadesProtocolos(force){
+  if(window._novProtoCargado&&!force)return
+  try{
+    const{data,error}=await sb.from('novedades_protocolos').select('*').order('idx',{ascending:true})
+    window._novProtoCargado=true
+    if(error||!data||!data.length){NOV_RULES=NOV_RULES_DEFAULT.map(r=>({...r,keys:[...r.keys]}));NOV_PROTO=JSON.parse(JSON.stringify(NOV_PROTO_DEFAULT));return}
+    const rules=[], proto={}
+    data.filter(r=>r.activo!==false).forEach(r=>{
+      const c=_novPriColors(r.prioridad)
+      const keys=String(r.keywords||'').split(',').map(k=>k.trim().toLowerCase()).filter(Boolean)
+      rules.push({pri:String(r.prioridad||'NORMAL').toUpperCase(),tipo:r.tipo||'Novedad',keys,color:c.color,bg:c.bg,border:c.border,idx:r.idx})
+      proto[r.idx]={titulo:r.tipo||'Novedad',msg:r.msg||'',resp:r.resp||''}
+    })
+    if(rules.length){NOV_RULES=rules;NOV_PROTO=proto}
+  }catch(e){window._novProtoCargado=true}
 }
 
 // ── AUXILIAR: NOVEDADES (con persistencia BD) ───────────
@@ -8749,6 +8787,7 @@ async function pageAuxNovedades(c){
     <div class="page-title" style="font-size:16px">📊 Historial de lotes</div>
     <div class="page-sub">Resoluciones por lote — todas las subidas históricas</div>
     <div id="nov-hist"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando historial...</div></div>`
+  await cargarNovedadesProtocolos()
   cargarNovedadesPorFecha()
   cargarHistorialNovedades()
 }
@@ -8820,7 +8859,7 @@ async function cargarNovedadesPorFecha(){
           contactCount++
         }
       }
-      const cat=NOV_RULES[(it.cat_idx||1)-1]||{pri:'NORMAL',tipo:it.tipo||'Otra novedad',color:'var(--muted)',bg:'var(--card2)',border:'var(--border)',idx:99}
+      const cat=NOV_RULES.find(r=>r.idx===(it.cat_idx||1))||{pri:'NORMAL',tipo:it.tipo||'Otra novedad',color:'var(--muted)',bg:'var(--card2)',border:'var(--border)',idx:99}
       let dias=it.dias_desde_novedad
       if(it.fecha_novedad){
         const p=it.fecha_novedad.split('-')
@@ -8971,6 +9010,7 @@ window.procesarNovedadesXlsx=async()=>{
   const msg=document.getElementById('nov-msg')
   if(!fileInput.files.length){msg.innerHTML='<div class="alert alert-red">Selecciona un archivo</div>';return}
   msg.innerHTML='<div class="alert alert-blue">Procesando novedades...</div>'
+  await cargarNovedadesProtocolos(true)
 
   try{
     const file=fileInput.files[0]
@@ -10925,7 +10965,7 @@ async function _auxFetchNovedad(tel){
       if(r.accion==='contactada'){if(!contact)contact={cuando:r.created_at,usuario:r.usuario_nombre}}
       else if(!resol){resol={accion:r.accion,usuario:r.usuario_nombre,cuando:r.created_at,motivo:r.motivo}}
     }
-    const cat=NOV_RULES[(it.cat_idx||1)-1]||{tipo:it.tipo||'Novedad',idx:it.cat_idx||99}
+    const cat=NOV_RULES.find(r=>r.idx===(it.cat_idx||1))||{tipo:it.tipo||'Novedad',idx:it.cat_idx||99}
     return{
       tel:it.telefono,orden_id:it.orden_id,nombre:it.cliente_nombre,
       carrier:it.carrier,direccion:it.direccion,producto:it.producto,
@@ -11289,7 +11329,7 @@ window.auxNovedadesHecho=async(force)=>{
     }
     let faltan=0
     for(const it of (items||[])){
-      const pri=it.prioridad||(NOV_RULES[(it.cat_idx||1)-1]?.pri)||'NORMAL'
+      const pri=it.prioridad||(NOV_RULES.find(r=>r.idx===(it.cat_idx||1))?.pri)||'NORMAL'
       if(pri!=='URGENTE')continue
       const k=(it.telefono||'')+'|'+(it.orden_id||'')
       const tsNov=_ts(it)
@@ -12304,8 +12344,10 @@ async function pageAdminTextos(c){
   c.innerHTML=`<div class="page-title">📝 Textos / Mensajes</div>
     <div class="page-sub">Edita los mensajes que se envían a los clientes y cuántos se mandan por día. Los cambios aplican cuando el auxiliar recarga la app.</div>
     <div id="txt-msg" style="margin-bottom:12px"></div>
-    <div id="txt-list"><div class="loading">Cargando...</div></div>`
+    <div id="txt-list"><div class="loading">Cargando...</div></div>
+    <div id="txt-novedades" style="margin-top:8px"></div>`
   cargarTextosAdmin()
+  cargarNovedadesAdmin()
 }
 
 async function cargarTextosAdmin(){
@@ -12406,6 +12448,132 @@ window.txtAgregarVariante=async(sec)=>{
   if(msg)msg.innerHTML='<div class="alert alert-green">✅ Variante agregada. Edítala y dale Guardar.</div>'
   logAction('textos_variante_agregada',{sec,idx:nuevoIdx}).catch(()=>{})
   cargarTextosAdmin()
+}
+
+// ── ADMIN · NOVEDADES (protocolos editables, tabla novedades_protocolos) ──
+function _novFilaDOM(idx){
+  const g=(s)=>document.getElementById(s)
+  const st=((window._novProtoState&&window._novProtoState.rows)||[]).find(r=>String(r.idx)===String(idx))||{}
+  const pri=g('nvp-'+idx+'-pri'), tipo=g('nvp-'+idx+'-tipo'), keys=g('nvp-'+idx+'-keys')
+  const m=g('nvp-'+idx+'-msg'), rp=g('nvp-'+idx+'-resp'), ac=g('nvp-'+idx+'-ac')
+  return {
+    idx:Number(idx),
+    prioridad: pri?pri.value:(st.prioridad||'NORMAL'),
+    tipo: tipo?tipo.value.trim():(st.tipo||''),
+    keywords: keys?keys.value.trim():(st.keywords||''),
+    msg: m?m.value:(st.msg||''),
+    resp: rp?rp.value:(st.resp||''),
+    activo: ac?ac.checked:(st.activo!==false)
+  }
+}
+window.novActualizarColor=(idx)=>{
+  const sel=document.getElementById('nvp-'+idx+'-pri'), card=document.getElementById('nvp-card-'+idx)
+  if(sel&&card)card.style.borderLeftColor=_novPriColors(sel.value).color
+}
+async function cargarNovedadesAdmin(){
+  const el=document.getElementById('txt-novedades')
+  if(!el)return
+  const esc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  const escAttr=(s)=>esc(s).replace(/"/g,'&quot;')
+  let rows, sembrado
+  try{
+    const{data,error}=await sb.from('novedades_protocolos').select('*').order('idx',{ascending:true})
+    if(error){el.innerHTML=`<div class="card" style="margin-bottom:18px"><div class="alert alert-red">Novedades: ${esc(error.message)}</div></div>`;return}
+    if(data&&data.length){rows=data;sembrado=true}else{rows=_novDefaults();sembrado=false}
+  }catch(e){rows=_novDefaults();sembrado=false}
+  window._novProtoState={rows,sembrado}
+  const phChips=['[NOMBRE]','[PRODUCTO]','[CARRIER]','[TELÉFONO]','[DIRECCIÓN COMPLETA]']
+    .map(p=>`<code style="background:var(--card2);border:1px solid var(--border);border-radius:5px;padding:1px 6px;font-size:11px;color:var(--accent)">${esc(p)}</code>`).join(' ')
+  const priSel=(idx,cur)=>`<select id="nvp-${idx}-pri" onchange="novActualizarColor('${idx}')" style="padding:7px 8px;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--text);font-size:12px;font-weight:700">`+
+    ['URGENTE','MEDIA','NORMAL'].map(p=>`<option ${String(cur||'').toUpperCase()===p?'selected':''}>${p}</option>`).join('')+`</select>`
+  const lbl='font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;display:block;margin:10px 0 4px'
+  const tx='width:100%;box-sizing:border-box;padding:8px 10px;font-family:monospace;font-size:12px;line-height:1.5;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--text);resize:vertical'
+  const tarjetas=rows.map(r=>{
+    const c=_novPriColors(r.prioridad)
+    return `<div id="nvp-card-${r.idx}" class="card" style="background:var(--card2);margin-bottom:12px;border-left:3px solid ${c.color};padding:12px">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+        <input type="text" id="nvp-${r.idx}-tipo" value="${escAttr(r.tipo)}" placeholder="Nombre del tipo" style="flex:1;min-width:160px;font-weight:700;padding:7px 10px;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--text);font-size:13px">
+        ${priSel(r.idx,r.prioridad)}
+        <label style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px;white-space:nowrap"><input type="checkbox" id="nvp-${r.idx}-ac" ${r.activo===false?'':'checked'}> activo</label>
+      </div>
+      <label style="${lbl}">🔑 Palabras clave (para auto-detectar · separadas por coma)</label>
+      <textarea id="nvp-${r.idx}-keys" style="${tx};min-height:46px">${esc(r.keywords)}</textarea>
+      <label style="${lbl}">💬 Mensaje al cliente</label>
+      <textarea id="nvp-${r.idx}-msg" style="${tx};min-height:108px">${esc(r.msg)}</textarea>
+      <label style="${lbl}">📋 Protocolo de respuesta (interno)</label>
+      <textarea id="nvp-${r.idx}-resp" style="${tx};min-height:92px">${esc(r.resp)}</textarea>
+      <div style="display:flex;gap:6px;margin-top:10px">
+        <button class="btn-sm btn-primary" onclick="novGuardarProto('${r.idx}')">💾 Guardar</button>
+        <button class="btn-sm btn-red" onclick="novEliminarProto('${r.idx}')">🗑️ Eliminar</button>
+      </div>
+    </div>`
+  }).join('')
+  el.innerHTML=`<div class="card" style="margin-bottom:18px">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">
+      <div style="font-size:15px;font-weight:800">⚠️ Novedades</div>
+      <div style="font-size:11px;color:var(--muted)">${rows.length} tipo(s)</div>
+    </div>
+    ${!sembrado?`<div class="alert alert-blue" style="margin-bottom:12px">Estos son los tipos de fábrica. Edita y dale <b>Guardar</b> para personalizarlos, o <b>Sembrar los ${rows.length}</b> para activarlos todos de una. <button class="btn-sm btn-outline" style="margin-left:6px" onclick="novSembrar()">📥 Sembrar los ${rows.length}</button></div>`:''}
+    <div style="font-size:11px;color:var(--muted);margin-bottom:14px">Etiquetas que puedes usar: ${phChips}</div>
+    ${tarjetas}
+    <button class="btn-sm btn-outline" onclick="novAgregarProto()">➕ Agregar novedad</button>
+  </div>`
+}
+window.novGuardarProto=async(idx)=>{
+  const msg=document.getElementById('txt-msg')
+  const fila=_novFilaDOM(idx)
+  if(!fila.tipo.trim()){if(msg)msg.innerHTML='<div class="alert alert-red">El nombre del tipo no puede estar vacío.</div>';return}
+  if(!fila.msg.trim()){if(msg)msg.innerHTML='<div class="alert alert-red">El mensaje al cliente no puede estar vacío.</div>';return}
+  let payload
+  if(window._novProtoState&&!window._novProtoState.sembrado){
+    payload=(window._novProtoState.rows||[]).map(r=>_novFilaDOM(r.idx))
+  }else{payload=[fila]}
+  const{error}=await sb.from('novedades_protocolos').upsert(payload,{onConflict:'idx'})
+  if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+  if(msg)msg.innerHTML='<div class="alert alert-green">✅ Novedad guardada. El auxiliar debe recargar para que aplique.</div>'
+  logAction('novedad_proto_editada',{idx:Number(idx)}).catch(()=>{})
+  await cargarNovedadesProtocolos(true)
+  cargarNovedadesAdmin()
+}
+window.novAgregarProto=async()=>{
+  const msg=document.getElementById('txt-msg')
+  const rows=(window._novProtoState&&window._novProtoState.rows)||[]
+  const nuevoIdx=rows.length?Math.max(...rows.map(r=>Number(r.idx)))+1:1
+  let payload=[]
+  if(window._novProtoState&&!window._novProtoState.sembrado){payload=rows.map(r=>_novFilaDOM(r.idx))}
+  payload.push({idx:nuevoIdx,prioridad:'NORMAL',tipo:'Nueva novedad',keywords:'',msg:'',resp:'',activo:true})
+  const{error}=await sb.from('novedades_protocolos').upsert(payload,{onConflict:'idx'})
+  if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+  if(msg)msg.innerHTML='<div class="alert alert-green">✅ Novedad agregada. Edítala (nombre, palabras clave y mensaje) y dale Guardar.</div>'
+  logAction('novedad_proto_agregada',{idx:nuevoIdx}).catch(()=>{})
+  await cargarNovedadesProtocolos(true)
+  cargarNovedadesAdmin()
+}
+window.novEliminarProto=async(idx)=>{
+  if(!confirm('¿Eliminar este tipo de novedad? Dejará de detectarse y de mostrar su protocolo.'))return
+  const msg=document.getElementById('txt-msg')
+  if(window._novProtoState&&!window._novProtoState.sembrado){
+    const payload=(window._novProtoState.rows||[]).filter(r=>String(r.idx)!==String(idx)).map(r=>_novFilaDOM(r.idx))
+    if(payload.length){const{error}=await sb.from('novedades_protocolos').upsert(payload,{onConflict:'idx'});if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}}
+  }else{
+    const{error}=await sb.from('novedades_protocolos').delete().eq('idx',Number(idx))
+    if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+  }
+  if(msg)msg.innerHTML='<div class="alert alert-green">✅ Novedad eliminada.</div>'
+  logAction('novedad_proto_eliminada',{idx:Number(idx)}).catch(()=>{})
+  await cargarNovedadesProtocolos(true)
+  cargarNovedadesAdmin()
+}
+window.novSembrar=async()=>{
+  const msg=document.getElementById('txt-msg')
+  const rows=(window._novProtoState&&window._novProtoState.rows)||[]
+  const payload=rows.map(r=>_novFilaDOM(r.idx))
+  const{error}=await sb.from('novedades_protocolos').upsert(payload,{onConflict:'idx'})
+  if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+  if(msg)msg.innerHTML='<div class="alert alert-green">✅ Tipos guardados. Ya puedes editarlos y agregar nuevos.</div>'
+  logAction('novedad_proto_sembrado',{n:payload.length}).catch(()=>{})
+  await cargarNovedadesProtocolos(true)
+  cargarNovedadesAdmin()
 }
 
 // ── AUXILIAR: SEGUIMIENTO DE ENTREGAS ─────────────────────

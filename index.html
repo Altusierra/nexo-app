@@ -8659,7 +8659,11 @@ function clasificarNovedad(texto){
   if(!texto)return{pri:'NORMAL',tipo:'Otra novedad',color:'var(--muted)',bg:'var(--card2)',border:'var(--border)',idx:99}
   const t=texto.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
   for(const r of NOV_RULES){
-    for(const k of r.keys){if(t.includes(k))return r}
+    const hit=(r.keys||[]).some(k=>k&&t.includes(k))
+    if(!hit)continue
+    const excl=r.excluir||[]
+    if(excl.length&&excl.some(x=>x&&t.includes(x)))continue
+    return r
   }
   return{pri:'NORMAL',tipo:'Otra novedad',color:'var(--muted)',bg:'var(--card2)',border:'var(--border)',idx:99}
 }
@@ -8704,6 +8708,7 @@ function _novDefaults(){
   return NOV_RULES_DEFAULT.map(r=>({
     idx:r.idx, prioridad:r.pri, tipo:r.tipo,
     keywords:(r.keys||[]).join(', '),
+    excluir:'',
     msg:(NOV_PROTO_DEFAULT[r.idx]||{}).msg||'',
     resp:(NOV_PROTO_DEFAULT[r.idx]||{}).resp||'',
     activo:true
@@ -8719,10 +8724,12 @@ async function cargarNovedadesProtocolos(force){
     window._novProtoCargado=true
     if(error||!data||!data.length){NOV_RULES=NOV_RULES_DEFAULT.map(r=>({...r,keys:[...r.keys]}));NOV_PROTO=JSON.parse(JSON.stringify(NOV_PROTO_DEFAULT));return}
     const rules=[], proto={}
+    const _norm=(s)=>String(s||'').split(',').map(k=>k.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')).filter(Boolean)
     data.filter(r=>r.activo!==false).forEach(r=>{
       const c=_novPriColors(r.prioridad)
-      const keys=String(r.keywords||'').split(',').map(k=>k.trim().toLowerCase()).filter(Boolean)
-      rules.push({pri:String(r.prioridad||'NORMAL').toUpperCase(),tipo:r.tipo||'Novedad',keys,color:c.color,bg:c.bg,border:c.border,idx:r.idx})
+      const keys=_norm(r.keywords)
+      const excluir=_norm(r.excluir)
+      rules.push({pri:String(r.prioridad||'NORMAL').toUpperCase(),tipo:r.tipo||'Novedad',keys,excluir,color:c.color,bg:c.bg,border:c.border,idx:r.idx})
       proto[r.idx]={titulo:r.tipo||'Novedad',msg:r.msg||'',resp:r.resp||''}
     })
     if(rules.length){NOV_RULES=rules;NOV_PROTO=proto}
@@ -12455,12 +12462,14 @@ function _novFilaDOM(idx){
   const g=(s)=>document.getElementById(s)
   const st=((window._novProtoState&&window._novProtoState.rows)||[]).find(r=>String(r.idx)===String(idx))||{}
   const pri=g('nvp-'+idx+'-pri'), tipo=g('nvp-'+idx+'-tipo'), keys=g('nvp-'+idx+'-keys')
+  const ex=g('nvp-'+idx+'-ex')
   const m=g('nvp-'+idx+'-msg'), rp=g('nvp-'+idx+'-resp'), ac=g('nvp-'+idx+'-ac')
   return {
     idx:Number(idx),
     prioridad: pri?pri.value:(st.prioridad||'NORMAL'),
     tipo: tipo?tipo.value.trim():(st.tipo||''),
     keywords: keys?keys.value.trim():(st.keywords||''),
+    excluir: ex?ex.value.trim():(st.excluir||''),
     msg: m?m.value:(st.msg||''),
     resp: rp?rp.value:(st.resp||''),
     activo: ac?ac.checked:(st.activo!==false)
@@ -12498,6 +12507,8 @@ async function cargarNovedadesAdmin(){
       </div>
       <label style="${lbl}">🔑 Palabras clave (para auto-detectar · separadas por coma)</label>
       <textarea id="nvp-${r.idx}-keys" style="${tx};min-height:46px">${esc(r.keywords)}</textarea>
+      <label style="${lbl}">🚫 No debe estar (excepciones · separadas por coma · opcional)</label>
+      <textarea id="nvp-${r.idx}-ex" placeholder="Si aparece alguna de estas palabras, NO se usa este tipo" style="${tx};min-height:40px">${esc(r.excluir||'')}</textarea>
       <label style="${lbl}">💬 Mensaje al cliente</label>
       <textarea id="nvp-${r.idx}-msg" style="${tx};min-height:108px">${esc(r.msg)}</textarea>
       <label style="${lbl}">📋 Protocolo de respuesta (interno)</label>
@@ -12541,7 +12552,7 @@ window.novAgregarProto=async()=>{
   const nuevoIdx=rows.length?Math.max(...rows.map(r=>Number(r.idx)))+1:1
   let payload=[]
   if(window._novProtoState&&!window._novProtoState.sembrado){payload=rows.map(r=>_novFilaDOM(r.idx))}
-  payload.push({idx:nuevoIdx,prioridad:'NORMAL',tipo:'Nueva novedad',keywords:'',msg:'',resp:'',activo:true})
+  payload.push({idx:nuevoIdx,prioridad:'NORMAL',tipo:'Nueva novedad',keywords:'',excluir:'',msg:'',resp:'',activo:true})
   const{error}=await sb.from('novedades_protocolos').upsert(payload,{onConflict:'idx'})
   if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
   if(msg)msg.innerHTML='<div class="alert alert-green">✅ Novedad agregada. Edítala (nombre, palabras clave y mensaje) y dale Guardar.</div>'

@@ -530,6 +530,11 @@ async function loadMe(uid){
     if(!dentroDeHorario(bData?.rol,bData?.hora_inicio,bData?.hora_fin)){console.warn('Fuera de horario');return false}
     me=data
     me.modo_historico=bData?.modo_historico||false
+    // Permiso "subir ventas de HOY" (solo auxiliar). Select aparte y tolerante: si la columna aún no existe, NO rompe el login.
+    try{
+      const{data:phData}=await sb.from('usuarios').select('permite_hoy').eq('id',data.id).maybeSingle()
+      me.permite_hoy=phData?.permite_hoy||false
+    }catch(_){me.permite_hoy=false}
     // Credenciales Dropi/SellerChat (solo auxiliar/admin las usan). Tolerante si las columnas aún no existen.
     try{
       const{data:dData}=await sb.from('usuarios').select('dropi_email,dropi_password,dropi_cuentas,sellerchat_cuentas,dropi_url,sellerchat_url').eq('id',data.id).maybeSingle()
@@ -4909,6 +4914,13 @@ window.modalUserEdit=(u)=>{
         </label>
         <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-left:24px">Activa esta opción solo cuando necesites cargar datos viejos. Desactiva al terminar.</div>
       </div>
+      <div class="fld" id="eu-permite-hoy-wrap" style="${u.rol==='auxiliar'?'':'display:none'}">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="eu-permite-hoy" ${u.permite_hoy?'checked':''}>
+          <span><strong>☀️ Permitir ventas de HOY</strong> — deja que el auxiliar suba en el Asignador las ventas del día de hoy (se SUMA a ayer y hasta 4 días atrás)</span>
+        </label>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-left:24px">Útil para despachar el mismo día (ej. sábado). NUNCA permite fechas futuras. Desactiva al terminar.</div>
+      </div>
       <div id="eu-dropi-wrap" style="${u.rol==='auxiliar'?'':'display:none'}">
         <div style="font-size:13px;font-weight:800;color:var(--text);margin:10px 0 6px">🔑 Acceso Dropi (para el botón rápido)</div>
         <div class="fld"><label>URL de Dropi (la pones tú · editable)</label><input type="text" id="eu-dropi-url" value="${(u.dropi_url||'').replace(/"/g,'&quot;')}" placeholder="https://app.dropi.co/auth/login" autocapitalize="off"></div>
@@ -4935,6 +4947,8 @@ window.modalUserEdit=(u)=>{
   if(rolSel)rolSel.addEventListener('change',()=>{
     const w=document.getElementById('eu-modo-hist-wrap')
     if(w)w.style.display=rolSel.value==='auxiliar'?'':'none'
+    const wph=document.getElementById('eu-permite-hoy-wrap')
+    if(wph)wph.style.display=rolSel.value==='auxiliar'?'':'none'
     const wd=document.getElementById('eu-dropi-wrap')
     if(wd)wd.style.display=rolSel.value==='auxiliar'?'':'none'
   })
@@ -4944,6 +4958,7 @@ window.doEditUser=async(user_id)=>{
   const get=id=>document.getElementById(id).value.trim()
   const usernameVal=get('eu-username').toLowerCase()
   const modoHistorico=document.getElementById('eu-modo-historico')?.checked||false
+  const permiteHoy=document.getElementById('eu-permite-hoy')?.checked||false
   // Campos que SÍ van a la Edge Function (sin modo_historico, que no está en su schema)
   const fields={
     nombre:get('eu-nombre'),
@@ -4965,6 +4980,11 @@ window.doEditUser=async(user_id)=>{
       btn.disabled=false;btn.textContent='Guardar cambios'
       return
     }
+    // 1b. Actualizar permite_hoy directo en la tabla (tolerante: si la columna no existe, solo avisa y NO bloquea el resto)
+    try{
+      const{error:phErr}=await sb.from('usuarios').update({permite_hoy:permiteHoy}).eq('id',user_id)
+      if(phErr)console.warn('No se guardó permite_hoy (¿falta la columna en usuarios?):',phErr.message)
+    }catch(e){console.warn('permite_hoy update excepción:',e)}
     // 2. Resto de campos vía Edge Function (toca Supabase Auth)
     const res=await callEdge('update_user',{user_id,fields})
     if(!res.ok){
@@ -4986,7 +5006,7 @@ window.doEditUser=async(user_id)=>{
       }).eq('id',user_id)
       if(dErr)console.warn('No se guardaron cuentas Dropi/SellerChat (¿faltan columnas?):',dErr.message)
     }catch(e){console.warn('Cuentas update excepción:',e)}
-    logAction('usuario_editado',{user_id,modo_historico:modoHistorico}).catch(()=>{})
+    logAction('usuario_editado',{user_id,modo_historico:modoHistorico,permite_hoy:permiteHoy}).catch(()=>{})
     closeModal();loadUsuarios()
   }catch(e){
     msg.innerHTML=`<div class="alert alert-red">Error inesperado: ${e.message}</div>`
@@ -5443,6 +5463,8 @@ async function pageAuxAsignador(c){
 
     // Verificar si está en modo histórico (admin permitió cargas viejas para este auxiliar)
     const modoHistorico=me?.modo_historico===true
+    // Permiso para subir ventas de HOY (admin lo activa para este auxiliar)
+    const permiteHoy=me?.permite_hoy===true
 
     document.getElementById('asign-content').innerHTML=`
       <div class="card" style="margin-bottom:14px">
@@ -5468,7 +5490,7 @@ async function pageAuxAsignador(c){
       <div class="card">
         <div style="font-size:12px;color:var(--muted);margin-bottom:8px">
           <strong>Formato (1 línea por orden):</strong> <code>CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_DROPI, ID_ANUNCIO, [carrier]</code><br>
-          AGENTE = bot que generó la venta · ID_DROPI = número del producto en Dropi (obligatorio, debe coincidir) · ID_ANUNCIO vacío = orgánico · carrier opcional · fecha en formato M/D/YYYY${modoHistorico?'':'<br>📅 Fecha permitida: <strong>de hoy hasta 4 días atrás</strong>'}
+          AGENTE = bot que generó la venta · ID_DROPI = número del producto en Dropi (obligatorio, debe coincidir) · ID_ANUNCIO vacío = orgánico · carrier opcional · fecha en formato M/D/YYYY${modoHistorico?'':(permiteHoy?'<br>☀️ <strong>Modo HOY activo:</strong> fecha permitida de <strong>HOY hasta 4 días atrás</strong>':'<br>📅 Fecha permitida: <strong>de hoy hasta 4 días atrás</strong>')}
         </div>
         <textarea id="asign-input" placeholder="MEDELLIN, 2, ANTIOQUIA, 3018022316, 5/17/2026, Colageno, Neocell_X3_A1, 2111472, 120243626234290122
 BOGOTA, 3, CUNDINAMARCA, 3018022317, 5/17/2026, Triflex, Triflex_X3_A1, 2123836, ,
@@ -5486,6 +5508,7 @@ CARTAGENA, 2, BOLIVAR, 3018022318, 5/17/2026, Colageno, Neocell_X3_A1, 2111472, 
     window._asignKw=kwArrayFull
     window._asignKwVisibles=kwArray
     window._asignModoHist=modoHistorico
+    window._asignPermiteHoy=permiteHoy
   }catch(e){
     document.getElementById('asign-content').innerHTML=`<div class="alert alert-red">Error cargando data del asignador: ${e.message}</div>`
   }
@@ -5572,6 +5595,7 @@ window.procesarAsignador=async()=>{
   // La lista correcta ya está armada en window._asignKwVisibles (construida en pageAuxAsignador).
   const kwList=window._asignKwVisibles||window._asignKw||[]
   const modoHistorico=window._asignModoHist===true
+  const permiteHoy=window._asignPermiteHoy===true
   const hoyStr=today()
   const limiteAtras=_isoDate(new Date(Date.now()-4*86400000))
   parsed.forEach((p,i)=>{
@@ -5594,7 +5618,7 @@ window.procesarAsignador=async()=>{
     if(!modoHistorico&&p.fecha){
       if(p.fecha>hoyStr){
         conErrores.push({linea:i+1,raw:p.raw,faltan:[`fecha ${p.fecha} es futura (máximo: ayer)`]})
-      }else if(p.fecha===hoyStr){
+      }else if(p.fecha===hoyStr&&!permiteHoy){
         conErrores.push({linea:i+1,raw:p.raw,faltan:[`fecha ${p.fecha} es de HOY · las ventas de hoy se suben mañana. Use fecha de ayer o anterior (hasta 4 días atrás)`]})
       }else if(p.fecha<limiteAtras){
         conErrores.push({linea:i+1,raw:p.raw,faltan:[`fecha ${p.fecha} es anterior al límite (mínimo: ${limiteAtras}, máximo 4 días atrás)`]})

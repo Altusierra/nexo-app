@@ -5499,11 +5499,20 @@ async function pageAuxAsignador(c){
       _pals=[...new Set(_pals)]
       _pals.forEach(w=>_palCubiertas.add(w))
       if(!_pals.length)continue
-      _prodPalabras.push({nombre:p.nombre,palabras:_pals,agentes:(_prodAgentes[p.id]||[]),dropi:String(p.dropi_id||'').trim()})
+      _prodPalabras.push({nombre:p.nombre,id:p.id,palabras:_pals,agentes:(_prodAgentes[p.id]||[]),dropi:String(p.dropi_id||'').trim()})
     }
     _prodPalabras.sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||''))
     // Palabras que el asignador reconoce pero NO pertenecen a un producto (ej: keywords de carriers) → se PRESERVAN, sin agentes
     const _huerfanas=kwArray.filter(w=>!_palCubiertas.has(w))
+    // Proveedores → mapa producto_id → {nombre, horas}. La hora de HOY se calcula según el día actual.
+    const _provByProd={}
+    try{
+      const{data:_provs}=await sb.from('proveedores').select('*')
+      for(const pv of (_provs||[])){
+        const _pids=Array.isArray(pv.product_ids)?pv.product_ids:[]
+        for(const _pid of _pids){if(!_provByProd[String(_pid)])_provByProd[String(_pid)]=pv}
+      }
+    }catch(_){}
     // copiar al portapapeles y marcar el chip en VERDE (queda así hasta recargar la página)
     window._copiarChip=function(el,txt){
       try{navigator.clipboard&&navigator.clipboard.writeText(txt)}catch(_){}
@@ -5518,8 +5527,20 @@ async function pageAuxAsignador(c){
     const _idChip=id=>id
       ? `<span onclick="_copiarChip(this,'${_esc(id)}')" title="Toca para copiar el ID de Dropi" style="cursor:pointer;display:inline-block;padding:2px 8px;background:rgba(239,68,68,0.12);border:1px solid #EF4444;color:#EF4444;border-radius:12px;font-family:monospace;font-size:11.5px;margin:2px 3px 2px 0">📦 ${id}</span>`
       : '<span style="font-size:11px;color:var(--muted)">📦 sin ID</span>'
+    // Hora "HH:MM" (24h) → "3:00 p.m." / "9:40 a.m."
+    const _hora12=(hhmm)=>{const _p=String(hhmm||'').split(':');let h=parseInt(_p[0]);const m=parseInt(_p[1]||'0');if(isNaN(h))return hhmm;const _ap=h>=12?'p.m.':'a.m.';let h12=h%12;if(h12===0)h12=12;return h12+':'+String(isNaN(m)?0:m).padStart(2,'0')+' '+_ap}
+    // Línea del proveedor de un producto, con la hora límite de HOY (día automático) y color por estado
+    const _lineaProvHoy=(pp)=>{
+      const pv=_provByProd[String(pp.id)]
+      if(!pv)return `<div style="display:inline-flex;align-items:center;gap:5px;margin-top:7px;padding:4px 10px;border-radius:8px;background:rgba(245,158,11,0.12);color:var(--amber);font-size:12px;font-weight:600">🚚 sin proveedor asignado</div>`
+      const _d=new Date().getDay() // 0=Dom · 1-5=Lun-Vie · 6=Sáb
+      const _hoy=_d===0?pv.hora_corte_dom:(_d===6?pv.hora_corte_sab:pv.hora_corte_lv)
+      const _lbl=_d===0?' (dom)':(_d===6?' (sáb)':'')
+      if(_hoy&&String(_hoy).trim())return `<div style="display:inline-flex;align-items:center;gap:5px;margin-top:7px;padding:4px 10px;border-radius:8px;background:rgba(34,197,94,0.12);color:var(--green);font-size:12px;font-weight:600">🚚 ${_esc(pv.nombre)} · ⏰ hoy${_lbl} hasta las ${_hora12(_hoy)}</div>`
+      return `<div style="display:inline-flex;align-items:center;gap:5px;margin-top:7px;padding:4px 10px;border-radius:8px;background:rgba(239,68,68,0.12);color:#EF4444;font-size:12px;font-weight:600">🚚 ${_esc(pv.nombre)} · ⏰ hoy${_lbl} cerrado</div>`
+    }
     const kwHtml=(_prodPalabras.length||_huerfanas.length)
-      ? `${_prodPalabras.map(pp=>`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--border)"><span style="display:inline-flex;flex-wrap:wrap;align-items:center">${pp.palabras.map(_chip).join('')}</span><span style="color:var(--muted);font-size:12px">→</span><span style="display:inline-flex;flex-wrap:wrap;align-items:center">${_agChips(pp.agentes)}</span><span style="color:var(--muted);font-size:12px">→</span><span style="display:inline-flex;flex-wrap:wrap;align-items:center">${_idChip(pp.dropi)}</span></div>`).join('')}${_huerfanas.length?`<div style="padding:6px 0"><span style="font-size:11px;color:var(--muted)">Otras palabras reconocidas:</span> ${_huerfanas.map(_chip).join('')}</div>`:''}`
+      ? `${_prodPalabras.map(pp=>`<div style="padding:8px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="display:inline-flex;flex-wrap:wrap;align-items:center">${pp.palabras.map(_chip).join('')}</span><span style="color:var(--muted);font-size:12px">→</span><span style="display:inline-flex;flex-wrap:wrap;align-items:center">${_agChips(pp.agentes)}</span><span style="color:var(--muted);font-size:12px">→</span><span style="display:inline-flex;flex-wrap:wrap;align-items:center">${_idChip(pp.dropi)}</span></div>${_lineaProvHoy(pp)}</div>`).join('')}${_huerfanas.length?`<div style="padding:6px 0"><span style="font-size:11px;color:var(--muted)">Otras palabras reconocidas:</span> ${_huerfanas.map(_chip).join('')}</div>`:''}`
       : '<span style="color:var(--muted)">⚠️ No hay productos configurados. Configura productos con keywords en la sección Productos.</span>'
 
     // #7: los IDs de Dropi ahora se muestran inline junto a cada producto (chip rojo arriba)

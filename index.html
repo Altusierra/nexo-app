@@ -1596,6 +1596,49 @@ async function loadDash(){
     return `<div style="margin-top:10px"><button onclick="window._dashToggleMat('${key}')" style="display:inline-flex;align-items:center;gap:6px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer" title="Ver de un vistazo cuánto aporta cada producto en cada estado">📊 Ver por producto <span id="matchev-${key}" style="font-size:10px">▾</span></button><div id="matbox-${key}" style="display:none;margin-top:10px;overflow-x:auto"><table style="width:100%;border-collapse:collapse;table-layout:fixed;font-size:12px;min-width:640px"><thead><tr style="border-bottom:1px solid var(--border)">${_th('26%','Producto','var(--muted)')}${_th('10%','Total','var(--muted)')}${_th('11%','Confirm.','var(--green)')}${_th('11%','Entreg.','var(--green)')}${_th('11%','Devuelt.','var(--red)')}${_th('10%','Cancel.','var(--red)')}${_th('10%','Pend.','var(--amber)')}${_th('11%','Conv.','var(--purple)')}</tr></thead><tbody>${_body}</tbody><tfoot>${_foot}</tfoot></table></div></div>`
   }
 
+  // NUEVO: tabla embudo por producto (Dropi) — cuadra con las cards de arriba (misma fuente y mismos buckets)
+  const _mkEmbudoProdDropiHTML=(arr,key)=>{
+    const mp={}
+    for(const m of (arr||[])){
+      const pn=resolveProdName(m.producto).nombre||m.producto||'Sin producto'
+      if(!mp[pn])mp[pn]={pn,total:0,canc:0,pconf:0,pend:0,ent:0,dev:0,fenvSum:0,fenvN:0,fenvCfg:0,fdpSum:0,fdpN:0,fdtSum:0,fdtN:0}
+      const P=mp[pn],_est=m.estado_final,_cat=DROPI_STATUS[_est]?.cat
+      P.total++
+      if(_est==='CANCELADO')P.canc++
+      else if(_est==='PENDIENTE CONFIRMACION'||!_est)P.pconf++
+      else if(_est==='PENDIENTE')P.pend++
+      if(_cat==='entregado'||_cat==='novedad_ok')P.ent++
+      else if(_cat==='devuelto')P.dev++
+      const _desp=!(_est==='CANCELADO'||_est==='PENDIENTE CONFIRMACION'||!_est||_est==='PENDIENTE')
+      const _prod=productos.find(p=>p.nombre===pn)||productos[0]||{}
+      const _env=m.flete_snapshot
+      // Flete envío REAL por orden (flete_snapshot ya viene sobreescrito por Dropi al importar). Marca si quedó en el valor config del producto (no real).
+      if(_desp&&_env!=null){P.fenvSum+=_env;P.fenvN++;if(_prod.flete_outbound!=null&&Number(_env)===Number(_prod.flete_outbound))P.fenvCfg++}
+      // Devolución: flete_dev_snapshot = ida+vuelta. Pura = ida+vuelta − envío. Solo cuenta si hay costo real de vuelta (dev>envío).
+      if(_cat==='devuelto'){const _dt=m.flete_dev_snapshot;if(_dt!=null&&_env!=null&&_dt>_env){P.fdtSum+=_dt;P.fdtN++;P.fdpSum+=(_dt-_env);P.fdpN++}}
+    }
+    const _fl=Object.values(mp).filter(f=>f.total>0).sort((a,b)=>b.total-a.total)
+    if(!_fl.length)return ''
+    const _e=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    const _p=(a,b)=>{if(!b)return '0%';const v=Math.round(a/b*1000)/10;return (v%1===0?v.toFixed(0):v.toFixed(1))+'%'}
+    const _BG='rgba(56,139,222,.14)'
+    const _c=(v,col)=>`<td style="text-align:center;padding:7px 7px;font-variant-numeric:tabular-nums;color:${v>0?(col||'var(--text)'):'var(--subtle)'}">${v}</td>`
+    const _cp=s=>`<td style="text-align:center;padding:7px 7px;font-variant-numeric:tabular-nums;color:var(--muted)">${s}</td>`
+    const _hl=s=>`<td style="text-align:center;padding:7px 7px;font-variant-numeric:tabular-nums;background:${_BG};color:var(--blue);font-weight:700">${s}</td>`
+    const _cf=v=>`<td style="text-align:center;padding:7px 7px;font-variant-numeric:tabular-nums;color:${v?'var(--text)':'var(--subtle)'}">${v?('$'+fmt(v)):'—'}</td>`
+    const _cfenv=(v,cfg,n)=>{if(!v)return `<td style="text-align:center;padding:7px 7px;color:var(--subtle)">—</td>`;const _r=cfg>0,_t=_r?(cfg+' de '+n+' órdenes usan el flete del sistema (config), no el real de Dropi'):('Las '+n+' órdenes usan flete real de Dropi');return `<td title="${_t}" style="text-align:center;padding:7px 7px;font-variant-numeric:tabular-nums;cursor:help;color:${_r?'var(--red)':'var(--text)'}">$${fmt(v)}${_r?' ⚠':''}</td>`}
+    const _body=_fl.map(f=>{const desp=f.total-f.canc-f.pconf-f.pend,encam=desp-f.ent-f.dev,fin=f.ent+f.dev,fenv=f.fenvN?Math.round(f.fenvSum/f.fenvN):0,fdp=f.fdpN?Math.round(f.fdpSum/f.fdpN):0,fdt=f.fdtN?Math.round(f.fdtSum/f.fdtN):0;return `<tr style="border-bottom:1px solid var(--border)"><td style="text-align:left;padding:7px 10px;color:var(--text);white-space:nowrap" title="${_e(f.pn)}">${_e(f.pn)}</td>`+_c(f.total,'var(--text)')+_c(f.canc,'var(--red)')+_cp(_p(f.canc,f.total))+_c(f.pconf,'var(--amber)')+_cp(_p(f.pconf,f.total))+_c(f.pend,'var(--amber)')+_hl(_p(f.pend,f.total))+_c(desp,'var(--text)')+_c(encam,'var(--blue)')+_hl(_p(encam,desp))+_c(f.ent,'var(--green)')+_cp(_p(f.ent,fin))+_c(f.dev,'var(--red)')+_cp(_p(f.dev,fin))+_hl(fin+' · '+_p(fin,desp))+_cfenv(fenv,f.fenvCfg,f.fenvN)+_cf(fdp)+_cf(fdt)+`</tr>`}).join('')
+    const T=_fl.reduce((a,f)=>{a.total+=f.total;a.canc+=f.canc;a.pconf+=f.pconf;a.pend+=f.pend;a.ent+=f.ent;a.dev+=f.dev;a.fenvSum+=f.fenvSum;a.fenvN+=f.fenvN;a.fenvCfg+=f.fenvCfg;a.fdpSum+=f.fdpSum;a.fdpN+=f.fdpN;a.fdtSum+=f.fdtSum;a.fdtN+=f.fdtN;return a},{total:0,canc:0,pconf:0,pend:0,ent:0,dev:0,fenvSum:0,fenvN:0,fenvCfg:0,fdpSum:0,fdpN:0,fdtSum:0,fdtN:0})
+    const Td=T.total-T.canc-T.pconf-T.pend,Tcam=Td-T.ent-T.dev,Tfin=T.ent+T.dev,Tfenv=T.fenvN?Math.round(T.fenvSum/T.fenvN):0,Tfdp=T.fdpN?Math.round(T.fdpSum/T.fdpN):0,Tfdt=T.fdtN?Math.round(T.fdtSum/T.fdtN):0
+    const _ft=(v,col)=>`<td style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;color:${col||'var(--text)'}">${v}</td>`
+    const _fthl=s=>`<td style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;background:${_BG};color:var(--blue)">${s}</td>`
+    const _ftenv=(v,cfg,n)=>{if(!v)return `<td style="text-align:center;padding:8px 7px;font-weight:700;color:var(--subtle)">—</td>`;const _r=cfg>0,_t=_r?(cfg+' de '+n+' usan flete del sistema (config), no real de Dropi'):('Las '+n+' usan flete real');return `<td title="${_t}" style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;cursor:help;color:${_r?'var(--red)':'var(--text)'}">$${fmt(v)}${_r?' ⚠':''}</td>`}
+    const _foot=`<tr style="border-top:1px solid var(--border)"><td style="text-align:left;padding:8px 10px;font-weight:700;color:var(--text)">Total</td>`+_ft(T.total)+_ft(T.canc)+_ft(_p(T.canc,T.total),'var(--muted)')+_ft(T.pconf)+_ft(_p(T.pconf,T.total),'var(--muted)')+_ft(T.pend)+_fthl(_p(T.pend,T.total))+_ft(Td)+_ft(Tcam)+_fthl(_p(Tcam,Td))+_ft(T.ent)+_ft(_p(T.ent,Tfin),'var(--muted)')+_ft(T.dev)+_ft(_p(T.dev,Tfin),'var(--muted)')+_fthl(Tfin+' · '+_p(Tfin,Td))+_ftenv(Tfenv,T.fenvCfg,T.fenvN)+_ft(Tfdp?('$'+fmt(Tfdp)):'—')+_ft(Tfdt?('$'+fmt(Tfdt)):'—')+`</tr>`
+    const _th=(t,c,hl)=>`<th style="text-align:${t==='Producto'?'left':'center'};padding:7px 7px;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;white-space:nowrap;${hl?('background:'+_BG+';color:var(--blue)'):('color:'+(c||'var(--muted)'))}">${t}</th>`
+    const _head=_th('Producto')+_th('Total')+_th('Canc','var(--red)')+_th('%Canc')+_th('P.conf','var(--amber)')+_th('%P.conf')+_th('Pend','var(--amber)')+_th('%Pend',null,true)+_th('Desp')+_th('En cam','var(--blue)')+_th('%cam',null,true)+_th('Entr','var(--green)')+_th('%Ent')+_th('Dev','var(--red)')+_th('%Dev')+_th('Final',null,true)+_th('Flete env')+_th('Flete dev')+_th('Flete dev total')
+    return `<div style="margin-top:10px"><button onclick="window._dashToggleMat('${key}')" style="display:inline-flex;align-items:center;gap:6px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer" title="Embudo por producto · cuadra con las tarjetas de arriba">📊 Ver por producto <span id="matchev-${key}" style="font-size:10px">▾</span></button><div id="matbox-${key}" style="display:none;margin-top:10px;overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;min-width:1280px;width:100%"><thead><tr style="border-bottom:1px solid var(--border)">${_head}</tr></thead><tbody>${_body}</tbody><tfoot>${_foot}</tfoot></table></div></div>`
+  }
+
   // RENDER: 3 bloques agrupados (Ventas/Órdenes, Gastos, Eficiencia)
   // RENDER: Ventas y órdenes DROPI (por fecha_dropi)
   const _bloqueVentasDropiHTML=`
@@ -1639,7 +1682,7 @@ async function loadDash(){
     <div id="dashdet-devD" style="display:none"></div>
     <div id="dashdet-cancD" style="display:none"></div>
     <div id="dashdet-pendD" style="display:none"></div>
-    ${_mkMatProdHTML(_prodMatD,'dropi')}
+    ${_mkEmbudoProdDropiHTML(mapeosDropi,'dropi')}
     <input type="file" id="dash-fantasmas-file" accept=".xlsx,.xls" style="display:none" onchange="auditarFantasmasDropi()">
     <div id="dash-fantasmas-result" style="margin-top:12px"></div>`
 

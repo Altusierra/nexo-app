@@ -16435,7 +16435,7 @@ function _renderProductoCardResumen(data,ranking){
     // toda la columna de Presupuesto, Estado, Pausar, etc. de una sola pasada. Scroll horizontal si no cabe.
     // NUEVO: etiqueta corta del día para encabezados de columna (TRASANTIER no cabe en 66px)
     const _labCortoF=(lab)=>String(lab||'').replace('TRASANTIER','TRAS').replace('PERÍODO','PER.')
-    const _cwF={nom:330,acc:66,id:188,cp:34,est:150,alr:106,bud:120,dup:104,tog:90,dias:316,gto:96,cpa:102,ids:132,vids:84,vA:66,iA:66,vB:70,iB:70,vC:66,iC:66,iTot:64,vts:46}
+    const _cwF={nom:330,acc:66,id:188,cp:34,est:150,alr:106,bud:120,dup:104,tog:90,dias:316,gto:96,cpa:102,ids:132,vids:84,vA:66,iA:66,vB:70,iB:70,vC:66,iC:66,iTot:118,vts:114}
     // NUEVO (12jun26 · carriles de color): cada bloque de día tiene SU color para bajar por la columna
     // sin perderse — suave en las filas, MÁS intenso en encabezado y Σ TOTALES (misma familia de color).
     // HOY (morado) y el bloque TOTALES (dorado) llevan línea vertical gruesa que los separa del resto.
@@ -17378,6 +17378,19 @@ window._rpFusionLifetime=async function(slug,btn){
   const cidF='cuadf_'+slug
   const sub=document.getElementById(cidF+'-sub')
   if(!ctx||!sub){if(btn)btn.textContent='⚠️ Abre la fusión primero';return}
+  // ── TOGGLE OFF: si el lifetime ya está prendido, APAGA y restaura la vista de 4 días (cero queries) ──
+  const _lifeRestore=()=>{
+    sub.querySelectorAll('.rp-life-itot[data-lifebak],.rp-life-vts[data-lifebak]').forEach(el=>{el.innerHTML=el.getAttribute('data-lifebak');el.removeAttribute('data-lifebak')})
+    const _b=(window._rpLifeTotBak||{})[slug]||{}
+    for(const id in _b){for(const suf of ['','-top']){const e=document.getElementById(cidF+'-tot'+suf+'-'+id);if(e&&_b[id]&&_b[id][suf]){e.textContent=_b[id][suf].t;e.style.color=_b[id][suf].c}}}
+    const _bar=document.getElementById(cidF+'-lifebar');if(_bar)_bar.remove()
+  }
+  if(btn&&btn.dataset.lifeOn==='1'){
+    _lifeRestore()
+    btn.dataset.lifeOn='0';btn.disabled=false;btn.textContent='📊 Cargar lifetime'
+    btn.style.background='rgba(94,234,212,.1)';btn.style.borderColor='#5eead4';btn.style.color='#5eead4'
+    return
+  }
   if(typeof sb==='undefined'||!sb){if(btn)btn.textContent='⚠️ Sin conexión';return}
   if(btn){btn.disabled=true;btn.textContent='⏳ Cargando histórico…'}
   const _fmtL=(x)=>(typeof fmt==='function'?fmt(Math.round(x)):String(Math.round(x)))
@@ -17399,17 +17412,41 @@ window._rpFusionLifetime=async function(slug,btn){
     const adsetToCamp={},adToCamp={}
     const{data:mc}=await sb.from('meta_campanas').select('meta_id,parent_id,nivel').limit(100000)
     for(const x of (mc||[])){if(x.nivel==='adset')adsetToCamp[String(x.meta_id)]=String(x.parent_id||'')}
-    for(const x of (mc||[])){if(x.nivel==='ad')adToCamp[String(x.meta_id)]=adsetToCamp[String(x.parent_id)]||''}
-    // 3) Mapeos del producto → total de órdenes (IDs) y confirmadas Dropi por campaña (real)
+    for(const x of (mc||[])){if(x.nivel==='ad'){const _cc=adsetToCamp[String(x.parent_id)]||'';if(_cc)adToCamp[String(x.meta_id)]=_cc}}
+    // REFUERZO: ad_ids ya conocidos de cada fila (data-fadids) → su campaña, por si meta_campanas
+    // no tiene algún anuncio archivado. Así no se pierden ventas por mapeo incompleto.
+    sub.querySelectorAll('.rp-fus-row[data-fcampid]').forEach(row=>{
+      const c=String(row.dataset.fcampid)
+      ;(row.dataset.fadids||'').split(',').forEach(a=>{a=String(a).trim();if(a&&!adToCamp[a])adToCamp[a]=c})
+    })
+    // 3) Mapeos del producto → órdenes (IDs) y confirmadas Dropi POR campaña (real) + TOTALES REALES
+    //    del producto (_gTotIds/_gTotConf cuentan TODAS las órdenes aunque algún anuncio no se mapee).
     const idsLife={},confLife={}
+    let _gTotIds=0,_gTotConf=0
     let _qm=sb.from('mapeos').select('ad_id,estado_final').limit(200000)
     if(prodId)_qm=_qm.eq('producto_id',prodId)
     const{data:mps}=await _qm
     for(const m of (mps||[])){
+      const _esVta=!!(window._nexoClasifVenta&&window._nexoClasifVenta(m.estado_final)==='venta')
+      _gTotIds++;if(_esVta)_gTotConf++
       const c=adToCamp[String(m.ad_id)]||''
       if(!c)continue
       idsLife[c]=(idsLife[c]||0)+1
-      if(window._nexoClasifVenta&&window._nexoClasifVenta(m.estado_final)==='venta')confLife[c]=(confLife[c]||0)+1
+      if(_esVta)confLife[c]=(confLife[c]||0)+1
+    }
+    // 3b) GASTO COMPLETO: traer también las campañas que GASTARON aunque no estén en campaign_ids
+    //     — descubiertas por sus órdenes de este producto (mapeos) y por la fusión (filas visibles).
+    //     Así el total de la barra cuadra con Meta Ads filtrando por el producto (incluye las que
+    //     gastaron y vendieron 0). Solo suma el gasto que aún no se contó (no duplica campaign_ids).
+    const _domCampIds=[];sub.querySelectorAll('.rp-fus-row[data-fcampid]').forEach(row=>{const c=String(row.dataset.fcampid||'');if(c)_domCampIds.push(c)})
+    const _setCamp=new Set(campIds)
+    const _extraCamps=[...new Set([...Object.keys(idsLife),..._domCampIds])].filter(c=>c&&!_setCamp.has(c))
+    if(_extraCamps.length){
+      for(let _i=0;_i<_extraCamps.length;_i+=300){
+        const _lote=_extraCamps.slice(_i,_i+300)
+        const{data:_insX}=await sb.from('meta_insights').select('spend,meta_id').eq('nivel','campaign').in('meta_id',_lote).limit(100000)
+        for(const r of (_insX||[])){const c=String(r.meta_id);gLife[c]=(gLife[c]||0)+(r.spend||0)}
+      }
     }
     // Builders del HTML de celda (mismo formato visual que el render normal)
     const _itotH=(ids,g)=>{
@@ -17427,26 +17464,39 @@ window._rpFusionLifetime=async function(slug,btn){
         +(cR>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_col(cR,BE)}" title="🎯 CPA REAL lifetime = gasto (sin hoy) ÷ ventas confirmadas Dropi (${conf})">🎯$${_fmtL(cR)}</span>`:'')
         +(cEnt>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_col(cEnt,BE)}" title="📦 CPA V. ENTREGADAS lifetime = gasto ÷ (confirmadas × (1−${Math.round(devPct*100)}% devol))">📦$${_fmtL(cEnt)}</span>`:'')
     }
-    // 4) Rellenar celdas por campaña visible + acumular totales
-    let _tIds=0,_tConf=0,_tGyes=0,_tGno=0
+    // 4) GUARDAR el HTML original de cada celda (para poder APAGAR el lifetime) y rellenar
     sub.querySelectorAll('.rp-fus-row[data-fcampid]').forEach(row=>{
       const c=String(row.dataset.fcampid)
       const ids=idsLife[c]||0,conf=confLife[c]||0
       const gYes=Math.round(gLife[c]||0),gHoy=parseFloat(row.dataset.fgp)||0,gNo=Math.max(0,gYes-gHoy)
-      _tIds+=ids;_tConf+=conf;_tGyes+=gYes;_tGno+=gNo
-      const itc=row.querySelector('.rp-life-itot');if(itc)itc.innerHTML=_itotH(ids,gYes)
-      const vtc=row.querySelector('.rp-life-vts');if(vtc)vtc.innerHTML=_vtsH(conf,gNo)
+      const itc=row.querySelector('.rp-life-itot');if(itc){if(!itc.hasAttribute('data-lifebak'))itc.setAttribute('data-lifebak',itc.innerHTML);itc.innerHTML=_itotH(ids,gYes)}
+      const vtc=row.querySelector('.rp-life-vts');if(vtc){if(!vtc.hasAttribute('data-lifebak'))vtc.setAttribute('data-lifebak',vtc.innerHTML);vtc.innerHTML=_vtsH(conf,gNo)}
     })
-    // 5) Fila Σ TOTALES (ambos sufijos -top y '')
-    const _stT=(id,txt,color)=>{for(const suf of ['','-top']){const e=document.getElementById(cidF+'-tot'+suf+'-'+id);if(e){e.textContent=txt;if(color)e.style.color=color}}}
-    const cpaIT=(_tIds>0&&_tGyes>0)?Math.round(_tGyes/_tIds):0,cpaITe=(_tIds>0&&_tGyes>0)?Math.round(_tGyes/(_tIds*pctConf)):0
-    _stT('itot',_tIds>0?'🆔 '+_tIds:'—');_stT('itotg',_tGyes>0?_abL(_tGyes):'')
+    // 4b) Gasto lifetime TOTAL de TODAS las campañas (con hoy / sin hoy) — para la Σ y la barra
+    const _gAllYes=Object.values(gLife).reduce((s,v)=>s+v,0)
+    let _gHoyAll=0;sub.querySelectorAll('.rp-fus-row[data-fcampid]').forEach(row=>{_gHoyAll+=parseFloat(row.dataset.fgp)||0})
+    const _gAllNo=Math.max(0,_gAllYes-_gHoyAll)
+    // 5) Fila Σ TOTALES (ambos sufijos): GUARDA el original y escribe el lifetime REAL.
+    //    Usa _gTotIds/_gTotConf (totales reales del producto) → la Σ nunca queda en —.
+    window._rpLifeTotBak=window._rpLifeTotBak||{};const _bak={};window._rpLifeTotBak[slug]=_bak
+    const _stT=(id,txt,color)=>{for(const suf of ['','-top']){const e=document.getElementById(cidF+'-tot'+suf+'-'+id);if(e){if(!_bak[id])_bak[id]={};_bak[id][suf]={t:e.textContent,c:e.style.color};e.textContent=txt;if(color)e.style.color=color}}}
+    const cpaIT=(_gTotIds>0&&_gAllYes>0)?Math.round(_gAllYes/_gTotIds):0,cpaITe=(_gTotIds>0&&_gAllYes>0)?Math.round(_gAllYes/(_gTotIds*pctConf)):0
+    _stT('itot',_gTotIds>0?'🆔 '+_gTotIds:'—');_stT('itotg',_gAllYes>0?_abL(_gAllYes):'')
     _stT('itotc',cpaIT>0?'🆔$'+_fmtL(cpaIT):'',_col(cpaIT,BE));_stT('itotce',cpaITe>0?'🔮$'+_fmtL(cpaITe):'',_col(cpaITe,BE))
-    _stT('itotvp',_tIds>0?'🔮 '+(Math.floor(_tIds*pctConf*10)/10).toFixed(1):'')
-    const cpaVT=(_tConf>0&&_tGno>0)?Math.round(_tGno/_tConf):0,cpaVTe=(_tConf>0&&_tGno>0)?Math.round(_tGno/(_tConf*(1-devPct))):0
-    _stT('vts',_tConf>0?String(_tConf):'—');_stT('vtsg',_tGno>0?_abL(_tGno):'')
+    _stT('itotvp',_gTotIds>0?'🔮 '+(Math.floor(_gTotIds*pctConf*10)/10).toFixed(1):'')
+    const cpaVT=(_gTotConf>0&&_gAllNo>0)?Math.round(_gAllNo/_gTotConf):0,cpaVTe=(_gTotConf>0&&_gAllNo>0)?Math.round(_gAllNo/(_gTotConf*(1-devPct))):0
+    _stT('vts',_gTotConf>0?String(_gTotConf):'—');_stT('vtsg',_gAllNo>0?_abL(_gAllNo):'')
     _stT('vtscp',cpaVT>0?'🎯$'+_fmtL(cpaVT):'',_col(cpaVT,BE));_stT('vtscpe',cpaVTe>0?'📦$'+_fmtL(cpaVTe):'',_col(cpaVTe,BE))
-    if(btn){btn.textContent='✅ Lifetime real';btn.style.background='rgba(134,239,172,.15)';btn.style.borderColor='var(--green)';btn.style.color='var(--green)'}
+    // 6) BARRA CIAN: gasto lifetime de TODAS las campañas juntas (color que resalta sin chocar)
+    const _oldBar=document.getElementById(cidF+'-lifebar');if(_oldBar)_oldBar.remove()
+    const _bar=document.createElement('div');_bar.id=cidF+'-lifebar'
+    _bar.style.cssText='margin:8px 0 2px;padding:8px 12px;border-radius:8px;background:rgba(34,211,238,.12);border:1px solid #22d3ee;display:flex;align-items:center;gap:14px;flex-wrap:wrap'
+    _bar.innerHTML='<span style="font-size:11px;font-weight:800;letter-spacing:.4px;color:#22d3ee">📊 LIFETIME · TODAS LAS CAMPAÑAS</span>'
+      +'<span style="font-size:13px;font-weight:800;color:#22d3ee" title="Gasto histórico real (con HOY) sumando todas las campañas de este producto">💰 Gastado: '+_abL(_gAllYes)+'</span>'
+      +'<span style="font-size:10.5px;font-weight:700;color:#67e8f9" title="Gasto histórico SIN el de HOY (base del CPA REAL)">sin hoy: '+_abL(_gAllNo)+'</span>'
+      +'<span style="font-size:10.5px;font-weight:700;color:#67e8f9" title="Órdenes totales reales (IDs) · ventas confirmadas Dropi">🆔 '+_gTotIds+' órdenes · 🛒 '+_gTotConf+' confirmadas</span>'
+    sub.parentNode.insertBefore(_bar,sub)
+    if(btn){btn.disabled=false;btn.dataset.lifeOn='1';btn.textContent='✅ Lifetime real (clic = apagar)';btn.style.background='rgba(134,239,172,.15)';btn.style.borderColor='var(--green)';btn.style.color='var(--green)'}
   }catch(e){console.warn('lifetime error',e);if(btn){btn.disabled=false;btn.textContent='⚠️ Error — reintentar'}}
 }
 

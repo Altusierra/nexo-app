@@ -557,6 +557,7 @@ async function loadProductos(){
     if(error)console.error('loadProductos error:',error)
     productos=data||[]
   }catch(e){console.error('loadProductos exception:',e);productos=[]}
+  try{await cargarDropiIdsArchivados()}catch(_){}
   await cargarMensajesDinamicos()
 }
 
@@ -873,12 +874,66 @@ window.resolveProdName=resolveProdName
 function _prodCanonMapeo(m){
   const _idDr=String((m&&m.producto_id_dropi)||'').trim()
   if(_idDr&&Array.isArray(productos)){
-    const _p=productos.find(pp=>String(pp.dropi_id||'').trim()===_idDr)
+    const _p=resolveProdByDropiId(_idDr)
     if(_p&&_p.nombre)return _p.nombre
   }
   return (resolveProdName(m&&m.producto).nombre)||(m&&m.producto)||'Sin producto'
 }
 window._prodCanonMapeo=_prodCanonMapeo
+
+// ── HISTORIAL DE IDs DE DROPI ──────────────────────────────────────────────
+// Un producto puede haber tenido VARIOS IDs de Dropi a lo largo del tiempo. El ID
+// VIGENTE (productos.dropi_id) manda para órdenes NUEVAS y el Asignador. Los IDs
+// ARCHIVADOS sirven para que el Cruce/Seguimiento reconozcan órdenes VIEJAS que
+// traen un ID anterior. Este índice se llena en loadProductos() desde la tabla
+// producto_dropi_ids (con fallback: si la tabla no existe, queda vacío y todo sigue
+// funcionando contra el ID vigente, comportamiento legacy).
+window._dropiIdArchivados=window._dropiIdArchivados||{}  // { 'idViejo': {producto_id, nombre, vigente_hasta} }
+
+// Carga el índice de IDs archivados (todos los productos, una sola query). No rompe nada si falla.
+async function cargarDropiIdsArchivados(){
+  const idx={}
+  try{
+    const{data,error}=await sb.from('producto_dropi_ids')
+      .select('producto_id,dropi_id,vigente_desde,vigente_hasta')
+    if(error)return // tabla aún no existe → índice vacío (legacy)
+    const _prodById={}
+    for(const p of (productos||[]))_prodById[p.id]=p
+    for(const r of (data||[])){
+      const k=String(r.dropi_id||'').trim()
+      if(!k)continue
+      const prod=_prodById[r.producto_id]
+      // Guardar incluso si el producto no está en memoria (archivado): nombre como fallback
+      idx[k]={producto_id:r.producto_id,nombre:prod?prod.nombre:null,vigente_hasta:r.vigente_hasta||null,vigente_desde:r.vigente_desde||null}
+    }
+  }catch(e){console.warn('[DROPI_IDS] no se pudo cargar índice de IDs archivados:',e?.message||e)}
+  window._dropiIdArchivados=idx
+}
+window.cargarDropiIdsArchivados=cargarDropiIdsArchivados
+
+// Resuelve el producto al que pertenece un ID de Dropi.
+// 1) Busca primero en el ID VIGENTE (productos.dropi_id) — comportamiento actual, sin cambios.
+// 2) Si no aparece, busca en los IDs ARCHIVADOS (órdenes viejas con ID anterior).
+// Devuelve el objeto producto de `productos` si está activo, o null. Nunca lanza.
+function resolveProdByDropiId(idDr){
+  const _id=String(idDr||'').trim()
+  if(!_id)return null
+  if(Array.isArray(productos)){
+    const _vig=productos.find(pp=>String(pp.dropi_id||'').trim()===_id)
+    if(_vig)return _vig
+  }
+  const _arch=window._dropiIdArchivados&&window._dropiIdArchivados[_id]
+  if(_arch){
+    if(Array.isArray(productos)){
+      const _p=productos.find(pp=>pp.id===_arch.producto_id)
+      if(_p)return _p
+    }
+    // Producto archivado / no cargado: devolver un objeto mínimo con el nombre conocido
+    if(_arch.nombre)return{id:_arch.producto_id,nombre:_arch.nombre,dropi_id:_id}
+  }
+  return null
+}
+window.resolveProdByDropiId=resolveProdByDropiId
 
 // Devuelve el precio/costo vigente de un producto en una fecha específica (Fase 2.2)
 // Consulta producto_precios_historial buscando el registro donde vigente_desde <= fecha
@@ -3228,6 +3283,32 @@ async function pageAdminProductos(c){
       }
     }
 
+    // Historial de IDs de Dropi: si el ID VIGENTE cambió, archivar el anterior (cierra HOY) y
+    // abrir el nuevo como vigente desde HOY. El campo productos.dropi_id (ya actualizado arriba)
+    // queda como el ID vigente → el Asignador sigue exigiendo el vigente sin tocar su lógica.
+    // Mismo patrón que el historial de precios. Todo en try/catch: si la tabla no existe, no rompe.
+    try{
+      const _prodAnt=productos.find(p=>p.id===id)
+      const _idViejo=String((_prodAnt&&_prodAnt.dropi_id)||'').trim()
+      const _idNuevo=String(updateData.dropi_id||'').trim()
+      if(_idNuevo&&_idNuevo!==_idViejo){
+        const _ahoraIso=new Date(today()+'T00:00:00').toISOString()
+        const{data:_vigDr}=await sb.from('producto_dropi_ids')
+          .select('id,dropi_id,vigente_desde')
+          .eq('producto_id',id).is('vigente_hasta',null)
+          .order('vigente_desde',{ascending:false}).limit(1)
+        const _vig=_vigDr&&_vigDr[0]
+        const _mismoDia=_vig&&_vig.vigente_desde&&String(_vig.vigente_desde).slice(0,10)===_ahoraIso.slice(0,10)
+        if(_vig&&_mismoDia){
+          // Mismo día de inicio → solo corregir el ID en sitio (sin registro de duración cero)
+          await sb.from('producto_dropi_ids').update({dropi_id:_idNuevo}).eq('id',_vig.id)
+        }else{
+          if(_vig)await sb.from('producto_dropi_ids').update({vigente_hasta:_ahoraIso}).eq('id',_vig.id)
+          await sb.from('producto_dropi_ids').insert({producto_id:id,dropi_id:_idNuevo,vigente_desde:_ahoraIso,usuario_id:me?.id||null,motivo:'Cambio de ID desde Productos'})
+        }
+      }
+    }catch(e){console.warn('historial dropi_id fail:',e)}
+
     const msg=document.getElementById('pmsg-'+id)
     msg.innerHTML='<div class="alert alert-green">✅ Guardado</div>'
     await loadProductos()
@@ -3360,6 +3441,14 @@ async function pageAdminProductos(c){
         if(initialRecords.length)await sb.from('producto_precios_historial').insert(initialRecords)
       }
     }catch(e){console.warn('historial inicial fail:',e)}
+    // Registro inicial del ID de Dropi en su historial (vigente desde la creación del producto)
+    try{
+      const _npIdDr=data?.id
+      const _drInit=String(payload.dropi_id||'').trim()
+      if(_npIdDr&&_drInit){
+        await sb.from('producto_dropi_ids').insert({producto_id:_npIdDr,dropi_id:_drInit,vigente_desde:new Date().toISOString(),usuario_id:me?.id||null,motivo:'Producto creado'})
+      }
+    }catch(e){console.warn('historial dropi_id inicial fail:',e)}
     // #6 (B): sembrar las ofertas en producto_ofertas para que el producto NAZCA en la tabla nueva
     // (evita el aviso "Pendiente migrar a tabla nueva" en productos nuevos).
     try{
@@ -4145,6 +4234,13 @@ async function renderProdBody(id,maestrosList){
   let _vigDesdeActualISO=''
   for(const r of _precHistList){if(r.vigente_desde&&!r.vigente_hasta){const d=String(r.vigente_desde).slice(0,10);if(!_vigDesdeActualISO||d>_vigDesdeActualISO)_vigDesdeActualISO=d}}
 
+  // Historial de IDs de Dropi: desde cuándo está vigente el ID actual (para el badge de la tarjeta)
+  let _dropiVigDesde=''
+  try{
+    const{data:_dh}=await sb.from('producto_dropi_ids').select('vigente_desde').eq('producto_id',id).is('vigente_hasta',null).order('vigente_desde',{ascending:false}).limit(1)
+    if(_dh&&_dh[0]&&_dh[0].vigente_desde)_dropiVigDesde=String(_dh[0].vigente_desde).slice(0,10)
+  }catch(_){}
+
   body.innerHTML=`<div style="padding-top:14px">
     <div style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:14px">
       <button id="prod-tab-config-btn-${id}" onclick="switchProdTab('${id}','config')" style="background:transparent;border:none;color:var(--text);padding:10px 16px;cursor:pointer;font-size:14px;font-weight:500;border-bottom:2px solid var(--primary);outline:none">⚙️ Configuración</button>
@@ -4156,8 +4252,12 @@ async function renderProdBody(id,maestrosList){
         <input type="text" id="pname-${id}" value="${prod.nombre||''}"></div>
       <div class="fld"><label>🆔 ID interno</label>
         <input type="text" value="${id}" disabled style="font-family:monospace;font-size:11px;opacity:0.6"></div>
-      <div class="fld"><label>🆔 ID de Dropi <span style="color:var(--muted);font-size:10px">(el número del producto en Dropi — lo ve el auxiliar en el Asignador)</span></label>
-        <input type="text" inputmode="numeric" id="pdropi-${id}" value="${prod.dropi_id||''}" placeholder="Ej: 152345" style="font-family:monospace;font-size:12px"></div>
+      <div class="fld"><label>🆔 ID de Dropi (vigente) <span style="color:var(--muted);font-size:10px">(el número del producto en Dropi — lo ve el auxiliar en el Asignador)</span></label>
+        <input type="text" inputmode="numeric" id="pdropi-${id}" value="${prod.dropi_id||''}" placeholder="Ej: 152345" style="font-family:monospace;font-size:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
+          <span style="font-size:10px;color:var(--muted)">${_dropiVigDesde?`✅ Vigente desde ${_dropiVigDesde.split('-').reverse().join('/')}`:'ℹ️ Sin historial de IDs todavía'}</span>
+          <button type="button" class="btn-sm" onclick="verHistorialDropiIds('${id}')" style="background:rgba(167,139,250,.12);border:1px solid var(--purple);color:var(--purple);font-size:11px;padding:3px 8px">📜 Historial de IDs</button>
+        </div></div>
     </div>
     <div style="font-size:10px;color:var(--muted);margin-top:6px;display:flex;gap:14px;flex-wrap:wrap">
       <span>📅 Creado: ${prod.created_at?new Date(prod.created_at).toLocaleString('es-CO'):'—'}</span>
@@ -4427,6 +4527,143 @@ window.verHistorialPrecios=async(prodId)=>{
     }
     cont.innerHTML=html
   }catch(e){cont.innerHTML=`<div class="alert alert-red">No se pudo cargar el historial: ${(e&&e.message)||e}</div>`}
+}
+
+// ── MODAL: HISTORIAL DE IDs DE DROPI (editable) ─────────────────────────────
+// Clona el look del historial de precios pero permite editar fechas, eliminar y
+// agregar IDs históricos. Regla: solo UN ID vigente (vigente_hasta = null) a la vez.
+window.verHistorialDropiIds=async(prodId)=>{
+  closeModal()
+  const prod=productos.find(p=>p.id===prodId)
+  const div=document.createElement('div')
+  div.id='user-modal';div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:600px">
+    <div class="modal-title">🆔 Historial de IDs de Dropi</div>
+    <div class="modal-sub">${prod?(prod.nombre||''):''} — cada ID y desde/hasta cuándo estuvo vigente</div>
+    <div class="alert alert-blue" style="font-size:11px;margin-top:10px">Solo UN ID puede estar vigente (sin fecha "hasta"). El <b>Asignador</b> exige el vigente; el <b>Cruce</b> y <b>Seguimiento</b> reconocen los archivados para las órdenes viejas.</div>
+    <div id="hist-dropi-body" style="margin-top:12px;max-height:60vh;overflow:auto"><div class="loading">Cargando...</div></div>
+    <div class="modal-actions"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>
+  </div>`
+  div.onclick=closeModal
+  document.body.appendChild(div)
+  await _renderHistDropiBody(prodId)
+}
+
+async function _renderHistDropiBody(prodId){
+  const cont=document.getElementById('hist-dropi-body')
+  if(!cont)return
+  try{
+    const{data:rows,error}=await sb.from('producto_dropi_ids').select('id,dropi_id,vigente_desde,vigente_hasta,motivo').eq('producto_id',prodId).order('vigente_desde',{ascending:false})
+    if(error&&(error.code==='42P01'||/producto_dropi_ids/.test(error.message||''))){
+      cont.innerHTML='<div class="alert alert-amber" style="font-size:12px">⚠️ Falta crear la tabla <code>producto_dropi_ids</code> en Supabase. Ejecuta el SQL de migración que vino con esta entrega y vuelve a abrir esta ventana.</div>'
+      return
+    }
+    const _toDateInput=(v)=>v?String(v).slice(0,10):''
+    let html=''
+    for(const r of (rows||[])){
+      const vigente=!r.vigente_hasta
+      html+=`<div style="padding:9px 11px;border-radius:8px;margin-bottom:8px;background:${vigente?'rgba(34,197,94,.08)':'rgba(255,255,255,.03)'};border:1px solid ${vigente?'var(--green)':'var(--border)'}">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:7px">
+          <div style="font-weight:700;font-size:14px;font-family:monospace">${r.dropi_id||'—'} ${vigente?'<span style="font-size:10px;color:var(--green);font-family:inherit">✅ VIGENTE</span>':''}</div>
+          ${r.motivo?`<div style="font-size:10px;color:var(--muted)">${r.motivo}</div>`:''}
+        </div>
+        <div style="display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap">
+          <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Desde</div><input type="date" id="hd-desde-${r.id}" value="${_toDateInput(r.vigente_desde)}" style="font-size:11px;padding:4px 6px"></div>
+          <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Hasta ${vigente?'(vacío = HOY)':''}</div><input type="date" id="hd-hasta-${r.id}" value="${_toDateInput(r.vigente_hasta)}" style="font-size:11px;padding:4px 6px"></div>
+          <button type="button" class="btn-sm btn-primary" style="font-size:11px;padding:4px 9px" onclick="guardarFechasDropiId('${prodId}','${r.id}')">💾 Guardar</button>
+          ${vigente?'':`<button type="button" class="btn-sm" style="font-size:11px;padding:4px 9px;background:rgba(34,197,94,.12);border:1px solid var(--green);color:var(--green)" onclick="marcarDropiIdVigente('${prodId}','${r.id}')">⭐ Hacer vigente</button>`}
+          <button type="button" class="btn-sm" style="font-size:11px;padding:4px 9px;background:rgba(239,68,68,.1);border:1px solid var(--red);color:var(--red)" onclick="eliminarFilaDropiId('${prodId}','${r.id}')">🗑️</button>
+        </div>
+      </div>`
+    }
+    if(!rows||!rows.length)html='<div style="color:var(--muted);font-size:13px;padding:8px">Todavía no hay IDs registrados. Agrega uno abajo, o cambia el ID en la tarjeta y se archivará solo.</div>'
+    html+=`<div class="divider"></div>
+      <div style="font-weight:700;font-size:13px;margin-bottom:6px">➕ Agregar ID histórico</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Para registrar un ID viejo con su rango real. Si dejas "hasta" vacío, ese ID pasa a ser el vigente (y se sincroniza con la tarjeta).</div>
+      <div style="display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;background:rgba(167,139,250,.06);border:1px solid var(--purple);border-radius:8px;padding:10px">
+        <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">ID de Dropi</div><input type="text" inputmode="numeric" id="hd-new-id" placeholder="Ej: 2120000" style="font-size:11px;padding:5px 7px;font-family:monospace;width:120px"></div>
+        <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Desde</div><input type="date" id="hd-new-desde" style="font-size:11px;padding:5px 7px"></div>
+        <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Hasta</div><input type="date" id="hd-new-hasta" style="font-size:11px;padding:5px 7px"></div>
+        <button type="button" class="btn-sm btn-primary" style="font-size:11px;padding:6px 11px" onclick="agregarDropiIdHist('${prodId}')">➕ Agregar</button>
+      </div>
+      <div id="hd-msg" style="margin-top:8px"></div>`
+    cont.innerHTML=html
+  }catch(e){cont.innerHTML=`<div class="alert alert-red">No se pudo cargar: ${(e&&e.message)||e}</div>`}
+}
+window._renderHistDropiBody=_renderHistDropiBody
+
+// Guardar fechas de una fila. Si "hasta" queda vacío → esa fila pasa a VIGENTE
+// (se cierran las demás y se sincroniza productos.dropi_id).
+window.guardarFechasDropiId=async(prodId,rowId)=>{
+  const msg=document.getElementById('hd-msg')
+  const _desde=(document.getElementById('hd-desde-'+rowId)||{}).value||''
+  const _hasta=(document.getElementById('hd-hasta-'+rowId)||{}).value||''
+  if(!_desde){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">La fecha "desde" es obligatoria</div>';return}
+  if(_hasta&&_hasta<_desde){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">"Hasta" no puede ser antes que "desde"</div>';return}
+  try{
+    const _desdeIso=new Date(_desde+'T00:00:00').toISOString()
+    if(!_hasta){
+      await sb.from('producto_dropi_ids').update({vigente_desde:_desdeIso}).eq('id',rowId)
+      await window.marcarDropiIdVigente(prodId,rowId,true)
+      await cargarDropiIdsArchivados()
+      if(msg)msg.innerHTML='<div class="alert alert-green" style="font-size:11px">✅ Guardado y marcado vigente</div>'
+      await _renderHistDropiBody(prodId);return
+    }
+    const _hastaIso=new Date(_hasta+'T00:00:00').toISOString()
+    await sb.from('producto_dropi_ids').update({vigente_desde:_desdeIso,vigente_hasta:_hastaIso}).eq('id',rowId)
+    await cargarDropiIdsArchivados()
+    if(msg)msg.innerHTML='<div class="alert alert-green" style="font-size:11px">✅ Guardado</div>'
+    await _renderHistDropiBody(prodId)
+  }catch(e){if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">${(e&&e.message)||e}</div>`}
+}
+
+// Eliminar una fila del historial de IDs
+window.eliminarFilaDropiId=async(prodId,rowId)=>{
+  if(!confirm('¿Eliminar este ID del historial? El Cruce/Seguimiento dejará de reconocer ese ID viejo en órdenes nuevas que lleguen.'))return
+  try{
+    await sb.from('producto_dropi_ids').delete().eq('id',rowId)
+    await cargarDropiIdsArchivados()
+    await _renderHistDropiBody(prodId)
+  }catch(e){alert((e&&e.message)||e)}
+}
+
+// Agregar un ID histórico a mano (con rango). Si no lleva "hasta" → queda vigente.
+window.agregarDropiIdHist=async(prodId)=>{
+  const msg=document.getElementById('hd-msg')
+  const _id=((document.getElementById('hd-new-id')||{}).value||'').trim()
+  const _desde=(document.getElementById('hd-new-desde')||{}).value||''
+  const _hasta=(document.getElementById('hd-new-hasta')||{}).value||''
+  if(!_id){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">Escribe el ID de Dropi</div>';return}
+  if(!_desde){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">La fecha "desde" es obligatoria</div>';return}
+  if(_hasta&&_hasta<_desde){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">"Hasta" no puede ser antes que "desde"</div>';return}
+  try{
+    const _hoyIso=new Date(today()+'T00:00:00').toISOString()
+    // Si el nuevo NO lleva "hasta" → será vigente: cerrar el vigente actual ANTES de insertar (1 solo vigente)
+    if(!_hasta)await sb.from('producto_dropi_ids').update({vigente_hasta:_hoyIso}).eq('producto_id',prodId).is('vigente_hasta',null)
+    const _rec={producto_id:prodId,dropi_id:_id,vigente_desde:new Date(_desde+'T00:00:00').toISOString(),usuario_id:me?.id||null,motivo:'ID histórico agregado a mano'}
+    if(_hasta)_rec.vigente_hasta=new Date(_hasta+'T00:00:00').toISOString()
+    await sb.from('producto_dropi_ids').insert(_rec)
+    // Si quedó vigente, sincronizar el campo del producto (el Asignador usa productos.dropi_id)
+    if(!_hasta){await sb.from('productos').update({dropi_id:_id}).eq('id',prodId);await loadProductos()}
+    await cargarDropiIdsArchivados()
+    if(msg)msg.innerHTML='<div class="alert alert-green" style="font-size:11px">✅ ID agregado</div>'
+    await _renderHistDropiBody(prodId)
+  }catch(e){if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">${(e&&e.message)||e}</div>`}
+}
+
+// Marca una fila como ID VIGENTE: cierra cualquier otro vigente (hasta = HOY), deja esta sin "hasta",
+// y sincroniza productos.dropi_id (clave: el Asignador exige el ID vigente del producto).
+window.marcarDropiIdVigente=async(prodId,rowId,silencioso)=>{
+  try{
+    const{data:_row}=await sb.from('producto_dropi_ids').select('id,dropi_id').eq('id',rowId).maybeSingle()
+    if(!_row){if(!silencioso)alert('No se encontró el registro');return}
+    const _hoyIso=new Date(today()+'T00:00:00').toISOString()
+    await sb.from('producto_dropi_ids').update({vigente_hasta:_hoyIso}).eq('producto_id',prodId).is('vigente_hasta',null).neq('id',rowId)
+    await sb.from('producto_dropi_ids').update({vigente_hasta:null}).eq('id',rowId)
+    await sb.from('productos').update({dropi_id:_row.dropi_id}).eq('id',prodId)
+    await loadProductos()
+    if(!silencioso)await _renderHistDropiBody(prodId)
+  }catch(e){if(!silencioso)alert((e&&e.message)||e)}
 }
 
 window.guardarOferta=async(prodId)=>{
@@ -5867,9 +6104,18 @@ window.procesarAsignador=async()=>{
     if(!_dropiEscrito){
       erroresDropi.push({linea:i+1,raw:p.raw,faltan:['falta el ID de Dropi. Es obligatorio: es el dato que decide el producto.']});return
     }
-    // 2) El ID de Dropi debe pertenecer a un producto configurado
+    // 2) El ID de Dropi debe ser el VIGENTE de un producto (el Asignador SIEMPRE exige el vigente)
     const _prodDropi=productos.find(pp=>String(pp.dropi_id||'').trim()===_dropiEscrito)
     if(!_prodDropi){
+      // ¿Es un ID VIEJO (archivado)? Si sí, decir cuál es el vigente. El Asignador solo acepta el vigente.
+      const _arch=window._dropiIdArchivados&&window._dropiIdArchivados[_dropiEscrito]
+      if(_arch){
+        const _prodArch=productos.find(pp=>pp.id===_arch.producto_id)
+        const _nomA=_prodArch?_prodArch.nombre:(_arch.nombre||'ese producto')
+        const _vigA=_prodArch?String(_prodArch.dropi_id||'').trim():''
+        const _hastaA=_arch.vigente_hasta?String(_arch.vigente_hasta).slice(0,10).split('-').reverse().join('/'):'?'
+        erroresDropi.push({linea:i+1,raw:p.raw,faltan:[`el ID "${_dropiEscrito}" es un ID VIEJO de "${_nomA}" (estuvo vigente hasta ${_hastaA}). El Asignador solo acepta el ID VIGENTE${_vigA?`: ${_vigA}`:''} para órdenes nuevas.`]});return
+      }
       erroresDropi.push({linea:i+1,raw:p.raw,faltan:[`ningún producto tiene el ID de Dropi "${_dropiEscrito}". Configúralo en Productos → tarjeta del producto → "🆔 ID de Dropi".`]});return
     }
     const _nomDropi=_prodDropi.nombre
@@ -13789,7 +14035,7 @@ window.procesarSeguimiento=async()=>{
     for(const r of resultados){
       const _idDr=String(r.producto_id_dropi||'').trim()
       if(!_idDr)continue
-      const _prodReal=productos.find(pp=>String(pp.dropi_id||'').trim()===_idDr)
+      const _prodReal=resolveProdByDropiId(_idDr)
       if(!_prodReal)continue
       const _adId=(r.mapeo&&r.mapeo.ad_id)?String(r.mapeo.ad_id):null
       const _adInfo=_adId?_adMapSeg[_adId]:null

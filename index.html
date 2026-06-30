@@ -17268,6 +17268,19 @@ window._rpFusionFiltro=function(cidF,tipo,valor,btn){
     box.style.display=ok?'':'none'
     if(ok)vis++
   })
+  // P1 (29jun26): las filas LIFETIME extra (campañas viejas sin actividad en los días visibles) NO
+  // viven en una .rp-fus-box → se filtran aparte. Solo aplican urgencia (sem), buscador por ID y
+  // con/sin ventas (sobre sus órdenes lifetime). Cualquier filtro de día o de estado-de-hoy las oculta.
+  sub.querySelectorAll('.rp-life-extra[data-fcampid]').forEach(row=>{
+    let okE=true
+    if(fsem&&(row.dataset.fsem||'')!==fsem)okE=false
+    if(fest)okE=false
+    if(fdia)okE=false
+    if(fid&&!((row.dataset.fcampid||'').includes(fid)))okE=false
+    if(fvsv){const _li=parseFloat(row.dataset.lifeIds)||0;if(fvsv==='con'&&!(_li>0))okE=false;if(fvsv==='sin'&&_li>0)okE=false}
+    row.style.display=okE?'':'none'
+    if(okE)vis++
+  })
   // Si la fusión está cerrada, abrirla para que el filtro se vea de una
   if(sub.style.display==='none'){
     sub.style.display='block'
@@ -17413,6 +17426,50 @@ window._rpFusionTotales=function(cidF){
   // NUEVO (Opción A): gasto por día de las filas visibles
   _set('gp',gp>0?_abT(gp):'');_set('ga',ga>0?_abT(ga):'')
   _set('gb',gb>0?_abT(gb):'');_set('gc',gc>0?_abT(gc):'')
+  // P1 (29jun26): en modo LIFETIME, los totales 🆔 ID TOT y 🛒 VTS se sobreescriben con datos lifetime de las filas visibles
+  try{if(window._rpLifeOn&&window._rpLifeOn[cidF.replace('cuadf_','')])window._rpLifeOverlayTot(cidF)}catch(_){}
+}
+
+// P1 (29jun26): clasificación de URGENCIA en modo LIFETIME — OPCIÓN B = 🔮 CPA R. EFECTIVAS lifetime
+// (gasto CON hoy ÷ (órdenes × %conf)) contra el margen BE. Mismos umbrales del semáforo de 4 días.
+// 'prender_ya' NO se calcula aquí (es flag de HOY y se respeta aparte). Devuelve '' si no hay BE.
+window._rpLifeClasif=function(ids,gYes,BE,pctConf){
+  if(!(BE>0))return''
+  if(ids>0&&gYes>0){
+    const cpaEf=gYes/(ids*(pctConf||0.62))
+    return cpaEf>BE?'stop':(cpaEf>BE*0.7?'precaucion':(cpaEf>BE*0.45?'escalar':'fuego'))
+  }
+  if(gYes>0){const p=gYes/BE;return p>=1?'stop':(p>=0.5?'precaucion':'sin_ventas')}
+  return'sin_ventas'
+}
+
+// P1 (29jun26): en modo LIFETIME, sobreescribe los totales 🆔 ID TOT y 🛒 VTS de la fila Σ con datos
+// LIFETIME de las filas VISIBLES. SIN filtro (todas visibles) → totales reales del producto (gTot*).
+// CON filtro → suma de los data-life-* de las filas (boxes + extra) que quedaron visibles. Solo toca
+// esos 9 spans (los días y el conteo los maneja _rpFusionTotales). Nunca rompe el flujo de 4 días.
+window._rpLifeOverlayTot=function(cidF){
+  const slug=cidF.replace('cuadf_','')
+  const cfg=(window._rpLifeData||{})[slug];if(!cfg)return
+  const sub=document.getElementById(cidF+'-sub');if(!sub)return
+  if(!document.getElementById(cidF+'-totrow'))return
+  const pctConf=cfg.pctConf||0.62,devPct=(cfg.devPct!=null?cfg.devPct:0.19),BE=cfg.BE||0
+  let totalRows=0,visRows=0,ids=0,conf=0,gYes=0,gNo=0
+  const _acc=(row)=>{ids+=parseFloat(row.dataset.lifeIds)||0;conf+=parseFloat(row.dataset.lifeConf)||0;gYes+=parseFloat(row.dataset.lifeGyes)||0;gNo+=parseFloat(row.dataset.lifeGno)||0}
+  sub.querySelectorAll('.rp-fus-box').forEach(box=>{const row=box.querySelector('.rp-fus-row[data-fcampid]');if(!row)return;totalRows++;if(box.style.display==='none')return;visRows++;_acc(row)})
+  sub.querySelectorAll('.rp-life-extra[data-fcampid]').forEach(row=>{totalRows++;if(row.style.display==='none')return;visRows++;_acc(row)})
+  // SIN filtro (todas visibles) → totales reales del producto; CON filtro → suma de visibles
+  if(visRows===totalRows){ids=cfg.gTotIds||0;conf=cfg.gTotConf||0;gYes=cfg.gAllYes||0;gNo=cfg.gAllNo||0}
+  const _f=(x)=>(typeof fmt==='function'?fmt(Math.round(x)):String(Math.round(x)))
+  const _ab=(g)=>g>=1e6?('$'+(g/1e6).toFixed(3)+'M'):(g>=1000?('$'+Math.round(g/1000)+'k'):('$'+Math.round(g)))
+  const _col=(cpa)=>(cpa>0&&typeof window._nexoSemColor==='function'&&BE>0)?window._nexoSemColor(cpa,BE):'var(--subtle)'
+  const _set=(id,txt,col)=>{for(const suf of ['','-top']){const e=document.getElementById(cidF+'-tot'+suf+'-'+id);if(e){e.textContent=txt;if(col)e.style.color=col}}}
+  const cpaIT=(ids>0&&gYes>0)?Math.round(gYes/ids):0,cpaITe=(ids>0&&gYes>0)?Math.round(gYes/(ids*pctConf)):0
+  _set('itot',ids>0?'🆔 '+ids:'—');_set('itotg',gYes>0?_ab(gYes):'')
+  _set('itotc',cpaIT>0?'🆔$'+_f(cpaIT):'',_col(cpaIT));_set('itotce',cpaITe>0?'🔮$'+_f(cpaITe):'',_col(cpaITe))
+  _set('itotvp',ids>0?'🔮 '+(Math.floor(ids*pctConf*10)/10).toFixed(1):'')
+  const cpaVT=(conf>0&&gNo>0)?Math.round(gNo/conf):0,cpaVTe=(conf>0&&gNo>0)?Math.round(gNo/(conf*(1-devPct))):0
+  _set('vts',conf>0?String(conf):'—');_set('vtsg',gNo>0?_ab(gNo):'')
+  _set('vtscp',cpaVT>0?'🎯$'+_f(cpaVT):'',_col(cpaVT));_set('vtscpe',cpaVTe>0?'📦$'+_f(cpaVTe):'',_col(cpaVTe))
 }
 
 // ════════ LIFETIME REAL: totales 🛒 VTS y 🆔 TOT desde que inició cada campaña ════════
@@ -17432,6 +17489,16 @@ window._rpFusionLifetime=async function(slug,btn){
     const _b=(window._rpLifeTotBak||{})[slug]||{}
     for(const id in _b){for(const suf of ['','-top']){const e=document.getElementById(cidF+'-tot'+suf+'-'+id);if(e&&_b[id]&&_b[id][suf]){e.textContent=_b[id][suf].t;e.style.color=_b[id][suf].c}}}
     const _bar=document.getElementById(cidF+'-lifebar');if(_bar)_bar.remove()
+    // P1 (29jun26): restaurar clasificación de urgencia, conteo+clickeabilidad de pills, apagar bandera
+    // lifetime y re-aplicar el filtro vigente con los datos de 4 días (vista coherente al apagar).
+    try{
+      sub.querySelectorAll('.rp-fus-row[data-fsembak]').forEach(row=>{row.setAttribute('data-fsem',row.getAttribute('data-fsembak')||'');row.removeAttribute('data-fsembak')})
+      const _wrapR=sub.closest('div[style*="border-left:3px solid var(--purple)"]')||sub.parentElement
+      const _pbak=(window._rpLifePillBak||{})[slug]||{}
+      if(_wrapR)_wrapR.querySelectorAll('.rp-fus-urgpill').forEach(p=>{const b=_pbak[p.dataset.code||''];if(!b)return;if(p.children[1])p.children[1].textContent=b.n;p.style.opacity=b.op||'';p.style.cursor=b.cur||'';p.style.pointerEvents=b.pe||'';if(b.oc)p.setAttribute('onclick',b.oc);else p.removeAttribute('onclick')})
+      if(window._rpLifeOn)window._rpLifeOn[slug]=false
+      const _ff=sub.dataset.fsem||'';sub.dataset.fsem='';window._rpFusionFiltro(cidF,'sem',_ff)
+    }catch(_eR){console.warn('lifetime restore clasif',_eR)}
   }
   if(btn&&btn.dataset.lifeOn==='1'){
     _lifeRestore()
@@ -17518,6 +17585,7 @@ window._rpFusionLifetime=async function(slug,btn){
       const c=String(row.dataset.fcampid)
       const ids=idsLife[c]||0,conf=confLife[c]||0
       const gYes=Math.round(gLife[c]||0),gHoy=parseFloat(row.dataset.fgp)||0,gNo=Math.max(0,gYes-gHoy)
+      row.setAttribute('data-life-ids',ids);row.setAttribute('data-life-conf',conf);row.setAttribute('data-life-gyes',gYes);row.setAttribute('data-life-gno',gNo)
       const itc=row.querySelector('.rp-life-itot');if(itc){if(!itc.hasAttribute('data-lifebak'))itc.setAttribute('data-lifebak',itc.innerHTML);itc.innerHTML=_itotH(ids,gYes)}
       const vtc=row.querySelector('.rp-life-vts');if(vtc){if(!vtc.hasAttribute('data-lifebak'))vtc.setAttribute('data-lifebak',vtc.innerHTML);vtc.innerHTML=_vtsH(conf,gNo)}
     })
@@ -17541,6 +17609,7 @@ window._rpFusionLifetime=async function(slug,btn){
           const _row=document.createElement('div')
           _row.className='rp-fus-row rp-life-extra'
           _row.setAttribute('data-fcampid',c);_row.setAttribute('data-fgp','0')
+          _row.setAttribute('data-life-ids',ids);_row.setAttribute('data-life-conf',conf);_row.setAttribute('data-life-gyes',gYes);_row.setAttribute('data-life-gno',gYes)
           _row.style.cssText='display:flex;align-items:center;font-size:12px;color:var(--text);min-height:28px;min-width:max-content;padding:2px 8px;opacity:.92'
           _row.innerHTML='<span style="display:inline-block;width:'+_nomW+'px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#94a3b8" title="No corrió en los días visibles — datos LIFETIME (desde que inició)">📣 '+(_campNombre[c]||c)+'</span>'
             +'<span style="display:inline-block;width:'+_offTot+'px;flex-shrink:0;text-align:center;color:var(--subtle);font-size:9px;font-style:italic">— sin actividad en los días visibles · solo lifetime —</span>'
@@ -17555,6 +17624,36 @@ window._rpFusionLifetime=async function(slug,btn){
     const _gAllYes=Object.values(gLife).reduce((s,v)=>s+v,0)
     let _gHoyAll=0;sub.querySelectorAll('.rp-fus-row[data-fcampid]').forEach(row=>{_gHoyAll+=parseFloat(row.dataset.fgp)||0})
     const _gAllNo=Math.max(0,_gAllYes-_gHoyAll)
+    // ── P1 (29jun26): RECLASIFICAR URGENCIA por rendimiento LIFETIME + RECONTAR pills + marcar ON ──
+    try{
+      // a) cada fila (incl. extra) toma su semáforo por 🔮 CPA efectivas lifetime. 'prender_ya' se respeta.
+      sub.querySelectorAll('.rp-fus-row[data-fcampid]').forEach(row=>{
+        if((row.dataset.fsem||'')==='prender_ya')return
+        const _ids=parseFloat(row.dataset.lifeIds)||0,_gy=parseFloat(row.dataset.lifeGyes)||0
+        const _sl=window._rpLifeClasif(_ids,_gy,BE,pctConf)
+        if(!row.hasAttribute('data-fsembak'))row.setAttribute('data-fsembak',row.dataset.fsem||'')
+        row.setAttribute('data-fsem',_sl||(row.dataset.fsem||''))
+      })
+      // b) recontar los 6 pills de urgencia (prender_ya conserva su número) + ajustar clickeabilidad
+      const _wrapL=sub.closest('div[style*="border-left:3px solid var(--purple)"]')||sub.parentElement
+      if(_wrapL){
+        const _ctaL={prender_ya:0,stop:0,precaucion:0,fuego:0,escalar:0,sin_ventas:0}
+        sub.querySelectorAll('.rp-fus-row[data-fcampid]').forEach(row=>{const c=row.dataset.fsem||'';if(_ctaL[c]!=null)_ctaL[c]++})
+        window._rpLifePillBak=window._rpLifePillBak||{};const _pbak={};window._rpLifePillBak[slug]=_pbak
+        _wrapL.querySelectorAll('.rp-fus-urgpill').forEach(p=>{
+          const code=p.dataset.code||''
+          _pbak[code]={n:(p.children[1]?p.children[1].textContent:''),op:p.style.opacity,cur:p.style.cursor,pe:p.style.pointerEvents,oc:p.getAttribute('onclick')||''}
+          if(_ctaL[code]==null)return
+          const nN=_ctaL[code]
+          if(p.children[1])p.children[1].textContent=String(nN)
+          if(nN>0){p.style.opacity='';p.style.cursor='pointer';p.style.pointerEvents='';if(!p.getAttribute('onclick'))p.setAttribute('onclick',"event.stopPropagation();window._rpFusionFiltro('"+cidF+"','sem','"+code+"',this)")}
+          else{p.style.opacity='.35';p.style.cursor='default';p.style.pointerEvents='none'}
+        })
+      }
+      // c) guardar config lifetime para el recálculo de Σ por filtro + marcar lifetime ON para este producto
+      window._rpLifeData=window._rpLifeData||{};window._rpLifeData[slug]={gTotIds:_gTotIds,gTotConf:_gTotConf,gAllYes:_gAllYes,gAllNo:_gAllNo,pctConf:pctConf,devPct:devPct,BE:BE}
+      window._rpLifeOn=window._rpLifeOn||{};window._rpLifeOn[slug]=true
+    }catch(_eL){console.warn('lifetime pills/clasif',_eL)}
     // 5) Fila Σ TOTALES (ambos sufijos): GUARDA el original y escribe el lifetime REAL.
     //    Usa _gTotIds/_gTotConf (totales reales del producto) → la Σ nunca queda en —.
     window._rpLifeTotBak=window._rpLifeTotBak||{};const _bak={};window._rpLifeTotBak[slug]=_bak
@@ -17575,6 +17674,7 @@ window._rpFusionLifetime=async function(slug,btn){
       +'<span style="font-size:10.5px;font-weight:700;color:#67e8f9" title="Gasto histórico SIN el de HOY (base del CPA REAL)">sin hoy: '+_abL(_gAllNo)+'</span>'
       +'<span style="font-size:10.5px;font-weight:700;color:#67e8f9" title="Órdenes totales reales (IDs) · ventas confirmadas Dropi">🆔 '+_gTotIds+' órdenes · 🛒 '+_gTotConf+' confirmadas</span>'
       +'<span onclick="event.stopPropagation();window._rpSyncGastoProducto(\''+slug+'\',this)" style="margin-left:auto;display:inline-flex;align-items:center;gap:5px;background:rgba(34,211,238,.10);border:1px solid #22d3ee;border-radius:7px;padding:4px 11px;font-size:11px;font-weight:800;color:#22d3ee;cursor:pointer;flex-shrink:0" title="Trae de Meta el gasto histórico real de CADA campaña de este producto (sin importar en qué cuenta esté) y lo guarda en la base. Después de esto el total cuadra con Meta Ads filtrando por el producto.">🔄 Sync gasto Meta</span>'
+    _bar.innerHTML+='<span onclick="event.stopPropagation();window._rpSyncEstructuraProducto(\''+slug+'\',this)" style="margin-left:8px;display:inline-flex;align-items:center;gap:5px;background:rgba(34,211,238,.10);border:1px solid #22d3ee;border-radius:7px;padding:4px 11px;font-size:11px;font-weight:800;color:#22d3ee;cursor:pointer;flex-shrink:0" title="Trae de Meta la estructura (anuncio→conjunto→campaña) de las campañas VIEJAS de este producto y la guarda, para que sus órdenes se atribuyan y la suma de filas cuadre con el total de arriba. Córrelo UNA vez; después usa 🔄 Sync gasto.">🏗️ Sync estructura</span>'
     sub.parentNode.insertBefore(_bar,sub)
     if(btn){btn.disabled=false;btn.dataset.lifeOn='1';btn.textContent='✅ Lifetime real (clic = apagar)';btn.style.background='rgba(134,239,172,.15)';btn.style.borderColor='var(--green)';btn.style.color='var(--green)'}
   }catch(e){console.warn('lifetime error',e);if(btn){btn.disabled=false;btn.textContent='⚠️ Error — reintentar'}}
@@ -17600,6 +17700,28 @@ window._rpSyncGastoProducto=async function(slug,btn){
     }
     if(btn){btn.style.pointerEvents='';btn.style.opacity='';btn.textContent='✅ Gasto sincronizado';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}
   }catch(e){console.warn('sync gasto error',e);if(btn){btn.style.pointerEvents='';btn.style.opacity='';btn.textContent='⚠️ Error — reintentar';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}}
+}
+
+// ════════ SYNC ESTRUCTURA (botón de la barra lifetime) → Edge Function meta-sync-nocturno (modo estructura) ════════
+// Rellena meta_campanas con el árbol ad→adset→campaign de las campañas VIEJAS del producto (las que no
+// corrieron en los días visibles), tomando los ad_id de mapeos que aún no están mapeados. Después de esto,
+// cada orden se atribuye a su campaña → la suma de filas cuadra con el total de arriba. Correr UNA vez.
+window._rpSyncEstructuraProducto=async function(slug,btn){
+  const ctx=window._rpFusionCtx&&window._rpFusionCtx[slug]
+  if(!ctx){if(btn)btn.textContent='⚠️ Abre la fusión primero';return}
+  if(typeof sb==='undefined'||!sb){if(btn)btn.textContent='⚠️ Sin conexión';return}
+  if(!ctx.prodId){if(btn)btn.textContent='⚠️ Producto sin ID';return}
+  if(btn){btn.dataset._t=btn.textContent;btn.style.pointerEvents='none';btn.style.opacity='.7';btn.textContent='⏳ Trayendo estructura…'}
+  try{
+    const{data,error}=await sb.functions.invoke('meta-sync-nocturno',{body:{modo:'estructura',producto_id:ctx.prodId}})
+    if(error)throw error
+    const _r=(data&&data.estructura)||{}
+    const _msg='✅ '+(_r.resueltos!=null?_r.resueltos:0)+' anuncios mapeados'
+    // recargar el lifetime para que las campañas viejas ya muestren sus órdenes (apagar y volver a prender)
+    const lifeBtn=document.querySelector('[onclick*="_rpFusionLifetime(\''+slug+'\'"]')
+    if(lifeBtn&&lifeBtn.dataset.lifeOn==='1'){await window._rpFusionLifetime(slug,lifeBtn);await window._rpFusionLifetime(slug,lifeBtn)}
+    if(btn){btn.style.pointerEvents='';btn.style.opacity='';btn.textContent=_msg;setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},4000)}
+  }catch(e){console.warn('sync estructura error',e);if(btn){btn.style.pointerEvents='';btn.style.opacity='';btn.textContent='⚠️ Error — reintentar';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}}
 }
 // desglose, la fila queda fija justo debajo de encabezados + Σ TOTALES (que ya son sticky),
 // así siempre se ve EN QUÉ campaña estás sin subir. Al cerrar el desglose se suelta sola, y

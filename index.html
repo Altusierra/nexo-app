@@ -13475,17 +13475,31 @@ window._nombreActualProd=(rawTexto,mapeo)=>{
 // edita el ad_id del mapeo existente (no re-inserta → no duplica), recalcula el semáforo del anuncio
 // viejo y el nuevo (Meta Ads queda correcto al instante) y registra la novedad con ANTES/DESPUÉS.
 
-// Registra una novedad de ID en el historial (tolerante: si la tabla no existe aún, no rompe).
+// Marca la novedad como CORREGIDA en el registro (upsert por mapeo_id: si ya existía pendiente, la pasa a corregida; si no, la crea). Tolerante.
 async function _registrarNovedadId(d){
   try{
-    await sb.from('novedades_id').insert({
+    await sb.from('novedades_id').upsert({
       mapeo_id:d.mapeo_id||null, telefono:d.telefono||null, numero_guia:d.numero_guia||null,
       producto_real:d.producto_real||null, id_dropi:d.id_dropi||null,
       ad_antes:d.ad_antes||null, prod_antes:d.prod_antes||null,
       ad_despues:d.ad_despues||null, prod_despues:d.prod_despues||null,
-      tipo:d.tipo||null, fuente:d.fuente||null,
-      corregido_por:(me&&(me.nombre||me.email))||currentRol()||'—'
-    })
+      tipo:d.tipo||null, fuente:d.fuente||null, estado:'corregido',
+      corregido_por:(me&&(me.nombre||me.email))||currentRol()||'—',
+      corregido_at:new Date().toISOString()
+    },{onConflict:'mapeo_id'})
+  }catch(_){}
+}
+// Registra los pendientes detectados (desde el xlsx) en el registro permanente. ignoreDuplicates: no pisa
+// los que ya existen (no revierte una corregida ni duplica). Así el admin los ve aunque no se reprocese. Tolerante.
+async function _logNovedadesPendientes(marcas){
+  if(!marcas||!marcas.length)return
+  try{
+    const rows=marcas.map(m=>({
+      mapeo_id:m.mapeo_id, telefono:m.telefono||null, numero_guia:(m.guia&&m.guia!=='—')?m.guia:null,
+      producto_real:m.prod_real||null, id_dropi:m.id_dropi||null,
+      ad_antes:m.ad_id||null, prod_antes:m.prod_anuncio||null, estado:'pendiente', fuente:'seguimiento'
+    }))
+    await sb.from('novedades_id').upsert(rows,{onConflict:'mapeo_id',ignoreDuplicates:true})
   }catch(_){}
 }
 // Núcleo: aplica la corrección. nuevoAd = string (corregir) o null/'' (orgánica).
@@ -13536,37 +13550,24 @@ window._renderNovedadesId=async function(){
   if(!box)return
   if(currentRol()!=='admin'){box.innerHTML='';return}
   box.innerHTML='<div class="card" style="margin-bottom:14px"><div style="color:var(--muted);font-size:13px">🆔 Cargando novedades de ID…</div></div>'
-  // 1) Candidatos: mapeos cruzados (con ID de Dropi del reporte) y con anuncio
-  let cands=null,sinCol=false
+  // Lee el REGISTRO PERMANENTE de novedades (no depende de reprocesar). Tolerante si la tabla no existe.
+  let rows=null,sinTabla=false
   try{
-    const r=await sb.from('mapeos').select('id,telefono,ad_id,producto,producto_id_dropi,numero_guia').not('producto_id_dropi','is',null).not('ad_id','is',null).limit(10000)
+    const r=await sb.from('novedades_id').select('*').order('created_at',{ascending:false}).limit(500)
     if(r.error)throw r.error
-    cands=r.data||[]
-  }catch(_){sinCol=true}
-  if(sinCol){
-    box.innerHTML=`<div class="card" style="margin-bottom:14px;border:1px dashed var(--border)"><div style="font-weight:700;font-size:15px;margin-bottom:4px">🆔 Novedades ID</div><div style="font-size:12.5px;color:var(--muted)">Corre el SQL (<code>producto_id_dropi</code> + <code>numero_guia</code>) y reprocesa el reporte una vez para activar esta sección.</div></div>`
+    rows=r.data||[]
+  }catch(_){sinTabla=true}
+  if(sinTabla){
+    box.innerHTML=`<div class="card" style="margin-bottom:14px;border:1px dashed var(--border)"><div style="font-weight:700;font-size:15px;margin-bottom:4px">🆔 Novedades ID</div><div style="font-size:12.5px;color:var(--muted)">Corre el SQL de la tabla <code>novedades_id</code> (con la columna <code>estado</code>) para activar esta sección.</div></div>`
     return
   }
-  // 2) Resolver anuncios → producto
-  const adIds=[...new Set(cands.map(m=>String(m.ad_id||'')).filter(Boolean))]
-  let adMap={}; try{adMap=adIds.length?await buildAdProductMap(adIds):{}}catch(_){}
-  // 3) Pendientes: anuncio → producto ≠ ID de Dropi → producto
-  const pend=[]
-  for(const m of cands){
-    const _idDr=String(m.producto_id_dropi||'').trim()
-    const _real=productos.find(p=>String(p.dropi_id||'').trim()===_idDr)
-    if(!_real)continue
-    const _ai=adMap[String(m.ad_id)]
-    if(_ai&&_ai.producto_id&&_ai.producto_id!==_real.id){
-      pend.push({mapeo_id:m.id,telefono:m.telefono||'—',guia:m.numero_guia||'—',ad_antes:String(m.ad_id),prod_antes:_ai.producto_nombre,prod_real:_real.nombre,id_dropi:_idDr,fuente:'admin'})
-    }
-  }
-  window._novData={}; pend.forEach(p=>window._novData[p.mapeo_id]=p)
-  // 4) Patrón: por (prod_real ← prod_antes) con 2+ ocurrencias
+  // Pendientes (siguen mal) y corregidas (historial). TODO queda permanente para el admin.
+  const pend=rows.filter(r=>r.estado==='pendiente').map(r=>({mapeo_id:r.mapeo_id,prod_real:r.producto_real||'—',guia:r.numero_guia||'—',telefono:r.telefono||'—',ad_antes:r.ad_antes||'—',prod_antes:r.prod_antes||'—',id_dropi:r.id_dropi||''}))
+  const hist=rows.filter(r=>r.estado!=='pendiente')
+  window._novData={}; pend.forEach(p=>window._novData[p.mapeo_id]={mapeo_id:p.mapeo_id,ad_antes:p.ad_antes,prod_real:p.prod_real,prod_antes:p.prod_antes,id_dropi:p.id_dropi,guia:p.guia,telefono:p.telefono,fuente:'admin'})
+  // Patrón: por (prod_real ← prod_antes) con 2+ ocurrencias entre los pendientes
   const _comb={}; pend.forEach(p=>{const k=p.prod_real+'|||'+p.prod_antes; _comb[k]=(_comb[k]||0)+1})
   const patrones=Object.entries(_comb).filter(([,n])=>n>=2).map(([k,n])=>{const a=k.split('|||');return{real:a[0],antes:a[1],n}})
-  // 5) Historial (tolerante)
-  let hist=[]; try{const r=await sb.from('novedades_id').select('*').order('created_at',{ascending:false}).limit(200); if(!r.error)hist=r.data||[]}catch(_){}
   // 6) Render
   const _fmtFecha=s=>{try{return new Date(s).toLocaleString('es-CO',{timeZone:'America/Bogota',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}catch(_){return s||''}}
   const pendHtml=pend.length?`
@@ -13591,7 +13592,7 @@ window._renderNovedadesId=async function(){
       <div style="font-size:13px;margin-bottom:4px">📦 <b>${h.producto_real||'—'}</b> · Guía <code style="color:var(--muted)">${h.numero_guia||'—'}</code> · Tel <code style="color:var(--muted)">${h.telefono||'—'}</code></div>
       <div style="font-size:11.5px;color:var(--red)">❌ ANTES: ID <code>${h.ad_antes||'—'}</code> → era de ${h.prod_antes||'—'}</div>
       <div style="font-size:11.5px;color:var(--green)">✅ AHORA: ${h.tipo==='organica'?'Sin anuncio (orgánica) → fuera del CPA':('ID <code>'+(h.ad_despues||'—')+'</code> → es de '+(h.prod_despues||'—'))}</div>
-      <div style="font-size:10.5px;color:var(--muted);margin-top:3px">👤 ${h.corregido_por||'—'} · ${_fmtFecha(h.created_at)} · ${h.fuente||'—'}</div>
+      <div style="font-size:10.5px;color:var(--muted);margin-top:3px">👤 ${h.corregido_por||'—'} · ${_fmtFecha(h.corregido_at||h.created_at)} · ${h.fuente||'—'}</div>
     </div>`).join('')}
   `:''
   box.innerHTML=`<div class="card" style="margin-bottom:14px">
@@ -13862,6 +13863,8 @@ window.procesarSeguimiento=async()=>{
     // Panel de marcas de anuncio (solo si hay) — tonto y bebé: visual, con botones corregir / orgánica.
     window._marcasSegData={}
     _marcasAnuncio.forEach(m=>{window._marcasSegData[m.mapeo_id]={mapeo_id:m.mapeo_id,ad_antes:m.ad_id,prod_real:m.prod_real,prod_antes:m.prod_anuncio,id_dropi:m.id_dropi,guia:m.guia,telefono:m.telefono,fuente:'seguimiento'}})
+    // Registrar los pendientes en el registro permanente (para que el admin los vea aunque no reprocese, y queden siempre)
+    _logNovedadesPendientes(_marcasAnuncio)
     const marcasHtml=_marcasAnuncio.length?`<div class="card" style="margin-bottom:14px;border:2px solid var(--amber);background:var(--amber-bg)">
       <div style="font-weight:700;font-size:15px;margin-bottom:6px">⚠️ ${_marcasAnuncio.length} orden(es): el anuncio apunta a OTRO producto</div>
       <div style="font-size:12.5px;color:var(--muted);margin-bottom:12px">El producto está bien (lo decide el ID de Dropi del reporte). Pero el <b>anuncio</b> guardado es de otro producto → daña el CPA. Pon el ID correcto, o márcala orgánica si no vino de un anuncio 👇</div>

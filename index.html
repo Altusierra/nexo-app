@@ -1907,6 +1907,72 @@ window._borrarFantasma=async function(mapeoId,tel){
     if(grp)grp.insertAdjacentHTML('beforeend',`<div style="font-size:12px;color:var(--red);margin-top:6px">Error: ${e.message}</div>`)
   }
 }
+// ── Clasificación de clientes con varios pedidos (mismo teléfono) — cuadro cerrado ──────────
+function _audEstado(m){return String(m.estado_final||'').toUpperCase().trim()}
+function _audEsCancel(m){return /CANCEL/.test(_audEstado(m))}
+function _audEsEntreg(m){return /ENTREG/.test(_audEstado(m))}
+function _audEsDevuel(m){return /DEVUEL|NOVEDAD/.test(_audEstado(m))}
+function _audEsPendConf(m){return /CONFIRMAC/.test(_audEstado(m))}
+function _audEsPend(m){const s=_audEstado(m);return /PENDIENTE/.test(s)&&!/CONFIRMAC/.test(s)}
+function _audEsCamino(m){return /CAMINO|TRANSITO|REPARTO|DESPACH|RUTA|GENERAD/.test(_audEstado(m))}
+function _audDia(m){return String(m.fecha_dropi||'').slice(0,10)}
+// Clasifica las copias de UN cliente para UN producto (ordenadas por fecha asc).
+function _clasifProducto(copias){
+  const dias=[...new Set(copias.map(_audDia))]
+  const mismoDia=dias.length===1
+  const cancels=copias.filter(_audEsCancel)
+  const vivas=copias.filter(m=>!_audEsCancel(m))
+  if(cancels.length){
+    if(mismoDia&&vivas.length) return {tipo:'basura',emoji:'🗑️',col:'var(--red)',label:'Basura (error del auxiliar)',dropIds:cancels.map(m=>m.id)}
+    if(vivas.length===0) return {tipo:'negra',emoji:'🔴',col:'var(--red)',label:'Cliente malo (lista negra)'}
+  }
+  if(mismoDia) return {tipo:'revisar',emoji:'❔',col:'var(--muted)',label:'Revisar (mismo día, 2 órdenes vivas)'}
+  const ant=copias[0] // la más vieja decide
+  if(_audEsEntreg(ant)) return {tipo:'recompra',emoji:'🟢',col:'var(--green)',label:'Recompra (cliente fiel)'}
+  if(_audEsDevuel(ant)) return {tipo:'reintento',emoji:'🟠',col:'var(--amber)',label:'Reintento tras devolución'}
+  if(_audEsPendConf(ant)) return {tipo:'indeciso',emoji:'🟣',col:'#A855F7',label:'Indeciso / sin confirmar'}
+  if(_audEsPend(ant)||_audEsCamino(ant)) return {tipo:'paralela',emoji:'🔵',col:'var(--blue)',label:'Compra paralela (pidió sin recibir la 1ra)'}
+  if(_audEsCancel(ant)) return {tipo:'intento',emoji:'⚪',col:'var(--muted)',label:'Intento (anterior cancelada)'}
+  return {tipo:'revisar',emoji:'❔',col:'var(--muted)',label:'Revisar'}
+}
+// Tarjeta BASURA: marca la(s) cancelada(s) como SOBRA (con botón borrar) y la viva como DEJAR.
+function _fCardBasura(g){
+  const cop=g.copias, drop=new Set(g.cls.dropIds||[])
+  const letra=i=>String.fromCharCode(65+i)
+  const tel=cop[0].telefono||'—'
+  const cab=cop.map((m,i)=>`<th style="font-size:11px">Copia ${letra(i)}<br>${drop.has(m.id)?'<span style="color:var(--red);font-weight:700">🗑️ SOBRA</span>':'<span style="color:var(--green);font-weight:700">✅ DEJAR</span>'}</th>`).join('')
+  const fila=(lbl,f)=>`<tr><td style="color:var(--muted);font-size:11px">${lbl}</td>${cop.map(m=>`<td style="font-size:12px">${f(m)}</td>`).join('')}</tr>`
+  const btns=cop.map((m,i)=>drop.has(m.id)?`<td style="text-align:center"><button onclick="_borrarFantasma('${m.id}','${g.tel}')" style="padding:5px 10px;font-size:11px;background:var(--red-bg);color:var(--red);border:1px solid var(--red);border-radius:7px;cursor:pointer;font-weight:600">🗑️ Borrar Copia ${letra(i)}</button></td>`:`<td style="text-align:center;font-size:11px;color:var(--green)">Se queda ✅</td>`).join('')
+  return `<div id="dupgrp-${g.tel}" class="card" style="border:1px solid var(--red);margin-bottom:10px">
+    <div style="font-weight:700;font-size:14px;margin-bottom:5px">📞 ${tel} · ${g.producto} <span style="color:var(--red);font-weight:600">· 🗑️ basura</span></div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Mismo día + cancelada + otra viva = el auxiliar corrigió. Borra la cancelada.</div>
+    <div class="table-wrap"><table style="font-size:12px;width:100%"><thead><tr><th></th>${cab}</tr></thead><tbody>
+      ${fila('Estado',m=>m.estado_final||'(sin estado)')}
+      ${fila('Día Dropi',m=>m.fecha_dropi||'—')}
+      ${fila('Anuncio',m=>m.ad_id||'orgánica')}
+      <tr><td></td>${btns}</tr>
+    </tbody></table></div>
+  </div>`
+}
+// Tarjeta COMPACTA (recompra/reintento/paralela/indeciso/intento/negra/revisar) — informativa.
+function _fCardClasif(g){
+  const cop=g.copias, c=g.cls
+  const tel=cop[0].telefono||'—'
+  const filas=cop.map((m,i)=>`<span style="font-size:11.5px;color:var(--muted)">${String.fromCharCode(65+i)}) ${m.fecha_dropi||'—'} · ${m.estado_final||'(sin estado)'}</span>`).join(' &nbsp;·&nbsp; ')
+  return `<div class="card" style="border-left:3px solid ${c.col};margin-bottom:8px;padding:9px 11px">
+    <div style="font-size:13px;font-weight:600;margin-bottom:3px">${c.emoji} ${c.label}</div>
+    <div style="font-size:12px;color:var(--text);margin-bottom:4px">📞 ${tel} · ${g.producto}</div>
+    <div>${filas}</div>
+  </div>`
+}
+// Tarjeta CLIENTE POTENCIAL (compró varios productos distintos).
+function _fCardPotencial(g){
+  const tel=g.copias[0].telefono||'—'
+  return `<div class="card" style="border-left:3px solid #A855F7;margin-bottom:8px;padding:9px 11px">
+    <div style="font-size:13px;font-weight:600;margin-bottom:3px">⭐ Cliente potencial (compró ${g.prods.length} productos distintos)</div>
+    <div style="font-size:12px;color:var(--text)">📞 ${tel} · ${g.prods.join(' + ')}</div>
+  </div>`
+}
 window.auditarFantasmasDropi=async()=>{
   const fileInput=document.getElementById('dash-fantasmas-file')
   const resEl=document.getElementById('dash-fantasmas-result')
@@ -1927,10 +1993,15 @@ window.auditarFantasmasDropi=async()=>{
       const t=String(r['TELÉFONO']||r['TELEFONO']||'').replace(/\D/g,'')
       if(t.length>=7){xlsxCount[t]=(xlsxCount[t]||0)+1;filasXlsx++}
     }
-    // 2. Mapeos de Nexo con fecha_dropi dentro del rango del Dashboard
-    const{data:mapeosDropi}=await sb.from('mapeos')
-      .select('id,telefono,fecha_dropi,fecha,producto,estado_final,ad_id,nombre_cliente,transportadora,cantidad')
-      .gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).limit(10000)
+    // 2. Mapeos de Nexo con fecha_dropi dentro del rango (intenta traer producto_id_dropi; si no existe, cae al set base)
+    let mapeosDropi=null
+    {
+      const _qF=cols=>sb.from('mapeos').select(cols).gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).limit(10000)
+      const _base='id,telefono,fecha_dropi,fecha,producto,estado_final,ad_id,nombre_cliente,transportadora,cantidad'
+      let _rF=await _qF(_base+',producto_id_dropi')
+      if(_rF.error)_rF=await _qF(_base)
+      mapeosDropi=_rF.data
+    }
     const totalNexo=(mapeosDropi||[]).length
     // 3. Agrupar mapeos de Nexo por teléfono
     const nexoByTel={}
@@ -1939,42 +2010,60 @@ window.auditarFantasmasDropi=async()=>{
       if(!nexoByTel[t])nexoByTel[t]=[]
       nexoByTel[t].push(m)
     }
-    // 4. Fantasmas por OCURRENCIAS (no por presencia):
-    //    - Ausente: el teléfono está en Nexo pero 0 veces en el xlsx.
-    //    - Duplicado: el teléfono aparece MÁS veces en Nexo que en el xlsx
-    //      (mismo cliente con varios pedidos; el cruce solo casa el primero).
-    const fantasmas=[]      // Ausentes (lista plana)
-    const dupGroups=[]      // Duplicados (por cliente, para comparar las copias)
+    // 4. Clasificar: ausentes (no están en el xlsx) + clientes con varios pedidos (cuadro cerrado).
+    const fantasmas=[]   // Ausentes (no están en el xlsx)
+    const buckets={basura:[],negra:[],recompra:[],reintento:[],paralela:[],indeciso:[],intento:[],revisar:[],potencial:[]}
     for(const[tel,lista]of Object.entries(nexoByTel)){
       const enXlsx=xlsxCount[tel]||0
-      if(enXlsx===0){
-        lista.forEach(m=>fantasmas.push({...m,_motivo:'Ausente en Dropi'}))
-      }else if(lista.length>enXlsx){
-        dupGroups.push({tel,enXlsx,copias:lista})
+      if(enXlsx===0){ lista.forEach(m=>fantasmas.push({...m,_motivo:'Ausente en Dropi'})); continue }
+      if(lista.length<2)continue   // un solo pedido → nada que clasificar
+      const ord=[...lista].sort((a,b)=>String(a.fecha_dropi||'').localeCompare(String(b.fecha_dropi||'')))
+      // agrupar por producto canónico (ID de Dropi del producto manda)
+      const porProd={}
+      ord.forEach(m=>{const p=_prodCanonMapeo(m)||'—';(porProd[p]=porProd[p]||[]).push(m)})
+      const prods=Object.keys(porProd)
+      if(prods.length>=2) buckets.potencial.push({tel,prods,copias:ord})   // multi-producto
+      for(const p of prods){
+        const cop=porProd[p]
+        if(cop.length<2)continue
+        const cls=_clasifProducto(cop)
+        ;(buckets[cls.tipo]||buckets.revisar).push({tel,producto:p,copias:cop,cls})
       }
     }
-    const totalFant=fantasmas.length+dupGroups.reduce((a,g)=>a+(g.copias.length-g.enXlsx),0)
+    const totalFant=fantasmas.length+buckets.basura.reduce((a,g)=>a+((g.cls.dropIds||[]).length),0)
     // 5. Render
-    if(!fantasmas.length&&!dupGroups.length){
-      resEl.innerHTML=`<div class="alert alert-green">✅ Sin fantasmas. Las ${totalNexo} órdenes de Nexo (${desde} → ${hasta}) cuadran 1 a 1 con las ${filasXlsx} filas del xlsx de Dropi.</div>`
+    const hayAlgo=fantasmas.length||Object.values(buckets).some(b=>b.length)
+    if(!hayAlgo){
+      resEl.innerHTML=`<div class="alert alert-green">✅ Sin novedades. Las ${totalNexo} órdenes de Nexo (${desde} → ${hasta}) cuadran 1 a 1 con las ${filasXlsx} filas del xlsx, sin clientes repetidos.</div>`
       return
     }
-    // Duplicados → tarjetas de comparación (tonto y bebé: veredicto + qué borrar)
-    const dupHtml=dupGroups.length?`<div style="font-weight:700;font-size:14px;color:var(--amber);margin:6px 0 8px">👯 Duplicados (${dupGroups.length} cliente${dupGroups.length>1?'s':''}) — mira por qué se duplicó y borra la copia que sobra</div>${dupGroups.map(_fCardDup).join('')}`:''
-    // Ausentes → tabla plana (como antes)
+    const _sec=(titulo,arr,fn)=>arr.length?`<div style="font-weight:700;font-size:13.5px;margin:12px 0 6px">${titulo} (${arr.length})</div>${arr.map(fn).join('')}`:''
+    // Resumen de recompras por producto (qué producto fideliza)
+    const recByProd={}; buckets.recompra.forEach(g=>{recByProd[g.producto]=(recByProd[g.producto]||0)+1})
+    const resumenRec=Object.keys(recByProd).length?`<div style="font-size:12.5px;color:var(--green);background:var(--green-bg);border-radius:8px;padding:7px 9px;margin:6px 0">🔁 <b>Recompras por producto:</b> ${Object.entries(recByProd).map(([p,n])=>`${p} (${n})`).join(' · ')}</div>`:''
+    const basuraHtml=_sec('🗑️ Basura — borra la cancelada',buckets.basura,_fCardBasura)
+    const negraHtml=_sec('🔴 Lista negra — cancelaron de verdad (clientes malos)',buckets.negra,_fCardClasif)
+    const recompraHtml=_sec('🟢 Recompras — cliente fiel volvió contento',buckets.recompra,_fCardClasif)
+    const reintentoHtml=_sec('🟠 Reintento tras devolución — recuperaste la venta',buckets.reintento,_fCardClasif)
+    const paralelaHtml=_sec('🔵 Compra paralela — pidió sin recibir la 1ra (ojo doble envío)',buckets.paralela,_fCardClasif)
+    const indecisoHtml=_sec('🟣 Indeciso / sin confirmar — la anterior quedó colgada',buckets.indeciso,_fCardClasif)
+    const intentoHtml=_sec('⚪ Intento — anterior cancelada (otro día)',buckets.intento,_fCardClasif)
+    const revisarHtml=_sec('❔ Revisar — no encaja claro, míralo tú',buckets.revisar,_fCardClasif)
+    const potencialHtml=_sec('⭐ Clientes potenciales — compraron varios productos',buckets.potencial,_fCardPotencial)
     const ausHtml=fantasmas.length?`
-      <div style="font-weight:700;font-size:14px;color:var(--amber);margin:12px 0 6px">👻 Ausentes en Dropi (${fantasmas.length}) — ya no están en el xlsx (anuladas/archivadas/fusionadas)</div>
+      <div style="font-weight:700;font-size:13.5px;margin:12px 0 6px">👻 Ausentes en Dropi (${fantasmas.length}) — ya no están en el xlsx (anuladas/archivadas/fusionadas)</div>
       <div class="table-wrap"><table style="font-size:12px">
-        <thead><tr><th>Teléfono</th><th>Fecha Dropi</th><th>Fecha compra</th><th>Producto</th><th>Estado en Nexo</th><th>Carrier</th><th>Ad ID</th></tr></thead>
-        <tbody>${fantasmas.map(m=>`<tr><td>${m.telefono||'—'}</td><td>${m.fecha_dropi||'—'}</td><td>${m.fecha||'—'}</td><td>${resolveProdName(m.producto).nombre||m.producto||'—'}</td><td>${m.estado_final||'(sin estado)'}</td><td>${m.transportadora||'—'}</td><td>${m.ad_id||'orgánica'}</td></tr>`).join('')}</tbody>
+        <thead><tr><th>Teléfono</th><th>Fecha Dropi</th><th>Producto</th><th>Estado</th><th>Carrier</th><th>Ad ID</th></tr></thead>
+        <tbody>${fantasmas.map(m=>`<tr><td>${m.telefono||'—'}</td><td>${m.fecha_dropi||'—'}</td><td>${resolveProdName(m.producto).nombre||m.producto||'—'}</td><td>${m.estado_final||'(sin estado)'}</td><td>${m.transportadora||'—'}</td><td>${m.ad_id||'orgánica'}</td></tr>`).join('')}</tbody>
       </table></div>`:''
     resEl.innerHTML=`
       <div class="card" style="border:2px solid var(--amber)">
-        <div style="font-weight:800;font-size:15px;color:var(--amber);margin-bottom:6px">👻 Fantasmas detectadas: ${totalFant}</div>
-        <div style="font-size:13px;color:var(--muted);margin-bottom:10px">Nexo tiene <b>${totalNexo}</b> órdenes con fecha en el rango (${desde} → ${hasta}). El xlsx trae <b>${filasXlsx}</b> filas. Sobran <b>${totalFant}</b> en Nexo.</div>
-        ${dupHtml}${ausHtml}
+        <div style="font-weight:800;font-size:15px;color:var(--amber);margin-bottom:6px">🕵️ Auditoría — clientes y fantasmas</div>
+        <div style="font-size:13px;color:var(--muted);margin-bottom:2px">Nexo: <b>${totalNexo}</b> órdenes (${desde} → ${hasta}) · xlsx: <b>${filasXlsx}</b> filas · a borrar (basura): <b>${totalFant}</b>.</div>
+        ${resumenRec}
+        ${basuraHtml}${negraHtml}${recompraHtml}${reintentoHtml}${paralelaHtml}${indecisoHtml}${intentoHtml}${revisarHtml}${potencialHtml}${ausHtml}
       </div>`
-    logAction('auditoria_fantasmas',{rango:desde+'/'+hasta,total_nexo:totalNexo,filas_xlsx:filasXlsx,fantasmas:totalFant}).catch(()=>{})
+    logAction('auditoria_fantasmas',{rango:desde+'/'+hasta,total_nexo:totalNexo,filas_xlsx:filasXlsx,basura:totalFant,recompras:buckets.recompra.length,potenciales:buckets.potencial.length}).catch(()=>{})
   }catch(e){
     resEl.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
   }
@@ -16140,7 +16229,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     if(_iC&&_iC.campId&&_iC.accId&&!_campInfoCuadre[String(_iC.campId)])_campInfoCuadre[String(_iC.campId)]={nombre:_iC.campNombre||String(_iC.campId),accNombre:_iC.accNombre||_iC.accId,accId:_iC.accId}
   }
   const _gAdsBloques=adGastoBloques||{p:{},a:{},b:{},c:{}}
-  const _mkCuadre=(adList,gAds,gCamps)=>{
+  const _mkCuadre=(adList,gAds,gCamps,adListEnt)=>{
     const _ga=gAds||{},_gc=gCamps||{}
     let _enCamp=0,_org=0,_sin=0,_huer=0
     const _pcMap={}
@@ -16167,6 +16256,19 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
       }else{
         _sin++
         _sinMap[id]=(_sinMap[id]||0)+1
+      }
+    }
+    // ENTREGADAS por campaña/ad (paralelo a count) — para mostrar "cuántas ya llegaron al cliente".
+    for(const raw of (adListEnt||[])){
+      const id=(raw!=null&&raw!=='')?String(raw):''
+      if(!id)continue
+      const info=_atcCuadre[id]
+      if(info&&info.accId){
+        const ck=String(info.campId)
+        if(!_campMap[ck])_campMap[ck]={campId:ck,nombre:info.campNombre||ck,accNombre:info.accNombre||info.accId,count:0,ads:{},adsGasto:{}}
+        _campMap[ck].ent=(_campMap[ck].ent||0)+1
+        _campMap[ck].adsEnt=_campMap[ck].adsEnt||{}
+        _campMap[ck].adsEnt[id]=(_campMap[ck].adsEnt[id]||0)+1
       }
     }
     // Gasto y CPA por campaña: usa el gasto COMPLETO de la campaña en el rango (gCamps, mismo
@@ -16205,6 +16307,9 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
   }
   // Lista de ad_ids de los mapeos CONFIRMADOS de un día (lo que muestra el número grande).
   const _confDeMps=(arr)=>(arr||[]).filter(m=>m.estado_final&&m.estado_final!=='CANCELADO'&&m.estado_final!=='PENDIENTE CONFIRMACION').map(m=>m.ad_id)
+  // Lista de ad_ids de los mapeos ENTREGADOS (ya llegaron al cliente) — mismo criterio que los
+  // reportes de la app: estado cat 'entregado' o 'novedad_ok'. Subconjunto de los confirmados.
+  const _entDeMps=(arr)=>(arr||[]).filter(m=>{const _c=DROPI_STATUS[m.estado_final]?.cat;return _c==='entregado'||_c==='novedad_ok'}).map(m=>m.ad_id)
 
   // ── Período previo (misma duración, justo antes) ──
   let prevData=null
@@ -16236,7 +16341,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
       const cpaP=pConfP>0?gastoP/pConfP:0
       const roasP=gastoP>0?ventaP/gastoP:0
       const pedidosIdsP=(reportesPrevByProd&&reportesPrevByProd[prod.nombre])||0
-      prevData={gasto:gastoP,pedidos:pConfP,ganancia:gananciaP,cpa:cpaP,roas:roasP,pedidosIds:pedidosIdsP,conversaciones:_convPrev,cuadre:_mkCuadre(_confDeMps(mpsP),_gAdsBloques.a||{},gastoPrevByCampId)}
+      prevData={gasto:gastoP,pedidos:pConfP,ganancia:gananciaP,cpa:cpaP,roas:roasP,pedidosIds:pedidosIdsP,conversaciones:_convPrev,cuadre:_mkCuadre(_confDeMps(mpsP),_gAdsBloques.a||{},gastoPrevByCampId,_entDeMps(mpsP))}
     }
   }
 
@@ -16269,7 +16374,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     const cpaX=pCX>0?gP/pCX:0
     const roasX=gP>0?ventaX/gP:0
     const idsX=(repMap&&repMap[prod.nombre])||0
-    return{gasto:gP,pedidos:pCX,ganancia:gananciaX,cpa:cpaX,roas:roasX,pedidosIds:idsX,conversaciones:convX,cuadre:_mkCuadre(_confDeMps(mpsX),_gAdsBloques[bloqueKey]||{},gastoMap)}
+    return{gasto:gP,pedidos:pCX,ganancia:gananciaX,cpa:cpaX,roas:roasX,pedidosIds:idsX,conversaciones:convX,cuadre:_mkCuadre(_confDeMps(mpsX),_gAdsBloques[bloqueKey]||{},gastoMap,_entDeMps(mpsX))}
   }
   const _ex=extrasDias||{}
   const prevData2=(nDiasRango>0)?_calcDiaExtra(_ex.mapeosAntierByProd&&_ex.mapeosAntierByProd[prod.nombre],_ex.gastoAntierByCampId,_ex.conversacionesAntierByProd,_ex.reportesAntierByProd,'b'):null
@@ -16296,7 +16401,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
       const lst=(reportesAdIdsListByProd&&reportesAdIdsListByProd[prod.nombre])||null
       _adList=lst?lst.slice():[]
     }
-    cuadre=_mkCuadre(_adList,_gAdsBloques.p||{},gastoByCampId)
+    cuadre=_mkCuadre(_adList,_gAdsBloques.p||{},gastoByCampId,(!esSoloHoy&&pConf>0)?_entDeMps(mps):[])
   }catch(_){cuadre=null}
 
   // NUEVO: ventas por IDs del aux POR CAMPAÑA y POR ANUNCIO para cada día (p=hoy/período, a=ayer, b=antier, c=trasantier).
@@ -16658,18 +16763,20 @@ function _renderProductoCardResumen(data,ranking){
       _diasConDatos++
       for(const cp of lista){
         const ck=String(cp.campId)
-        if(!_fus[ck])_fus[ck]={campId:ck,nombre:cp.nombre,accNombre:cp.accNombre,count:0,gasto:0,dias:{},ads:{}}
+        if(!_fus[ck])_fus[ck]={campId:ck,nombre:cp.nombre,accNombre:cp.accNombre,count:0,ent:0,gasto:0,dias:{},ads:{}}
         const F=_fus[ck]
         F.count+=cp.count
+        F.ent=(F.ent||0)+(cp.ent||0)
         F.gasto+=cp.gasto||0
-        F.dias[d.k]={count:cp.count,gasto:cp.gasto||0,cpa:cp.cpa||0}
+        F.dias[d.k]={count:cp.count,ent:(cp.ent||0),gasto:cp.gasto||0,cpa:cp.cpa||0}
         for(const _adId of Object.keys(cp.ads||{})){
           const n=cp.ads[_adId]
-          if(!F.ads[_adId])F.ads[_adId]={count:0,gasto:0,dias:{}}
+          if(!F.ads[_adId])F.ads[_adId]={count:0,ent:0,gasto:0,dias:{}}
           const A=F.ads[_adId]
           const g=(cp.adsGasto&&cp.adsGasto[_adId])||0
-          A.count+=n;A.gasto+=g
-          A.dias[d.k]={n:n,g:g,cpa:(n>0&&g>0)?g/n:0}
+          const _aEnt=(cp.adsEnt&&cp.adsEnt[_adId])||0
+          A.count+=n;A.ent=(A.ent||0)+_aEnt;A.gasto+=g
+          A.dias[d.k]={n:n,ent:_aEnt,g:g,cpa:(n>0&&g>0)?g/n:0}
         }
         // NUEVO: ads que gastaron ese día pero NO vendieron (fuga 🚨) — entran con 0 ventas
         for(const _adSv of Object.keys(cp.adsSinVenta||{})){
@@ -17079,7 +17186,7 @@ function _renderProductoCardResumen(data,ranking){
       // Los que vendieron 0 en todos sus días (pura fuga) van AL FINAL marcados en ámbar.
       const _adsF=Object.keys(F.ads).map(_adId=>{
         const A=F.ads[_adId]
-        return{adId:_adId,count:A.count,gasto:A.gasto,dias:A.dias,cpaT:(A.count>0&&A.gasto>0)?A.gasto/A.count:0}
+        return{adId:_adId,count:A.count,ent:A.ent||0,gasto:A.gasto,dias:A.dias,cpaT:(A.count>0&&A.gasto>0)?A.gasto/A.count:0}
       }).sort((a,b)=>{
         const x=a.cpaT>0?a.cpaT:Infinity,y=b.cpaT>0?b.cpaT:Infinity
         return x!==y?x-y:b.count-a.count
@@ -17106,7 +17213,7 @@ function _renderProductoCardResumen(data,ranking){
         const _hovAdJ=esFugaAd?` onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='.55'" title="🚨 Gastó y no vendió: bloque apagado a propósito para que el ojo se vaya a los verdes. Pasa el cursor para verlo completo."`:''
         const _badgeVendioAd=_vendioAd?`<span style="margin-left:6px;font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:var(--green-bg);color:var(--green);border:1px solid var(--green)" title="Este anuncio SÍ vendió en el período: ${A.count} venta${A.count===1?'':'s'}. Es de los buenos — míralo primero.">🏆 VENDIÓ</span>`:''
         return`<div${_hovAdJ} style="margin-top:6px;padding:6px 8px;background:${_bgAdJ};border-radius:5px;${_bordAdJ}">
-          <div style="display:flex;align-items:center;font-size:${_vendioAd?'12px':'11.5px'};color:${esFugaAd?'var(--amber)':'var(--muted)'}">${_dotAd}${_idChip(A.adId,`<span style="font-family:monospace${_vendioAd?';font-size:12.5px;font-weight:700;color:var(--text)':''}">🖼️ ${_esc(A.adId)}</span>`,'ID del anuncio')}${_badgeVendioAd}${_pyBadgeAd}${_btnsAd}${_gastoTxt(A.gasto)}${esFugaAd?`<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap" title="Gastó plata en sus días y no vendió NADA. Pura fuga: revísalo o apágalo.">🚨 gastó y no vendió</span>`:_cpaPill(A.cpaT,'sm')}<span style="margin-left:auto;color:${esFugaAd?'var(--amber)':'var(--text)'};font-weight:700;padding-left:10px" title="Ventas totales del anuncio sumando sus días">${A.count}</span></div>
+          <div style="display:flex;align-items:center;font-size:${_vendioAd?'12px':'11.5px'};color:${esFugaAd?'var(--amber)':'var(--muted)'}">${_dotAd}${_idChip(A.adId,`<span style="font-family:monospace${_vendioAd?';font-size:12.5px;font-weight:700;color:var(--text)':''}">🖼️ ${_esc(A.adId)}</span>`,'ID del anuncio')}${_badgeVendioAd}${_pyBadgeAd}${_btnsAd}${_gastoTxt(A.gasto)}${esFugaAd?`<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap" title="Gastó plata en sus días y no vendió NADA. Pura fuga: revísalo o apágalo.">🚨 gastó y no vendió</span>`:_cpaPill(A.cpaT,'sm')}<span style="margin-left:auto;color:${esFugaAd?'var(--amber)':'var(--text)'};font-weight:700;padding-left:10px" title="Ventas totales del anuncio sumando sus días">${A.count}</span>${A.ent>0?`<span style="color:#86efac;font-weight:800;font-size:10px;padding-left:10px;white-space:nowrap" title="📦 ENTREGADAS: órdenes que YA llegaron al cliente">📦 ${A.ent}</span>`:''}</div>
           <div id="${_ccid}-adsetbox-${A.adId}" style="margin:1px 0 0 22px;font-size:9.5px;line-height:1.3"></div>
           <div style="margin:2px 0 0 14px;border-left:1px solid ${esFugaAd?'var(--amber)':'var(--border)'};padding-left:8px">${_metHeader(73)}${_dias.map((d,di)=>{const _pA=_dias.slice(di+1).find(dp=>A.dias[dp.k]);return _filaDia(d,A.dias[d.k],'sm',_metAdDe(d.k,A.adId),_idsAdDiaF(d.k,A.adId),_pA?{k:_pA.k,obj:A.dias[_pA.k],met:_metAdDe(_pA.k,A.adId),nIds:_idsAdDiaF(_pA.k,A.adId)}:null)}).join('')}${_filaTotal(A.count,A.gasto,A.cpaT,_aggMet(_dias.map(d=>_metAdDe(d.k,A.adId))),'sm',_splitCpaF(A.dias),_dias.reduce((s,d)=>s+_idsAdDiaF(d.k,A.adId),0),_idsAdDiaF('p',A.adId),_beTotF({p:_idsAdDiaF('p',A.adId),a:_idsAdDiaF('a',A.adId),b:_idsAdDiaF('b',A.adId),c:_idsAdDiaF('c',A.adId)}))}</div>
           <div id="${_ccid}-sem-${A.adId}" style="margin:4px 0 0 14px"></div>
@@ -17194,7 +17301,7 @@ function _renderProductoCardResumen(data,ranking){
       // NUEVO: CPA del 🛒 VTS SIN el gasto de HOY (hoy aún no tiene ventas confirmadas Dropi → inflaba el CPA). Solo se quita ese gasto.
       const _gtoSinHoyVtsRow=Math.max(0,(F.gasto||0)-((F.dias['p']&&F.dias['p'].gasto)||0))
       return`<div id="${_ccid}-box" class="rp-fus-box" style="padding:4px 0;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-radius:6px;border-bottom:1px solid rgba(255,255,255,.04)">
-        <div class="rp-fus-row" data-fsem="${_fsemF}" data-fnoent="${_noEntFlagF}" data-factiva="${_activaRealF===true?1:0}" data-fdias="${_diasVtaF}" data-fcampid="${_esc(F.campId)}" data-fadids="${Object.keys(F.ads||{}).join(',')}" data-fghoy="${(((F.dias['p']&&F.dias['p'].gasto)||0)>0)?1:0}" data-fgto="${Math.round(F.gasto||0)}" data-fgp="${Math.round((F.dias['p']&&F.dias['p'].gasto)||0)}" data-fga="${Math.round((F.dias['a']&&F.dias['a'].gasto)||0)}" data-fgb="${Math.round((F.dias['b']&&F.dias['b'].gasto)||0)}" data-fgc="${Math.round((F.dias['c']&&F.dias['c'].gasto)||0)}" data-fvts="${F.count||0}" data-fvtsc="${_vtsConfRow}" data-fvp="${_idsCampDiaF('p',F.campId)}" data-fva="${(F.dias['a']&&F.dias['a'].count)||0}" data-fia="${_idsCampDiaF('a',F.campId)}" data-fvb="${(F.dias['b']&&F.dias['b'].count)||0}" data-fib="${_idsCampDiaF('b',F.campId)}" data-fvc="${(F.dias['c']&&F.dias['c'].count)||0}" data-fic="${_idsCampDiaF('c',F.campId)}" data-fitot="${_dias.reduce((s,d)=>s+_idsCampDiaF(d.k,F.campId),0)}" data-fcpa="${Math.round(F.cpa||0)}" data-fcpah="${(()=>{try{if(!_esDiaIdsF('p'))return 0;const gP=(F.dias['p']&&F.dias['p'].gasto)||0;const nP=(F.dias['p']&&F.dias['p'].count)||0;return(gP>0&&nP>0)?Math.round(_cpaSemHoyF(gP,nP)):0}catch(_){return 0}})()}" onclick="window._rpToggleCuadre('${_ccid}');try{window._rpFusionSemLoad('${_ccid}')}catch(_){};try{window._rpFusionStickyRow(this,'${_ccid}')}catch(_){}" style="cursor:pointer;display:flex;align-items:center;font-size:12px;color:var(--text);min-height:28px;min-width:max-content;padding:2px 8px" title="Toca para ver esta campaña día por día y sus anuncios agrupados por ID">
+        <div class="rp-fus-row" data-fsem="${_fsemF}" data-fnoent="${_noEntFlagF}" data-factiva="${_activaRealF===true?1:0}" data-fdias="${_diasVtaF}" data-fcampid="${_esc(F.campId)}" data-fadids="${Object.keys(F.ads||{}).join(',')}" data-fghoy="${(((F.dias['p']&&F.dias['p'].gasto)||0)>0)?1:0}" data-fgto="${Math.round(F.gasto||0)}" data-fgp="${Math.round((F.dias['p']&&F.dias['p'].gasto)||0)}" data-fga="${Math.round((F.dias['a']&&F.dias['a'].gasto)||0)}" data-fgb="${Math.round((F.dias['b']&&F.dias['b'].gasto)||0)}" data-fgc="${Math.round((F.dias['c']&&F.dias['c'].gasto)||0)}" data-fvts="${F.count||0}" data-fvtsc="${_vtsConfRow}" data-fent="${F.ent||0}" data-fvp="${_idsCampDiaF('p',F.campId)}" data-fva="${(F.dias['a']&&F.dias['a'].count)||0}" data-fia="${_idsCampDiaF('a',F.campId)}" data-fvb="${(F.dias['b']&&F.dias['b'].count)||0}" data-fib="${_idsCampDiaF('b',F.campId)}" data-fvc="${(F.dias['c']&&F.dias['c'].count)||0}" data-fic="${_idsCampDiaF('c',F.campId)}" data-fitot="${_dias.reduce((s,d)=>s+_idsCampDiaF(d.k,F.campId),0)}" data-fcpa="${Math.round(F.cpa||0)}" data-fcpah="${(()=>{try{if(!_esDiaIdsF('p'))return 0;const gP=(F.dias['p']&&F.dias['p'].gasto)||0;const nP=(F.dias['p']&&F.dias['p'].count)||0;return(gP>0&&nP>0)?Math.round(_cpaSemHoyF(gP,nP)):0}catch(_){return 0}})()}" onclick="window._rpToggleCuadre('${_ccid}');try{window._rpFusionSemLoad('${_ccid}')}catch(_){};try{window._rpFusionStickyRow(this,'${_ccid}')}catch(_){}" style="cursor:pointer;display:flex;align-items:center;font-size:12px;color:var(--text);min-height:28px;min-width:max-content;padding:2px 8px" title="Toca para ver esta campaña día por día y sus anuncios agrupados por ID">
           ${_cF(_cwF.nom,`<span id="${_ccid}-chev" style="display:inline-block;width:12px;font-size:9px;color:var(--muted)">▸</span><span style="margin-left:3px">${_dotF}📣 ${_esc(F.nombre)}</span>`,false,_esc(F.nombre))}
           ${_cF(_cwF.alr,_pyBadgeF)}
           ${_cF(_cwF.dias,_chips)}
@@ -17269,7 +17376,7 @@ function _renderProductoCardResumen(data,ranking){
               +_parDiaF('c',_cwF.vC,_cwF.iC,_dias[3].lab,'tras')
               +_cF(_cwF.iTot,`<span class="rp-life-itot" style="display:inline-block;text-align:right"><span style="display:block;color:${_descTot?'var(--amber)':(_iTotF>0?'#fcd34d':'var(--subtle)')};font-weight:700;line-height:1.15">${_iTotF>0?'🆔 '+_iTotF:'—'}</span>${F.gasto>0?`<span style="display:block;font-size:8.5px;line-height:1.1;color:var(--subtle);font-weight:600">${_gAbrF(F.gasto)}</span>`:''}${(F.gasto>0&&_iTotF>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${(typeof window._nexoSemColor==='function')?window._nexoSemColor(Math.round(F.gasto/_iTotF),_beTotF({p:_idsCampDiaF('p',F.campId),a:_idsCampDiaF('a',F.campId),b:_idsCampDiaF('b',F.campId),c:_idsCampDiaF('c',F.campId)})):'var(--subtle)'}" title="🆔 CPA IDS = gasto total (4 días) ÷ IDs = $${fmt(F.gasto)} ÷ ${_iTotF}">🆔$${fmt(Math.round(F.gasto/_iTotF))}</span>`:''}${(F.gasto>0&&_iTotF>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${(typeof window._nexoSemColor==='function')?window._nexoSemColor(Math.round(F.gasto/(_iTotF*_pctConfF)),_beTotF({p:_idsCampDiaF('p',F.campId),a:_idsCampDiaF('a',F.campId),b:_idsCampDiaF('b',F.campId),c:_idsCampDiaF('c',F.campId)})):'var(--subtle)'}" title="🔮 CPA R. EFECTIVAS = gasto total ÷ (IDs × ${Math.round(_pctConfF*100)}% confirmación) = $${fmt(F.gasto)} ÷ (${_iTotF} × ${Math.round(_pctConfF*100)}%)">🔮$${fmt(Math.round(F.gasto/(_iTotF*_pctConfF)))}</span>`:''}${(_iTotF>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:var(--purple)" title="🔮 Ventas proyectadas post-Dropi = ${_iTotF} IDs × ${Math.round(_pctConfF*100)}% confirmación">🔮 ${(Math.floor(_iTotF*_pctConfF*10)/10).toFixed(1)}</span>`:''}</span>`,true,'Total ventas por IDs (4 días): '+_iTotF+(_descTot?' — no cuadra con las 🛒 VTS totales de al lado ('+F.count+')':' — cuadra con las 🛒 VTS totales'),false,'tot','l')
           })()}
-          ${_cF(_cwF.vts,`<span class="rp-life-vts" style="display:inline-block;text-align:right"><span style="display:block;color:${_vtsConfRow>0?'var(--text)':'var(--subtle)'};font-weight:700;line-height:1.15">${_vtsConfRow>0?_vtsConfRow:'—'}</span>${_gtoSinHoyVtsRow>0?`<span style="display:block;font-size:8.5px;line-height:1.1;color:var(--subtle);font-weight:600">${_gtoSinHoyVtsRow>=1e6?'$'+(_gtoSinHoyVtsRow/1e6).toFixed(3)+'M':(_gtoSinHoyVtsRow>=1000?'$'+Math.round(_gtoSinHoyVtsRow/1000)+'k':'$'+Math.round(_gtoSinHoyVtsRow))}</span>`:''}${(_gtoSinHoyVtsRow>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${(typeof window._nexoSemColor==='function')?window._nexoSemColor(Math.round(_gtoSinHoyVtsRow/F.count),_beTotF({p:_idsCampDiaF('p',F.campId),a:_idsCampDiaF('a',F.campId),b:_idsCampDiaF('b',F.campId),c:_idsCampDiaF('c',F.campId)})):'var(--subtle)'}">🎯$${fmt(Math.round(_gtoSinHoyVtsRow/F.count))}</span>`:''}${(_gtoSinHoyVtsRow>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${(typeof window._nexoSemColor==='function')?window._nexoSemColor(Math.round(_gtoSinHoyVtsRow/(F.count*(1-_devPctF))),_beTotF({p:_idsCampDiaF('p',F.campId),a:_idsCampDiaF('a',F.campId),b:_idsCampDiaF('b',F.campId),c:_idsCampDiaF('c',F.campId)})):'var(--subtle)'}" title="📦 CPA V. ENTREGADAS total = gasto (sin HOY) ÷ (ventas confirmadas × (1−${Math.round(_devPctF*100)}% devol))">📦$${fmt(Math.round(_gtoSinHoyVtsRow/(F.count*(1-_devPctF))))}</span>`:''}</span>`,true,'Ventas totales CONFIRMADAS Dropi de la campaña sumando sus días — las 🆔 de HOY no entran hasta que el cruce las confirme (véelas en 🆔 VTS HOY) · 🎯 abajo: CPA = gasto (SIN el de HOY) ÷ ventas confirmadas',false,'tot','r')}
+          ${_cF(_cwF.vts,`<span class="rp-life-vts" style="display:inline-block;text-align:right"><span style="display:block;color:${_vtsConfRow>0?'var(--text)':'var(--subtle)'};font-weight:700;line-height:1.15">${_vtsConfRow>0?_vtsConfRow:'—'}</span>${_gtoSinHoyVtsRow>0?`<span style="display:block;font-size:8.5px;line-height:1.1;color:var(--subtle);font-weight:600">${_gtoSinHoyVtsRow>=1e6?'$'+(_gtoSinHoyVtsRow/1e6).toFixed(3)+'M':(_gtoSinHoyVtsRow>=1000?'$'+Math.round(_gtoSinHoyVtsRow/1000)+'k':'$'+Math.round(_gtoSinHoyVtsRow))}</span>`:''}${(_gtoSinHoyVtsRow>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${(typeof window._nexoSemColor==='function')?window._nexoSemColor(Math.round(_gtoSinHoyVtsRow/F.count),_beTotF({p:_idsCampDiaF('p',F.campId),a:_idsCampDiaF('a',F.campId),b:_idsCampDiaF('b',F.campId),c:_idsCampDiaF('c',F.campId)})):'var(--subtle)'}">🎯$${fmt(Math.round(_gtoSinHoyVtsRow/F.count))}</span>`:''}${(_gtoSinHoyVtsRow>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${(typeof window._nexoSemColor==='function')?window._nexoSemColor(Math.round(_gtoSinHoyVtsRow/(F.count*(1-_devPctF))),_beTotF({p:_idsCampDiaF('p',F.campId),a:_idsCampDiaF('a',F.campId),b:_idsCampDiaF('b',F.campId),c:_idsCampDiaF('c',F.campId)})):'var(--subtle)'}" title="📦 CPA V. ENTREGADAS total = gasto (sin HOY) ÷ (ventas confirmadas × (1−${Math.round(_devPctF*100)}% devol))">📦$${fmt(Math.round(_gtoSinHoyVtsRow/(F.count*(1-_devPctF))))}</span>`:''}${F.ent>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:800;color:#86efac" title="📦 ENTREGADAS: órdenes que YA llegaron al cliente (subconjunto de las confirmadas)">📦 ${F.ent}</span>`:''}</span>`,true,'Ventas totales CONFIRMADAS Dropi de la campaña sumando sus días — las 🆔 de HOY no entran hasta que el cruce las confirme (véelas en 🆔 VTS HOY) · 🎯 abajo: CPA = gasto (SIN el de HOY) ÷ ventas confirmadas',false,'tot','r')}
           ${_cF(_cwF.bud,_btnBudF)}
           ${_cF(_cwF.id,_idChip(F.campId,`<span style="font-family:monospace;font-size:10.5px;color:var(--muted)">${_esc(F.campId)}</span>`,'ID de la campaña'),false,'ID de la campaña: '+_esc(F.campId),true)}
           ${_cF(_cwF.dup,_btnDupF)}
@@ -17349,6 +17456,7 @@ function _renderProductoCardResumen(data,ranking){
           ${_optsCampF}
         </select>
         <button onclick="event.stopPropagation();window._rpFusionRango('${_slugProd}','${_cidF}')" style="background:rgba(167,139,250,.12);border:1px solid var(--purple);border-radius:5px;color:var(--purple);font-size:11px;font-weight:700;padding:2px 10px;cursor:pointer">🔍 Aplicar</button>
+        <button onclick="event.stopPropagation();window._rpFusion8dias('${_slugProd}','${_cidF}')" style="background:rgba(134,239,172,.12);border:1px solid var(--green);border-radius:5px;color:var(--green);font-size:11px;font-weight:700;padding:2px 10px;cursor:pointer" title="Carga HOY y los 7 días anteriores (8 columnas) con datos directos — ventas, gasto e IDs completos por día. Ventana que siempre termina en hoy. Se desliza horizontal para verlos todos.">📅 Últimos 8 días</button>
         <button onclick="event.stopPropagation();window._rpFusionVolver('${_cidF}')" style="background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:5px;color:var(--muted);font-size:11px;padding:2px 10px;cursor:pointer" title="Volver a la vista normal de los 4 días (sin llamados)">↩️ Volver a los 4 días</button>
         <span id="${_cidF}-rango-status" style="font-size:10.5px"></span>
       </div>`
@@ -17379,6 +17487,7 @@ function _renderProductoCardResumen(data,ranking){
       const _tVts=_lista.reduce((s,F)=>s+(F.count||0),0)
       // NUEVO (12jun26): VTS visible = solo confirmadas Dropi (las 🆔 de HOY no inflan el total). El CPA Σ no se toca.
       const _tVtsConf=_lista.reduce((s,F)=>s+(_esDiaIdsF('p')?Math.max(0,(F.count||0)-((F.dias['p']&&F.dias['p'].count)||0)):(F.count||0)),0)
+      const _tEnt=_lista.reduce((s,F)=>s+(F.ent||0),0)
       const _tVp=_lista.reduce((s,F)=>s+_idsCampDiaF('p',F.campId),0)
       const _tVa=_lista.reduce((s,F)=>s+((F.dias['a']&&F.dias['a'].count)||0),0)
       const _tIa=_lista.reduce((s,F)=>s+_idsCampDiaF('a',F.campId),0)
@@ -17409,7 +17518,7 @@ function _renderProductoCardResumen(data,ranking){
           ${_tdC2(_cwF.vC,'vc',_tVc>0?_tVc:'—','#86efac','gc',_tGc>0?_tAb(_tGc):'','tras')}
           ${_tdC(_cwF.iC,'ic',_tIc>0?_tIc:'—','#fcd34d','tras')}
           ${(()=>{const _cpaIT=(_tITot>0&&_tGto>0)?Math.round(_tGto/_tITot):0;const _colIT=(_cpaIT>0&&typeof window._nexoSemColor==='function')?window._nexoSemColor(_cpaIT,_BE):'var(--subtle)';const _cpaITe=(_tITot>0&&_tGto>0)?Math.round(_tGto/(_tITot*_pctConfF)):0;const _colITe=(_cpaITe>0&&typeof window._nexoSemColor==='function')?window._nexoSemColor(_cpaITe,_BE):'var(--subtle)';return`<span class="rp-laneh-tot" style="display:inline-block;width:${_cwF.iTot}px;flex-shrink:0;white-space:nowrap;text-align:right;padding-right:8px;vertical-align:middle;background:${_laneHdF.tot};${_laneEdgeF('tot','l')}align-self:stretch;display:inline-flex;flex-direction:column;justify-content:center;align-items:flex-end" title="🆔 TOT: total ventas por IDs (4 días, incluye HOY) · gasto total (con HOY) · 🆔 CPA IDS = gasto ÷ IDs · 🔮 CPA R. EFECTIVAS = gasto ÷ (IDs × % confirmación)"><span style="display:inline-block;text-align:right"><span id="${_cidF}-tot${suf}-itot" style="display:block;color:#fcd34d;font-weight:700;line-height:1.15">${_tITot>0?'🆔 '+_tITot:'—'}</span><span id="${_cidF}-tot${suf}-itotg" style="display:block;font-size:8.5px;line-height:1.1;color:var(--subtle);font-weight:600">${_tGto>0?_tAb(_tGto):''}</span><span id="${_cidF}-tot${suf}-itotc" style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_colIT}">${_cpaIT>0?'🆔$'+fmt(_cpaIT):''}</span><span id="${_cidF}-tot${suf}-itotce" style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_colITe}">${_cpaITe>0?'🔮$'+fmt(_cpaITe):''}</span><span id="${_cidF}-tot${suf}-itotvp" style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:var(--purple)">${_tITot>0?'🔮 '+(Math.floor(_tITot*_pctConfF*10)/10).toFixed(1):''}</span></span></span>`})()}
-          ${(()=>{const _gsh=Math.max(0,_tGto-_tGp);const _cpaVT=(_tVtsConf>0&&_gsh>0)?Math.round(_gsh/_tVtsConf):0;const _colVT=(_cpaVT>0&&typeof window._nexoSemColor==='function')?window._nexoSemColor(_cpaVT,_BE):'var(--subtle)';const _cpaVTe=(_tVtsConf>0&&_gsh>0)?Math.round(_gsh/(_tVtsConf*(1-_devPctF))):0;const _colVTe=(_cpaVTe>0&&typeof window._nexoSemColor==='function')?window._nexoSemColor(_cpaVTe,_BE):'var(--subtle)';return`<span class="rp-laneh-tot" style="display:inline-block;width:${_cwF.vts}px;flex-shrink:0;white-space:nowrap;text-align:right;padding-right:8px;vertical-align:middle;background:${_laneHdF.tot};${_laneEdgeF('tot','r')}align-self:stretch;display:inline-flex;flex-direction:column;justify-content:center;align-items:flex-end" title="🛒 VTS: ventas confirmadas Dropi (sin HOY) · gasto SIN el de HOY · 🎯 CPA REAL = gasto ÷ ventas confirmadas · 📦 CPA V. ENTREGADAS = gasto ÷ (ventas × (1−% devol))"><span style="display:inline-block;text-align:right"><span id="${_cidF}-tot${suf}-vts" style="display:block;color:var(--text);font-weight:700;line-height:1.15">${_tVtsConf>0?_tVtsConf:'—'}</span><span id="${_cidF}-tot${suf}-vtsg" style="display:block;font-size:8.5px;line-height:1.1;color:var(--subtle);font-weight:600">${_gsh>0?_tAb(_gsh):''}</span><span id="${_cidF}-tot${suf}-vtscp" style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_colVT}">${_cpaVT>0?'🎯$'+fmt(_cpaVT):''}</span><span id="${_cidF}-tot${suf}-vtscpe" style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_colVTe}">${_cpaVTe>0?'📦$'+fmt(_cpaVTe):''}</span></span></span>`})()}
+          ${(()=>{const _gsh=Math.max(0,_tGto-_tGp);const _cpaVT=(_tVtsConf>0&&_gsh>0)?Math.round(_gsh/_tVtsConf):0;const _colVT=(_cpaVT>0&&typeof window._nexoSemColor==='function')?window._nexoSemColor(_cpaVT,_BE):'var(--subtle)';const _cpaVTe=(_tVtsConf>0&&_gsh>0)?Math.round(_gsh/(_tVtsConf*(1-_devPctF))):0;const _colVTe=(_cpaVTe>0&&typeof window._nexoSemColor==='function')?window._nexoSemColor(_cpaVTe,_BE):'var(--subtle)';return`<span class="rp-laneh-tot" style="display:inline-block;width:${_cwF.vts}px;flex-shrink:0;white-space:nowrap;text-align:right;padding-right:8px;vertical-align:middle;background:${_laneHdF.tot};${_laneEdgeF('tot','r')}align-self:stretch;display:inline-flex;flex-direction:column;justify-content:center;align-items:flex-end" title="🛒 VTS: ventas confirmadas Dropi (sin HOY) · gasto SIN el de HOY · 🎯 CPA REAL = gasto ÷ ventas confirmadas · 📦 CPA V. ENTREGADAS = gasto ÷ (ventas × (1−% devol))"><span style="display:inline-block;text-align:right"><span id="${_cidF}-tot${suf}-vts" style="display:block;color:var(--text);font-weight:700;line-height:1.15">${_tVtsConf>0?_tVtsConf:'—'}</span><span id="${_cidF}-tot${suf}-vtsg" style="display:block;font-size:8.5px;line-height:1.1;color:var(--subtle);font-weight:600">${_gsh>0?_tAb(_gsh):''}</span><span id="${_cidF}-tot${suf}-vtscp" style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_colVT}">${_cpaVT>0?'🎯$'+fmt(_cpaVT):''}</span><span id="${_cidF}-tot${suf}-vtscpe" style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_colVTe}">${_cpaVTe>0?'📦$'+fmt(_cpaVTe):''}</span><span id="${_cidF}-tot${suf}-vtsent" style="display:block;font-size:8px;line-height:1.15;font-weight:800;color:#86efac" title="📦 ENTREGADAS: total de órdenes que YA llegaron al cliente">${_tEnt>0?'📦 '+_tEnt:''}</span></span></span>`})()}
           <span style="display:inline-block;width:${_cwF.bud+_cwF.id+_cwF.dup}px;flex-shrink:0"></span>
         </div>`
     }
@@ -17935,14 +18044,14 @@ window._rpRangoTotales=function(cidF){
 window._rpFusionTotales=function(cidF){
   const sub=document.getElementById(cidF+'-sub');if(!sub)return
   const tot=document.getElementById(cidF+'-totrow');if(!tot)return
-  let n=0,gto=0,vts=0,vtsc=0,vp=0,va=0,ia=0,vb=0,ib=0,vc=0,ic=0,itot=0,gp=0,ga=0,gb=0,gc=0
+  let n=0,gto=0,vts=0,vtsc=0,vp=0,va=0,ia=0,vb=0,ib=0,vc=0,ic=0,itot=0,gp=0,ga=0,gb=0,gc=0,ent=0
   sub.querySelectorAll('.rp-fus-box').forEach(box=>{
     if(box.style.display==='none')return
     const row=box.querySelector('.rp-fus-row');if(!row)return
     const d=row.dataset,num=(x)=>parseFloat(x)||0
     n++;gto+=num(d.fgto);vts+=num(d.fvts);vtsc+=num(d.fvtsc!==undefined?d.fvtsc:d.fvts);vp+=num(d.fvp)
     va+=num(d.fva);ia+=num(d.fia);vb+=num(d.fvb);ib+=num(d.fib);vc+=num(d.fvc);ic+=num(d.fic);itot+=num(d.fitot)
-    gp+=num(d.fgp);ga+=num(d.fga);gb+=num(d.fgb);gc+=num(d.fgc)
+    gp+=num(d.fgp);ga+=num(d.fga);gb+=num(d.fgb);gc+=num(d.fgc);ent+=num(d.fent)
   })
   const _set=(id,val)=>{for(const _sufT of ['','-top']){const e=document.getElementById(cidF+'-tot'+_sufT+'-'+id);if(e)e.textContent=val}}
   const _fmtT=(x)=>(typeof fmt==='function'?fmt(x):String(x))
@@ -17974,6 +18083,7 @@ window._rpFusionTotales=function(cidF){
   _set('itotvp',itot>0?('🔮 '+(Math.floor(itot*_pcT*10)/10).toFixed(1)):'')
   const _cpaVTe2=(vtsc>0&&_gsh2>0)?Math.round(_gsh2/(vtsc*(1-_dvT))):0
   _setC('vtscpe',_cpaVTe2>0?('📦$'+_fmtT(_cpaVTe2)):'',_semC(_cpaVTe2))
+  _set('vtsent',ent>0?('📦 '+ent):'')
   // NUEVO (Opción A): gasto por día de las filas visibles
   _set('gp',gp>0?_abT(gp):'');_set('ga',ga>0?_abT(ga):'')
   _set('gb',gb>0?_abT(gb):'');_set('gc',gc>0?_abT(gc):'')
@@ -18399,6 +18509,22 @@ window._rpFusionRefreshSem=async function(slug,btn){
     alert('⚠️ No se pudo: '+((e&&e.message)||'error desconocido'))
   }
 }
+// 📅 (30jun26): ATAJO "Últimos 8 días" — rellena las fechas (HOY y los 7 días anteriores) y
+// dispara el mismo motor del "Otro rango", que trae los datos directos (ventas, gasto, IDs por
+// día) sin depender de los bloques de 4 días. Ventana móvil que SIEMPRE termina en hoy: hoy mar
+// 30 → mar 23; mañana mié 1 → mié 24. Son 8 columnas (hoy-7 … hoy), con scroll horizontal.
+window._rpFusion8dias=function(slug,cidF){
+  try{
+    const _iso=(d)=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+    const _h=new Date(),_d7=new Date();_d7.setDate(_d7.getDate()-7)
+    const eD=document.getElementById(cidF+'-desde'),eH=document.getElementById(cidF+'-hasta')
+    if(eD)eD.value=_iso(_d7)
+    if(eH)eH.value=_iso(_h)
+    const eC=document.getElementById(cidF+'-camp');if(eC)eC.value='' // siempre TODAS las campañas
+    if(window._rpFusionRango)window._rpFusionRango(slug,cidF)
+  }catch(_e){console.warn('rpFusion8dias',_e)}
+}
+
 window._rpFusionRango=async function(slug,cidF){
   const st=document.getElementById(cidF+'-rango-status')
   const _setSt=(t,col)=>{if(st){st.textContent=t;st.style.color=col||'var(--muted)'}}

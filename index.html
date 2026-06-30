@@ -1832,6 +1832,81 @@ async function loadDash(){
 // teléfonos del xlsx de Dropi recién subido. Las que están en Nexo pero NO
 // en el xlsx son "fantasmas" (anuladas/archivadas/fusionadas en Dropi, o
 // duplicados de un mismo cliente). SOLO LECTURA: no modifica ningún mapeo.
+// ── Auditor de fantasmas: comparación de duplicados (tonto y bebé) ──────────────
+// "Real" = la copia que el cruce actualizó con Dropi (estado distinto de PENDIENTE/vacío). La PENDIENTE/vacía es la vieja.
+function _fEsReal(e){const s=String(e||'').toUpperCase().trim();return !!s && !/^PENDIENTE/.test(s)}
+// Veredicto en una línea: mira qué cambia entre las copias y dice qué hacer.
+function _fVeredictoDup(copias){
+  const eq=f=>copias.every(m=>String(f(m)||'').trim()===String(f(copias[0])||'').trim())
+  const prodDif=!eq(m=>resolveProdName(m.producto).nombre||m.producto)
+  const estDif=!eq(m=>m.estado_final)
+  const carrDif=!eq(m=>m.transportadora)
+  const adDif=!eq(m=>m.ad_id)
+  let txt
+  if(!prodDif&&!estDif&&!carrDif&&!adDif) txt='📋 Copia idéntica — alguien la metió 2 veces. Borra cualquiera.'
+  else if(prodDif) txt='📦 Quedó en 2 productos distintos — uno está mal. Deja la que cuadra con el ID de Dropi.'
+  else if(estDif||carrDif) txt='🚚 Una se actualizó con Dropi y la otra quedó vieja. Deja la del estado real, borra la PENDIENTE.'
+  else if(adDif) txt='📣 Misma orden con 2 anuncios. Deja la del anuncio correcto, borra la otra.'
+  else txt='Revisa las copias y deja la correcta.'
+  return {txt,prodDif,estDif,carrDif,adDif}
+}
+// Tarjeta de comparación de un cliente duplicado: copias lado a lado, ✅ DEJAR / 🗑️ SOBRA, diferencias y botón borrar.
+function _fCardDup(g){
+  const copias=g.copias
+  const v=_fVeredictoDup(copias)
+  const reales=copias.filter(_fEsReal)
+  const stale=copias.filter(m=>!_fEsReal(m))
+  const limpio=reales.length>=1 && stale.length>=1   // hay una real y una vieja → decisión clara
+  const keepSet=new Set((limpio?reales:[]).map(m=>m.id))
+  const dropSet=new Set((limpio?stale:[]).map(m=>m.id))
+  const letra=i=>String.fromCharCode(65+i)
+  const tel=copias[0].telefono||'—'
+  const prodTit=resolveProdName(copias[0].producto).nombre||copias[0].producto||'—'
+  const fila=(label,f,dif)=>`<tr>
+    <td style="color:var(--muted);font-size:11px;white-space:nowrap">${label}</td>
+    ${copias.map(m=>`<td style="font-size:12px${dif?';color:var(--amber);font-weight:600':''}">${f(m)}</td>`).join('')}
+    <td style="font-size:11px;white-space:nowrap">${dif?'<span style="color:var(--amber)">⚠️ DIST</span>':'<span style="color:var(--subtle)">✅ igual</span>'}</td>
+  </tr>`
+  const headCopia=copias.map((m,i)=>{
+    let badge
+    if(keepSet.has(m.id)) badge='<span style="color:var(--green);font-weight:700">✅ DEJAR</span>'
+    else if(dropSet.has(m.id)) badge='<span style="color:var(--red);font-weight:700">🗑️ SOBRA</span>'
+    else badge='<span style="color:var(--amber);font-weight:700">⚠️ ?</span>'
+    return `<th style="font-size:11px">Copia ${letra(i)}<br>${badge}</th>`
+  }).join('')
+  const botones=copias.map((m,i)=>{
+    const borrable=limpio?dropSet.has(m.id):true
+    if(!borrable) return `<td style="text-align:center;font-size:11px;color:var(--green)">Se queda ✅</td>`
+    return `<td style="text-align:center"><button onclick="_borrarFantasma('${m.id}','${g.tel}')" style="padding:5px 10px;font-size:11px;background:var(--red-bg);color:var(--red);border:1px solid var(--red);border-radius:7px;cursor:pointer;font-weight:600">🗑️ Borrar Copia ${letra(i)}</button></td>`
+  }).join('')
+  return `<div id="dupgrp-${g.tel}" class="card" style="border:1px solid var(--amber);margin-bottom:10px">
+    <div style="font-weight:700;font-size:14px;margin-bottom:6px">📞 ${tel} · ${prodTit} <span style="color:var(--muted);font-weight:400">· 👯 ${copias.length} copias</span></div>
+    <div style="font-size:12.5px;color:var(--text);background:var(--amber-bg);border-radius:8px;padding:7px 9px;margin-bottom:10px">${v.txt}${limpio?'':' <span style="color:var(--amber)">(las 2 tienen datos — revisa cuál dejar)</span>'}</div>
+    <div class="table-wrap"><table style="font-size:12px;width:100%">
+      <thead><tr><th></th>${headCopia}<th></th></tr></thead>
+      <tbody>
+        ${fila('Producto',m=>resolveProdName(m.producto).nombre||m.producto||'—',v.prodDif)}
+        ${fila('Estado',m=>m.estado_final||'(sin estado)',v.estDif)}
+        ${fila('Carrier',m=>m.transportadora||'—',v.carrDif)}
+        ${fila('Anuncio',m=>m.ad_id||'orgánica',v.adDif)}
+        ${fila('Compra',m=>m.fecha||'—',false)}
+        <tr><td></td>${botones}<td></td></tr>
+      </tbody>
+    </table></div>
+  </div>`
+}
+// Borra una copia duplicada (con confirmación). No se puede deshacer.
+window._borrarFantasma=async function(mapeoId,tel){
+  if(!confirm('¿Borrar esta copia duplicada? No se puede deshacer.'))return
+  const grp=document.getElementById('dupgrp-'+tel)
+  try{
+    const{error}=await sb.from('mapeos').delete().eq('id',mapeoId)
+    if(error){if(grp)grp.insertAdjacentHTML('beforeend',`<div style="font-size:12px;color:var(--red);margin-top:6px">Error: ${error.message}</div>`);return}
+    if(grp)grp.innerHTML=`<div style="font-size:13px;color:var(--green);padding:8px 0">✅ Copia borrada. El dashboard cuadra en el próximo refresco. (Vuelve a auditar para confirmar.)</div>`
+  }catch(e){
+    if(grp)grp.insertAdjacentHTML('beforeend',`<div style="font-size:12px;color:var(--red);margin-top:6px">Error: ${e.message}</div>`)
+  }
+}
 window.auditarFantasmasDropi=async()=>{
   const fileInput=document.getElementById('dash-fantasmas-file')
   const resEl=document.getElementById('dash-fantasmas-result')
@@ -1854,7 +1929,7 @@ window.auditarFantasmasDropi=async()=>{
     }
     // 2. Mapeos de Nexo con fecha_dropi dentro del rango del Dashboard
     const{data:mapeosDropi}=await sb.from('mapeos')
-      .select('telefono,fecha_dropi,fecha,producto,estado_final,ad_id,nombre_cliente,transportadora,cantidad')
+      .select('id,telefono,fecha_dropi,fecha,producto,estado_final,ad_id,nombre_cliente,transportadora,cantidad')
       .gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).limit(10000)
     const totalNexo=(mapeosDropi||[]).length
     // 3. Agrupar mapeos de Nexo por teléfono
@@ -1868,41 +1943,38 @@ window.auditarFantasmasDropi=async()=>{
     //    - Ausente: el teléfono está en Nexo pero 0 veces en el xlsx.
     //    - Duplicado: el teléfono aparece MÁS veces en Nexo que en el xlsx
     //      (mismo cliente con varios pedidos; el cruce solo casa el primero).
-    const fantasmas=[]
+    const fantasmas=[]      // Ausentes (lista plana)
+    const dupGroups=[]      // Duplicados (por cliente, para comparar las copias)
     for(const[tel,lista]of Object.entries(nexoByTel)){
       const enXlsx=xlsxCount[tel]||0
       if(enXlsx===0){
         lista.forEach(m=>fantasmas.push({...m,_motivo:'Ausente en Dropi'}))
       }else if(lista.length>enXlsx){
-        lista.slice(enXlsx).forEach(m=>fantasmas.push({...m,_motivo:`Duplicado (${lista.length} en Nexo · ${enXlsx} en Dropi)`}))
+        dupGroups.push({tel,enXlsx,copias:lista})
       }
     }
+    const totalFant=fantasmas.length+dupGroups.reduce((a,g)=>a+(g.copias.length-g.enXlsx),0)
     // 5. Render
-    if(!fantasmas.length){
+    if(!fantasmas.length&&!dupGroups.length){
       resEl.innerHTML=`<div class="alert alert-green">✅ Sin fantasmas. Las ${totalNexo} órdenes de Nexo (${desde} → ${hasta}) cuadran 1 a 1 con las ${filasXlsx} filas del xlsx de Dropi.</div>`
       return
     }
-    const filas=fantasmas.map(m=>`<tr>
-      <td>${m.telefono||'—'}</td>
-      <td>${m.fecha_dropi||'—'}</td>
-      <td>${m.fecha||'—'}</td>
-      <td>${resolveProdName(m.producto).nombre||m.producto||'—'}</td>
-      <td>${m.estado_final||'(sin estado)'}</td>
-      <td>${m.transportadora||'—'}</td>
-      <td>${m.ad_id||'orgánica'}</td>
-      <td style="font-size:11px;color:var(--amber)">${m._motivo}</td>
-    </tr>`).join('')
+    // Duplicados → tarjetas de comparación (tonto y bebé: veredicto + qué borrar)
+    const dupHtml=dupGroups.length?`<div style="font-weight:700;font-size:14px;color:var(--amber);margin:6px 0 8px">👯 Duplicados (${dupGroups.length} cliente${dupGroups.length>1?'s':''}) — mira por qué se duplicó y borra la copia que sobra</div>${dupGroups.map(_fCardDup).join('')}`:''
+    // Ausentes → tabla plana (como antes)
+    const ausHtml=fantasmas.length?`
+      <div style="font-weight:700;font-size:14px;color:var(--amber);margin:12px 0 6px">👻 Ausentes en Dropi (${fantasmas.length}) — ya no están en el xlsx (anuladas/archivadas/fusionadas)</div>
+      <div class="table-wrap"><table style="font-size:12px">
+        <thead><tr><th>Teléfono</th><th>Fecha Dropi</th><th>Fecha compra</th><th>Producto</th><th>Estado en Nexo</th><th>Carrier</th><th>Ad ID</th></tr></thead>
+        <tbody>${fantasmas.map(m=>`<tr><td>${m.telefono||'—'}</td><td>${m.fecha_dropi||'—'}</td><td>${m.fecha||'—'}</td><td>${resolveProdName(m.producto).nombre||m.producto||'—'}</td><td>${m.estado_final||'(sin estado)'}</td><td>${m.transportadora||'—'}</td><td>${m.ad_id||'orgánica'}</td></tr>`).join('')}</tbody>
+      </table></div>`:''
     resEl.innerHTML=`
       <div class="card" style="border:2px solid var(--amber)">
-        <div style="font-weight:800;font-size:15px;color:var(--amber);margin-bottom:6px">👻 Fantasmas detectadas: ${fantasmas.length}</div>
-        <div style="font-size:13px;color:var(--muted);margin-bottom:4px">Nexo tiene <b>${totalNexo}</b> órdenes con fecha de subida en el rango (${desde} → ${hasta}). El xlsx de Dropi trae <b>${filasXlsx}</b> filas. Sobran <b>${fantasmas.length}</b> en Nexo (${totalNexo} − ${totalNexo-fantasmas.length} que cuadran = ${fantasmas.length}).</div>
-        <div style="font-size:12.5px;color:var(--subtle);margin-bottom:10px"><b>Ausente en Dropi</b> = la orden ya no está en el xlsx (anulada/archivada/fusionada). <b>Duplicado</b> = mismo cliente con varios pedidos; el cruce solo casa el primero y los demás quedan flotando.</div>
-        <div class="table-wrap"><table style="font-size:12px">
-          <thead><tr><th>Teléfono</th><th>Fecha Dropi</th><th>Fecha compra</th><th>Producto</th><th>Estado en Nexo</th><th>Carrier</th><th>Ad ID</th><th>Motivo</th></tr></thead>
-          <tbody>${filas}</tbody>
-        </table></div>
+        <div style="font-weight:800;font-size:15px;color:var(--amber);margin-bottom:6px">👻 Fantasmas detectadas: ${totalFant}</div>
+        <div style="font-size:13px;color:var(--muted);margin-bottom:10px">Nexo tiene <b>${totalNexo}</b> órdenes con fecha en el rango (${desde} → ${hasta}). El xlsx trae <b>${filasXlsx}</b> filas. Sobran <b>${totalFant}</b> en Nexo.</div>
+        ${dupHtml}${ausHtml}
       </div>`
-    logAction('auditoria_fantasmas',{rango:desde+'/'+hasta,total_nexo:totalNexo,filas_xlsx:filasXlsx,fantasmas:fantasmas.length}).catch(()=>{})
+    logAction('auditoria_fantasmas',{rango:desde+'/'+hasta,total_nexo:totalNexo,filas_xlsx:filasXlsx,fantasmas:totalFant}).catch(()=>{})
   }catch(e){
     resEl.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
   }

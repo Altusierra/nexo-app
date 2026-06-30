@@ -867,6 +867,19 @@ function resolveProdName(raw){
 }
 window.resolveProdName=resolveProdName
 
+// Producto CANÓNICO de un mapeo para el tablero: el ID de Dropi del reporte MANDA (verdad de máquina,
+// guardado en producto_id_dropi al cruzar). Si la orden no está cruzada o no hay dato → cae al producto
+// del Asignador (resolveProdName). Esto hace que el tablero cuadre con el reporte de Dropi.
+function _prodCanonMapeo(m){
+  const _idDr=String((m&&m.producto_id_dropi)||'').trim()
+  if(_idDr&&Array.isArray(productos)){
+    const _p=productos.find(pp=>String(pp.dropi_id||'').trim()===_idDr)
+    if(_p&&_p.nombre)return _p.nombre
+  }
+  return (resolveProdName(m&&m.producto).nombre)||(m&&m.producto)||'Sin producto'
+}
+window._prodCanonMapeo=_prodCanonMapeo
+
 // Devuelve el precio/costo vigente de un producto en una fecha específica (Fase 2.2)
 // Consulta producto_precios_historial buscando el registro donde vigente_desde <= fecha
 // AND (vigente_hasta IS NULL OR vigente_hasta > fecha)
@@ -1076,7 +1089,14 @@ async function loadDash(){
   const ventasNetasTotal=ventasNetasReales+ventasNetasEstimadas
 
   // 2b. NUEVO: Órdenes por FECHA DROPI (cuándo se subieron a Dropi, no cuándo se vendieron en chat)
-  const{data:mapeosDropi}=await sb.from('mapeos').select('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi').gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).limit(10000)
+  // mapeosDropi: intenta traer producto_id_dropi (verdad del reporte). Si la columna aún no existe en BD, cae al set base (sin romper).
+  let mapeosDropi=null
+  {
+    const _qD=cols=>sb.from('mapeos').select(cols).gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).limit(10000)
+    let _rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi,producto_id_dropi')
+    if(_rD.error)_rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi')
+    mapeosDropi=_rD.data
+  }
   let totD1=0,totD2=0,totD3=0,totD4=0,confD=0,cancD=0,pendD=0,entD=0,devD=0
   let _grdGanD=0,_grdFDevD=0,_grdConDatoD=0
   // NUEVO: listas de detalle para desplegables (fecha de subida Dropi)
@@ -1089,7 +1109,7 @@ async function loadDash(){
     else confD++
     // NUEVO: detalle para desplegables (no altera los contadores de arriba)
     const _telD=m.telefono||'—'
-    const _prodDD=resolveProdName(m.producto).nombre||m.producto||'Sin producto'
+    const _prodDD=_prodCanonMapeo(m)
     if(m.estado_final==='CANCELADO')_listCancD.push({tel:_telD,prod:_prodDD})
     else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)_listPendD.push({tel:_telD,prod:_prodDD})
     else _listConfD.push({tel:_telD,prod:_prodDD})
@@ -1098,7 +1118,7 @@ async function loadDash(){
       entD++
       if(m.ganancia_dropi&&m.ganancia_dropi>0){_grdGanD+=m.ganancia_dropi;_grdConDatoD++}
       else{
-        const _pn=resolveProdName(m.producto).nombre
+        const _pn=_prodCanonMapeo(m)
         const _prod=productos.find(p=>p.nombre===_pn)||productos[0]||{}
         const _precio=m.precio_dropi||[0,_prod.precio_1u||0,_prod.precio_2u||0,_prod.precio_3u||0,_prod.precio_4u||0][q]||(_prod.precio_2u||0)
         const _costo=m.costo_snapshot||[0,_prod.costo_1u||0,_prod.costo_2u||0,_prod.costo_3u||0,_prod.costo_4u||0][q]||(_prod.costo_2u||0)
@@ -1108,7 +1128,7 @@ async function loadDash(){
       }
     }else if(_stD==='devuelto'){
       devD++
-      const _pn=resolveProdName(m.producto).nombre
+      const _pn=_prodCanonMapeo(m)
       const _prod=productos.find(p=>p.nombre===_pn)||productos[0]||{}
       const _fd=m.flete_dev_snapshot||m.flete_snapshot||_prod.flete_devolucion||18000
       _grdFDevD+=_fd
@@ -1600,7 +1620,7 @@ async function loadDash(){
   const _mkEmbudoProdDropiHTML=(arr,key)=>{
     const mp={}
     for(const m of (arr||[])){
-      const pn=resolveProdName(m.producto).nombre||m.producto||'Sin producto'
+      const pn=_prodCanonMapeo(m)
       if(!mp[pn])mp[pn]={pn,total:0,canc:0,pconf:0,pend:0,ent:0,dev:0,fenvSum:0,fenvN:0,fenvCfg:0,fdpSum:0,fdpN:0,fdtSum:0,fdtN:0}
       const P=mp[pn],_est=m.estado_final,_cat=DROPI_STATUS[_est]?.cat
       P.total++
@@ -5784,7 +5804,10 @@ window.procesarAsignador=async()=>{
   parsed.forEach((p,i)=>{
     if(p.tipo!=='nuevo'||p.errores.length>0){_lineaProdId[i]=null;return}
     let pid=null
-    if(p.adId&&_adProdMapPre[p.adId])pid=_adProdMapPre[p.adId].producto_id
+    // CADENA DE IDENTIDAD: el ID de Dropi MANDA (dato único por producto) → anuncio → nombre (respaldo)
+    const _idDr=String(p.idDropi||'').trim()
+    if(_idDr){const _pd=productos.find(pp=>String(pp.dropi_id||'').trim()===_idDr);if(_pd)pid=_pd.id}
+    if(!pid&&p.adId&&_adProdMapPre[p.adId])pid=_adProdMapPre[p.adId].producto_id
     if(!pid){const r=resolveProdName(p.producto);if(r&&r.id)pid=r.id}
     _lineaProdId[i]=pid
     if(pid)prodIdsParaAuth.add(pid)
@@ -5832,26 +5855,36 @@ window.procesarAsignador=async()=>{
     return
   }
 
-  // PASO 1.7 — Validar ID de Dropi: el ID escrito debe coincidir con el dropi_id ACTUAL del producto.
-  // Anclado al UUID interno del producto (_lineaProdId, resuelto por ad_id o por nombre): si el dropi_id
-  // cambia en Productos, esta validación SIEMPRE compara contra el valor de HOY y rechaza el viejo.
+  // PASO 1.7 — CADENA DE IDENTIDAD: el ID de Dropi MANDA (dato único por producto, lo confirma el reporte).
+  // El producto se ancla por el ID de Dropi escrito; el ANUNCIO y el NOMBRE solo VERIFICAN. Si alguno
+  // apunta a otro producto → no pasa, con mensaje que dice exactamente cuál no cuadra (anuncio o nombre).
   const erroresDropi=[]
   parsed.forEach((p,i)=>{
     if(p.tipo!=='nuevo'||p.errores.length>0)return
-    const pid=_lineaProdId[i]
-    if(!pid)return // producto no resuelto → ya lo capturan otras validaciones
-    const _prodD=productos.find(pp=>pp.id===pid)||{}
-    const _prodNombreD=_prodD.nombre||p.producto
-    const _dropiReal=String(_prodD.dropi_id||'').trim()
     const _dropiEscrito=String(p.idDropi||'').trim()
-    if(!_dropiReal){
-      erroresDropi.push({linea:i+1,raw:p.raw,faltan:[`el producto "${_prodNombreD}" no tiene ID de Dropi configurado. Ponlo en Productos → tarjeta del producto → "🆔 ID de Dropi".`]})
-    }else if(_dropiEscrito!==_dropiReal){
-      erroresDropi.push({linea:i+1,raw:p.raw,faltan:[`ID de Dropi "${_dropiEscrito||'(vacío)'}" NO coincide con el del producto "${_prodNombreD}" (debe ser ${_dropiReal}).`]})
+    // 1) ID de Dropi obligatorio (es el que decide el producto)
+    if(!_dropiEscrito){
+      erroresDropi.push({linea:i+1,raw:p.raw,faltan:['falta el ID de Dropi. Es obligatorio: es el dato que decide el producto.']});return
+    }
+    // 2) El ID de Dropi debe pertenecer a un producto configurado
+    const _prodDropi=productos.find(pp=>String(pp.dropi_id||'').trim()===_dropiEscrito)
+    if(!_prodDropi){
+      erroresDropi.push({linea:i+1,raw:p.raw,faltan:[`ningún producto tiene el ID de Dropi "${_dropiEscrito}". Configúralo en Productos → tarjeta del producto → "🆔 ID de Dropi".`]});return
+    }
+    const _nomDropi=_prodDropi.nombre
+    // 3) VERIFICA con el ANUNCIO: si su campaña apunta a OTRO producto → no pasa
+    const _adInfo=p.adId?_adProdMapPre[p.adId]:null
+    if(_adInfo&&_adInfo.producto_id&&_adInfo.producto_id!==_prodDropi.id){
+      erroresDropi.push({linea:i+1,raw:p.raw,faltan:[`el ID de anuncio "${p.adId}" pertenece al producto "${_adInfo.producto_nombre}", pero el ID de Dropi "${_dropiEscrito}" es de "${_nomDropi}". Corrige el anuncio o el ID de Dropi.`]});return
+    }
+    // 4) VERIFICA con el NOMBRE escrito: si resuelve a OTRO producto → no pasa
+    const _nomRes=resolveProdName(p.producto)
+    if(_nomRes&&_nomRes.id&&_nomRes.id!==_prodDropi.id){
+      erroresDropi.push({linea:i+1,raw:p.raw,faltan:[`escribiste "${p.producto}" (producto "${_nomRes.nombre}"), pero el ID de Dropi "${_dropiEscrito}" es de "${_nomDropi}". Corrige el nombre o el ID de Dropi.`]})
     }
   })
   if(erroresDropi.length>0){
-    msg.innerHTML=`<div class="alert alert-red"><strong>❌ ${erroresDropi.length} línea(s) con ID de Dropi incorrecto. Corrige antes de procesar:</strong><ul style="margin-top:6px;margin-left:14px;font-size:12px">
+    msg.innerHTML=`<div class="alert alert-red"><strong>❌ ${erroresDropi.length} línea(s) donde el producto, el anuncio o el ID de Dropi no cuadran. Corrige antes de procesar:</strong><ul style="margin-top:6px;margin-left:14px;font-size:12px">
       ${erroresDropi.map(e=>`<li><strong>Línea ${e.linea}:</strong> ${e.faltan.join(', ')}<br><code style="font-size:10px;color:var(--muted)">${e.raw}</code></li>`).join('')}
     </ul></div>`
     return
@@ -5890,11 +5923,22 @@ window.procesarAsignador=async()=>{
       ciudadDropi=D[df.key].nombre;deptoDropi=D[df.key].dept
     }
 
-    // Resolver producto_id + nombre canónico (cadena: ad_id → producto, fallback a alias/nombre)
+    // Resolver producto_id + nombre canónico — CADENA: ID de Dropi MANDA → anuncio → nombre (respaldo)
     let prodId=null,prodNombre=p.producto,prodCorregido=false,prodEscrito=p.producto
     if(p.tipo==='nuevo'){
-      // 1. Intentar por ad_id
-      if(p.adId&&adProdMap[p.adId]){
+      const _idDr=String(p.idDropi||'').trim()
+      const _pdDr=_idDr?productos.find(pp=>String(pp.dropi_id||'').trim()===_idDr):null
+      if(_pdDr){
+        // 1. ID de Dropi manda (la cadena ya validó que anuncio/nombre cuadran en PASO 1.7)
+        prodId=_pdDr.id
+        prodNombre=_pdDr.nombre
+        const escritoResuelto=resolveProdName(p.producto)
+        if(escritoResuelto&&escritoResuelto.id&&escritoResuelto.id!==prodId){
+          prodCorregido=true
+          correcciones.push({telefono:p.tel,ad_id:p.adId,escrito:p.producto,corregido:prodNombre,producto_id:prodId})
+        }
+      }else if(p.adId&&adProdMap[p.adId]){
+        // 2. Fallback por ad_id
         prodId=adProdMap[p.adId].producto_id
         prodNombre=adProdMap[p.adId].producto_nombre
         // Comparar con lo que escribió el auxiliar (por alias/nombre)
@@ -5904,7 +5948,7 @@ window.procesarAsignador=async()=>{
           correcciones.push({telefono:p.tel,ad_id:p.adId,escrito:p.producto,corregido:prodNombre,producto_id:prodId})
         }
       }else{
-        // 2. Fallback: resolver por keyword/alias
+        // 3. Fallback: resolver por keyword/alias
         const r=resolveProdName(p.producto)
         if(r.id){prodId=r.id;prodNombre=r.nombre}
       }
@@ -13425,6 +13469,22 @@ window._nombreActualProd=(rawTexto,mapeo)=>{
   }
   return rawTexto||(mapeo&&mapeo.producto)||'—'
 }
+// Corrige el ID de anuncio de un mapeo YA existente (editar, no re-insertar → nunca duplica).
+// El producto NO se toca: lo decide el ID de Dropi del reporte. Esto solo arregla la atribución (CPA).
+window._segCorregirAnuncio=async function(mapeoId){
+  const inp=document.getElementById('segad-'+mapeoId)
+  const cont=document.getElementById('marca-'+mapeoId)
+  if(!inp)return
+  const nuevo=String(inp.value||'').trim()
+  if(!nuevo){inp.style.borderColor='var(--red)';inp.focus();return}
+  try{
+    const{error}=await sb.from('mapeos').update({ad_id:nuevo}).eq('id',mapeoId)
+    if(error){if(cont)cont.insertAdjacentHTML('beforeend',`<div style="font-size:12px;color:var(--red);margin-top:6px">Error al guardar: ${error.message}</div>`);return}
+    if(cont)cont.innerHTML=`<div style="font-size:13px;color:var(--green);padding:6px 0">✅ Anuncio corregido a <code>${nuevo}</code>. Se aplica en el próximo refresco del tablero.</div>`
+  }catch(e){
+    if(cont)cont.insertAdjacentHTML('beforeend',`<div style="font-size:12px;color:var(--red);margin-top:6px">Error: ${e.message}</div>`)
+  }
+}
 window._segGuardarPegados=(ordenes,paresSeg)=>{
   // Construye los pedidos pegados (resolviendo nombre por ID), GUARDA en localStorage y pinta
   const items=[]
@@ -13582,6 +13642,25 @@ window.procesarSeguimiento=async()=>{
       msg.innerHTML='<div class="alert alert-amber">No se encontraron órdenes cruzadas con el asignador</div>';return
     }
 
+    // ⚠️ CADENA — VERIFICAR ANUNCIO vs ID DE DROPI DEL REPORTE (la verdad de máquina). NO corrige: MARCA.
+    // El producto lo decide el ID de Dropi del reporte. Si el anuncio guardado en el mapeo pertenece a OTRO
+    // producto (su campaña apunta a otro), el CPA queda mal → se MARCA para que el auxiliar ponga el correcto.
+    // El anuncio NO viene en el reporte, por eso no se puede auto-corregir: lo confirma una persona.
+    const _adIdsSeg=[...new Set(resultados.map(r=>r.mapeo&&r.mapeo.ad_id).filter(Boolean).map(String))]
+    const _adMapSeg=_adIdsSeg.length?await buildAdProductMap(_adIdsSeg):{}
+    const _marcasAnuncio=[]
+    for(const r of resultados){
+      const _idDr=String(r.producto_id_dropi||'').trim()
+      if(!_idDr)continue
+      const _prodReal=productos.find(pp=>String(pp.dropi_id||'').trim()===_idDr)
+      if(!_prodReal)continue
+      const _adId=(r.mapeo&&r.mapeo.ad_id)?String(r.mapeo.ad_id):null
+      const _adInfo=_adId?_adMapSeg[_adId]:null
+      if(_adInfo&&_adInfo.producto_id&&_adInfo.producto_id!==_prodReal.id){
+        _marcasAnuncio.push({guia:r.numero_guia||'—',telefono:r.telefono||'—',mapeo_id:r.mapeo.id,ad_id:_adId,prod_anuncio:_adInfo.producto_nombre,prod_real:_prodReal.nombre,id_dropi:_idDr})
+      }
+    }
+
     // Agrupar por lote (fecha_dropi del mapeo)
     const lotes={}
     const productosSet=new Set()
@@ -13644,7 +13723,21 @@ window.procesarSeguimiento=async()=>{
       </div>`
     }).join('')
 
-    resEl.innerHTML=filtroHtml+lotesHtml
+    // Panel de marcas de anuncio (solo si hay) — tonto y bebé: visual, claro, con botón para corregir
+    const marcasHtml=_marcasAnuncio.length?`<div class="card" style="margin-bottom:14px;border:2px solid var(--amber);background:var(--amber-bg)">
+      <div style="font-weight:700;font-size:15px;margin-bottom:6px">⚠️ ${_marcasAnuncio.length} orden(es): el anuncio apunta a OTRO producto</div>
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:12px">El producto está bien (lo decide el ID de Dropi del reporte). Pero el <b>anuncio</b> guardado es de otro producto → daña el CPA. Pon el ID de anuncio correcto y guarda 👇</div>
+      ${_marcasAnuncio.map(m=>`<div id="marca-${m.mapeo_id}" style="border-top:1px solid var(--border);padding:10px 0">
+        <div style="font-size:13px;margin-bottom:5px">📦 <b>${m.prod_real}</b> · Guía <code style="color:var(--muted)">${m.guia}</code> · Tel <code style="color:var(--muted)">${m.telefono}</code></div>
+        <div style="font-size:12px;color:var(--red);margin-bottom:8px">El anuncio <code>${m.ad_id}</code> es de <b>${m.prod_anuncio}</b>, no de ${m.prod_real}.</div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <input type="text" inputmode="numeric" id="segad-${m.mapeo_id}" placeholder="ID de anuncio correcto" style="font-family:monospace;font-size:12px;max-width:230px;padding:7px 9px;background:var(--card2);border:1px solid var(--border);border-radius:8px;color:var(--text)">
+          <button onclick="_segCorregirAnuncio('${m.mapeo_id}')" style="padding:7px 14px;font-size:12px;background:var(--blue);color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600">Corregir anuncio</button>
+        </div>
+      </div>`).join('')}
+    </div>`:''
+
+    resEl.innerHTML=marcasHtml+filtroHtml+lotesHtml
     setTimeout(()=>{if(resEl)resEl.scrollIntoView({behavior:'smooth',block:'start'})},300)
 
     // Update mapeos with latest status
@@ -17281,6 +17374,9 @@ window._rpFusionFiltro=function(cidF,tipo,valor,btn){
     row.style.display=okE?'':'none'
     if(okE)vis++
   })
+  // P1 (29jun26): la fila 🌱 Orgánicas es informativa (no es campaña). Se oculta si hay CUALQUIER
+  // filtro activo (para no descuadrar la vista filtrada) y vuelve a verse al quitar los filtros.
+  try{const _hayFiltro=!!(fsem||fest||fdia||fvsv||fid);sub.querySelectorAll('.rp-life-org').forEach(row=>{row.style.display=_hayFiltro?'none':''})}catch(_){}
   // Si la fusión está cerrada, abrirla para que el filtro se vea de una
   if(sub.style.display==='none'){
     sub.style.display='block'
@@ -17525,10 +17621,22 @@ window._rpFusionLifetime=async function(slug,btn){
     }
     // 2) Mapa ad→campaña (meta_campanas: ad→adset→campaign) + nombres de campaña
     const adsetToCamp={},adToCamp={},_campNombre={}
-    const{data:mc}=await sb.from('meta_campanas').select('meta_id,parent_id,nivel,nombre').limit(100000)
-    for(const x of (mc||[])){if(x.nivel==='adset')adsetToCamp[String(x.meta_id)]=String(x.parent_id||'')}
-    for(const x of (mc||[])){if(x.nivel==='ad'){const _cc=adsetToCamp[String(x.parent_id)]||'';if(_cc)adToCamp[String(x.meta_id)]=_cc}}
-    for(const x of (mc||[])){if(x.nivel==='campaign')_campNombre[String(x.meta_id)]=x.nombre||String(x.meta_id)}
+    // FIX (29jun26): igual que el modo RANGO — partir de las campañas del producto y BAJAR
+    // (campaña→adsets→ads) filtrando por parent_id, en lotes. Antes traía TODA meta_campanas con
+    // un limit global que se quedaba corto en cuentas grandes y dejaba las campañas VIEJAS sin
+    // atribuir (sus órdenes salían en "—"). Filtrando por parent_id siempre trae sus ads completos.
+    for(let _i=0;_i<campIds.length;_i+=300){
+      const _lote=campIds.slice(_i,_i+300)
+      const{data:_adsetsL}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','adset').in('parent_id',_lote)
+      for(const s of (_adsetsL||[])){if(s.parent_id)adsetToCamp[String(s.meta_id)]=String(s.parent_id)}
+      const{data:_campRowsL}=await sb.from('meta_campanas').select('meta_id,nombre').eq('nivel','campaign').in('meta_id',_lote)
+      for(const cp of (_campRowsL||[]))_campNombre[String(cp.meta_id)]=cp.nombre||String(cp.meta_id)
+    }
+    const _asIdsLife=Object.keys(adsetToCamp)
+    for(let _i=0;_i<_asIdsLife.length;_i+=300){
+      const{data:_adsBL}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','ad').in('parent_id',_asIdsLife.slice(_i,_i+300))
+      for(const a of (_adsBL||[])){const _cmp=adsetToCamp[String(a.parent_id)];if(_cmp)adToCamp[String(a.meta_id)]=_cmp}
+    }
     // REFUERZO: ad_ids ya conocidos de cada fila (data-fadids) → su campaña, por si meta_campanas
     // no tiene algún anuncio archivado. Así no se pierden ventas por mapeo incompleto.
     sub.querySelectorAll('.rp-fus-row[data-fcampid]').forEach(row=>{
@@ -17538,13 +17646,15 @@ window._rpFusionLifetime=async function(slug,btn){
     // 3) Mapeos del producto → órdenes (IDs) y confirmadas Dropi POR campaña (real) + TOTALES REALES
     //    del producto (_gTotIds/_gTotConf cuentan TODAS las órdenes aunque algún anuncio no se mapee).
     const idsLife={},confLife={}
-    let _gTotIds=0,_gTotConf=0
-    let _qm=sb.from('mapeos').select('ad_id,estado_final').limit(200000)
+    let _gTotIds=0,_gTotConf=0,_orgIds=0,_orgConf=0
+    let _qm=sb.from('mapeos').select('ad_id,estado_final,es_organico').limit(200000)
     if(prodId)_qm=_qm.eq('producto_id',prodId)
     const{data:mps}=await _qm
     for(const m of (mps||[])){
       const _esVta=!!(window._nexoClasifVenta&&window._nexoClasifVenta(m.estado_final)==='venta')
       _gTotIds++;if(_esVta)_gTotConf++
+      const _sinAd=(!m.ad_id||String(m.ad_id).trim()==='')
+      if(_sinAd&&m.es_organico===true){_orgIds++;if(_esVta)_orgConf++}
       const c=adToCamp[String(m.ad_id)]||''
       if(!c)continue
       idsLife[c]=(idsLife[c]||0)+1
@@ -17620,6 +17730,28 @@ window._rpFusionLifetime=async function(slug,btn){
         }
       }
     }catch(_e){console.warn('lifetime filas extra',_e)}
+    // 4a-bis) FILA ORGÁNICAS: ventas que llegaron SIN anuncio (es_organico) — no cuelgan de ninguna
+    //         campaña. Informativa: desagrega cuántas del total fueron orgánicas. $0 gasto → no toca CPA.
+    //         Sin data-fcampid (no es campaña filtrable); clase rp-life-org para ocultarla al filtrar.
+    try{
+      if(_orgIds>0){
+        const cw=ctx.cwF||{}
+        const _nomW=cw.nom||330
+        const _offTot=(cw.alr||0)+(cw.dias||0)+(cw.cpa||0)+(cw.tog||0)+(cw.est||0)+(cw.vids||0)+(cw.vA||0)+(cw.iA||0)+(cw.vB||0)+(cw.iB||0)+(cw.vC||0)+(cw.iC||0)
+        const _totW=cw.iTot||118,_vtsW=cw.vts||114
+        const _laneG='align-self:stretch;display:inline-flex;flex-direction:column;justify-content:center;align-items:flex-end;text-align:right;padding-right:8px'
+        const _totRowBottom=document.getElementById(cidF+'-totrow')
+        const _row=document.createElement('div')
+        _row.className='rp-fus-row rp-life-extra rp-life-org'
+        _row.style.cssText='display:flex;align-items:center;font-size:12px;color:var(--text);min-height:28px;min-width:max-content;padding:2px 8px;background:rgba(134,239,172,.05)'
+        _row.innerHTML='<span style="display:inline-block;width:'+_nomW+'px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#86efac;font-weight:700" title="Ventas que llegaron SIN anuncio pagado (orgánicas). No tienen gasto, por eso van aparte y no afectan el CPA de ninguna campaña. 🆔 = órdenes · 🛒 = confirmadas Dropi.">🌱 Orgánicas (sin anuncio)</span>'
+          +'<span style="display:inline-block;width:'+_offTot+'px;flex-shrink:0;text-align:center;color:var(--subtle);font-size:9px;font-style:italic">— llegaron solas, sin pauta · 💰 $0 en ads —</span>'
+          +'<span style="width:'+_totW+'px;flex-shrink:0;border-left:2px solid rgba(134,239,172,.5);background:rgba(134,239,172,.06);'+_laneG+'"><span style="display:block;color:#fcd34d;font-weight:700;line-height:1.15">🆔 '+_orgIds+'</span></span>'
+          +'<span style="width:'+_vtsW+'px;flex-shrink:0;border-right:2px solid rgba(134,239,172,.5);background:rgba(134,239,172,.06);'+_laneG+'"><span style="display:block;color:#86efac;font-weight:700;line-height:1.15">🛒 '+_orgConf+'</span></span>'
+        if(_totRowBottom&&_totRowBottom.parentNode)_totRowBottom.parentNode.insertBefore(_row,_totRowBottom)
+        else sub.appendChild(_row)
+      }
+    }catch(_eO){console.warn('lifetime fila organicas',_eO)}
     // 4b) Gasto lifetime TOTAL de TODAS las campañas (con hoy / sin hoy) — para la Σ y la barra
     const _gAllYes=Object.values(gLife).reduce((s,v)=>s+v,0)
     let _gHoyAll=0;sub.querySelectorAll('.rp-fus-row[data-fcampid]').forEach(row=>{_gHoyAll+=parseFloat(row.dataset.fgp)||0})

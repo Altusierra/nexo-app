@@ -1768,7 +1768,8 @@ async function loadDash(){
     </div>`
 
   // RENDER FINAL
-  el.innerHTML=_heroHTML+_4reyesHTML+_desgloseHTML+_bloqueVentasHTML+_bloqueVentasDropiHTML+_bloqueGastosHTML+_bloqueEficienciaHTML
+  el.innerHTML=_heroHTML+_4reyesHTML+_desgloseHTML+_bloqueVentasHTML+_bloqueVentasDropiHTML+_bloqueGastosHTML+_bloqueEficienciaHTML+'<div id="novedadesIdBox"></div>'
+  try{_renderNovedadesId()}catch(_){}
 }
 
 // ── ADMIN: AUDITORÍA DE FANTASMAS DROPI (huérfanas) ─────────
@@ -13469,21 +13470,156 @@ window._nombreActualProd=(rawTexto,mapeo)=>{
   }
   return rawTexto||(mapeo&&mapeo.producto)||'—'
 }
-// Corrige el ID de anuncio de un mapeo YA existente (editar, no re-insertar → nunca duplica).
-// El producto NO se toca: lo decide el ID de Dropi del reporte. Esto solo arregla la atribución (CPA).
+// ── CORRECCIÓN DE ANUNCIO (núcleo compartido auxiliar + admin) ─────────────────
+// El producto NO se toca: lo decide el ID de Dropi del reporte. Esto arregla la atribución (CPA):
+// edita el ad_id del mapeo existente (no re-inserta → no duplica), recalcula el semáforo del anuncio
+// viejo y el nuevo (Meta Ads queda correcto al instante) y registra la novedad con ANTES/DESPUÉS.
+
+// Registra una novedad de ID en el historial (tolerante: si la tabla no existe aún, no rompe).
+async function _registrarNovedadId(d){
+  try{
+    await sb.from('novedades_id').insert({
+      mapeo_id:d.mapeo_id||null, telefono:d.telefono||null, numero_guia:d.numero_guia||null,
+      producto_real:d.producto_real||null, id_dropi:d.id_dropi||null,
+      ad_antes:d.ad_antes||null, prod_antes:d.prod_antes||null,
+      ad_despues:d.ad_despues||null, prod_despues:d.prod_despues||null,
+      tipo:d.tipo||null, fuente:d.fuente||null,
+      corregido_por:(me&&(me.nombre||me.email))||currentRol()||'—'
+    })
+  }catch(_){}
+}
+// Núcleo: aplica la corrección. nuevoAd = string (corregir) o null/'' (orgánica).
+// data: {mapeo_id, ad_antes, prod_real, prod_antes, id_dropi, guia, telefono, fuente}
+async function _aplicarCorreccionAnuncio(data,nuevoAd){
+  const esOrg=!String(nuevoAd||'').trim()
+  const _nuevo=esOrg?null:String(nuevoAd).trim()
+  const{error}=await sb.from('mapeos').update({ad_id:_nuevo}).eq('id',data.mapeo_id)
+  if(error)return{ok:false,error:error.message}
+  // producto al que apunta el anuncio nuevo (para el historial)
+  let prodDespues=esOrg?'Orgánica':'(anuncio sin campaña)'
+  if(!esOrg){try{const _m=await buildAdProductMap([_nuevo]);if(_m[_nuevo]&&_m[_nuevo].producto_nombre)prodDespues=_m[_nuevo].producto_nombre}catch(_){}}
+  // recalcular semáforos del anuncio viejo + el nuevo → CPA correcto en Meta Ads al instante
+  try{await _calcularYGuardarSemaforos([data.ad_antes,_nuevo].filter(Boolean),'correccion_anuncio')}catch(_){}
+  // registrar en historial
+  await _registrarNovedadId({mapeo_id:data.mapeo_id,telefono:data.telefono,numero_guia:data.guia,producto_real:data.prod_real,id_dropi:data.id_dropi,ad_antes:data.ad_antes,prod_antes:data.prod_antes,ad_despues:_nuevo,prod_despues:prodDespues,tipo:esOrg?'organica':'anuncio',fuente:data.fuente||'—'})
+  return{ok:true,prodDespues,esOrg}
+}
+
+// ── Wrappers SEGUIMIENTO (auxiliar) ────────────────────────────────────────────
 window._segCorregirAnuncio=async function(mapeoId){
   const inp=document.getElementById('segad-'+mapeoId)
   const cont=document.getElementById('marca-'+mapeoId)
-  if(!inp)return
+  const data=(window._marcasSegData||{})[mapeoId]
+  if(!inp||!data)return
   const nuevo=String(inp.value||'').trim()
   if(!nuevo){inp.style.borderColor='var(--red)';inp.focus();return}
+  if(cont)cont.style.opacity='.6'
+  const r=await _aplicarCorreccionAnuncio(data,nuevo)
+  if(cont)cont.style.opacity=''
+  if(!r.ok){if(cont)cont.insertAdjacentHTML('beforeend',`<div style="font-size:12px;color:var(--red);margin-top:6px">Error: ${r.error}</div>`);return}
+  if(cont)cont.innerHTML=`<div style="font-size:13px;color:var(--green);padding:6px 0">✅ Anuncio corregido a <code>${nuevo}</code> (${r.prodDespues}). CPA actualizado.</div>`
+}
+window._segMarcarOrganica=async function(mapeoId){
+  const cont=document.getElementById('marca-'+mapeoId)
+  const data=(window._marcasSegData||{})[mapeoId]
+  if(!data)return
+  if(cont)cont.style.opacity='.6'
+  const r=await _aplicarCorreccionAnuncio(data,null)
+  if(cont)cont.style.opacity=''
+  if(!r.ok){if(cont)cont.insertAdjacentHTML('beforeend',`<div style="font-size:12px;color:var(--red);margin-top:6px">Error: ${r.error}</div>`);return}
+  if(cont)cont.innerHTML=`<div style="font-size:13px;color:var(--green);padding:6px 0">✅ Marcada como orgánica (sin anuncio). Salió del CPA de Meta Ads.</div>`
+}
+// ── SECCIÓN ADMIN: NOVEDADES ID ────────────────────────────────────────────────
+// 🔴 Faltan X (en vivo, desde mapeos) con botones Corregir/Orgánica · ⚠️ patrón · ✅ corregidas (historial).
+window._renderNovedadesId=async function(){
+  const box=document.getElementById('novedadesIdBox')
+  if(!box)return
+  if(currentRol()!=='admin'){box.innerHTML='';return}
+  box.innerHTML='<div class="card" style="margin-bottom:14px"><div style="color:var(--muted);font-size:13px">🆔 Cargando novedades de ID…</div></div>'
+  // 1) Candidatos: mapeos cruzados (con ID de Dropi del reporte) y con anuncio
+  let cands=null,sinCol=false
   try{
-    const{error}=await sb.from('mapeos').update({ad_id:nuevo}).eq('id',mapeoId)
-    if(error){if(cont)cont.insertAdjacentHTML('beforeend',`<div style="font-size:12px;color:var(--red);margin-top:6px">Error al guardar: ${error.message}</div>`);return}
-    if(cont)cont.innerHTML=`<div style="font-size:13px;color:var(--green);padding:6px 0">✅ Anuncio corregido a <code>${nuevo}</code>. Se aplica en el próximo refresco del tablero.</div>`
-  }catch(e){
-    if(cont)cont.insertAdjacentHTML('beforeend',`<div style="font-size:12px;color:var(--red);margin-top:6px">Error: ${e.message}</div>`)
+    const r=await sb.from('mapeos').select('id,telefono,ad_id,producto,producto_id_dropi,numero_guia').not('producto_id_dropi','is',null).not('ad_id','is',null).limit(10000)
+    if(r.error)throw r.error
+    cands=r.data||[]
+  }catch(_){sinCol=true}
+  if(sinCol){
+    box.innerHTML=`<div class="card" style="margin-bottom:14px;border:1px dashed var(--border)"><div style="font-weight:700;font-size:15px;margin-bottom:4px">🆔 Novedades ID</div><div style="font-size:12.5px;color:var(--muted)">Corre el SQL (<code>producto_id_dropi</code> + <code>numero_guia</code>) y reprocesa el reporte una vez para activar esta sección.</div></div>`
+    return
   }
+  // 2) Resolver anuncios → producto
+  const adIds=[...new Set(cands.map(m=>String(m.ad_id||'')).filter(Boolean))]
+  let adMap={}; try{adMap=adIds.length?await buildAdProductMap(adIds):{}}catch(_){}
+  // 3) Pendientes: anuncio → producto ≠ ID de Dropi → producto
+  const pend=[]
+  for(const m of cands){
+    const _idDr=String(m.producto_id_dropi||'').trim()
+    const _real=productos.find(p=>String(p.dropi_id||'').trim()===_idDr)
+    if(!_real)continue
+    const _ai=adMap[String(m.ad_id)]
+    if(_ai&&_ai.producto_id&&_ai.producto_id!==_real.id){
+      pend.push({mapeo_id:m.id,telefono:m.telefono||'—',guia:m.numero_guia||'—',ad_antes:String(m.ad_id),prod_antes:_ai.producto_nombre,prod_real:_real.nombre,id_dropi:_idDr,fuente:'admin'})
+    }
+  }
+  window._novData={}; pend.forEach(p=>window._novData[p.mapeo_id]=p)
+  // 4) Patrón: por (prod_real ← prod_antes) con 2+ ocurrencias
+  const _comb={}; pend.forEach(p=>{const k=p.prod_real+'|||'+p.prod_antes; _comb[k]=(_comb[k]||0)+1})
+  const patrones=Object.entries(_comb).filter(([,n])=>n>=2).map(([k,n])=>{const a=k.split('|||');return{real:a[0],antes:a[1],n}})
+  // 5) Historial (tolerante)
+  let hist=[]; try{const r=await sb.from('novedades_id').select('*').order('created_at',{ascending:false}).limit(200); if(!r.error)hist=r.data||[]}catch(_){}
+  // 6) Render
+  const _fmtFecha=s=>{try{return new Date(s).toLocaleString('es-CO',{timeZone:'America/Bogota',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}catch(_){return s||''}}
+  const pendHtml=pend.length?`
+    <div style="font-weight:700;font-size:15px;color:var(--red);margin-bottom:4px">🔴 FALTAN ${pend.length} POR CORREGIR</div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">El anuncio todavía apunta a otro producto. Corrígelo aquí mismo (o el auxiliar en Seguimiento). Se actualiza todo al instante, sin subir el xlsx.</div>
+    ${pend.map(p=>`<div id="nov-${p.mapeo_id}" style="border:1px solid var(--red);background:var(--red-bg);border-radius:10px;padding:10px;margin-bottom:8px">
+      <div style="font-size:13px;margin-bottom:5px">📦 <b>${p.prod_real}</b> · Guía <code style="color:var(--muted)">${p.guia}</code> · Tel <code style="color:var(--muted)">${p.telefono}</code></div>
+      <div style="font-size:12px;color:var(--red);margin-bottom:8px">❌ El anuncio <code>${p.ad_antes}</code> es de <b>${p.prod_antes}</b>, no de ${p.prod_real}.</div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <input type="text" inputmode="numeric" id="novad-${p.mapeo_id}" placeholder="ID de anuncio correcto" style="font-family:monospace;font-size:12px;max-width:230px;padding:7px 9px;background:var(--card2);border:1px solid var(--border);border-radius:8px;color:var(--text)">
+        <button onclick="_novCorregir('${p.mapeo_id}')" style="padding:7px 14px;font-size:12px;background:var(--blue);color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600">Corregir</button>
+        <button onclick="_novOrganica('${p.mapeo_id}')" style="padding:7px 14px;font-size:12px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:8px;cursor:pointer;font-weight:600">Orgánica</button>
+      </div>
+    </div>`).join('')}
+  `:`<div style="font-size:13px;color:var(--green);margin-bottom:6px">✅ No falta nada por corregir. Todos los anuncios cuadran con el ID de Dropi.</div>`
+  const patronHtml=patrones.length?`<div style="border:1px solid var(--amber);background:var(--amber-bg);border-radius:10px;padding:10px;margin:10px 0">
+    ${patrones.map(p=>`<div style="font-size:12.5px;margin-bottom:3px">⚠️ <b>${p.n}</b> órdenes de <b>${p.real}</b> traían anuncios de <b>${p.antes}</b>. 👉 Revisa si una campaña de ${p.antes} tiene anuncios de ${p.real} mal enlazados.</div>`).join('')}
+  </div>`:''
+  const histHtml=hist.length?`
+    <div style="font-weight:700;font-size:14px;color:var(--green);margin:12px 0 6px">✅ CORREGIDAS (${hist.length})</div>
+    ${hist.map(h=>`<div style="border-top:1px solid var(--border);padding:9px 0">
+      <div style="font-size:13px;margin-bottom:4px">📦 <b>${h.producto_real||'—'}</b> · Guía <code style="color:var(--muted)">${h.numero_guia||'—'}</code> · Tel <code style="color:var(--muted)">${h.telefono||'—'}</code></div>
+      <div style="font-size:11.5px;color:var(--red)">❌ ANTES: ID <code>${h.ad_antes||'—'}</code> → era de ${h.prod_antes||'—'}</div>
+      <div style="font-size:11.5px;color:var(--green)">✅ AHORA: ${h.tipo==='organica'?'Sin anuncio (orgánica) → fuera del CPA':('ID <code>'+(h.ad_despues||'—')+'</code> → es de '+(h.prod_despues||'—'))}</div>
+      <div style="font-size:10.5px;color:var(--muted);margin-top:3px">👤 ${h.corregido_por||'—'} · ${_fmtFecha(h.created_at)} · ${h.fuente||'—'}</div>
+    </div>`).join('')}
+  `:''
+  box.innerHTML=`<div class="card" style="margin-bottom:14px">
+    <div style="font-weight:700;font-size:16px;margin-bottom:10px">🆔 Novedades ID <span style="color:var(--muted);font-weight:400;font-size:13px">— anuncios que apuntaban a otro producto</span></div>
+    ${pendHtml}${patronHtml}${histHtml}
+  </div>`
+}
+// Wrappers admin (re-renderizan la sección al terminar — todo interno, sin subir el xlsx)
+window._novCorregir=async function(mapeoId){
+  const inp=document.getElementById('novad-'+mapeoId)
+  const cont=document.getElementById('nov-'+mapeoId)
+  const data=(window._novData||{})[mapeoId]
+  if(!inp||!data)return
+  const nuevo=String(inp.value||'').trim()
+  if(!nuevo){inp.style.borderColor='var(--red)';inp.focus();return}
+  if(cont)cont.style.opacity='.6'
+  const r=await _aplicarCorreccionAnuncio(data,nuevo)
+  if(!r.ok){if(cont){cont.style.opacity='';cont.insertAdjacentHTML('beforeend',`<div style="font-size:12px;color:var(--red);margin-top:6px">Error: ${r.error}</div>`)}return}
+  _renderNovedadesId()
+}
+window._novOrganica=async function(mapeoId){
+  const cont=document.getElementById('nov-'+mapeoId)
+  const data=(window._novData||{})[mapeoId]
+  if(!data)return
+  if(cont)cont.style.opacity='.6'
+  const r=await _aplicarCorreccionAnuncio(data,null)
+  if(!r.ok){if(cont){cont.style.opacity='';cont.insertAdjacentHTML('beforeend',`<div style="font-size:12px;color:var(--red);margin-top:6px">Error: ${r.error}</div>`)}return}
+  _renderNovedadesId()
 }
 window._segGuardarPegados=(ordenes,paresSeg)=>{
   // Construye los pedidos pegados (resolviendo nombre por ID), GUARDA en localStorage y pinta
@@ -13723,16 +13859,19 @@ window.procesarSeguimiento=async()=>{
       </div>`
     }).join('')
 
-    // Panel de marcas de anuncio (solo si hay) — tonto y bebé: visual, claro, con botón para corregir
+    // Panel de marcas de anuncio (solo si hay) — tonto y bebé: visual, con botones corregir / orgánica.
+    window._marcasSegData={}
+    _marcasAnuncio.forEach(m=>{window._marcasSegData[m.mapeo_id]={mapeo_id:m.mapeo_id,ad_antes:m.ad_id,prod_real:m.prod_real,prod_antes:m.prod_anuncio,id_dropi:m.id_dropi,guia:m.guia,telefono:m.telefono,fuente:'seguimiento'}})
     const marcasHtml=_marcasAnuncio.length?`<div class="card" style="margin-bottom:14px;border:2px solid var(--amber);background:var(--amber-bg)">
       <div style="font-weight:700;font-size:15px;margin-bottom:6px">⚠️ ${_marcasAnuncio.length} orden(es): el anuncio apunta a OTRO producto</div>
-      <div style="font-size:12.5px;color:var(--muted);margin-bottom:12px">El producto está bien (lo decide el ID de Dropi del reporte). Pero el <b>anuncio</b> guardado es de otro producto → daña el CPA. Pon el ID de anuncio correcto y guarda 👇</div>
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:12px">El producto está bien (lo decide el ID de Dropi del reporte). Pero el <b>anuncio</b> guardado es de otro producto → daña el CPA. Pon el ID correcto, o márcala orgánica si no vino de un anuncio 👇</div>
       ${_marcasAnuncio.map(m=>`<div id="marca-${m.mapeo_id}" style="border-top:1px solid var(--border);padding:10px 0">
         <div style="font-size:13px;margin-bottom:5px">📦 <b>${m.prod_real}</b> · Guía <code style="color:var(--muted)">${m.guia}</code> · Tel <code style="color:var(--muted)">${m.telefono}</code></div>
         <div style="font-size:12px;color:var(--red);margin-bottom:8px">El anuncio <code>${m.ad_id}</code> es de <b>${m.prod_anuncio}</b>, no de ${m.prod_real}.</div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           <input type="text" inputmode="numeric" id="segad-${m.mapeo_id}" placeholder="ID de anuncio correcto" style="font-family:monospace;font-size:12px;max-width:230px;padding:7px 9px;background:var(--card2);border:1px solid var(--border);border-radius:8px;color:var(--text)">
           <button onclick="_segCorregirAnuncio('${m.mapeo_id}')" style="padding:7px 14px;font-size:12px;background:var(--blue);color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600">Corregir anuncio</button>
+          <button onclick="_segMarcarOrganica('${m.mapeo_id}')" style="padding:7px 14px;font-size:12px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:8px;cursor:pointer;font-weight:600">Es orgánica</button>
         </div>
       </div>`).join('')}
     </div>`:''

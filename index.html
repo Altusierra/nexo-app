@@ -17551,6 +17551,8 @@ function _renderProductoCardResumen(data,ranking){
         .rp-fus-row{transition:background .08s}
         .rp-fus-row:hover{background:rgba(124,92,250,.13)}
         .rp-fus-row:hover [class*="rp-lane-"]{filter:brightness(1.4)}
+        .rp-rng-row{transition:background .08s}
+        .rp-rng-row:hover{background:rgba(124,92,250,.16)}
         .rp-fus-sub:has(.rp-lane-hoy:hover,.rp-laneh-hoy:hover) .rp-lane-hoy{background:rgba(167,139,250,.15)!important}
         .rp-fus-sub:has(.rp-lane-ayer:hover,.rp-laneh-ayer:hover) .rp-lane-ayer{background:rgba(134,239,172,.12)!important}
         .rp-fus-sub:has(.rp-lane-antier:hover,.rp-laneh-antier:hover) .rp-lane-antier{background:rgba(125,211,252,.12)!important}
@@ -17942,14 +17944,33 @@ window._rpFusionFiltro=function(cidF,tipo,valor,btn){
   // filtro activo (para no descuadrar la vista filtrada) y vuelve a verse al quitar los filtros.
   try{const _hayFiltro=!!(fsem||fest||fdia||fvsv||fid);sub.querySelectorAll('.rp-life-org').forEach(row=>{row.style.display=_hayFiltro?'none':''})}catch(_){}
   // Si la fusión está cerrada, abrirla para que el filtro se vea de una
-  if(sub.style.display==='none'){
+  // Si el modo RANGO (8 días) está visible, NO abrimos la tabla de 4 días — el filtro va sobre el rango (abajo).
+  const _rgVis=(()=>{try{const _r=document.getElementById(cidF+'-rango');return !!(_r&&_r.style.display!=='none'&&_r.innerHTML)}catch(_){return false}})()
+  if(!_rgVis&&sub.style.display==='none'){
     sub.style.display='block'
     const chev=document.getElementById(cidF+'-chev');if(chev)chev.textContent='▾'
   }
   // NUEVO (Mejora 3 · 11jun26): si el MODO RANGO está visible, ocultarlo al aplicar cualquier filtro.
   // Antes quedaban las DOS listas a la vez (la del rango SIN filtrar + la de 4 días filtrada) y parecía
   // que el chip "Todas hoy" mostraba más campañas de las contadas. Se vuelve al rango con 🔍 Aplicar.
-  try{const _rg=document.getElementById(cidF+'-rango');if(_rg&&_rg.style.display!=='none'&&_rg.innerHTML){_rg.style.display='none'}}catch(_){}
+  // NUEVO (botones en rango): si el modo RANGO (8 días) está visible, aplicar los MISMOS filtros a SUS filas
+  // (urgencia/estado/buscador por ID). El filtro por día y con/sin ventas usan claves p/a/b/c que el rango
+  // (por fecha) no tiene, así que ahí se omiten. Antes se ocultaba el rango; ahora se filtra en vivo.
+  try{const _rg=document.getElementById(cidF+'-rango');if(_rg&&_rg.style.display!=='none'&&_rg.innerHTML){
+    _rg.querySelectorAll('.rp-rng-box').forEach(box=>{
+      const row=box.querySelector('.rp-rng-row');if(!row)return
+      let ok=true
+      const _esPy=(row.dataset.fsem||'')==='prender_ya'
+      if(fsem&&(row.dataset.fsem||'')!==fsem)ok=false
+      if(fest==='act'&&(row.dataset.factiva!=='1'||_esPy))ok=false
+      if(fest==='ventas'&&!_esPy)ok=false
+      if(fest==='inact'&&(row.dataset.factiva==='1'||_esPy||row.dataset.fghoy!=='1'))ok=false
+      if(fest==='noent'&&row.dataset.fnoent!=='1')ok=false
+      if(fest==='hoy'&&(_esPy||!(row.dataset.factiva==='1'||row.dataset.fghoy==='1')))ok=false
+      if(fid&&!((row.dataset.fcampid||'').includes(fid)||(row.dataset.fadids||'').includes(fid)))ok=false
+      box.style.display=ok?'':'none'
+    })
+  }}catch(_){}
   // Resaltar pills activos (urgencia y estado) dentro del bloque de esta fusión
   try{
     const wrap=sub.closest('div[style*="border-left:3px solid var(--purple)"]')||sub.parentElement
@@ -18147,6 +18168,7 @@ window._rpFusionLifetime=async function(slug,btn){
   const _lifeRestore=()=>{
     sub.querySelectorAll('.rp-life-extra').forEach(el=>el.remove())
     sub.querySelectorAll('.rp-life-itot[data-lifebak],.rp-life-vts[data-lifebak]').forEach(el=>{el.innerHTML=el.getAttribute('data-lifebak');el.removeAttribute('data-lifebak')})
+    try{const _rgL=document.getElementById(cidF+'-rango');if(_rgL)_rgL.querySelectorAll('.rp-life-itot[data-lifebak],.rp-life-vts[data-lifebak]').forEach(el=>{el.innerHTML=el.getAttribute('data-lifebak');el.removeAttribute('data-lifebak')})}catch(_){}
     const _b=(window._rpLifeTotBak||{})[slug]||{}
     for(const id in _b){for(const suf of ['','-top']){const e=document.getElementById(cidF+'-tot'+suf+'-'+id);if(e&&_b[id]&&_b[id][suf]){e.textContent=_b[id][suf].t;e.style.color=_b[id][suf].c}}}
     const _bar=document.getElementById(cidF+'-lifebar');if(_bar)_bar.remove()
@@ -18264,6 +18286,20 @@ window._rpFusionLifetime=async function(slug,btn){
       const itc=row.querySelector('.rp-life-itot');if(itc){if(!itc.hasAttribute('data-lifebak'))itc.setAttribute('data-lifebak',itc.innerHTML);itc.innerHTML=_itotH(ids,gYes)}
       const vtc=row.querySelector('.rp-life-vts');if(vtc){if(!vtc.hasAttribute('data-lifebak'))vtc.setAttribute('data-lifebak',vtc.innerHTML);vtc.innerHTML=_vtsH(conf,gNo)}
     })
+    // NUEVO (lifetime en rango): aplicar el MISMO lifetime a la tabla del RANGO (8 días) si está renderizada.
+    // Reemplaza 🆔 TOT y 🛒 VTS de cada campaña por su histórico real (mismos _itotH/_vtsH), con backup para apagar.
+    try{
+      const _rgL=document.getElementById(cidF+'-rango')
+      if(_rgL&&_rgL.innerHTML){
+        _rgL.querySelectorAll('.rp-rng-row[data-fcampid]').forEach(row=>{
+          const c=String(row.dataset.fcampid)
+          const ids=idsLife[c]||0,conf=confLife[c]||0
+          const gYes=Math.round(gLife[c]||0),gHoy=parseFloat(row.dataset.fgp)||0,gNo=Math.max(0,gYes-gHoy)
+          const itc=row.querySelector('.rp-life-itot');if(itc){if(!itc.hasAttribute('data-lifebak'))itc.setAttribute('data-lifebak',itc.innerHTML);itc.innerHTML=_itotH(ids,gYes)}
+          const vtc=row.querySelector('.rp-life-vts');if(vtc){if(!vtc.hasAttribute('data-lifebak'))vtc.setAttribute('data-lifebak',vtc.innerHTML);vtc.innerHTML=_vtsH(conf,gNo)}
+        })
+      }
+    }catch(_){}
     // 4a) MOSTRAR TODAS: campañas del producto (campIds) que NO corrieron en los días visibles
     //     pero SÍ tienen gasto/órdenes lifetime → se agregan como filas extra (días en —, TOT/VTS reales).
     //     Se marcan rp-life-extra para quitarlas al apagar el lifetime.
@@ -18755,7 +18791,7 @@ window._rpFusionRango=async function(slug,cidF){
     const _MESHR=['ENE','FEB','MAR','ABR','MAY','JUN','JUL','AGO','SEP','OCT','NOV','DIC']
     const _DIASEMHR=['DOM','LUN','MAR','MIÉ','JUE','VIE','SÁB']
     const _hoyISO_R=_isoR(new Date())
-    const _fLabHR=f=>{const p=String(f).split('-');if(p.length!==3)return f;const _dN=p[2],_mS=_MESHR[parseInt(p[1],10)-1]||p[1];if(f===_hoyISO_R)return 'HOY '+_dN+' '+_mS;const _dd=new Date(p[0]+'-'+p[1]+'-'+p[2]+'T12:00:00');return (_DIASEMHR[_dd.getDay()]||'')+' '+_dN}
+    const _fLabHR=f=>{const p=String(f).split('-');if(p.length!==3)return f;const _dN=String(parseInt(p[2],10)),_mS=_MESHR[parseInt(p[1],10)-1]||p[1];if(f===_hoyISO_R)return 'HOY '+_dN+' '+_mS;const _dd=new Date(p[0]+'-'+p[1]+'-'+p[2]+'T12:00:00');return (_DIASEMHR[_dd.getDay()]||'')+' '+_dN}
     const _idsCampR=(ck,f)=>((_idsCampDiaRg[String(ck)]||{})[f]||0)
     const _idsCampTotR=(ck)=>_todasFechasR.reduce((s,f)=>s+_idsCampR(ck,f),0)
     const _gAbrR=(g)=>g>=1e6?('$'+(g/1e6).toFixed(3)+'M'):(g>=1000?('$'+Math.round(g/1000)+'k'):('$'+Math.round(g)))
@@ -18772,7 +18808,7 @@ window._rpFusionRango=async function(slug,cidF){
       [_cwR.hoy,'🎯 CPA HOY','#fcd34d','CPA de HOY (solo si hoy está dentro del rango): gasto de hoy ÷ ventas de hoy (Dropi; si aún no hay cruce, por 🆔 IDs). Color = semáforo break-even',0,'fcpah'],
       [_cwR.tog,'⏯ ON/OFF','#f9a8d4','Pausar o activar la campaña en Meta (mismo modal de siempre)'],
       [_cwR.est,'⚡ ESTADO','#5eead4','Estado REAL (foto de AHORA): 🟢 ACTIVA · ⏸ APAGADA · 🔕 NO ENTREGA · ⚪ SIN ACTIVIDAD. Sale del último llamado en vivo del portafolio'],
-      ..._todasFechasR.flatMap((fH,iH3)=>[[_cwR.vD,'🛒 '+_fLabHR(fH),'#86efac','Ventas confirmadas (cuadre Dropi) del '+_fLab(fH)+' — si no cuadran con las 🆔 de al lado salen en ámbar',0,'fd'+iH3+'v'],[_cwR.iD,'🆔 '+_fLabHR(fH),'#fcd34d','Ventas por IDs del aux del '+_fLab(fH)+' — si no cuadran con las 🛒 de al lado salen en ámbar',0,'fd'+iH3+'i']]),
+      ..._todasFechasR.flatMap((fH,iH3)=>fH===_hoyISO_R?[[_cwR.iD,'🆔 '+_fLabHR(fH),'#fcd34d','Ventas por IDs del aux de HOY (T. Cierre, antes del cruce Dropi) — hoy aún no hay cruce Dropi, por eso no va la 🛒',0,'fd'+iH3+'i']]:[[_cwR.vD,'🛒 '+_fLabHR(fH),'#86efac','Ventas confirmadas (cuadre Dropi) del '+_fLab(fH)+' — si no cuadran con las 🆔 de al lado salen en ámbar',0,'fd'+iH3+'v'],[_cwR.iD,'🆔 '+_fLabHR(fH),'#fcd34d','Ventas por IDs del aux del '+_fLab(fH)+' — si no cuadran con las 🛒 de al lado salen en ámbar',0,'fd'+iH3+'i']]),
       [_cwR.iTot,'🆔 TOT','#fcd34d','Total de ventas por IDs del aux sumando TODOS los días del rango — compáralo con 🛒 VTS',0,'fitot'],
       [_cwR.vts,'🛒 VTS','#e2e8f0','Ventas totales confirmadas de la campaña en el rango',0,'fvts'],
       [_cwR.bud,'💰 PRESUP.','#a5b4fc','Cambiar presupuesto (mismo modal de las cards)',0,'budval'],
@@ -18789,7 +18825,11 @@ window._rpFusionRango=async function(slug,cidF){
         const vF=_listaR.reduce((s,F)=>s+((F.dias[fT2]&&F.dias[fT2].count)||0),0)
         const iF=_listaR.reduce((s,F)=>s+_idsCampR(F.campId,fT2),0)
         const gF=_listaR.reduce((s,F)=>s+((F.dias[fT2]&&F.dias[fT2].gasto)||0),0)
-        return `<span style="display:inline-block;width:${_cwR.vD}px;flex-shrink:0;white-space:nowrap;text-align:right;padding-right:8px" title="${_fLab(fT2)}: ${vF} venta${vF===1?'':'s'} Dropi · ${iF} por IDs · gasto $${fmt(Math.round(gF))}"><span style="display:inline-block;text-align:right"><span id="${cidF}-rng-tot${suf}-d${_dti}v" style="display:block;color:#86efac;font-weight:700;line-height:1.15">${vF>0?vF:'—'}</span><span id="${cidF}-rng-tot${suf}-d${_dti}g" style="display:block;font-size:8.5px;line-height:1.1;color:var(--subtle);font-weight:600">${gF>0?_gAbrR(gF):''}</span></span></span>`+_tdR(_cwR.iD,iF>0?iF:'—','#fcd34d',`${cidF}-rng-tot${suf}-d${_dti}i`)
+        const _laneT=(typeof window!=='undefined'&&window._nexoDiaLane)?window._nexoDiaLane(_dti):null
+        const _bgT=_laneT?`background:${_laneT.bg};`:''
+        const _colVdT=(fT2===_hoyISO_R)?'':`<span style="display:inline-block;width:${_cwR.vD}px;flex-shrink:0;white-space:nowrap;text-align:right;padding-right:8px;${_bgT}" title="${_fLab(fT2)}: ${vF} venta${vF===1?'':'s'} Dropi · ${iF} por IDs · gasto $${fmt(Math.round(gF))}"><span style="display:inline-block;text-align:right"><span id="${cidF}-rng-tot${suf}-d${_dti}v" style="display:block;color:#86efac;font-weight:700;line-height:1.15">${vF>0?vF:'—'}</span><span id="${cidF}-rng-tot${suf}-d${_dti}g" style="display:block;font-size:8.5px;line-height:1.1;color:var(--subtle);font-weight:600">${gF>0?_gAbrR(gF):''}</span></span></span>`
+        const _colIdT=`<span style="display:inline-block;width:${_cwR.iD}px;flex-shrink:0;white-space:nowrap;text-align:right;padding-right:8px;${_bgT}"><span id="${cidF}-rng-tot${suf}-d${_dti}i" style="color:#fcd34d;font-weight:700">${iF>0?iF:'—'}</span></span>`
+        return _colVdT+_colIdT
       }).join('')
       return `<div id="${cidF}-rng-totrow${suf}" style="display:flex;align-items:center;font-size:12px;min-height:30px;min-width:max-content;padding:4px 8px;${suf==='-top'?'margin-bottom:3px;border-bottom:1px solid var(--purple);border-radius:6px 6px 0 0':'margin-top:3px;border-top:1px solid var(--purple);border-radius:0 0 6px 6px'};background:rgba(167,139,250,.08)" title="Σ TOTALES del rango: suma de TODAS las campañas listadas. Cada día con su gasto debajo.${suf==='-top'?' Misma fila que la de abajo, repetida aquí para verla sin bajar.':''}">
         <span style="display:inline-block;width:${_cwR.nom}px;flex-shrink:0;font-weight:700;color:var(--purple);white-space:nowrap;">Σ TOTALES (<span id="${cidF}-rng-tot${suf}-n">${_listaR.length}</span> campaña${_listaR.length===1?'':'s'})</span>
@@ -18868,7 +18908,9 @@ window._rpFusionRango=async function(slug,cidF){
         const cH=Math.round(_gHoyR/nH)
         return`<span style="font-size:10px;font-weight:700;color:${_semColR(cH)};border:1.5px solid ${_semColR(cH)};border-radius:999px;padding:1px 8px;white-space:nowrap" title="CPA de HOY = $${fmt(Math.round(_gHoyR))} ÷ ${nH} venta${nH===1?'':'s'} ${vH>0?'Dropi':'por 🆔 IDs (sin cruce aún)'} · Semáforo break-even ($${fmt(BE)})">🎯 $${fmt(cH)}</span>`
       })()
-      const _paresDiaR=_todasFechasR.map(fD=>{
+      const _paresDiaR=_todasFechasR.map((fD,_idxDia)=>{
+        const _laneD=(typeof window!=='undefined'&&window._nexoDiaLane)?window._nexoDiaLane(_idxDia):null
+        const _bgLaneD=_laneD?`background:${_laneD.bg};`:''
         const _vN=(F.dias[fD]&&F.dias[fD].count)||0
         const _iN=_idsCampR(F.campId,fD)
         const _gN=(F.dias[fD]&&F.dias[fD].gasto)||0
@@ -18894,13 +18936,13 @@ window._rpFusionRango=async function(slug,cidF){
         const _cpaEfHtml_R=_cpaEfN_R>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(_cpaEfN_R)}" title="🔮 CPA R. EFECTIVAS del día = gasto ÷ (IDs × ${Math.round(_pctConfRg*100)}% confirmación)">🔮$${fmt(_cpaEfN_R)}</span>`:''
         const _vProyN_R=_iN>0?Math.floor(_iN*_pctConfRg*10)/10:0
         const _vProyHtml_R=_vProyN_R>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:var(--purple)" title="🔮 Ventas proyectadas post-Dropi = ${_iN} IDs × ${Math.round(_pctConfRg*100)}% confirmación">🔮 ${_vProyN_R.toFixed(1)}</span>`:''
-        return _cR(_cwR.vD,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_cV};font-weight:700;line-height:1.15">${_vN>0?_vN:'—'}</span>${_gHtmlD}${_cpaHtmlD}${_cpaEntHtmlD}</span>`,true,_tipP)
-          +_cR(_cwR.iD,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_cI3};font-weight:700;line-height:1.15">${_iN>0?_iN:'—'}</span>${_gHtmlI_R}${_cpaIdsHtml_R}${_cpaEfHtml_R}${_vProyHtml_R}</span>`,true,_tipP)
+        return (fD===_hoyISO_R?'':_cR(_cwR.vD,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_cV};font-weight:700;line-height:1.15">${_vN>0?_vN:'—'}</span>${_gHtmlD}${_cpaHtmlD}${_cpaEntHtmlD}</span>`,true,_tipP,false,_bgLaneD))
+          +_cR(_cwR.iD,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_cI3};font-weight:700;line-height:1.15">${_iN>0?_iN:'—'}</span>${_gHtmlI_R}${_cpaIdsHtml_R}${_cpaEfHtml_R}${_vProyHtml_R}</span>`,true,_tipP,false,_bgLaneD)
       }).join('')
       const _iTotR=_idsCampTotR(F.campId)
       const _descTotR=(_iTotR!==F.count)&&(_iTotR>0||F.count>0)
       return`<div id="${_rcid}-box" class="rp-rng-box" style="padding:4px 0;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-radius:6px;border-bottom:1px solid rgba(255,255,255,.04)">
-        <div class="rp-rng-row" data-fgto="${Math.round(F.gasto||0)}" data-fcpa="${Math.round(F.cpa||0)}" data-fcpah="${(()=>{if(!_hoyEnR||_gHoyR<=0)return 0;const vH2=(F.dias[_hoyISO_R]&&F.dias[_hoyISO_R].count)||0;const iH2=_idsCampR(F.campId,_hoyISO_R);const nH2=vH2>0?vH2:iH2;return nH2>0?Math.round(_gHoyR/nH2):0})()}" data-fitot="${_iTotR}" data-fvts="${F.count||0}" ${_todasFechasR.map((fD2,di2)=>`data-fd${di2}v="${(F.dias[fD2]&&F.dias[fD2].count)||0}" data-fd${di2}i="${_idsCampR(F.campId,fD2)}" data-fd${di2}g="${Math.round((F.dias[fD2]&&F.dias[fD2].gasto)||0)}"`).join(' ')} onclick="window._rpToggleCuadre('${_rcid}')" style="cursor:pointer;display:flex;align-items:center;font-size:12px;color:var(--text);min-height:28px;min-width:max-content;padding:2px 8px" title="Toca para ver esta campaña día por día y sus anuncios agrupados por ID">
+        <div class="rp-rng-row" data-fgto="${Math.round(F.gasto||0)}" data-fcpa="${Math.round(F.cpa||0)}" data-fcpah="${(()=>{if(!_hoyEnR||_gHoyR<=0)return 0;const vH2=(F.dias[_hoyISO_R]&&F.dias[_hoyISO_R].count)||0;const iH2=_idsCampR(F.campId,_hoyISO_R);const nH2=vH2>0?vH2:iH2;return nH2>0?Math.round(_gHoyR/nH2):0})()}" data-fitot="${_iTotR}" data-fvts="${F.count||0}" data-fsem="${_semCodeR||''}" data-factiva="${_activaRealR===true?1:0}" data-fghoy="${_gHoyR>0?1:0}" data-fgp="${Math.round(_gHoyR||0)}" data-fnoent="${(_estR==='ACTIVE'&&_entR===false)?1:0}" data-fcampid="${_esc(F.campId)}" data-fadids="${Object.keys(F.ads||{}).join(',')}" ${_todasFechasR.map((fD2,di2)=>`data-fd${di2}v="${(F.dias[fD2]&&F.dias[fD2].count)||0}" data-fd${di2}i="${_idsCampR(F.campId,fD2)}" data-fd${di2}g="${Math.round((F.dias[fD2]&&F.dias[fD2].gasto)||0)}"`).join(' ')} onclick="window._rpToggleCuadre('${_rcid}')" style="cursor:pointer;display:flex;align-items:center;font-size:12px;color:var(--text);min-height:28px;min-width:max-content;padding:2px 8px" title="Toca para ver esta campaña día por día y sus anuncios agrupados por ID">
           ${_cR(_cwR.nom,`<span id="${_rcid}-chev" style="display:inline-block;width:12px;font-size:9px;color:var(--muted)">▸</span><span style="margin-left:3px">${_dotR}📣 ${_esc(F.nombre)}</span>`,false,_esc(F.nombre),false,'')}
           ${_cR(_cwR.alr,_alrR,false,'',true)}
           ${_cR(_cwR.dias,`<span style="font-size:10px;font-weight:700;color:var(--purple)">🗓 ${_fechasF.length}/${_nDias}</span>`,false,'Días con actividad: '+(_fechasF.length?_fechasF.slice().reverse().map(_fLab).join(', '):'ninguno')+' · de '+_nDias+' del rango')}
@@ -18910,8 +18952,8 @@ window._rpFusionRango=async function(slug,cidF){
           ${_cR(_cwR.tog,_btnEstR,false,'',true)}
           ${_cR(_cwR.est,`<span style="display:inline-flex;flex-direction:column;gap:1px;align-items:flex-start;line-height:1.1">${_badgeEstR}<span style="font-size:9px;color:var(--subtle);max-width:${_cwR.est-6}px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🏢 ${_esc(F.accNombre)}</span></span>`,false,'Estado · Cuenta: '+_esc(F.accNombre))}
           ${_paresDiaR}
-          ${_cR(_cwR.iTot,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_descTotR?'var(--amber)':(_iTotR>0?'#fcd34d':'var(--subtle)')};font-weight:700;line-height:1.15">${_iTotR>0?'🆔 '+_iTotR:'—'}</span>${(F.gasto>0&&_iTotR>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round(F.gasto/_iTotR))}">🆔$${fmt(Math.round(F.gasto/_iTotR))}</span>`:''}</span>`,true,'Total ventas por IDs del rango: '+_iTotR+(_descTotR?' — no cuadra con las 🛒 VTS totales ('+F.count+')':' — cuadra con las 🛒 VTS totales'))}
-          ${_cR(_cwR.vts,`<span style="display:inline-block;text-align:right"><span style="display:block;color:var(--text);font-weight:700;line-height:1.15">${F.count}</span>${((F.gasto-_gHoyR)>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round((F.gasto-_gHoyR)/F.count))}">🎯$${fmt(Math.round((F.gasto-_gHoyR)/F.count))}</span>`:''}${((F.gasto-_gHoyR)>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round((F.gasto-_gHoyR)/(F.count*(1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19)))))}" title="📦 CPA V. ENTREGADAS = gasto (sin HOY) ÷ (ventas × (1−devol))">📦$${fmt(Math.round((F.gasto-_gHoyR)/(F.count*(1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19)))))}</span>`:''}${F.ent>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:800;color:#86efac" title="📦 ENTREGADAS: órdenes que YA llegaron al cliente (subconjunto de las confirmadas)">📦 ${F.ent}</span>`:''}</span>`,true,'Ventas totales del rango · 🎯 CPA = gasto (SIN el de HOY) ÷ ventas · 📦 CPA entregadas y nº de entregadas')}
+          ${_cR(_cwR.iTot,`<span class="rp-life-itot" style="display:inline-block;text-align:right"><span style="display:block;color:${_descTotR?'var(--amber)':(_iTotR>0?'#fcd34d':'var(--subtle)')};font-weight:700;line-height:1.15">${_iTotR>0?'🆔 '+_iTotR:'—'}</span>${(F.gasto>0&&_iTotR>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round(F.gasto/_iTotR))}">🆔$${fmt(Math.round(F.gasto/_iTotR))}</span>`:''}</span>`,true,'Total ventas por IDs del rango: '+_iTotR+(_descTotR?' — no cuadra con las 🛒 VTS totales ('+F.count+')':' — cuadra con las 🛒 VTS totales'))}
+          ${_cR(_cwR.vts,`<span class="rp-life-vts" style="display:inline-block;text-align:right"><span style="display:block;color:var(--text);font-weight:700;line-height:1.15">${F.count}</span>${((F.gasto-_gHoyR)>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round((F.gasto-_gHoyR)/F.count))}">🎯$${fmt(Math.round((F.gasto-_gHoyR)/F.count))}</span>`:''}${((F.gasto-_gHoyR)>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round((F.gasto-_gHoyR)/(F.count*(1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19)))))}" title="📦 CPA V. ENTREGADAS = gasto (sin HOY) ÷ (ventas × (1−devol))">📦$${fmt(Math.round((F.gasto-_gHoyR)/(F.count*(1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19)))))}</span>`:''}${F.ent>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:800;color:#86efac" title="📦 ENTREGADAS: órdenes que YA llegaron al cliente (subconjunto de las confirmadas)">📦 ${F.ent}</span>`:''}</span>`,true,'Ventas totales del rango · 🎯 CPA = gasto (SIN el de HOY) ÷ ventas · 📦 CPA entregadas y nº de entregadas')}
           ${_cR(_cwR.bud,_btnBudR,false,'',true)}
           ${_cR(_cwR.id,`<span style="font-family:monospace;font-size:10.5px;color:var(--muted)">${_esc(F.campId)}</span>`,false,'ID de la campaña: '+_esc(F.campId))}
           ${_cR(_cwR.cp,_btnC(F.campId,'ID de la campaña'),false,'',true)}

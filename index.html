@@ -1359,7 +1359,7 @@ async function loadDash(){
     const _gastoA=(insA||[]).reduce((s,i)=>s+(i.spend||0),0)
     let _confA=0
     for(const m of (mapA||[])){
-      if(m.estado_final==='CANCELADO')continue
+      if(m.estado_final==='CANCELADO'||m.estado_final==='RECHAZADO')continue
       if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)continue
       _confA++
     }
@@ -1640,7 +1640,8 @@ async function loadDash(){
       if(!mp[pn])mp[pn]={total:0,conf:0,ent:0,dev:0,canc:0,pend:0,conv:0}
       const P=mp[pn]
       P.total++
-      if(m.estado_final==='CANCELADO')P.canc++
+      // Regla única: CANCELADO y RECHAZADO = no venta (nunca salieron de bodega) → bucket canc
+      if(m.estado_final==='CANCELADO'||m.estado_final==='RECHAZADO')P.canc++
       else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)P.pend++
       else P.conf++
       const _cat=DROPI_STATUS[m.estado_final]?.cat
@@ -1674,17 +1675,20 @@ async function loadDash(){
   // NUEVO: tabla embudo por producto (Dropi) — cuadra con las cards de arriba (misma fuente y mismos buckets)
   const _mkEmbudoProdDropiHTML=(arr,key)=>{
     const mp={}
+    const _desconocidos=new Set() // 🚨 estados que Dropi trae y NEXO no tiene clasificados
     for(const m of (arr||[])){
       const pn=_prodCanonMapeo(m)
-      if(!mp[pn])mp[pn]={pn,total:0,canc:0,pconf:0,pend:0,ent:0,dev:0,fenvSum:0,fenvN:0,fenvCfg:0,fdpSum:0,fdpN:0,fdtSum:0,fdtN:0}
+      if(!mp[pn])mp[pn]={pn,total:0,canc:0,pconf:0,rech:0,pend:0,ent:0,dev:0,fenvSum:0,fenvN:0,fenvCfg:0,fdpSum:0,fdpN:0,fdtSum:0,fdtN:0}
       const P=mp[pn],_est=m.estado_final,_cat=DROPI_STATUS[_est]?.cat
       P.total++
+      if(_est&&!DROPI_STATUS[_est])_desconocidos.add(_est)
       if(_est==='CANCELADO')P.canc++
+      else if(_est==='RECHAZADO')P.rech++
       else if(_est==='PENDIENTE CONFIRMACION'||!_est)P.pconf++
       else if(_est==='PENDIENTE')P.pend++
       if(_cat==='entregado'||_cat==='novedad_ok')P.ent++
       else if(_cat==='devuelto')P.dev++
-      const _desp=!(_est==='CANCELADO'||_est==='PENDIENTE CONFIRMACION'||!_est||_est==='PENDIENTE')
+      const _desp=!(_est==='CANCELADO'||_est==='RECHAZADO'||_est==='PENDIENTE CONFIRMACION'||!_est||_est==='PENDIENTE')
       const _prod=productos.find(p=>p.nombre===pn)||productos[0]||{}
       const _env=m.flete_snapshot
       // Flete envío REAL por orden (flete_snapshot ya viene sobreescrito por Dropi al importar). Marca si quedó en el valor config del producto (no real).
@@ -1702,16 +1706,21 @@ async function loadDash(){
     const _hl=s=>`<td style="text-align:center;padding:7px 7px;font-variant-numeric:tabular-nums;background:${_BG};color:var(--blue);font-weight:700">${s}</td>`
     const _cf=v=>`<td style="text-align:center;padding:7px 7px;font-variant-numeric:tabular-nums;color:${v?'var(--text)':'var(--subtle)'}">${v?('$'+fmt(v)):'—'}</td>`
     const _cfenv=(v,cfg,n)=>{if(!v)return `<td style="text-align:center;padding:7px 7px;color:var(--subtle)">—</td>`;const _r=cfg>0,_t=_r?(cfg+' de '+n+' órdenes usan el flete del sistema (config), no el real de Dropi'):('Las '+n+' órdenes usan flete real de Dropi');return `<td title="${_t}" style="text-align:center;padding:7px 7px;font-variant-numeric:tabular-nums;cursor:help;color:${_r?'var(--red)':'var(--text)'}">$${fmt(v)}${_r?' ⚠':''}</td>`}
-    const _body=_fl.map(f=>{const desp=f.total-f.canc-f.pconf-f.pend,encam=desp-f.ent-f.dev,fin=f.ent+f.dev,fenv=f.fenvN?Math.round(f.fenvSum/f.fenvN):0,fdp=f.fdpN?Math.round(f.fdpSum/f.fdpN):0,fdt=f.fdtN?Math.round(f.fdtSum/f.fdtN):0;return `<tr style="border-bottom:1px solid var(--border)"><td style="text-align:left;padding:7px 10px;color:var(--text);white-space:nowrap" title="${_e(f.pn)}">${_e(f.pn)}</td>`+_c(f.total,'var(--text)')+_c(f.canc,'var(--red)')+_cp(_p(f.canc,f.total))+_c(f.pconf,'var(--amber)')+_cp(_p(f.pconf,f.total))+_c(f.pend,'var(--amber)')+_hl(_p(f.pend,f.total))+_c(desp,'var(--text)')+_c(encam,'var(--blue)')+_hl(_p(encam,desp))+_c(f.ent,'var(--green)')+_cp(_p(f.ent,fin))+_c(f.dev,'var(--red)')+_cp(_p(f.dev,fin))+_hl(fin+' · '+_p(fin,desp))+_cfenv(fenv,f.fenvCfg,f.fenvN)+_cf(fdp)+_cf(fdt)+`</tr>`}).join('')
-    const T=_fl.reduce((a,f)=>{a.total+=f.total;a.canc+=f.canc;a.pconf+=f.pconf;a.pend+=f.pend;a.ent+=f.ent;a.dev+=f.dev;a.fenvSum+=f.fenvSum;a.fenvN+=f.fenvN;a.fenvCfg+=f.fenvCfg;a.fdpSum+=f.fdpSum;a.fdpN+=f.fdpN;a.fdtSum+=f.fdtSum;a.fdtN+=f.fdtN;return a},{total:0,canc:0,pconf:0,pend:0,ent:0,dev:0,fenvSum:0,fenvN:0,fenvCfg:0,fdpSum:0,fdpN:0,fdtSum:0,fdtN:0})
-    const Td=T.total-T.canc-T.pconf-T.pend,Tcam=Td-T.ent-T.dev,Tfin=T.ent+T.dev,Tfenv=T.fenvN?Math.round(T.fenvSum/T.fenvN):0,Tfdp=T.fdpN?Math.round(T.fdpSum/T.fdpN):0,Tfdt=T.fdtN?Math.round(T.fdtSum/T.fdtN):0
+    const _filasMal=[] // productos donde las cuentas no cuadran (desp o en-camino negativos)
+    const _body=_fl.map(f=>{const desp=f.total-f.canc-f.pconf-f.rech-f.pend,encam=desp-f.ent-f.dev,fin=f.ent+f.dev,fenv=f.fenvN?Math.round(f.fenvSum/f.fenvN):0,fdp=f.fdpN?Math.round(f.fdpSum/f.fdpN):0,fdt=f.fdtN?Math.round(f.fdtSum/f.fdtN):0;if(desp<0||encam<0)_filasMal.push(f.pn);return `<tr style="border-bottom:1px solid var(--border)"><td style="text-align:left;padding:7px 10px;color:${(desp<0||encam<0)?'var(--red)':'var(--text)'};white-space:nowrap" title="${_e(f.pn)}">${(desp<0||encam<0)?'🚨 ':''}${_e(f.pn)}</td>`+_c(f.total,'var(--text)')+_c(f.canc,'var(--red)')+_cp(_p(f.canc,f.total))+_c(f.pconf,'var(--amber)')+_cp(_p(f.pconf,f.total))+_c(f.rech,'var(--red)')+_cp(_p(f.rech,f.total))+_c(f.pend,'var(--amber)')+_hl(_p(f.pend,f.total))+_c(desp,desp<0?'var(--red)':'var(--text)')+_c(encam,'var(--blue)')+_hl(_p(encam,desp))+_c(f.ent,'var(--green)')+_cp(_p(f.ent,fin))+_c(f.dev,'var(--red)')+_cp(_p(f.dev,fin))+_hl(fin+' · '+_p(fin,desp))+_cfenv(fenv,f.fenvCfg,f.fenvN)+_cf(fdp)+_cf(fdt)+`</tr>`}).join('')
+    const T=_fl.reduce((a,f)=>{a.total+=f.total;a.canc+=f.canc;a.pconf+=f.pconf;a.rech+=f.rech;a.pend+=f.pend;a.ent+=f.ent;a.dev+=f.dev;a.fenvSum+=f.fenvSum;a.fenvN+=f.fenvN;a.fenvCfg+=f.fenvCfg;a.fdpSum+=f.fdpSum;a.fdpN+=f.fdpN;a.fdtSum+=f.fdtSum;a.fdtN+=f.fdtN;return a},{total:0,canc:0,pconf:0,rech:0,pend:0,ent:0,dev:0,fenvSum:0,fenvN:0,fenvCfg:0,fdpSum:0,fdpN:0,fdtSum:0,fdtN:0})
+    const Td=T.total-T.canc-T.pconf-T.rech-T.pend,Tcam=Td-T.ent-T.dev,Tfin=T.ent+T.dev,Tfenv=T.fenvN?Math.round(T.fenvSum/T.fenvN):0,Tfdp=T.fdpN?Math.round(T.fdpSum/T.fdpN):0,Tfdt=T.fdtN?Math.round(T.fdtSum/T.fdtN):0
     const _ft=(v,col)=>`<td style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;color:${col||'var(--text)'}">${v}</td>`
     const _fthl=s=>`<td style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;background:${_BG};color:var(--blue)">${s}</td>`
     const _ftenv=(v,cfg,n)=>{if(!v)return `<td style="text-align:center;padding:8px 7px;font-weight:700;color:var(--subtle)">—</td>`;const _r=cfg>0,_t=_r?(cfg+' de '+n+' usan flete del sistema (config), no real de Dropi'):('Las '+n+' usan flete real');return `<td title="${_t}" style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;cursor:help;color:${_r?'var(--red)':'var(--text)'}">$${fmt(v)}${_r?' ⚠':''}</td>`}
-    const _foot=`<tr style="border-top:1px solid var(--border)"><td style="text-align:left;padding:8px 10px;font-weight:700;color:var(--text)">Total</td>`+_ft(T.total)+_ft(T.canc)+_ft(_p(T.canc,T.total),'var(--muted)')+_ft(T.pconf)+_ft(_p(T.pconf,T.total),'var(--muted)')+_ft(T.pend)+_fthl(_p(T.pend,T.total))+_ft(Td)+_ft(Tcam)+_fthl(_p(Tcam,Td))+_ft(T.ent)+_ft(_p(T.ent,Tfin),'var(--muted)')+_ft(T.dev)+_ft(_p(T.dev,Tfin),'var(--muted)')+_fthl(Tfin+' · '+_p(Tfin,Td))+_ftenv(Tfenv,T.fenvCfg,T.fenvN)+_ft(Tfdp?('$'+fmt(Tfdp)):'—')+_ft(Tfdt?('$'+fmt(Tfdt)):'—')+`</tr>`
+    const _foot=`<tr style="border-top:1px solid var(--border)"><td style="text-align:left;padding:8px 10px;font-weight:700;color:var(--text)">Total</td>`+_ft(T.total)+_ft(T.canc)+_ft(_p(T.canc,T.total),'var(--muted)')+_ft(T.pconf)+_ft(_p(T.pconf,T.total),'var(--muted)')+_ft(T.rech,'var(--red)')+_ft(_p(T.rech,T.total),'var(--muted)')+_ft(T.pend)+_fthl(_p(T.pend,T.total))+_ft(Td,Td<0?'var(--red)':undefined)+_ft(Tcam)+_fthl(_p(Tcam,Td))+_ft(T.ent)+_ft(_p(T.ent,Tfin),'var(--muted)')+_ft(T.dev)+_ft(_p(T.dev,Tfin),'var(--muted)')+_fthl(Tfin+' · '+_p(Tfin,Td))+_ftenv(Tfenv,T.fenvCfg,T.fenvN)+_ft(Tfdp?('$'+fmt(Tfdp)):'—')+_ft(Tfdt?('$'+fmt(Tfdt)):'—')+`</tr>`
     const _th=(t,c,hl)=>`<th style="text-align:${t==='Producto'?'left':'center'};padding:7px 7px;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;white-space:nowrap;${hl?('background:'+_BG+';color:var(--blue)'):('color:'+(c||'var(--muted)'))}">${t}</th>`
-    const _head=_th('Producto')+_th('Total')+_th('Canc','var(--red)')+_th('%Canc')+_th('P.conf','var(--amber)')+_th('%P.conf')+_th('Pend','var(--amber)')+_th('%Pend',null,true)+_th('Desp')+_th('En cam','var(--blue)')+_th('%cam',null,true)+_th('Entr','var(--green)')+_th('%Ent')+_th('Dev','var(--red)')+_th('%Dev')+_th('Final',null,true)+_th('Flete env')+_th('Flete dev')+_th('Flete dev total')
-    return `<div style="margin-top:10px"><button onclick="window._dashToggleMat('${key}')" style="display:inline-flex;align-items:center;gap:6px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer" title="Embudo por producto · cuadra con las tarjetas de arriba">📊 Ver por producto <span id="matchev-${key}" style="font-size:10px">▾</span></button><div id="matbox-${key}" style="display:none;margin-top:10px;overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;min-width:1280px;width:100%"><thead><tr style="border-bottom:1px solid var(--border)">${_head}</tr></thead><tbody>${_body}</tbody><tfoot>${_foot}</tfoot></table></div></div>`
+    const _head=_th('Producto')+_th('Total')+_th('Canc','var(--red)')+_th('%Canc')+_th('P.conf','var(--amber)')+_th('%P.conf')+_th('Rech','var(--red)')+_th('%Rech')+_th('Pend','var(--amber)')+_th('%Pend',null,true)+_th('Desp')+_th('En cam','var(--blue)')+_th('%cam',null,true)+_th('Entr','var(--green)')+_th('%Ent')+_th('Dev','var(--red)')+_th('%Dev')+_th('Final',null,true)+_th('Flete env')+_th('Flete dev')+_th('Flete dev total')
+    // 🚨 BLINDAJE: alarma de estados desconocidos + chequeo de cuadre (nunca contar mal en silencio)
+    let _alertas=''
+    if(_desconocidos.size)_alertas+=`<div class="alert alert-red" style="margin-top:8px">🚨 <b>ESTADO(S) SIN CLASIFICAR:</b> ${[..._desconocidos].map(_e).join(', ')}. NEXO no conoce este estado de Dropi — se está contando como despachado pero puede ser incorrecto. Avisar al admin para clasificarlo.</div>`
+    if(_filasMal.length)_alertas+=`<div class="alert alert-red" style="margin-top:8px">🚨 <b>LAS CUENTAS NO CUADRAN</b> en: ${_filasMal.map(_e).join(', ')}. La suma de estados da más que el total de órdenes — revisar datos.</div>`
+    return `<div style="margin-top:10px"><button onclick="window._dashToggleMat('${key}')" style="display:inline-flex;align-items:center;gap:6px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer" title="Embudo por producto · cuadra con las tarjetas de arriba">📊 Ver por producto <span id="matchev-${key}" style="font-size:10px">▾</span></button>${_alertas}<div id="matbox-${key}" style="display:none;margin-top:10px;overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;min-width:1340px;width:100%"><thead><tr style="border-bottom:1px solid var(--border)">${_head}</tr></thead><tbody>${_body}</tbody><tfoot>${_foot}</tfoot></table></div></div>`
   }
 
   // RENDER: 3 bloques agrupados (Ventas/Órdenes, Gastos, Eficiencia)
@@ -7138,7 +7147,9 @@ async function pageAuxReservado(c){
     if(!m)return'desconocido'
     if(m.estado_final==='CANCELADO')return'cancelado'
     if(m.estado_final==='CONFIRMADO')return'confirmado'
-    if(m.estado_final==='PENDIENTE CONFIRMACION'||m.estado_final==='PENDIENTE'||!m.estado_final){
+    // PENDIENTE = el auxiliar YA lo confirmó (va a despacho) → confirmado, NO se le envía mensaje
+    if(m.estado_final==='PENDIENTE')return'confirmado'
+    if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final){
       if(m.estado_inicial==='PENDIENTE CONFIRMACION')return'pendiente'
       return'pendiente'
     }
@@ -8185,13 +8196,13 @@ async function cargarPendientesSinFecha(){
   if(!el)return
   if(!(window._psfCache&&window._psfCache.items&&window._psfCache.items.length))el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Cargando pendientes...</div>'
   try{
-    // 1) Traer mapeos con estado pendiente
-    // Cualquiera de: estado_final IN ('PENDIENTE','PENDIENTE CONFIRMACION') OR estado_inicial='PENDIENTE CONFIRMACION'
+    // 1) Traer mapeos con estado PENDIENTE CONFIRMACION (los únicos que necesitan mensaje de confirmación).
+    // OJO: 'PENDIENTE' NO va aquí — ese ya lo confirmó el auxiliar y va para despacho, no se le manda mensaje.
     // Limitamos a últimos 90 días para no traer historia infinita
     const hace90=_isoDate(new Date(Date.now()-90*24*60*60*1000))
     const{data:pendA,error:e1}=await sb.from('mapeos')
       .select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,fecha_dropi,estado_inicial,estado_final,created_at')
-      .in('estado_final',['PENDIENTE','PENDIENTE CONFIRMACION'])
+      .in('estado_final',['PENDIENTE CONFIRMACION'])
       .gte('fecha',hace90)
       .order('fecha',{ascending:false}).limit(1000)
     if(e1)throw e1
@@ -11720,13 +11731,14 @@ const DROPI_STATUS={
 window.DROPI_STATUS=DROPI_STATUS
 
 // ⭐ REGLA ÚNICA DE VENTA CONFIRMADA (validada con el owner · misma del Resumen por producto):
-// CANCELADO → cancelada · PENDIENTE CONFIRMACION o sin estado → pendiente · TODO lo demás → venta.
+// CANCELADO o RECHAZADO → no venta (nunca salieron de bodega) · PENDIENTE CONFIRMACION o sin
+// estado → pendiente · TODO lo demás → venta (incluye PENDIENTE: el auxiliar ya lo confirmó).
 // La usan las cards de campaña/adset/ad del portafolio para que su conteo de VENTAS coincida
 // EXACTO con el Resumen por producto y el cuadre "¿De dónde salen los pedidos?".
 // (Antes esas cards usaban DROPI_STATUS.cat y los estados CONFIRMADO/PENDIENTE caían a
 //  "pendientes", descontando ventas reales → CPA de campaña inflado. Bug sección 10 del doc.)
 window._nexoClasifVenta=function(estadoFinal){
-  if(estadoFinal==='CANCELADO')return 'canc'
+  if(estadoFinal==='CANCELADO'||estadoFinal==='RECHAZADO')return 'canc'
   if(estadoFinal==='PENDIENTE CONFIRMACION'||!estadoFinal)return 'pend'
   return 'venta'
 }
@@ -12579,7 +12591,7 @@ async function cargarRegistrosDia(){
   }
   const pend=data.filter(m=>m.estado_final==='PENDIENTE CONFIRMACION')
   const canc=data.filter(m=>m.estado_final==='CANCELADO')
-  const conf=data.filter(m=>m.estado_final!=='PENDIENTE CONFIRMACION'&&m.estado_final!=='CANCELADO')
+  const conf=data.filter(m=>m.estado_final!=='PENDIENTE CONFIRMACION'&&m.estado_final!=='CANCELADO'&&m.estado_final!=='RECHAZADO')
   const esHoy=fecha===today()&&tipo==='compra'
   // ── Copiados persistentes (telefono + fecha_dropi) desde Supabase ──
   let copiadosSet=new Set()
@@ -12974,16 +12986,19 @@ window.actualizarEstadosDropi=async()=>{
     // Convertir DD-MM-YYYY → YYYY-MM-DD para Supabase
     let fd=null
     if(r.fecha_dropi){const p=r.fecha_dropi.split('-');if(p.length===3)fd=`${p[2]}-${p[1]}-${p[0]}`}
-    // ── FIX: el cruce de Dropi NO puede regresar a "Pendiente" una orden ya decidida a mano ──
-    // Si en Nexo está CONFIRMADO/CANCELADO y Dropi manda un estado pendiente, se conserva la decisión manual.
-    // (Si Dropi manda algo más avanzado: despachada, entregada, etc., sí se respeta y actualiza normal.)
-    const _estNexo=(r.mapeo.estado_final||'').toUpperCase().trim()
-    const _estDropi=(r.estatus||'').toUpperCase().trim()
+    // ── REGLA DE ORO: el Excel de Dropi es la verdad y se escribe SIEMPRE, con UNA excepción ──
+    // Excepción legítima: si en Nexo hay decisión manual (CONFIRMADO/CANCELADO) y Dropi aún manda
+    // 'PENDIENTE CONFIRMACION' (Dropi todavía no se enteró de la decisión), se conserva la manual.
+    // OJO: 'PENDIENTE' (≠ P.CONF) SÍ se escribe siempre — significa que el auxiliar YA confirmó y
+    // esa confirmación quedó registrada en Dropi; no es una regresión. (Ley de estados del owner.)
+    // Normalizador de formato: tildes, espacios dobles, mayúsculas → estado limpio y canónico.
+    const _normEst=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/\s+/g,' ').trim()
+    const _estNexo=_normEst(r.mapeo.estado_final)
+    const _estDropi=_normEst(r.estatus)
     const _decisionManual=_estNexo==='CONFIRMADO'||_estNexo==='CANCELADO'
-    const _dropiPendiente=_estDropi==='PENDIENTE'||_estDropi==='PENDIENTE CONFIRMACION'
-    const _protegerEstado=_decisionManual&&_dropiPendiente
+    const _protegerEstado=_decisionManual&&_estDropi==='PENDIENTE CONFIRMACION'
     const updatePayload={
-      estado_final:r.estatus,
+      estado_final:_estDropi||null,
       fecha_dropi:fd,
       nombre_cliente:r.nombre||null,
       cantidad:r.cantidad||1,
@@ -13029,7 +13044,7 @@ window.actualizarEstadosDropi=async()=>{
       }catch(_e){}
       // ── Fase 3 paso 3: registrar evento en mapeo_eventos si cambió el estado ──
       const estadoAnterior=r.mapeo.estado_final||null
-      const estadoNuevo=r.estatus||null
+      const estadoNuevo=_estDropi||null
       // Si protegimos la decisión manual, no registrar una transición falsa a pendiente
       if(!_protegerEstado&&estadoNuevo&&estadoAnterior!==estadoNuevo){
         try{
@@ -13146,7 +13161,7 @@ async function loadPuntoEquilibrio(){
     const prodStatsConf={}
     let totalOrdsConf=0
     for(const m of (mapeos||[])){
-      if(m.estado_final==='CANCELADO')continue
+      if(m.estado_final==='CANCELADO'||m.estado_final==='RECHAZADO')continue
       if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)continue
       const q=m.cantidad||2
       const pn=resolveProdName(m.producto).nombre||'Sin producto'
@@ -15594,7 +15609,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
         })),
         conteo_por_producto:{...reportesByProd},
         mapeos_por_producto:Object.fromEntries(Object.entries(mapeosByProd).map(([k,v])=>[k,v.length])),
-        mapeos_confirmados_por_producto:Object.fromEntries(Object.entries(mapeosByProd).map(([k,v])=>[k,v.filter(m=>m.estado_final&&m.estado_final!=='CANCELADO'&&m.estado_final!=='PENDIENTE CONFIRMACION').length]))
+        mapeos_confirmados_por_producto:Object.fromEntries(Object.entries(mapeosByProd).map(([k,v])=>[k,v.filter(m=>m.estado_final&&m.estado_final!=='CANCELADO'&&m.estado_final!=='RECHAZADO'&&m.estado_final!=='PENDIENTE CONFIRMACION').length]))
       }
       window._nexoDiagAyer=_diag
       console.log('%c[DIAG AYER] reportes_diarios para '+desde,'background:#7c3aed;color:#fff;padding:2px 6px;border-radius:4px',_diag)
@@ -16341,7 +16356,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     return{total:_t,enCampanas:_enCamp,organicas:_org,sinSync:_sin,huerfanos:_huer,porCuenta:_pc,porCampana:_porCampana,huerfanosIds:_huerMap,sinSyncIds:_sinMap,gastoTotal:_gastoTotal,cpaTotal:(_enCamp>0&&_gastoTotal>0)?_gastoTotal/_enCamp:0,cuadra:(_enCamp+_org+_huer+_sin)===_t,gastoCampanas:_gc,sinVentaPorCamp:_sinVentaPorCamp,campInfo:_campInfoCuadre}
   }
   // Lista de ad_ids de los mapeos CONFIRMADOS de un día (lo que muestra el número grande).
-  const _confDeMps=(arr)=>(arr||[]).filter(m=>m.estado_final&&m.estado_final!=='CANCELADO'&&m.estado_final!=='PENDIENTE CONFIRMACION').map(m=>m.ad_id)
+  const _confDeMps=(arr)=>(arr||[]).filter(m=>m.estado_final&&m.estado_final!=='CANCELADO'&&m.estado_final!=='RECHAZADO'&&m.estado_final!=='PENDIENTE CONFIRMACION').map(m=>m.ad_id)
   // Lista de ad_ids de los mapeos ENTREGADOS (ya llegaron al cliente) — mismo criterio que los
   // reportes de la app: estado cat 'entregado' o 'novedad_ok'. Subconjunto de los confirmados.
   const _entDeMps=(arr)=>(arr||[]).filter(m=>{const _c=DROPI_STATUS[m.estado_final]?.cat;return _c==='entregado'||_c==='novedad_ok'}).map(m=>m.ad_id)
@@ -16355,7 +16370,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     let pConfP=0,o1P=0,o2P=0,o3P=0,o4P=0
     for(const m of mpsP){
       const q=m.cantidad||2
-      if(m.estado_final==='CANCELADO')continue
+      if(m.estado_final==='CANCELADO'||m.estado_final==='RECHAZADO')continue
       if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)continue
       pConfP++
       if(q===1)o1P++;else if(q===2)o2P++;else if(q===3)o3P++;else o4P++
@@ -16390,7 +16405,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
     let pCX=0,a1=0,a2=0,a3=0,a4=0
     for(const m of mpsX){
       const q=m.cantidad||2
-      if(m.estado_final==='CANCELADO')continue
+      if(m.estado_final==='CANCELADO'||m.estado_final==='RECHAZADO')continue
       if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)continue
       pCX++
       if(q===1)a1++;else if(q===2)a2++;else if(q===3)a3++;else a4++
@@ -18619,7 +18634,7 @@ window._rpFusionRango=async function(slug,cidF){
     if(eMp)throw eMp
     const _conf=[]
     for(const m of (mp||[])){
-      if(!m.estado_final||m.estado_final==='CANCELADO'||m.estado_final==='PENDIENTE CONFIRMACION')continue
+      if(!m.estado_final||m.estado_final==='CANCELADO'||m.estado_final==='RECHAZADO'||m.estado_final==='PENDIENTE CONFIRMACION')continue
       const pn=(window.resolveProdName?window.resolveProdName(m.producto).nombre:(m.producto||''))||(m.producto||'')
       if(pn!==ctx.nombre)continue
       _conf.push(m)

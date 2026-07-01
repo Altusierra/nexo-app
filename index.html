@@ -7298,7 +7298,7 @@ async function pageAuxReservado(c){
       // Catálogo de íconos y colores por evento/fuente
       const fuenteIcon={
         asignador:'📝',auxiliar_manual:'👤',dropi:'📦',dropi_seguimiento:'🚚',
-        novedades_upload:'⚠️',reclame:'📨',reclame_cola:'📨'
+        novedades_upload:'⚠️',reclame:'📨',reclame_cola:'📨',correccion_anuncio:'🎯',reservados:'🚫'
       }
       const eventoColor={
         creado:'var(--blue)',
@@ -7310,7 +7310,9 @@ async function pageAuxReservado(c){
         en_transito:'var(--blue)',en_proceso:'var(--blue)',en_bodega:'var(--amber)',
         novedad:'var(--amber)',novedad_detectada:'var(--amber)',
         reclame_enviado:'var(--blue)',reclame_resuelta:'var(--green)',
-        actualizado:'var(--muted)'
+        actualizado:'var(--muted)',
+        ad_corregido:'var(--purple)',marcado_organica:'var(--purple)',re_cancelado:'var(--red)',
+        reactivado_deshecho:'var(--red)',resolucion_deshecha:'var(--amber)',canc_mensaje_enviado:'var(--blue)'
       }
       const eventoLabel={
         creado:'Orden creada',
@@ -7322,7 +7324,10 @@ async function pageAuxReservado(c){
         novedad:'Novedad reportada',novedad_ok:'Novedad resuelta (entregada)',
         novedad_detectada:'Novedad detectada en reporte',
         reclame_enviado:'Mensaje de reclame enviado',reclame_resuelta:'Reclame marcado como resuelto',
-        cancelado_dropi:'Cancelada (por Dropi)',actualizado:'Estado actualizado'
+        cancelado_dropi:'Cancelada (por Dropi)',actualizado:'Estado actualizado',
+        ad_corregido:'ID de anuncio corregido',marcado_organica:'Marcada como orgánica (sin anuncio)',
+        re_cancelado:'Cliente dijo que NO (definitivo)',reactivado_deshecho:'Reactivación deshecha',
+        resolucion_deshecha:'Resolución deshecha',canc_mensaje_enviado:'Mensaje de recuperación enviado'
       }
 
       // Render del timeline
@@ -7337,6 +7342,7 @@ async function pageAuxReservado(c){
         const d=ev.detalle||{}
         const partes=[]
         if(d.estado_anterior&&d.estado_nuevo)partes.push(`<span style="color:var(--muted)">${d.estado_anterior||'—'}</span> → <strong>${d.estado_nuevo}</strong>`)
+        if(d.ad_anterior||d.ad_nuevo)partes.push(`🎯 <code style="font-size:10px">${d.ad_anterior||'—'}</code> → <code style="font-size:10px">${d.ad_nuevo||'orgánica'}</code>`)
         if(d.motivo)partes.push(`📝 <em>"${d.motivo}"</em>`)
         if(d.fecha_envio)partes.push(`📅 Envío: ${d.fecha_envio}`)
         if(d.fecha_anterior&&d.fecha_envio&&d.fecha_anterior!==d.fecha_envio)partes.push(`(antes: ${d.fecha_anterior})`)
@@ -7368,7 +7374,15 @@ async function pageAuxReservado(c){
         </div>`
       }).join('')
 
-      body.innerHTML=headerHtml+`<div style="position:relative">${eventosHtml}</div>
+      // 🛣️ CAMINO DE ESTADOS (ley del owner): en qué estado inició, qué recorrió y dónde está hoy.
+      const _cadena=[]
+      const _pushCad=v=>{const s=String(v||'').trim();if(s&&_cadena[_cadena.length-1]!==s)_cadena.push(s)}
+      _pushCad(m.estado_inicial)
+      for(const ev of eventos){const d=ev.detalle||{};if(d.estado_anterior)_pushCad(d.estado_anterior);if(d.estado_nuevo)_pushCad(d.estado_nuevo)}
+      _pushCad(m.estado_final)
+      const caminoHtml=_cadena.length>1?`<div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:12px;line-height:1.9"><span style="font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)">🛣️ Camino de estados</span><br>${_cadena.map((s,i)=>`<span style="font-weight:${i===_cadena.length-1?'800':'600'};color:${i===_cadena.length-1?'var(--green)':'var(--text)'}">${s}</span>`).join(' <span style="color:var(--muted)">→</span> ')}</div>`:''
+
+      body.innerHTML=headerHtml+caminoHtml+`<div style="position:relative">${eventosHtml}</div>
         <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border);font-size:11px;color:var(--muted);text-align:center">
           ${eventos.length} evento${eventos.length===1?'':'s'} registrado${eventos.length===1?'':'s'}
         </div>`
@@ -8233,7 +8247,25 @@ async function cargarPendientesSinFecha(){
       if(data)progs=progs.concat(data)
     }
     const conProg=new Set(progs.map(p=>p.mapeo_id))
-    const sinFecha=pend.filter(m=>!conProg.has(m.id))
+    // 2b) ESCUDO 2 (ley del owner): si le dieron "CANCELAR PEDIDO" a mano, NUNCA vuelve a esta
+    // lista — aunque el Excel regrese su estado a P.CONF. La decisión vive en mapeo_eventos y el
+    // Excel no la toca. Única excepción: si DESPUÉS lo REACTIVARON a mano, sí puede volver.
+    let evsDec=[]
+    for(let i=0;i<ids.length;i+=100){
+      const batch=ids.slice(i,i+100)
+      const{data:ev}=await sb.from('mapeo_eventos').select('mapeo_id,evento,fuente,created_at')
+        .in('mapeo_id',batch).in('evento',['cancelado','re_cancelado','reactivado']).limit(20000)
+      if(ev)evsDec=evsDec.concat(ev)
+    }
+    evsDec.sort((a,b)=>String(a.created_at||'').localeCompare(String(b.created_at||'')))
+    const _decision={}
+    for(const e of evsDec){
+      if(e.evento==='reactivado')_decision[e.mapeo_id]='ok'
+      else if(e.evento==='re_cancelado'||(e.evento==='cancelado'&&e.fuente==='auxiliar_manual'))_decision[e.mapeo_id]='canc'
+    }
+    const canceladoManual=new Set()
+    for(const[k,v]of Object.entries(_decision))if(v==='canc')canceladoManual.add(String(k))
+    const sinFecha=pend.filter(m=>!conProg.has(m.id)&&!canceladoManual.has(String(m.id)))
     // Orden: más recientes primero
     sinFecha.sort((a,b)=>{
       const fa=a.fecha||a.created_at||''
@@ -11714,6 +11746,8 @@ const DROPI_STATUS={
   'TELEMERCADEO':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'Telemercadeo'},
   'ADMITIDA':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'Admitida'},
   'PREPARADO PARA TRANSPORTADORA':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'Preparado p/ transp.'},
+  'ENTREGADO A TRANSPORTADORA':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'Entregado a transp.'},
+  'ENTREGADA A CONEXIONES':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'Entregada a conexiones'},
   'REENVÍO':{cat:'en_transito',emoji:'↩️',pill:'pill-blue',label:'Reenvío'},
   'REENVIO':{cat:'en_transito',emoji:'↩️',pill:'pill-blue',label:'Reenvío'},
   'EN PUNTO DROOP':{cat:'en_transito',emoji:'🚚',pill:'pill-blue',label:'En punto'},
@@ -11743,6 +11777,90 @@ window._nexoClasifVenta=function(estadoFinal){
   return 'venta'
 }
 
+// ⭐ NORMALIZADOR ÚNICO DE ESTADOS: tildes fuera, espacios dobles a uno, MAYÚSCULAS, sin bordes.
+// TODO estado que entre a la base (cualquier cruce) pasa por aquí. Un solo formato, cero variantes.
+window._nexoNormEstado=function(s){
+  return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/\s+/g,' ').trim()
+}
+
+// 📸 FOTOGRAFÍA DE CRUCE (ley del owner): cada corrida de cruce deja registrado, por producto y
+// fecha de la orden, cuántas quedaron en cada estado EN ESE MOMENTO. Con eso se contrasta después:
+// "ese día el cruce dejó X confirmadas → hoy van Y despachadas/entregadas". Append-only, nunca se
+// edita. Tolerante: si la tabla cruce_snapshots aún no existe en Supabase, avisa en consola y sigue.
+window._nexoSnapshotCruce=async function(rows,tipo){
+  try{
+    if(!rows||!rows.length)return
+    const agg={}
+    for(const it of rows){
+      const est=window._nexoNormEstado(it.est)
+      let prod=it.prod||'Sin producto'
+      try{if(typeof resolveProdName==='function')prod=resolveProdName(it.prod||'').nombre||prod}catch(_e){}
+      const f=it.fecha||null
+      const k=prod+'||'+(f||'')
+      if(!agg[k])agg[k]={producto:prod,fecha_orden:f,total:0,confirmadas:0,canceladas:0,pconf:0,pendientes:0,rechazadas:0,entregadas:0,devueltas:0}
+      const A=agg[k];A.total++
+      const cat=DROPI_STATUS[est]?.cat
+      if(est==='CANCELADO')A.canceladas++
+      else if(est==='RECHAZADO')A.rechazadas++
+      else if(est==='PENDIENTE CONFIRMACION'||!est)A.pconf++
+      else{A.confirmadas++;if(est==='PENDIENTE')A.pendientes++}
+      if(cat==='entregado'||cat==='novedad_ok')A.entregadas++
+      else if(cat==='devuelto')A.devueltas++
+    }
+    const lote=new Date().toISOString()
+    const regs=Object.values(agg).map(a=>({tipo,lote,usuario_id:(typeof me!=='undefined'&&me?me.id:null),...a}))
+    for(let i=0;i<regs.length;i+=100){
+      const{error}=await sb.from('cruce_snapshots').insert(regs.slice(i,i+100))
+      if(error){console.warn('[cruce_snapshots] insert falló (¿ya corriste el SQL de la tabla?):',error.message);break}
+    }
+  }catch(e){console.warn('[cruce_snapshots] excepción:',e.message)}
+}
+
+// 📸 PANEL DE CONTRASTE: muestra todas las fotografías guardadas para las órdenes de una fecha,
+// de la más vieja a la más nueva, por producto. La PRIMERA (📸) es "cómo quedó el día del cruce";
+// la ÚLTIMA (🟢) es "cómo va hoy". Igual o mejor es normal: se recuperan canceladas, se despachan, etc.
+window._nexoVerContraste=async function(){
+  const f=document.getElementById('contraste-fecha')?.value
+  const body=document.getElementById('contraste-body')
+  if(!body)return
+  if(!f){body.innerHTML='<div class="alert alert-amber">Elige una fecha</div>';return}
+  body.innerHTML='<div style="color:var(--muted);padding:8px">Cargando fotografías...</div>'
+  try{
+    const{data,error}=await sb.from('cruce_snapshots').select('*').eq('fecha_orden',f).order('lote',{ascending:true}).limit(2000)
+    if(error)throw error
+    if(!data||!data.length){body.innerHTML='<div class="alert alert-blue">No hay fotografías para las órdenes de esa fecha. Se crean solas cada vez que corres un cruce (Cruce Dropi o Seguimiento).</div>';return}
+    const porProd={}
+    for(const s of data){(porProd[s.producto]=porProd[s.producto]||[]).push(s)}
+    const _e=x=>String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    const _fmtLote=l=>{try{return new Date(l).toLocaleString('es-CO',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}catch(e){return String(l||'').slice(0,16)}}
+    const _thc=(t,c)=>`<th style="text-align:center;padding:6px;font-size:10px;text-transform:uppercase;color:${c||'var(--muted)'}">${t}</th>`
+    let html=''
+    for(const[prod,arr]of Object.entries(porProd)){
+      arr.sort((a,b)=>String(a.lote||a.created_at||'').localeCompare(String(b.lote||b.created_at||'')))
+      const first=arr[0],last=arr[arr.length-1]
+      const delta=(last.confirmadas||0)-(first.confirmadas||0)
+      html+=`<div style="margin-bottom:14px">
+        <div style="font-weight:800;font-size:13px;color:var(--text);margin-bottom:6px">${_e(prod)} <span style="font-weight:600;color:${delta>=0?'var(--green)':'var(--red)'}">· confirmadas: ${first.confirmadas||0} → ${last.confirmadas||0} (${delta>=0?'+':''}${delta})</span></div>
+        <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;min-width:660px;width:100%">
+        <thead><tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:6px 8px;font-size:10px;text-transform:uppercase;color:var(--muted)">Corrida</th>${_thc('Tipo')}${_thc('Total')}${_thc('Conf','var(--green)')}${_thc('Canc','var(--red)')}${_thc('P.conf','var(--amber)')}${_thc('Pend','var(--amber)')}${_thc('Rech','var(--red)')}${_thc('Entr','var(--green)')}${_thc('Dev','var(--red)')}</tr></thead><tbody>
+        ${arr.map((s,i)=>`<tr style="border-bottom:1px solid var(--border);${i===0?'background:rgba(56,139,222,.10);':''}${(i===arr.length-1&&arr.length>1)?'background:rgba(63,185,80,.10);':''}">
+          <td style="padding:6px 8px;white-space:nowrap;color:var(--text)">${i===0?'📸 ':''}${(i===arr.length-1&&arr.length>1)?'🟢 ':''}${_fmtLote(s.lote||s.created_at)}</td>
+          <td style="text-align:center;padding:6px;color:var(--muted)">${s.tipo==='cruce_dropi'?'Cruce Dropi':'Seguimiento'}</td>
+          <td style="text-align:center;padding:6px;color:var(--text)">${s.total||0}</td>
+          <td style="text-align:center;padding:6px;color:var(--green);font-weight:700">${s.confirmadas||0}</td>
+          <td style="text-align:center;padding:6px;color:var(--red)">${s.canceladas||0}</td>
+          <td style="text-align:center;padding:6px;color:var(--amber)">${s.pconf||0}</td>
+          <td style="text-align:center;padding:6px;color:var(--amber)">${s.pendientes||0}</td>
+          <td style="text-align:center;padding:6px;color:var(--red)">${s.rechazadas||0}</td>
+          <td style="text-align:center;padding:6px;color:var(--green)">${s.entregadas||0}</td>
+          <td style="text-align:center;padding:6px;color:var(--red)">${s.devueltas||0}</td>
+        </tr>`).join('')}
+        </tbody></table></div></div>`
+    }
+    body.innerHTML=html+'<div style="font-size:11.5px;color:var(--muted)">📸 = primera fotografía (el día del cruce) · 🟢 = la más reciente (cómo va hoy)</div>'
+  }catch(e){body.innerHTML=`<div class="alert alert-red">Error: ${e.message}. ¿Ya corriste el SQL de la tabla cruce_snapshots?</div>`}
+}
+
 // ════════ ETAPAS DEL SEMÁFORO DE ÓRDENES (capa de SOLO visualización · Cruce Dropi) ════════
 // Agrupa los estados crudos de Dropi en 9 etapas del viaje de una orden (nace → entrega/pierde).
 // NO modifica DROPI_STATUS ni la lógica de cat/costos existente. Cubre TODOS los estados vistos.
@@ -11756,11 +11874,11 @@ const DROPI_ETAPAS=[
    det:['PENDIENTE CONFIRMACION → orden entró pero aún no se confirma; mientras tanto no sale','CANCELADO → se canceló antes de enviar (nunca salió)','RECHAZADO → bodega lo rechazó (peso, dirección, cobertura). NO genera costo. Hay que volver a subirla.','GUIA_ANULADA → la guía se anuló antes de despachar'],
    tip:'Ninguno generó flete: o no se confirmó o nunca salió.'},
   {id:'salio',emoji:'🟡',nombre:'3. Ya salió el paquete',sem:'AMARILLO — flete ya está corriendo',nfoC:'a',color:'var(--amber)',
-   estados:['CONFIRMADO','EN PROCESAMIENTO','DESPACHADA','ADMITIDA','PREPARADO PARA TRANSPORTADORA'],
+   estados:['CONFIRMADO','EN PROCESAMIENTO','DESPACHADA','ADMITIDA','PREPARADO PARA TRANSPORTADORA','ENTREGADO A TRANSPORTADORA'],
    det:['CONFIRMADO → ya la validaron, lista para procesar','EN PROCESAMIENTO → proveedor alistando el paquete en bodega','DESPACHADA → salió de la bodega del proveedor','ADMITIDA → llegó a la bodega matriz de la transportadora','PREPARADO PARA TRANSPORTADORA → en bodega, alistado y listo para que lo recoja la transportadora'],
    tip:'Confirmada y en preparación o ya despachada: el flete está por comprometerse o ya corre.'},
   {id:'camino',emoji:'🟡',nombre:'4. De camino',sem:'AMARILLO — viajando entre ciudades',nfoC:'a',color:'var(--amber)',
-   estados:['EN BODEGA TRANSPORTADORA','EN ESPERA DE RUTA DOMESTICA','EN REEXPEDICION','EN TERMINAL DESTINO','EN TERMINAL ORIGEN','EN BODEGA DESTINO','EN TRANSPORTE','EN PUNTO DROOP','EN PUNTO DROPI'],
+   estados:['EN BODEGA TRANSPORTADORA','EN ESPERA DE RUTA DOMESTICA','EN REEXPEDICION','EN TERMINAL DESTINO','EN TERMINAL ORIGEN','EN BODEGA DESTINO','EN TRANSPORTE','EN PUNTO DROOP','EN PUNTO DROPI','ENTREGADA A CONEXIONES'],
    det:['EN BODEGA TRANSPORTADORA → hub intermedio','EN ESPERA DE RUTA DOMESTICA → esperando que armen la ruta','EN REEXPEDICION → cambio de ruta','EN TERMINAL DESTINO → llegó al terminal de la ciudad destino','EN BODEGA DESTINO → ya está en la bodega de la ciudad del cliente','EN PUNTO DROOP → en un punto de recogida Dropi'],
    tip:'Va viajando. Vigílalo para que no se devuelva.'},
   {id:'ultimo',emoji:'🟡',nombre:'5. Último kilómetro',sem:'AMARILLO INTENSO — cerca del cliente',nfoC:'a',color:'var(--amber)',
@@ -12986,17 +13104,13 @@ window.actualizarEstadosDropi=async()=>{
     // Convertir DD-MM-YYYY → YYYY-MM-DD para Supabase
     let fd=null
     if(r.fecha_dropi){const p=r.fecha_dropi.split('-');if(p.length===3)fd=`${p[2]}-${p[1]}-${p[0]}`}
-    // ── REGLA DE ORO: el Excel de Dropi es la verdad y se escribe SIEMPRE, con UNA excepción ──
-    // Excepción legítima: si en Nexo hay decisión manual (CONFIRMADO/CANCELADO) y Dropi aún manda
-    // 'PENDIENTE CONFIRMACION' (Dropi todavía no se enteró de la decisión), se conserva la manual.
-    // OJO: 'PENDIENTE' (≠ P.CONF) SÍ se escribe siempre — significa que el auxiliar YA confirmó y
-    // esa confirmación quedó registrada en Dropi; no es una regresión. (Ley de estados del owner.)
-    // Normalizador de formato: tildes, espacios dobles, mayúsculas → estado limpio y canónico.
-    const _normEst=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/\s+/g,' ').trim()
-    const _estNexo=_normEst(r.mapeo.estado_final)
-    const _estDropi=_normEst(r.estatus)
-    const _decisionManual=_estNexo==='CONFIRMADO'||_estNexo==='CANCELADO'
-    const _protegerEstado=_decisionManual&&_estDropi==='PENDIENTE CONFIRMACION'
+    // ── REGLA DE ORO (ley del owner): el XLSX de Dropi es LA ÚNICA FUENTE DE VERDAD de estados.
+    // Se escribe SIEMPRE, sin excepciones — incluso sobre CONFIRMADO/CANCELADO manual. Si Deysi dice
+    // que confirmó pero Dropi sigue en P.CONF, la orden DEBE regresar a P.CONF (la confirmación no fue
+    // real en Dropi y hay que insistir). Las decisiones de flujo (programación, "ya dijo que NO",
+    // cancelación manual) viven en programaciones_envio y mapeo_eventos — el Excel NUNCA las toca.
+    // Todo cambio queda registrado en mapeo_eventos, así que nada se pierde.
+    const _estDropi=window._nexoNormEstado(r.estatus)
     const updatePayload={
       estado_final:_estDropi||null,
       fecha_dropi:fd,
@@ -13006,8 +13120,6 @@ window.actualizarEstadosDropi=async()=>{
       transportadora:r.transportadora||null,
       precio_dropi:r.total||null
     }
-    // Conservar la decisión manual: no dejar que Dropi la regrese a pendiente
-    if(_protegerEstado)delete updatePayload.estado_final
     // Snapshot del flete real desde Dropi (sobreescribe estimación del asignador)
     if(r.flete>0)updatePayload.flete_snapshot=r.flete
     // flete de devolución: COSTO DEV FLETE real (ida+vuelta); si Dropi no lo liquidó, usa el PRECIO FLETE de ida.
@@ -13046,7 +13158,7 @@ window.actualizarEstadosDropi=async()=>{
       const estadoAnterior=r.mapeo.estado_final||null
       const estadoNuevo=_estDropi||null
       // Si protegimos la decisión manual, no registrar una transición falsa a pendiente
-      if(!_protegerEstado&&estadoNuevo&&estadoAnterior!==estadoNuevo){
+      if(estadoNuevo&&estadoAnterior!==estadoNuevo){
         try{
           const{error:evErr}=await sb.from('mapeo_eventos').insert({
             mapeo_id:r.mapeo.id,
@@ -13070,6 +13182,8 @@ window.actualizarEstadosDropi=async()=>{
     }
   }
   msgEl.innerHTML=`<span style="color:var(--green)">✅ ${ok} actualizadas${fail?` · ${fail} errores`:''}</span>`
+  // 📸 Fotografía del cruce (por producto + fecha de orden) — alimenta el panel de contraste
+  window._nexoSnapshotCruce(cruzados.map(r=>({prod:r.mapeo?.producto||r.producto||null,est:r.estatus,fecha:r.mapeo?.fecha||null})),'cruce_dropi').catch(()=>{})
   logAction('dropi_estados_actualizados',{actualizadas:ok,errores:fail}).catch(()=>{})
   // ── ENTREGA 3B: disparar histórico de semáforos (async, no bloquea) ──
   try{
@@ -13676,6 +13790,15 @@ async function pageAuxSeguimiento(c){
     </div>
     <div id="seg-pegados" style="margin-top:18px"></div>
     <div id="seg-resultado" style="margin-top:18px"></div>
+    <div style="margin-top:18px;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:14px 16px">
+      <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px">📸 Contraste de cruces</div>
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:10px">Cada cruce deja una fotografía. Aquí comparas: "ese día quedaron X confirmadas → hoy van Y". Elige la fecha de las órdenes (día de la venta).</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="date" id="contraste-fecha" value="${today()}" style="font-size:13px;padding:8px 10px;background:var(--card2);border:1px solid var(--border);border-radius:8px;color:var(--text)">
+        <button onclick="window._nexoVerContraste()" style="padding:8px 16px;font-size:13px;background:var(--blue);color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:700">Ver contraste</button>
+      </div>
+      <div id="contraste-body" style="margin-top:12px"></div>
+    </div>
     <div class="divider"></div>
     <div class="page-title" style="font-size:16px">📦 Historial de lotes</div>
     <div class="fld" style="max-width:250px;margin-bottom:14px">
@@ -13966,6 +14089,16 @@ async function _aplicarCorreccionAnuncio(data,nuevoAd){
   if(!esOrg){try{const _m=await buildAdProductMap([_nuevo]);if(_m[_nuevo]&&_m[_nuevo].producto_nombre)prodDespues=_m[_nuevo].producto_nombre}catch(_){}}
   // recalcular semáforos del anuncio viejo + el nuevo → CPA correcto en Meta Ads al instante
   try{await _calcularYGuardarSemaforos([data.ad_antes,_nuevo].filter(Boolean),'correccion_anuncio')}catch(_){}
+  // Timeline de la orden (ley del owner): dejar huella imborrable del cambio de anuncio
+  try{
+    await sb.from('mapeo_eventos').insert({
+      mapeo_id:data.mapeo_id,
+      evento:esOrg?'marcado_organica':'ad_corregido',
+      fuente:'correccion_anuncio',
+      usuario_id:(typeof me!=='undefined'&&me?me.id:null),
+      detalle:{ad_anterior:data.ad_antes||null,ad_nuevo:_nuevo,producto_anterior:data.prod_antes||null,producto_nuevo:prodDespues,telefono:data.telefono||null,guia:data.guia||null}
+    })
+  }catch(_e){}
   // registrar en historial
   await _registrarNovedadId({mapeo_id:data.mapeo_id,telefono:data.telefono,numero_guia:data.guia,producto_real:data.prod_real,id_dropi:data.id_dropi,ad_antes:data.ad_antes,prod_antes:data.prod_antes,ad_despues:_nuevo,prod_despues:prodDespues,tipo:esOrg?'organica':'anuncio',fuente:data.fuente||'—'})
   return{ok:true,prodDespues,esOrg}
@@ -14340,7 +14473,8 @@ window.procesarSeguimiento=async()=>{
       if(r.mapeo){
         let fd=null
         if(r.fecha_dropi){const p=r.fecha_dropi.split('-');if(p.length===3)fd=`${p[2]}-${p[1]}-${p[0]}`}
-        const segPayload={estado_final:r.estatus,fecha_dropi:fd||r.mapeo.fecha_dropi,nombre_cliente:r.nombre||r.mapeo.nombre_cliente,novedad_texto:r.novedad||r.mapeo.novedad_texto||null,transportadora:r.transportadora||r.mapeo.transportadora||null}
+        const _estSegNorm=window._nexoNormEstado(r.estatus)
+        const segPayload={estado_final:_estSegNorm||null,fecha_dropi:fd||r.mapeo.fecha_dropi,nombre_cliente:r.nombre||r.mapeo.nombre_cliente,novedad_texto:r.novedad||r.mapeo.novedad_texto||null,transportadora:r.transportadora||r.mapeo.transportadora||null}
         // Capturar TODOS los datos de Dropi (igual que el Cruce Dropi). Solo se sobreescribe si viene >0, para no pisar un dato real con un vacío.
         if(r.cantidad>0)segPayload.cantidad=r.cantidad
         if(r.total>0)segPayload.precio_dropi=r.total
@@ -14376,7 +14510,7 @@ window.procesarSeguimiento=async()=>{
           }catch(_e){}
           // ── Fase 3 paso 3: registrar evento en mapeo_eventos si cambió el estado ──
           const estadoAnterior=r.mapeo.estado_final||null
-          const estadoNuevo=r.estatus||null
+          const estadoNuevo=_estSegNorm||null
           if(estadoNuevo&&estadoAnterior!==estadoNuevo){
             try{
               const{error:evErr}=await sb.from('mapeo_eventos').insert({
@@ -14403,6 +14537,8 @@ window.procesarSeguimiento=async()=>{
       }
     }
     msg.innerHTML+=`<div class="alert alert-blue" style="margin-top:8px">💾 ${updated} estados actualizados automáticamente</div>`
+    // 📸 Fotografía del cruce (por producto + fecha de orden) — alimenta el panel de contraste
+    window._nexoSnapshotCruce(resultados.filter(r=>r.mapeo).map(r=>({prod:r.mapeo?.producto||r.producto||null,est:r.estatus,fecha:r.mapeo?.fecha||null})),'seguimiento').catch(()=>{})
 
     // Rolling 90 días: auto-actualizar dev_pct si es admin y hay 50+ órdenes
     if(esAdmin){

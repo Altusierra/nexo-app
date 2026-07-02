@@ -1583,11 +1583,19 @@ window._gsaToggle=async()=>{
 //    BE = precio2u·(1−dev) − costo2u − fleteEnv − fleteDev·dev − costoConv·convPorVenta
 //  • Semáforo con los cortes oficiales 45% / 70% / 100% del BE.
 //  • Comparador AHORA vs SIMULADO con deltas + chips de escenario rápido.
+//  • (2jul26) Fechas PROPIAS del simulador: Desde/Hasta + Día único — ya NO depende
+//    del rango del Dashboard. Día único manda: llena desde=hasta con ese día.
+//  • (2jul26) CPA BE REAL (mix confirmadas): BE ponderado orden por orden con las
+//    confirmadas REALES del rango usando la plata de Dropi (precio_dropi = TOTAL DE
+//    LA ORDEN, costo_proveedor_dropi, flete_snapshot, flete_dev_snapshot). Fallback:
+//    config del producto según oferta (1u/2u/3u/4u). Convive con el BE teórico 2u.
 // Todos los IDs van con prefijo sim2- para NO chocar con el simulador viejo (sim-*).
 function _sim2Fila(id,label,val,step,sub){
   return `<div class="fld"><label>${label}</label><input type="number" step="${step||1}" id="${id}" value="${val}" oninput="_sim2Recalc()">${sub?`<div style="font-size:10px;color:var(--muted);margin-top:2px" id="${id}-sub">${sub}</div>`:''}</div>`
 }
 async function _sim2Render(body){
+  const _d0=document.getElementById('dash-desde')?.value||_daysAgo(7)
+  const _h0=document.getElementById('dash-hasta')?.value||today()
   body.innerHTML=`
     <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px">
       <div class="fld" style="margin:0;min-width:220px"><label>Producto</label>
@@ -1595,7 +1603,10 @@ async function _sim2Render(body){
           ${productos.map(p=>`<option value="${p.id}">${p.nombre}</option>`).join('')}
           <option value="_nuevo">➕ Producto nuevo (tantear un lanzamiento)</option>
         </select></div>
-      <div style="font-size:11px;color:var(--muted);padding-bottom:8px">Sembrado con el rango del Dashboard · todo es editable</div>
+      <div class="fld" style="margin:0"><label style="font-size:10px">📅 Desde</label><input type="date" id="sim2-desde" value="${_d0}" style="font-size:12px;padding:6px 8px" onchange="_sim2Fechas('desde')"></div>
+      <div class="fld" style="margin:0"><label style="font-size:10px">📅 Hasta</label><input type="date" id="sim2-hasta" value="${_h0}" style="font-size:12px;padding:6px 8px" onchange="_sim2Fechas('hasta')"></div>
+      <div class="fld" style="margin:0"><label style="font-size:10px">📆 Día único</label><input type="date" id="sim2-dia" style="font-size:12px;padding:6px 8px" onchange="_sim2Fechas('dia')" title="Si eliges un día aquí, manda: desde=hasta=ese día"></div>
+      <div style="font-size:11px;color:var(--muted);padding-bottom:8px">Fechas propias del simulador · todo es editable</div>
     </div>
     <div id="sim2-reales" style="margin-bottom:10px"></div>
     <div class="form-grid g4">
@@ -1619,13 +1630,26 @@ async function _sim2Render(body){
     <div id="sim2-compare"></div>`
   await _sim2Seed()
 }
-// Trae (con caché por rango) mapeos + gasto por campaña del rango del Dashboard
+// (2jul26) Fechas propias del simulador: 'dia' (Día único) manda y llena desde=hasta;
+// tocar Desde/Hasta limpia el Día único; si el rango queda al revés se auto-corrige.
+window._sim2Fechas=(cual)=>{
+  const d=document.getElementById('sim2-desde'),h=document.getElementById('sim2-hasta'),u=document.getElementById('sim2-dia')
+  if(cual==='dia'){
+    if(u&&u.value){if(d)d.value=u.value;if(h)h.value=u.value}
+  }else{
+    if(u)u.value=''
+    if(d&&h&&d.value&&h.value&&d.value>h.value){if(cual==='desde')h.value=d.value;else d.value=h.value}
+  }
+  window._sim2Seed()
+}
+// Trae (con caché por rango) mapeos + gasto por campaña — fechas PROPIAS del simulador
+// (sim2-desde/hasta; fallback al rango del Dashboard si los inputs aún no existen)
 async function _sim2Datos(){
-  const desde=document.getElementById('dash-desde')?.value||_daysAgo(7)
-  const hasta=document.getElementById('dash-hasta')?.value||today()
+  const desde=document.getElementById('sim2-desde')?.value||document.getElementById('dash-desde')?.value||_daysAgo(7)
+  const hasta=document.getElementById('sim2-hasta')?.value||document.getElementById('dash-hasta')?.value||today()
   const key=desde+'|'+hasta
   if(window._sim2Cache&&window._sim2Cache.key===key)return window._sim2Cache
-  const{data:mps}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('fecha,producto,cantidad,estado_final').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+  const{data:mps}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('fecha,producto,cantidad,estado_final,precio_dropi,costo_proveedor_dropi,flete_snapshot,flete_dev_snapshot').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
   const{data:ins}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('spend,meta_id').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
   const gastoByCamp={}
   for(const i of (ins||[])){if(i.meta_id)gastoByCamp[i.meta_id]=(gastoByCamp[i.meta_id]||0)+(i.spend||0)}
@@ -1647,6 +1671,7 @@ window._sim2Seed=async()=>{
     _sub('sim2-cpa','vacío = uso el 70% del BE como objetivo')
     if(reales)reales.innerHTML=`<div class="alert alert-blue" style="font-size:12px">🧪 Producto nuevo: digita precio y costo del proveedor → te digo qué CPA necesitas para que sea negocio ANTES de lanzar.</div>`
     window._sim2ProdSel=null
+    window._sim2ConfReal=null
     _sim2Snapshot();window._sim2Recalc()
     return
   }
@@ -1658,16 +1683,30 @@ window._sim2Seed=async()=>{
     const D=await _sim2Datos()
     let tot=0,conf=0,canc=0,ent=0,dev=0
     const qs={1:0,2:0,3:0,4:0}
+    // (2jul26) Acumulador del BE REAL: por cada confirmada suma la plata REAL de Dropi
+    // (precio_dropi = TOTAL DE LA ORDEN; costo/fletes = snapshots del XLSX). Si Dropi aún
+    // no trae el dato, cae a la config del producto según la oferta (1u/2u/3u/4u).
+    // ⚠️ REGLA DURA: flete_dev_snapshot YA incluye ida+vuelta — jamás sumarle PRECIO FLETE.
+    const cr={n:0,sp:0,sc:0,sf:0,sfd:0,q:{1:0,2:0,3:0,4:0}}
     for(const m of D.mps){
       if((resolveProdName(m.producto).nombre||'')!==prod.nombre)continue
       tot++
       const q=m.cantidad||2;qs[q>=4?4:q]++
       const cl=window._nexoClasifVenta(m.estado_final)
-      if(cl==='venta')conf++;else if(cl==='canc')canc++
+      if(cl==='venta'){
+        conf++
+        const _q=q>=4?4:q
+        cr.n++;cr.q[_q]++
+        cr.sp+=(m.precio_dropi>0?m.precio_dropi:(prod['precio_'+_q+'u']||0))
+        cr.sc+=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:(prod['costo_'+_q+'u']||0))
+        cr.sf+=(m.flete_snapshot>0?m.flete_snapshot:(prod.flete_outbound||21000))
+        cr.sfd+=(m.flete_dev_snapshot>0?m.flete_dev_snapshot:(prod.flete_devolucion||18000))
+      }else if(cl==='canc')canc++
       const cat=DROPI_STATUS[m.estado_final]?.cat
       if(cat==='entregado'||cat==='novedad_ok')ent++
       else if(cat==='devuelto')dev++
     }
+    window._sim2ConfReal=cr.n>0?cr:null
     let gastoProd=0
     for(const cid of (prod.campaign_ids||[]))gastoProd+=D.gastoByCamp[cid]||0
     const devReal=(ent+dev)>0?(dev/(ent+dev)*100):null
@@ -1697,6 +1736,7 @@ window._sim2Seed=async()=>{
       <span class="pill">💸 Gasto: $${fmt(gastoProd)}</span>
       <span class="pill">🎯 CPA real: ${cpaRealTxt}</span>
       <span class="pill">📦 Oferta top: ${ofTop[0]}u</span>
+      ${cr.n>0?`<span class="pill" title="Con ESTE mix de confirmadas se calcula el CPA BE REAL de abajo">🧬 Mix conf: ${[1,2,3,4].filter(k=>cr.q[k]>0).map(k=>cr.q[k]+'×'+k+'u').join(' · ')}</span>`:''}
     </div>`
   }catch(e){
     if(reales)reales.innerHTML='<div class="alert alert-blue" style="font-size:12px">No pude leer los reales ('+(e.message||e)+') — sembré solo la config del producto.</div>'
@@ -1705,6 +1745,7 @@ window._sim2Seed=async()=>{
     _set('sim2-dev',((prod.dev_pct||0.19)*100).toFixed(1))
     _set('sim2-conv',prod.conversaciones_por_venta!=null?prod.conversaciones_por_venta:25)
     _set('sim2-cconv',prod.costo_conversacion||100);_set('sim2-cpa',0);_set('sim2-gasto',500000)
+    window._sim2ConfReal=null
   }
   _sim2Snapshot()
   window._sim2Recalc()
@@ -1729,7 +1770,17 @@ function _sim2Leer(){
   }
   const ordDia=cpaObj>0?gasto/cpaObj:0
   const ganDia=ordDia*gan
-  return{precio,costo,fout,fdev,devp,conv,cconv,gasto,be,cpa:cpaObj,esObjetivo,gan,colch,semE,semT,semC,ordDia,ganDia,ganMes:ganDia*30}
+  // (2jul26) CPA BE REAL con el MIX de confirmadas del rango (sumas acumuladas en _sim2Seed).
+  // Reacciona a las perillas %dev / conv / costo-conv como buen simulador:
+  //   BE real = (Σprecio·(1−dev) − Σcosto − Σflete − Σfdev·dev) / n − (cconv·conv)
+  const R=window._sim2ConfReal
+  let beReal=null,ganReal=null,colchReal=null
+  if(R&&R.n>0){
+    beReal=(R.sp*(1-devp)-R.sc-R.sf-(R.sfd*devp))/R.n-(cconv*conv)
+    ganReal=beReal-cpaObj
+    colchReal=beReal>0?(ganReal/beReal*100):0
+  }
+  return{precio,costo,fout,fdev,devp,conv,cconv,gasto,be,cpa:cpaObj,esObjetivo,gan,colch,semE,semT,semC,ordDia,ganDia,ganMes:ganDia*30,beReal,ganReal,colchReal}
 }
 function _sim2Snapshot(){window._sim2Base=_sim2Leer()}
 window._sim2Recalc=()=>{
@@ -1744,7 +1795,8 @@ window._sim2Recalc=()=>{
   const esNuevo=!window._sim2ProdSel
   ver.innerHTML=`<div class="card" style="border-left:4px solid var(${v.semC})">
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;font-size:12px">
-      <div><div style="color:var(--muted);font-size:10px">🎯 CPA BREAK-EVEN</div><div style="font-size:17px;font-weight:800;font-variant-numeric:tabular-nums">$${fmt(v.be)}</div></div>
+      <div><div style="color:var(--muted);font-size:10px">🎯 CPA BREAK-EVEN <span title="Teórico: calculado siempre con la oferta 2u de la config" style="cursor:help">ℹ️</span></div><div style="font-size:17px;font-weight:800;font-variant-numeric:tabular-nums">$${fmt(v.be)}</div></div>
+      ${v.beReal!=null?`<div><div style="color:var(--muted);font-size:10px">🧬 CPA BE REAL (mix conf.) <span title="Calculado orden por orden con las confirmadas REALES del rango y la plata de Dropi (TOTAL DE LA ORDEN, costo proveedor y fletes reales; si falta el dato usa la config por oferta). Más 1u en el mix = BE baja · más 3u/4u = BE sube." style="cursor:help">ℹ️</span></div><div style="font-size:17px;font-weight:800;font-variant-numeric:tabular-nums;color:var(${v.beReal>=v.be?'--green':'--amber'})">$${fmt(v.beReal)}</div></div><div><div style="color:var(--muted);font-size:10px">🛡️ MARGEN REAL = BE REAL − CPA</div><div style="font-size:17px;font-weight:800;color:var(${v.ganReal>=0?'--green':'--red'})">$${fmt(v.ganReal)} <span style="font-size:11px">(${(v.colchReal||0).toFixed(0)}%)</span></div></div>`:''}
       <div><div style="color:var(--muted);font-size:10px">📡 CPA ${v.esObjetivo?'OBJETIVO (70% BE)':'USADO'}</div><div style="font-size:17px;font-weight:800;font-variant-numeric:tabular-nums">$${fmt(v.cpa)}</div></div>
       <div><div style="color:var(--muted);font-size:10px">SEMÁFORO</div><div style="font-size:15px;font-weight:800;color:var(${v.semC})">${v.semE} ${v.semT}</div></div>
       <div><div style="color:var(--muted);font-size:10px">🛡️ COLCHÓN = GANANCIA/ORDEN</div><div style="font-size:17px;font-weight:800;color:var(${v.gan>=0?'--green':'--red'})">$${fmt(v.gan)} <span style="font-size:11px">(${v.colch.toFixed(0)}%)</span></div></div>
@@ -1770,6 +1822,7 @@ window._sim2Recalc=()=>{
     <div style="font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--muted);margin-bottom:6px">AHORA (sembrado) → SIMULADO</div>
     <table style="width:100%;border-collapse:collapse">
       ${fila('🎯 CPA Break-even',b.be,v.be,$f,true)}
+      ${(v.beReal!=null&&b.beReal!=null)?fila('🧬 BE REAL (mix conf.)',b.beReal,v.beReal,$f,true):''}
       ${fila('🛡️ Colchón',b.colch,v.colch,$p,true)}
       ${fila('💵 Ganancia/orden',b.gan,v.gan,$f,true)}
       ${fila('📆 Ganancia/mes',b.ganMes,v.ganMes,$f,true)}

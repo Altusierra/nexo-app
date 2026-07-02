@@ -1682,6 +1682,7 @@ window._sim2Seed=async()=>{
   try{
     const D=await _sim2Datos()
     let tot=0,conf=0,canc=0,ent=0,dev=0
+    let rech=0,pend=0 // NUEVO (2jul26): rechazadas y pendientes por separado (antes canc mezclaba CANCELADO+RECHAZADO)
     const qs={1:0,2:0,3:0,4:0}
     // (2jul26) Acumulador del BE REAL: por cada confirmada suma la plata REAL de Dropi
     // (precio_dropi = TOTAL DE LA ORDEN; costo/fletes = snapshots del XLSX). Si Dropi aún
@@ -1701,7 +1702,9 @@ window._sim2Seed=async()=>{
         cr.sc+=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:(prod['costo_'+_q+'u']||0))
         cr.sf+=(m.flete_snapshot>0?m.flete_snapshot:(prod.flete_outbound||21000))
         cr.sfd+=(m.flete_dev_snapshot>0?m.flete_dev_snapshot:(prod.flete_devolucion||18000))
-      }else if(cl==='canc')canc++
+      }else if(m.estado_final==='RECHAZADO')rech++ // NUEVO (2jul26): separado de canceladas
+      else if(cl==='canc')canc++
+      else if(cl==='pend')pend++ // NUEVO (2jul26): contar pendientes de confirmación
       const cat=DROPI_STATUS[m.estado_final]?.cat
       if(cat==='entregado'||cat==='novedad_ok')ent++
       else if(cat==='devuelto')dev++
@@ -1711,6 +1714,9 @@ window._sim2Seed=async()=>{
     for(const cid of (prod.campaign_ids||[]))gastoProd+=D.gastoByCamp[cid]||0
     const devReal=(ent+dev)>0?(dev/(ent+dev)*100):null
     const cancPct=tot>0?(canc/tot*100):0
+    const rechPct=tot>0?(rech/tot*100):0 // NUEVO (2jul26)
+    const pendPct=tot>0?(pend/tot*100):0 // NUEVO (2jul26)
+    const udsConf=1*cr.q[1]+2*cr.q[2]+3*cr.q[3]+4*cr.q[4] // NUEVO (2jul26): unidades vendidas = total del Mix conf
     const cpaReal=conf>0?(gastoProd/conf):0
     const gastoDia=gastoProd>0?Math.round(gastoProd/D.dias):500000
     const ofTop=Object.entries(qs).sort((a,b)=>b[1]-a[1])[0]
@@ -1731,12 +1737,15 @@ window._sim2Seed=async()=>{
       <span class="pill">📡 TUS NÚMEROS REALES (${D.desde} → ${D.hasta})</span>
       <span class="pill">🛒 ${tot} órdenes</span>
       <span class="pill">✅ ${conf} confirmadas</span>
-      <span class="pill">❌ ${cancPct.toFixed(0)}% canceladas</span>
+      <span class="pill" title="Órdenes que aún no dicen sí ni no. No cuentan como venta.">⏳ ${pendPct.toFixed(0)}% pend. conf. (${pend})</span>
+      <span class="pill" title="Solo estado CANCELADO (el cliente se cayó).">❌ ${cancPct.toFixed(0)}% canceladas (${canc})</span>
+      <span class="pill" title="Solo estado RECHAZADO. Separado de canceladas para ver de dónde viene el hueco.">🚫 ${rechPct.toFixed(0)}% rechazadas (${rech})</span>
       <span class="pill">↩️ Dev real: ${devRealTxt}</span>
       <span class="pill">💸 Gasto: $${fmt(gastoProd)}</span>
       <span class="pill">🎯 CPA real: ${cpaRealTxt}</span>
       <span class="pill">📦 Oferta top: ${ofTop[0]}u</span>
       ${cr.n>0?`<span class="pill" title="Con ESTE mix de confirmadas se calcula el CPA BE REAL de abajo">🧬 Mix conf: ${[1,2,3,4].filter(k=>cr.q[k]>0).map(k=>cr.q[k]+'×'+k+'u').join(' · ')}</span>`:''}
+      ${udsConf>0?`<span class="pill" title="Total de UNIDADES en las órdenes confirmadas = la suma del Mix conf (ej: 10×1u + 48×2u + 38×3u = 220).">📦 ${udsConf} productos vendidos</span>`:''}
     </div>`
   }catch(e){
     if(reales)reales.innerHTML='<div class="alert alert-blue" style="font-size:12px">No pude leer los reales ('+(e.message||e)+') — sembré solo la config del producto.</div>'
@@ -3266,8 +3275,9 @@ async function pageAdminReportes(c){
     const el=document.getElementById('rep-list')
     el.innerHTML='<div class="loading">Cargando...</div>'
 
-    // Mapeos por fecha
-    const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('fecha,cantidad,producto,estado_final,ad_id').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+    // Mapeos por fecha — NUEVO (2jul26): + plata REAL de Dropi por orden (precio_dropi = total orden,
+    // costo_proveedor_dropi, flete_snapshot, flete_dev_snapshot) para Venta/ROAS/BE reales
+    const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('fecha,cantidad,producto,estado_final,ad_id,precio_dropi,costo_proveedor_dropi,flete_snapshot,flete_dev_snapshot').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
     // Gasto Meta por fecha (con meta_id para atribuir por producto)
     const{data:insData}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('fecha,spend,meta_id').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
     // Conversaciones desde reportes (con producto_id para desglose por producto)
@@ -3276,15 +3286,18 @@ async function pageAdminReportes(c){
     const byFecha={}
     for(const m of (mapeos||[])){
       const f=m.fecha||'sin-fecha'
-      if(!byFecha[f])byFecha[f]={o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,conv:0,gasto:0,conAd:0}
+      if(!byFecha[f])byFecha[f]={o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,conv:0,gasto:0,conAd:0,rech:0}
       const q=m.cantidad||2
       if(q===1)byFecha[f].o1++;else if(q===2)byFecha[f].o2++;else if(q===3)byFecha[f].o3++;else byFecha[f].o4++
+      // NUEVO (2jul26) · CORRECCIÓN CANON: antes RECHAZADO caía en "conf" (inflaba confirmadas
+      // y abarataba el CPA del día). Ahora: CANCELADO→canc, RECHAZADO→rech, resto según canon.
       if(m.estado_final==='CANCELADO')byFecha[f].canc++
+      else if(m.estado_final==='RECHAZADO')byFecha[f].rech++
       else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)byFecha[f].pend++
       else byFecha[f].conf++
       if(m.ad_id)byFecha[f].conAd++
     }
-    for(const i of (insData||[])){if(!byFecha[i.fecha])byFecha[i.fecha]={o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,conv:0,gasto:0,conAd:0};byFecha[i.fecha].gasto+=(i.spend||0)}
+    for(const i of (insData||[])){if(!byFecha[i.fecha])byFecha[i.fecha]={o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,conv:0,gasto:0,conAd:0,rech:0};byFecha[i.fecha].gasto+=(i.spend||0)}
     for(const r of (reps||[])){if(byFecha[r.fecha])byFecha[r.fecha].conv+=(r.conversaciones||0)}
 
     const fechas=Object.keys(byFecha).sort().reverse()
@@ -3307,15 +3320,32 @@ async function pageAdminReportes(c){
     }
     // Órdenes por fecha+producto
     const byFechaProd={}
-    const _ensureFP=(f,pid)=>{if(!byFechaProd[f])byFechaProd[f]={};if(!byFechaProd[f][pid])byFechaProd[f][pid]={o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,gasto:0,conv:0};return byFechaProd[f][pid]}
+    const _ensureFP=(f,pid)=>{if(!byFechaProd[f])byFechaProd[f]={};if(!byFechaProd[f][pid])byFechaProd[f][pid]={o1:0,o2:0,o3:0,o4:0,conf:0,canc:0,pend:0,gasto:0,conv:0,rech:0,vr:0,nR:0,nT:0,cN:0,cvr:0,cco:0,cfl:0,cfd:0};return byFechaProd[f][pid]}
     for(const m of (mapeos||[])){
       const f=m.fecha||'sin-fecha'
       const pid=prodByNorm[_normProd(m.producto||'')]||'_sin'
       const r=_ensureFP(f,pid),q=m.cantidad||2
       if(q===1)r.o1++;else if(q===2)r.o2++;else if(q===3)r.o3++;else r.o4++
+      // NUEVO (2jul26) · PLATA REAL DE DROPI por orden (fallback a config del producto por oferta):
+      const _qk=q>=4?4:q
+      const _prodC=prodById[pid]||{}
+      const _pr=m.precio_dropi>0?m.precio_dropi:(_prodC['precio_'+_qk+'u']||0)
+      r.nT++;if(m.precio_dropi>0)r.nR++
+      r.vr+=_pr
+      // NUEVO (2jul26) · CORRECCIÓN CANON: RECHAZADO ya no cuenta como confirmada
       if(m.estado_final==='CANCELADO')r.canc++
+      else if(m.estado_final==='RECHAZADO')r.rech++
       else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)r.pend++
-      else r.conf++
+      else{
+        r.conf++
+        // Sumas REALES solo de confirmadas → de aquí sale el Break-even real del día.
+        // ⚠️ flete_dev_snapshot YA incluye ida+vuelta (regla dura del sistema).
+        r.cN++
+        r.cvr+=_pr
+        r.cco+=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:(_prodC['costo_'+_qk+'u']||_prodC.costo_2u||0))
+        r.cfl+=(m.flete_snapshot>0?m.flete_snapshot:(_prodC.flete_outbound||21000))
+        r.cfd+=(m.flete_dev_snapshot>0?m.flete_dev_snapshot:(_prodC.flete_devolucion||18000))
+      }
     }
     // Gasto por fecha+producto (campañas no atribuidas → '_sin')
     for(const i of (insData||[])){
@@ -3359,12 +3389,36 @@ async function pageAdminReportes(c){
         const venta=esSin?0:((r.o1*(prod.precio_1u||0))+(r.o2*(prod.precio_2u||0))+(r.o3*(prod.precio_3u||0))+(r.o4*(prod.precio_4u||0)))
         const roasP=r.gasto>0?venta/r.gasto:0
         const roasThr=(!esSin&&be>0&&prod.precio_2u)?(prod.precio_2u/be):0
-        const sem=_semDia(cpaP,be)
+        // NUEVO (2jul26) · BE REAL del día: ticket/costo/fletes promedio REALES de las confirmadas
+        // de ESTE producto ESTE día. La ÚNICA suposición es el % de devolución (dev_pct del producto),
+        // porque las devoluciones tardan semanas en cerrarse. Si no hay confirmadas, cae al BE config.
+        let beU=be,beEsReal=false
+        if(!esSin&&r.cN>0){
+          const _dp=prod.dev_pct||0.19
+          const _cvv=prod.conversaciones_por_venta!=null?prod.conversaciones_por_venta:25
+          const _tick=r.cvr/r.cN,_co=r.cco/r.cN,_fl=r.cfl/r.cN,_fd=r.cfd/r.cN
+          const _beR=_tick*(1-_dp)-_co-_fl-(_fd*_dp)-((prod.costo_conversacion||100)*_cvv)
+          if(_beR>0){beU=_beR;beEsReal=true}
+        }
+        // NUEVO (2jul26) · Venta y ROAS con la plata REAL de Dropi (precio_dropi por orden)
+        const ventaR=r.vr||0
+        const roasR=r.gasto>0&&ventaR>0?ventaR/r.gasto:0
+        const tickC=r.cN>0?r.cvr/r.cN:0
+        const thrR=(beU>0&&tickC>0)?(tickC/beU):roasThr
+        const covP=r.nT>0?Math.round(r.nR/r.nT*100):0
+        // NUEVO (2jul26) · %s sobre el total de órdenes de la fila (estilo imagen Ventas)
+        const pConf=totP>0?(r.conf/totP*100):0
+        const pCanc=totP>0?(r.canc/totP*100):0
+        const pRech=totP>0?((r.rech||0)/totP*100):0
+        const pPend=totP>0?(r.pend/totP*100):0
+        const sem=_semDia(cpaP,beU)
         const nombre=esSin?'⚠️ Sin asignar a producto':(prod?prod.nombre:'?')
-        return{nombre,o1:r.o1,o2:r.o2,o3:r.o3,o4:r.o4,totP,conf:r.conf,canc:r.canc,pend:r.pend,conv:r.conv,gasto:r.gasto,cpaP,roasP,roasThr,be,sem,esSin}
+        return{nombre,o1:r.o1,o2:r.o2,o3:r.o3,o4:r.o4,totP,conf:r.conf,canc:r.canc,pend:r.pend,conv:r.conv,gasto:r.gasto,cpaP,roasP,roasThr,be,sem,esSin,rech:r.rech||0,ventaR,roasR,thrR,beU,beEsReal,covP,pConf,pCanc,pRech,pPend,vr:r.vr||0,nR:r.nR||0,nT:r.nT||0}
       }).sort((a,b)=>_pesoSem(a.sem.c)-_pesoSem(b.sem.c)||b.gasto-a.gasto)
       let nBueno=0,nReg=0,nMalo=0,nSin=0
+      let _vrF=0,_nRF=0,_nTF=0 // NUEVO (2jul26): venta real y cobertura de la fecha = suma de sus productos
       for(const x of filas){
+        _vrF+=x.vr;_nRF+=x.nR;_nTF+=x.nT
         if(x.sem.c==='brutal'||x.sem.c==='bueno')nBueno++
         else if(x.sem.c==='regular')nReg++
         else if(x.sem.c==='malo')nMalo++
@@ -3375,11 +3429,11 @@ async function pageAdminReportes(c){
       if(nReg)partes.push(`<span style="color:var(--amber)">🟡 ${nReg}</span>`)
       if(nMalo)partes.push(`<span style="color:var(--red)">🔴 ${nMalo}</span>`)
       if(!partes.length&&nSin)partes.push(`<span style="opacity:0.6">⚪ ${nSin}</span>`)
-      detalleByFecha[f]={filas,conteoHtml:partes.length?partes.join(' · '):'—'}
+      detalleByFecha[f]={filas,conteoHtml:partes.length?partes.join(' · '):'—',vr:_vrF,nR:_nRF,nT:_nTF}
     }
 
     el.innerHTML=`<div class="table-wrap"><table>
-      <tr><th>Fecha <span title="El día de la venta. Las órdenes se cuentan por el día que el cliente compró." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>1u <span title="Órdenes donde el cliente pidió 1 unidad del producto." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>2u <span title="Órdenes donde el cliente pidió 2 unidades." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>3u <span title="Órdenes donde el cliente pidió 3 unidades." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>4u <span title="Órdenes donde el cliente pidió 4 o más unidades." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Total <span title="Todas las órdenes del día sumadas (1u + 2u + 3u + 4u)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Conf. <span title="Confirmadas: las ventas que SÍ se concretaron. El cliente dijo que sí quiere el pedido." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Canc. <span title="Canceladas: las que se cayeron. El cliente dijo que no, o no se pudo completar." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Pend. <span title="Pendientes: todavía no se sabe si se confirman o se caen. Están en espera." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Conv. <span title="Conversaciones: cuántos chats hubo ese día (de lo que reportó el auxiliar)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Gasto <span title="Lo que se gastó en publicidad (Meta / Facebook) ese día." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>CPA Real <span title="Cuánto te costó conseguir cada venta confirmada. Se saca: gasto ÷ órdenes confirmadas.&#10;&#10;VERDE = barato (bien). ROJO = caro (mal)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>ROAS <span title="Cuántas veces recuperas lo que invertiste en ads.&#10;&#10;Ejemplo: 7x = por cada $1 en publicidad, vendiste $7.&#10;Más alto = mejor." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>¿Cómo fue? <span title="Resumen del día en un color, para no leer números:&#10;&#10;🟣 BRUTAL = ganaste muchísimo&#10;🟢 BUENO = ganaste bien&#10;🟡 REGULAR = ganaste poquito (cuidado)&#10;🔴 MALO = perdiste plata&#10;⚪ = sin datos (sin gasto o sin órdenes ese día)&#10;&#10;Se calcula comparando el CPA Real contra tu punto de equilibrio, igual que el semáforo de Meta Ads." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th></tr>
+      <tr><th>Fecha <span title="El día de la venta. Las órdenes se cuentan por el día que el cliente compró." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>1u <span title="Órdenes donde el cliente pidió 1 unidad del producto." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>2u <span title="Órdenes donde el cliente pidió 2 unidades." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>3u <span title="Órdenes donde el cliente pidió 3 unidades." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>4u <span title="Órdenes donde el cliente pidió 4 o más unidades." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Total <span title="Todas las órdenes del día sumadas (1u + 2u + 3u + 4u)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Conf. <span title="Confirmadas: las ventas que SÍ se concretaron. El cliente dijo que sí quiere el pedido.&#10;&#10;OJO: desde jul/2026 los RECHAZADOS ya NO se cuentan aquí (antes inflaban este número)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>%Conf <span title="De todas las órdenes del día, qué porcentaje se confirmó. Más alto = mejor cierre." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Canc. <span title="Canceladas: solo estado CANCELADO. El cliente dijo que no, o no se pudo completar." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>%Canc <span title="De todas las órdenes del día, qué porcentaje se canceló." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Rech. <span title="Rechazadas: solo estado RECHAZADO (lo rechazó el cliente al confirmar o el sistema). Separado de canceladas para ver de dónde viene el hueco." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>%Rech <span title="De todas las órdenes del día, qué porcentaje fue rechazado." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Pend. <span title="Pendientes: todavía no se sabe si se confirman o se caen. Están en espera." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>%Pend <span title="De todas las órdenes del día, qué porcentaje sigue pendiente por confirmar." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Conv. <span title="Conversaciones: cuántos chats hubo ese día (de lo que reportó el auxiliar)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Gasto <span title="Lo que se gastó en publicidad (Meta / Facebook) ese día." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>CPA Real <span title="Cuánto te costó conseguir cada venta confirmada. Se saca: gasto ÷ órdenes confirmadas.&#10;&#10;VERDE = barato (bien). ROJO = caro (mal)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>ROAS <span title="Cuántas veces recuperas lo que invertiste en ads.&#10;&#10;NUEVO: se calcula con la VENTA REAL de Dropi (el total de cada orden), no con precios estimados.&#10;&#10;Ejemplo: 7x = por cada $1 en publicidad, vendiste $7.&#10;Más alto = mejor." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>¿Cómo fue? <span title="Resumen del día en un color, para no leer números:&#10;&#10;🟣 BRUTAL = ganaste muchísimo&#10;🟢 BUENO = ganaste bien&#10;🟡 REGULAR = ganaste poquito (cuidado)&#10;🔴 MALO = perdiste plata&#10;⚪ = sin datos (sin gasto o sin órdenes ese día)&#10;&#10;Se calcula comparando el CPA Real contra tu punto de equilibrio, igual que el semáforo de Meta Ads." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th></tr>
       ${fechas.map(f=>{
         const d=byFecha[f],tot=d.o1+d.o2+d.o3+d.o4
         const venta=(d.o1*(prod0.precio_1u||0))+(d.o2*(prod0.precio_2u||0))+(d.o3*(prod0.precio_3u||0))+(d.o4*(prod0.precio_4u||0))
@@ -3387,44 +3441,60 @@ async function pageAdminReportes(c){
         const roas=d.gasto>0?venta/d.gasto:0
         const tieneOferta=venta>0
         const cpaCls=cpa>0&&cpa<=margenBE?'color:var(--green)':cpa>0?'color:var(--red)':''
-        const det=detalleByFecha[f]||{filas:[],conteoHtml:'—'}
+        const det=detalleByFecha[f]||{filas:[],conteoHtml:'—',vr:0,nR:0,nT:0}
+        // NUEVO (2jul26): venta REAL del día (suma precio_dropi de sus productos) + cobertura de datos
+        const ventaR=det.vr||0
+        const roasR=d.gasto>0&&ventaR>0?ventaR/d.gasto:0
+        const covF=det.nT>0?Math.round(det.nR/det.nT*100):0
+        const totBase=tot>0?tot:0
+        const pcF=totBase?(d.conf/totBase*100):0,pcaF=totBase?(d.canc/totBase*100):0,prF=totBase?((d.rech||0)/totBase*100):0,ppF=totBase?(d.pend/totBase*100):0
         const detalleHtml=det.filas.map(x=>{
-          const cpaColP=x.cpaP>0&&x.be>0?(x.cpaP<=x.be?'color:var(--green)':'color:var(--red)'):''
-          const roasColP=x.roasP>0&&x.roasThr>0?(x.roasP>=x.roasThr?'color:var(--green)':'color:var(--red)'):''
-          const tip=x.esSin?'Gasto de campanas sin asignar a un producto, o ventas sin producto reconocido. Asigna las campanas en Productos para que cuente aqui.':(x.be<=0?'Este producto no tiene precio configurado, no se puede calcular el break-even.':(x.cpaP<=0?(x.gasto>0?'Hubo gasto en ads ($'+fmt(x.gasto)+') pero todavia 0 ordenes confirmadas, por eso no se puede calcular el costo por venta aun.':'Este producto no tuvo gasto en ads asignado este dia (revisa que tenga sus campanas asignadas).'):'Cada venta confirmada costo $'+fmt(x.cpaP)+' y tu limite para ganar (break-even) es $'+fmt(x.be)+'. Si el costo es menor al limite, ganas.'))
+          const cpaColP=x.cpaP>0&&x.beU>0?(x.cpaP<=x.beU?'color:var(--green)':'color:var(--red)'):''
+          const roasColP=x.roasR>0&&x.thrR>0?(x.roasR>=x.thrR?'color:var(--green)':'color:var(--red)'):''
+          const tip=x.esSin?'Gasto de campanas sin asignar a un producto, o ventas sin producto reconocido. Asigna las campanas en Productos para que cuente aqui.':(x.beU<=0?'Este producto no tiene precio configurado, no se puede calcular el break-even.':(x.cpaP<=0?(x.gasto>0?'Hubo gasto en ads ($'+fmt(x.gasto)+') pero todavia 0 ordenes confirmadas, por eso no se puede calcular el costo por venta aun.':'Este producto no tuvo gasto en ads asignado este dia (revisa que tenga sus campanas asignadas).'):'Cada venta confirmada costo $'+fmt(x.cpaP)+' y tu limite para ganar (break-even '+(x.beEsReal?'REAL de ese dia':'config')+') es $'+fmt(x.beU)+'. Si el costo es menor al limite, ganas.'))
           return '<tr>'
-            +'<td data-label="Producto" style="font-weight:500">'+x.nombre+'</td>'
+            +'<td data-label="Producto" style="font-weight:500">'+x.nombre+((x.nT>0&&x.covP<100)?'<div style="font-size:9px;color:var(--muted)" title="Porcentaje de las ordenes de esta fila que ya traen el precio REAL de Dropi. El resto usa el precio configurado como respaldo.">'+x.covP+'% datos reales</div>':'')+'</td>'
             +'<td data-label="1u">'+x.o1+'</td><td data-label="2u">'+x.o2+'</td><td data-label="3u">'+x.o3+'</td><td data-label="4u">'+x.o4+'</td>'
             +'<td data-label="Total"><strong>'+x.totP+'</strong></td>'
             +'<td data-label="Conf." style="color:var(--green)">'+x.conf+'</td>'
+            +'<td data-label="%Conf" style="color:var(--green);font-size:11px">'+(x.totP>0?x.pConf.toFixed(0)+'%':'—')+'</td>'
             +'<td data-label="Canc."'+(x.canc?' style="color:var(--red)"':'')+'>'+x.canc+'</td>'
+            +'<td data-label="%Canc" style="color:var(--red);font-size:11px;opacity:'+(x.canc?1:.45)+'">'+(x.totP>0?x.pCanc.toFixed(0)+'%':'—')+'</td>'
+            +'<td data-label="Rech."'+(x.rech?' style="color:var(--red)"':'')+'>'+x.rech+'</td>'
+            +'<td data-label="%Rech" style="color:var(--red);font-size:11px;opacity:'+(x.rech?1:.45)+'">'+(x.totP>0?x.pRech.toFixed(0)+'%':'—')+'</td>'
             +'<td data-label="Pend."'+(x.pend?' style="color:var(--amber)"':'')+'>'+x.pend+'</td>'
+            +'<td data-label="%Pend" style="color:var(--amber);font-size:11px;opacity:'+(x.pend?1:.45)+'">'+(x.totP>0?x.pPend.toFixed(0)+'%':'—')+'</td>'
             +'<td data-label="Conv.">'+(x.conv||'—')+'</td>'
             +'<td data-label="Gasto">'+(x.gasto?'$'+fmt(x.gasto):'—')+'</td>'
             +'<td data-label="CPA Real" style="'+cpaColP+'">'+(x.cpaP>0?'$'+fmt(x.cpaP):'—')+'</td>'
-            +'<td data-label="ROAS" style="'+roasColP+'">'+(x.roasP>0?x.roasP.toFixed(2)+'x':'—')+'</td>'
-            +'<td data-label="Break-even">'+(x.be>0?'$'+fmt(x.be):'—')+'</td>'
+            +'<td data-label="ROAS" style="'+roasColP+'" title="Venta real Dropi: $'+fmt(x.ventaR)+'">'+(x.roasR>0?x.roasR.toFixed(2)+'x':'—')+'</td>'
+            +'<td data-label="Break-even" title="'+(x.beEsReal?'REAL: ticket, costo y fletes promedio de las confirmadas de ESTE dia (Dropi). Unica suposicion: % devolucion del producto.':'Config: sin confirmadas ese dia, se usa el break-even configurado del producto.')+'">'+(x.beU>0?'$'+fmt(x.beU)+'<span style="font-size:9px;color:var(--muted)"> '+(x.beEsReal?'REAL':'cfg')+'</span>':'—')+'</td>'
             +'<td data-label="Como fue" title="'+tip+'" style="cursor:help;white-space:nowrap"><span style="font-size:15px">'+x.sem.e+'</span> <span style="font-size:11px;opacity:0.85">'+x.sem.w+'</span></td>'
             +'</tr>'
         }).join('')
-        const detalleFinal=detalleHtml||'<tr><td colspan="15" style="color:var(--muted);text-align:center">Sin productos ese día</td></tr>'
+        const detalleFinal=detalleHtml||'<tr><td colspan="20" style="color:var(--muted);text-align:center">Sin productos ese día</td></tr>'
         return`<tr style="cursor:pointer" onclick="toggleReporteDia('${f}')">
           <td data-label="Fecha" style="font-family:monospace;font-size:12px"><span id="reparrow-${f}" style="display:inline-block;width:14px;color:var(--muted)">▶</span>${f}</td>
           <td data-label="1u">${d.o1}</td><td data-label="2u">${d.o2}</td><td data-label="3u">${d.o3}</td><td data-label="4u">${d.o4}</td>
           <td data-label="Total"><strong>${tot}</strong></td>
           <td data-label="Conf." style="color:var(--green)">${d.conf}</td>
+          <td data-label="%Conf" style="color:var(--green);font-size:11px">${totBase?pcF.toFixed(0)+'%':'—'}</td>
           <td data-label="Canc."${d.canc?` style="color:var(--red)"`:``}>${d.canc}</td>
+          <td data-label="%Canc" style="color:var(--red);font-size:11px;opacity:${d.canc?1:.45}">${totBase?pcaF.toFixed(0)+'%':'—'}</td>
+          <td data-label="Rech."${(d.rech||0)?` style="color:var(--red)"`:``}>${d.rech||0}</td>
+          <td data-label="%Rech" style="color:var(--red);font-size:11px;opacity:${(d.rech||0)?1:.45}">${totBase?prF.toFixed(0)+'%':'—'}</td>
           <td data-label="Pend."${d.pend?` style="color:var(--amber)"`:``}>${d.pend}</td>
+          <td data-label="%Pend" style="color:var(--amber);font-size:11px;opacity:${d.pend?1:.45}">${totBase?ppF.toFixed(0)+'%':'—'}</td>
           <td data-label="Conv.">${d.conv||'—'}</td>
           <td data-label="Gasto">${d.gasto?'$'+fmt(d.gasto):'—'}</td>
           <td data-label="CPA Real" style="${cpaCls}">${cpa>0?'$'+fmt(cpa):'—'}</td>
-          <td data-label="ROAS" style="${tieneOferta&&roas>0?(roas>=(prod0.precio_2u||129900)/margenBE?'color:var(--green)':'color:var(--red)'):''}">${tieneOferta&&roas>0?roas.toFixed(2)+'x':'—'}</td>
+          <td data-label="ROAS" title="Venta real Dropi del día: $${fmt(ventaR)}" style="${ventaR>0&&roasR>0?(roasR>=(prod0.precio_2u||129900)/margenBE?'color:var(--green)':'color:var(--red)'):''}">${ventaR>0&&roasR>0?roasR.toFixed(2)+'x':'—'}${(ventaR>0&&covF<100)?`<div style="font-size:9px;color:var(--muted)">${covF}% real</div>`:''}</td>
           <td data-label="¿Cómo fue?" title="Cuantos productos ganaron o perdieron ese dia. Click en la fila para ver el detalle por producto.&#10;&#10;🟢 = ganaron · 🟡 = justos · 🔴 = perdieron" style="cursor:help;white-space:nowrap;font-size:13px">${det.conteoHtml}</td>
         </tr>
-        <tr id="repdet-${f}" style="display:none"><td colspan="14" style="background:var(--card2);padding:10px 14px">
+        <tr id="repdet-${f}" style="display:none"><td colspan="19" style="background:var(--card2);padding:10px 14px">
           <div style="font-size:12px;color:var(--muted);margin-bottom:8px">📦 Detalle por producto del ${f}:</div>
           <div class="table-wrap"><table style="font-size:12px">
-            <tr><th>Producto <span title="El producto que se vendió ese día." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>1u <span title="Órdenes de 1 unidad de este producto (oferta de 1)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>2u <span title="Órdenes de 2 unidades de este producto (oferta de 2)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>3u <span title="Órdenes de 3 unidades de este producto (oferta de 3)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>4u <span title="Órdenes de 4 o más unidades de este producto (oferta de 4)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Total <span title="Todas las órdenes de este producto ese día (1u + 2u + 3u + 4u)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Conf. <span title="De esas órdenes, cuántas se confirmaron (el cliente dijo que sí)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Canc. <span title="Cuántas órdenes de este producto se cancelaron ese día." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Pend. <span title="Cuántas órdenes de este producto quedaron pendientes (sin saber si se confirman o caen)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Conv. <span title="Conversaciones (chats) de este producto ese día, según lo que reportó el auxiliar." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Gasto <span title="Cuánto se gastó en publicidad para este producto ese día, según las campañas que tiene asignadas." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>CPA Real <span title="Cuánto costó cada venta confirmada de ESTE producto. Se saca: gasto del producto ÷ sus órdenes confirmadas.&#10;&#10;VERDE = barato (bien). ROJO = caro (mal)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>ROAS <span title="Cuántas veces recuperas lo invertido en ads de ESTE producto.&#10;&#10;Ejemplo: 7x = por cada $1 en publicidad, vendiste $7.&#10;Más alto = mejor." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Break-even <span title="El máximo que puedes pagar por venta de ESTE producto y todavía ganar.&#10;&#10;Cada producto tiene el suyo (depende de su precio, costo, envío y devoluciones).&#10;&#10;Si el CPA Real es menor que esto, ganas. Si es mayor, pierdes." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>¿Cómo fue? <span title="El semáforo de ESTE producto: su CPA contra su propio break-even.&#10;&#10;🟣 BRUTAL = ganaste muchísimo&#10;🟢 BUENO = ganaste bien&#10;🟡 REGULAR = ganaste poquito (cuidado)&#10;🔴 MALO = perdiste plata&#10;⚪ = sin datos" style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th></tr>
+            <tr><th>Producto <span title="El producto que se vendió ese día." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>1u <span title="Órdenes de 1 unidad de este producto (oferta de 1)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>2u <span title="Órdenes de 2 unidades de este producto (oferta de 2)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>3u <span title="Órdenes de 3 unidades de este producto (oferta de 3)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>4u <span title="Órdenes de 4 o más unidades de este producto (oferta de 4)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Total <span title="Todas las órdenes de este producto ese día (1u + 2u + 3u + 4u)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Conf. <span title="De esas órdenes, cuántas se confirmaron (el cliente dijo que sí). Los RECHAZADOS ya NO cuentan aquí." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>%Conf <span title="Qué porcentaje del total de este producto se confirmó ese día." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Canc. <span title="Cuántas órdenes de este producto se cancelaron ese día (solo CANCELADO)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>%Canc <span title="Qué porcentaje del total de este producto se canceló." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Rech. <span title="Cuántas fueron RECHAZADAS (separado de canceladas para ver de dónde viene el hueco)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>%Rech <span title="Qué porcentaje del total de este producto fue rechazado." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Pend. <span title="Cuántas órdenes de este producto quedaron pendientes (sin saber si se confirman o caen)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>%Pend <span title="Qué porcentaje del total de este producto sigue pendiente por confirmar." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Conv. <span title="Conversaciones (chats) de este producto ese día, según lo que reportó el auxiliar." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Gasto <span title="Cuánto se gastó en publicidad para este producto ese día, según las campañas que tiene asignadas." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>CPA Real <span title="Cuánto costó cada venta confirmada de ESTE producto. Se saca: gasto del producto ÷ sus órdenes confirmadas.&#10;&#10;VERDE = barato (bien). ROJO = caro (mal)." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>ROAS <span title="Cuántas veces recuperas lo invertido en ads de ESTE producto.&#10;&#10;NUEVO: usa la VENTA REAL de Dropi (total de cada orden).&#10;&#10;Ejemplo: 7x = por cada $1 en publicidad, vendiste $7.&#10;Más alto = mejor." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>Break-even <span title="El máximo que puedes pagar por venta de ESTE producto y todavía ganar.&#10;&#10;NUEVO: se calcula con el ticket, costo de proveedor y fletes REALES de las confirmadas de ese día (datos Dropi). La ÚNICA suposición es el % de devolución del producto.&#10;&#10;Si el CPA Real es menor que esto, ganas. Si es mayor, pierdes." style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th><th>¿Cómo fue? <span title="El semáforo de ESTE producto: su CPA contra su propio break-even.&#10;&#10;🟣 BRUTAL = ganaste muchísimo&#10;🟢 BUENO = ganaste bien&#10;🟡 REGULAR = ganaste poquito (cuidado)&#10;🔴 MALO = perdiste plata&#10;⚪ = sin datos" style="cursor:help;font-weight:400;opacity:0.6">ℹ️</span></th></tr>
             ${detalleFinal}
           </table></div>
         </td></tr>`

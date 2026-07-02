@@ -1474,7 +1474,11 @@ function _dashCajonesHTML(){
   return `<style>#dash-cajones .page-title,#dash-cajones .page-sub{display:none}</style>
   <div id="dash-cajones" style="margin-top:18px">
     <div class="section-title" style="margin-bottom:2px">📂 SECCIONES DEL NEGOCIO</div>
-    ${_dashCajonHTML1('trk','💰','Tracker','¿Cómo va la plata día por día?')}
+    ${_dashCajonHTML1('sim','🧪','¿Qué pasa si...?','Simula precios, devoluciones y CPA — por producto o producto nuevo')}
+    <!-- NUEVO (2jul26): cajón Tracker retirado — su tabla duplicaba el desglose por producto del Dashboard.
+         Sus 2 piezas útiles ya viven aquí: alerta "Gasto sin atribuir" (bajo los 4 números) y el Simulador
+         nuevo (cajón 🧪). pageAdminGasto/loadTracker quedan INTACTOS. Revertir = descomentar la línea:
+    \${_dashCajonHTML1('trk','💰','Tracker','¿Cómo va la plata día por día?')} -->
     ${_dashCajonHTML1('res','📈','Resumen Semanal','¿Cómo va semana por semana?')}
     ${_dashCajonHTML1('rep','📋','Reportes','El detalle fino por fecha')}
   </div>`
@@ -1491,7 +1495,8 @@ window._dashCajonToggle=async(k)=>{
     body.dataset.loaded='1'
     body.innerHTML='<div class="loading">Cargando...</div>'
     try{
-      if(k==='trk')await pageAdminGasto(body)
+      if(k==='sim')await _sim2Render(body) // NUEVO (2jul26): simulador ¿Qué pasa si...?
+      else if(k==='trk')await pageAdminGasto(body)
       else if(k==='res')await pageAdminResumen(body)
       else if(k==='rep')await pageAdminReportes(body)
     }catch(e){
@@ -1507,9 +1512,10 @@ async function _dashCajonesMini(){
   try{
     const hoy=today(),d7=_daysAgo(6)
     const _set=(id,txt)=>{const e=document.getElementById(id);if(e)e.textContent=txt}
-    // 💰 Tracker: gasto 7d (nivel campaign, mismo criterio del dashboard) + confirmadas 7d
-    const{data:ins}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('spend').eq('nivel','campaign').gte('fecha',d7).lte('fecha',hoy).order('id',{ascending:true}).range(_f,_t))
-    let g=0;for(const i of(ins||[]))g+=(i.spend||0)
+    // NUEVO (2jul26): mini del Tracker retirado junto con su cajón — se ahorra la query de gasto 7d.
+    // Revertir = descomentar estas 3 líneas junto con el cajón trk:
+    // const{data:ins}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('spend').eq('nivel','campaign').gte('fecha',d7).lte('fecha',hoy).order('id',{ascending:true}).range(_f,_t))
+    // let g=0;for(const i of(ins||[]))g+=(i.spend||0)
     const{data:mps}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('fecha,estado_final').gte('fecha',d7).lte('fecha',hoy).order('id',{ascending:true}).range(_f,_t))
     const _mon=_getMonday(new Date(hoy+'T12:00:00'))
     const monIso=`${_mon.getFullYear()}-${String(_mon.getMonth()+1).padStart(2,'0')}-${String(_mon.getDate()).padStart(2,'0')}`
@@ -1518,7 +1524,8 @@ async function _dashCajonesMini(){
       if(window._nexoClasifVenta(m.estado_final)==='venta')conf++
       if((m.fecha||'')>=monIso)ordSem++
     }
-    _set('dcaj-mini-trk',`7d: Gasto $${fmt(g)} · ${conf} confirmadas`)
+    // _set('dcaj-mini-trk',`7d: Gasto $${fmt(g)} · ${conf} confirmadas`) // retirado con el cajón trk
+    _set('dcaj-mini-sim',`7d: ${conf} confirmadas pa' jugar`)
     // 📈 Resumen Semanal: órdenes de la semana actual (Lun-Dom)
     _set('dcaj-mini-res',`Semana actual: ${ordSem} órdenes`)
     // 📋 Reportes: reportes de hoy (count liviano, sin traer filas)
@@ -1527,6 +1534,265 @@ async function _dashCajonesMini(){
   }catch(_){/* decorativo: nunca rompe el dashboard */}
 }
 // ══ FIN CAJONES DEL DASHBOARD ═══════════════════════════════════════════════
+
+// ══ NUEVO (2jul26) · ALERTA SIN ATRIBUIR: expandible con nombres lazy ════════
+// Los nombres de las campañas huérfanas SOLO se consultan la 1ª vez que se abre
+// la alerta (chunks de 80 a meta_campanas). El total ya viene calculado en loadDash.
+window._gsaToggle=async()=>{
+  const body=document.getElementById('gsa-body')
+  const arr=document.getElementById('gsa-arrow')
+  if(!body)return
+  const abrir=body.style.display==='none'
+  body.style.display=abrir?'block':'none'
+  if(arr)arr.textContent=abrir?'▼':'▶'
+  const D=window._gsaData||{by:{},nombres:{},loaded:false}
+  if(!abrir)return
+  if(!D.loaded){
+    body.innerHTML='<div class="loading">Cargando nombres de campañas...</div>'
+    try{
+      const ids=Object.keys(D.by)
+      for(let i=0;i<ids.length;i+=80){
+        const chunk=ids.slice(i,i+80)
+        const{data:cs}=await sb.from('meta_campanas').select('meta_id,nombre,account_id,estado').in('meta_id',chunk).eq('nivel','campaign')
+        for(const c of (cs||[]))D.nombres[c.meta_id]={n:c.nombre,a:c.account_id,e:c.estado}
+      }
+      D.loaded=true
+    }catch(e){body.innerHTML='<div class="alert alert-blue">Error trayendo nombres: '+(e.message||e)+'</div>';return}
+  }
+  const filas=Object.entries(D.by).sort((a,b)=>b[1]-a[1]).map(([cid,g])=>{
+    const info=D.nombres[cid]||{}
+    const est=info.e==='ACTIVE'?'🟢':'⏸️'
+    return `<div style="display:flex;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px">
+      <span>${est}</span>
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(info.n||cid)}">${info.n||('Campaña '+cid)}</span>
+      <span style="color:var(--muted);font-size:11px">${info.a||''}</span>
+      <span style="font-weight:700;font-variant-numeric:tabular-nums">$${fmt(g)}</span>
+    </div>`
+  }).join('')
+  body.innerHTML=filas+`<div style="font-size:11px;color:var(--muted);margin-top:8px">👉 Atribúyelas a un producto desde <b>📡 Meta Ads</b> (o en 📦 Productos) para que el desglose por producto diga la verdad completa.</div>`
+}
+// ══ FIN ALERTA SIN ATRIBUIR ══════════════════════════════════════════════════
+
+// ══ NUEVO (2jul26) · SIMULADOR 2.0 "¿QUÉ PASA SI...?" ════════════════════════
+// Reemplaza (sin borrar) el simulador del Tracker. Diferencias clave:
+//  • Selector de producto → siembra TODO solo (config de Productos + reales del
+//    rango del Dashboard: % dev real, gasto atribuido, CPA real, oferta top).
+//  • "➕ Producto nuevo" → campos en blanco para tantear un lanzamiento: te dice
+//    qué CPA necesitas ANTES de gastar un peso.
+//  • Fórmula BE OFICIAL del sistema (la misma de _beProd / desglose por producto):
+//    BE = precio2u·(1−dev) − costo2u − fleteEnv − fleteDev·dev − costoConv·convPorVenta
+//  • Semáforo con los cortes oficiales 45% / 70% / 100% del BE.
+//  • Comparador AHORA vs SIMULADO con deltas + chips de escenario rápido.
+// Todos los IDs van con prefijo sim2- para NO chocar con el simulador viejo (sim-*).
+function _sim2Fila(id,label,val,step,sub){
+  return `<div class="fld"><label>${label}</label><input type="number" step="${step||1}" id="${id}" value="${val}" oninput="_sim2Recalc()">${sub?`<div style="font-size:10px;color:var(--muted);margin-top:2px" id="${id}-sub">${sub}</div>`:''}</div>`
+}
+async function _sim2Render(body){
+  body.innerHTML=`
+    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px">
+      <div class="fld" style="margin:0;min-width:220px"><label>Producto</label>
+        <select id="sim2-prod" onchange="_sim2Seed()">
+          ${productos.map(p=>`<option value="${p.id}">${p.nombre}</option>`).join('')}
+          <option value="_nuevo">➕ Producto nuevo (tantear un lanzamiento)</option>
+        </select></div>
+      <div style="font-size:11px;color:var(--muted);padding-bottom:8px">Sembrado con el rango del Dashboard · todo es editable</div>
+    </div>
+    <div id="sim2-reales" style="margin-bottom:10px"></div>
+    <div class="form-grid g4">
+      ${_sim2Fila('sim2-precio','Precio venta (oferta 2u)',0,1000)}
+      ${_sim2Fila('sim2-costo','Costo producto (2u)',0,500)}
+      ${_sim2Fila('sim2-fout','Flete envío',21000,500)}
+      ${_sim2Fila('sim2-fdev','Flete devolución',18000,500)}
+      ${_sim2Fila('sim2-dev','% Devolución',19,0.1,'—')}
+      ${_sim2Fila('sim2-conv','Conversaciones por venta',25,1)}
+      ${_sim2Fila('sim2-cconv','Costo por conversación',100,10)}
+      ${_sim2Fila('sim2-cpa','CPA (real o objetivo)',0,500,'—')}
+      ${_sim2Fila('sim2-gasto','Gasto diario ($)',500000,10000)}
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin:10px 0">
+      <button class="btn-sm" onclick="_sim2Chip('dev-5')">📉 −5 pts devolución</button>
+      <button class="btn-sm" onclick="_sim2Chip('precio+')">💲 +$10.000 precio</button>
+      <button class="btn-sm" onclick="_sim2Chip('precio-')">💲 −$10.000 precio</button>
+      <button class="btn-sm" onclick="_sim2Reset()">↺ Volver a lo real</button>
+    </div>
+    <div id="sim2-veredicto"></div>
+    <div id="sim2-compare"></div>`
+  await _sim2Seed()
+}
+// Trae (con caché por rango) mapeos + gasto por campaña del rango del Dashboard
+async function _sim2Datos(){
+  const desde=document.getElementById('dash-desde')?.value||_daysAgo(7)
+  const hasta=document.getElementById('dash-hasta')?.value||today()
+  const key=desde+'|'+hasta
+  if(window._sim2Cache&&window._sim2Cache.key===key)return window._sim2Cache
+  const{data:mps}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('fecha,producto,cantidad,estado_final').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+  const{data:ins}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('spend,meta_id').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+  const gastoByCamp={}
+  for(const i of (ins||[])){if(i.meta_id)gastoByCamp[i.meta_id]=(gastoByCamp[i.meta_id]||0)+(i.spend||0)}
+  const dias=Math.max(1,Math.round((new Date(hasta+'T12:00')-new Date(desde+'T12:00'))/86400000)+1)
+  window._sim2Cache={key,mps:mps||[],gastoByCamp,dias,desde,hasta}
+  return window._sim2Cache
+}
+window._sim2Seed=async()=>{
+  const sel=document.getElementById('sim2-prod')
+  if(!sel)return
+  const pid=sel.value
+  const _set=(id,v)=>{const e=document.getElementById(id);if(e)e.value=v}
+  const _sub=(id,t)=>{const e=document.getElementById(id+'-sub');if(e)e.textContent=t}
+  const reales=document.getElementById('sim2-reales')
+  if(pid==='_nuevo'){
+    _set('sim2-precio',0);_set('sim2-costo',0);_set('sim2-fout',21000);_set('sim2-fdev',18000)
+    _set('sim2-dev',19);_set('sim2-conv',25);_set('sim2-cconv',100);_set('sim2-cpa',0);_set('sim2-gasto',500000)
+    _sub('sim2-dev','19% = supuesto conservador del sistema')
+    _sub('sim2-cpa','vacío = uso el 70% del BE como objetivo')
+    if(reales)reales.innerHTML=`<div class="alert alert-blue" style="font-size:12px">🧪 Producto nuevo: digita precio y costo del proveedor → te digo qué CPA necesitas para que sea negocio ANTES de lanzar.</div>`
+    window._sim2ProdSel=null
+    _sim2Snapshot();window._sim2Recalc()
+    return
+  }
+  const prod=productos.find(p=>String(p.id)===String(pid))||{}
+  window._sim2ProdSel=prod
+  if(reales)reales.innerHTML='<div class="loading">Leyendo tus números reales del rango...</div>'
+  let devRealTxt='—',cpaRealTxt='—'
+  try{
+    const D=await _sim2Datos()
+    let tot=0,conf=0,canc=0,ent=0,dev=0
+    const qs={1:0,2:0,3:0,4:0}
+    for(const m of D.mps){
+      if((resolveProdName(m.producto).nombre||'')!==prod.nombre)continue
+      tot++
+      const q=m.cantidad||2;qs[q>=4?4:q]++
+      const cl=window._nexoClasifVenta(m.estado_final)
+      if(cl==='venta')conf++;else if(cl==='canc')canc++
+      const cat=DROPI_STATUS[m.estado_final]?.cat
+      if(cat==='entregado'||cat==='novedad_ok')ent++
+      else if(cat==='devuelto')dev++
+    }
+    let gastoProd=0
+    for(const cid of (prod.campaign_ids||[]))gastoProd+=D.gastoByCamp[cid]||0
+    const devReal=(ent+dev)>0?(dev/(ent+dev)*100):null
+    const cancPct=tot>0?(canc/tot*100):0
+    const cpaReal=conf>0?(gastoProd/conf):0
+    const gastoDia=gastoProd>0?Math.round(gastoProd/D.dias):500000
+    const ofTop=Object.entries(qs).sort((a,b)=>b[1]-a[1])[0]
+    // Sembrar perillas: config del producto + reales donde aplica
+    _set('sim2-precio',prod.precio_2u||0);_set('sim2-costo',prod.costo_2u||0)
+    _set('sim2-fout',prod.flete_outbound||21000);_set('sim2-fdev',prod.flete_devolucion||18000)
+    const devCfg=((prod.dev_pct||0.19)*100)
+    _set('sim2-dev',(devReal!=null?devReal:devCfg).toFixed(1))
+    devRealTxt=devReal!=null?devReal.toFixed(1)+'%':'sin cerrados aún'
+    _sub('sim2-dev',`config ${devCfg.toFixed(0)}% · real del rango ${devRealTxt}`)
+    _set('sim2-conv',prod.conversaciones_por_venta!=null?prod.conversaciones_por_venta:25)
+    _set('sim2-cconv',prod.costo_conversacion||100)
+    _set('sim2-cpa',cpaReal?Math.round(cpaReal):0)
+    cpaRealTxt=cpaReal?('$'+fmt(cpaReal)):'sin confirmadas'
+    _sub('sim2-cpa',`real del rango: ${cpaRealTxt} · si lo dejas vacío uso 70% del BE`)
+    _set('sim2-gasto',gastoDia)
+    if(reales)reales.innerHTML=`<div style="display:flex;gap:6px;flex-wrap:wrap;font-size:11px">
+      <span class="pill">📡 TUS NÚMEROS REALES (${D.desde} → ${D.hasta})</span>
+      <span class="pill">🛒 ${tot} órdenes</span>
+      <span class="pill">✅ ${conf} confirmadas</span>
+      <span class="pill">❌ ${cancPct.toFixed(0)}% canceladas</span>
+      <span class="pill">↩️ Dev real: ${devRealTxt}</span>
+      <span class="pill">💸 Gasto: $${fmt(gastoProd)}</span>
+      <span class="pill">🎯 CPA real: ${cpaRealTxt}</span>
+      <span class="pill">📦 Oferta top: ${ofTop[0]}u</span>
+    </div>`
+  }catch(e){
+    if(reales)reales.innerHTML='<div class="alert alert-blue" style="font-size:12px">No pude leer los reales ('+(e.message||e)+') — sembré solo la config del producto.</div>'
+    _set('sim2-precio',prod.precio_2u||0);_set('sim2-costo',prod.costo_2u||0)
+    _set('sim2-fout',prod.flete_outbound||21000);_set('sim2-fdev',prod.flete_devolucion||18000)
+    _set('sim2-dev',((prod.dev_pct||0.19)*100).toFixed(1))
+    _set('sim2-conv',prod.conversaciones_por_venta!=null?prod.conversaciones_por_venta:25)
+    _set('sim2-cconv',prod.costo_conversacion||100);_set('sim2-cpa',0);_set('sim2-gasto',500000)
+  }
+  _sim2Snapshot()
+  window._sim2Recalc()
+}
+// Lee las perillas actuales y calcula BE/veredicto (fórmula oficial + cortes 45/70/100)
+function _sim2Leer(){
+  const g=id=>parseFloat(document.getElementById(id)?.value)||0
+  const precio=g('sim2-precio'),costo=g('sim2-costo'),fout=g('sim2-fout'),fdev=g('sim2-fdev')
+  const devp=g('sim2-dev')/100,conv=g('sim2-conv'),cconv=g('sim2-cconv'),gasto=g('sim2-gasto')
+  const be=precio*(1-devp)-costo-fout-(fdev*devp)-(cconv*conv)
+  const cpaIn=g('sim2-cpa')
+  const cpaObj=cpaIn>0?cpaIn:(be>0?be*0.7:0)
+  const esObjetivo=!(cpaIn>0)
+  const gan=be-cpaObj
+  const colch=be>0?(gan/be*100):0
+  let semE='⚪',semT='Faltan datos',semC='--muted'
+  if(be>0&&cpaObj>0){
+    if(cpaObj>be){semE='🔴';semT='MALO — pierdes plata';semC='--red'}
+    else if(cpaObj>be*0.7){semE='🟡';semT='REGULAR — poco colchón';semC='--amber'}
+    else if(cpaObj>be*0.45){semE='🟢';semT='BUENO';semC='--green'}
+    else{semE='🟣';semT='BRUTAL';semC='--purple'}
+  }
+  const ordDia=cpaObj>0?gasto/cpaObj:0
+  const ganDia=ordDia*gan
+  return{precio,costo,fout,fdev,devp,conv,cconv,gasto,be,cpa:cpaObj,esObjetivo,gan,colch,semE,semT,semC,ordDia,ganDia,ganMes:ganDia*30}
+}
+function _sim2Snapshot(){window._sim2Base=_sim2Leer()}
+window._sim2Recalc=()=>{
+  const v=_sim2Leer()
+  const ver=document.getElementById('sim2-veredicto')
+  if(!ver)return
+  if(!(v.be>0)){
+    ver.innerHTML=`<div class="alert alert-blue" style="font-size:12px">Con estos números el <b>break-even sale ${v.be<0?'NEGATIVO ($'+fmt(v.be)+')':'en cero'}</b>: no hay CPA que salve este producto. Sube precio o baja costos/devolución.</div>`
+    const cmp=document.getElementById('sim2-compare');if(cmp)cmp.innerHTML=''
+    return
+  }
+  const esNuevo=!window._sim2ProdSel
+  ver.innerHTML=`<div class="card" style="border-left:4px solid var(${v.semC})">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;font-size:12px">
+      <div><div style="color:var(--muted);font-size:10px">🎯 CPA BREAK-EVEN</div><div style="font-size:17px;font-weight:800;font-variant-numeric:tabular-nums">$${fmt(v.be)}</div></div>
+      <div><div style="color:var(--muted);font-size:10px">📡 CPA ${v.esObjetivo?'OBJETIVO (70% BE)':'USADO'}</div><div style="font-size:17px;font-weight:800;font-variant-numeric:tabular-nums">$${fmt(v.cpa)}</div></div>
+      <div><div style="color:var(--muted);font-size:10px">SEMÁFORO</div><div style="font-size:15px;font-weight:800;color:var(${v.semC})">${v.semE} ${v.semT}</div></div>
+      <div><div style="color:var(--muted);font-size:10px">🛡️ COLCHÓN = GANANCIA/ORDEN</div><div style="font-size:17px;font-weight:800;color:var(${v.gan>=0?'--green':'--red'})">$${fmt(v.gan)} <span style="font-size:11px">(${v.colch.toFixed(0)}%)</span></div></div>
+      <div><div style="color:var(--muted);font-size:10px">📅 PROYECCIÓN / DÍA</div><div style="font-size:13px;font-weight:700">${v.ordDia.toFixed(1)} órd. · $${fmt(v.ganDia)}</div></div>
+      <div><div style="color:var(--muted);font-size:10px">📆 PROYECCIÓN / MES (×30)</div><div style="font-size:17px;font-weight:800;color:var(${v.ganMes>=0?'--green':'--red'})">$${fmt(v.ganMes)}</div></div>
+    </div>
+    ${esNuevo?`<div style="font-size:11px;color:var(--muted);margin-top:8px">🧪 Producto nuevo: para ganar plata necesitas conseguir órdenes confirmadas a <b>menos de $${fmt(v.be)}</b> cada una.</div>`:''}
+  </div>`
+  // Comparador AHORA (sembrado) vs SIMULADO (perillas movidas)
+  const cmp=document.getElementById('sim2-compare')
+  const b=window._sim2Base
+  if(!cmp||!b)return
+  const igual=['precio','costo','fout','fdev','gasto'].every(k=>v[k]===b[k])&&Math.abs(v.devp-b.devp)<0.0005&&v.cpa===b.cpa&&v.conv===b.conv&&v.cconv===b.cconv
+  if(igual){cmp.innerHTML='';return}
+  const fila=(lbl,a,s,fmtFn,mejorSiSube)=>{
+    const d=s-a
+    const col=d===0?'--muted':((d>0)===mejorSiSube?'--green':'--red')
+    const flecha=d===0?'=':(d>0?'▲':'▼')
+    return `<tr><td style="padding:4px 8px">${lbl}</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmtFn(a)}</td><td style="text-align:center;color:var(--muted)">→</td><td style="text-align:right;font-weight:700;font-variant-numeric:tabular-nums">${fmtFn(s)}</td><td style="text-align:right;color:var(${col});font-weight:700;font-variant-numeric:tabular-nums">${flecha} ${fmtFn(Math.abs(d))}</td></tr>`
+  }
+  const $f=x=>'$'+fmt(x),$p=x=>x.toFixed(0)+'%'
+  cmp.innerHTML=`<div class="card" style="margin-top:10px;font-size:12px">
+    <div style="font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--muted);margin-bottom:6px">AHORA (sembrado) → SIMULADO</div>
+    <table style="width:100%;border-collapse:collapse">
+      ${fila('🎯 CPA Break-even',b.be,v.be,$f,true)}
+      ${fila('🛡️ Colchón',b.colch,v.colch,$p,true)}
+      ${fila('💵 Ganancia/orden',b.gan,v.gan,$f,true)}
+      ${fila('📆 Ganancia/mes',b.ganMes,v.ganMes,$f,true)}
+    </table>
+  </div>`
+}
+window._sim2Chip=(t)=>{
+  const e=id=>document.getElementById(id)
+  if(t==='dev-5'&&e('sim2-dev'))e('sim2-dev').value=Math.max(0,(parseFloat(e('sim2-dev').value)||0)-5).toFixed(1)
+  if(t==='precio+'&&e('sim2-precio'))e('sim2-precio').value=(parseFloat(e('sim2-precio').value)||0)+10000
+  if(t==='precio-'&&e('sim2-precio'))e('sim2-precio').value=Math.max(0,(parseFloat(e('sim2-precio').value)||0)-10000)
+  window._sim2Recalc()
+}
+window._sim2Reset=()=>{
+  const b=window._sim2Base
+  if(!b)return
+  const _set=(id,v)=>{const e=document.getElementById(id);if(e)e.value=v}
+  _set('sim2-precio',b.precio);_set('sim2-costo',b.costo);_set('sim2-fout',b.fout);_set('sim2-fdev',b.fdev)
+  _set('sim2-dev',(b.devp*100).toFixed(1));_set('sim2-conv',b.conv);_set('sim2-cconv',b.cconv)
+  _set('sim2-cpa',b.esObjetivo?0:b.cpa);_set('sim2-gasto',b.gasto)
+  window._sim2Recalc()
+}
+// ══ FIN SIMULADOR 2.0 ════════════════════════════════════════════════════════
 
 // 🔧 FIX LÍMITE 1000 (v2 — motor definitivo): Supabase corta cada respuesta al máx. del servidor (1000 por defecto,
 // aunque se pida .limit(10000)). Este helper trae TODO paginando con .range():
@@ -2102,6 +2368,32 @@ async function loadDash(){
   desgloseProductos.sort((a,b)=>(_ordenSem[a.sem]||9)-(_ordenSem[b.sem]||9))
   const hayStop=desgloseProductos.some(d=>d.sem==='stop')
 
+  // ══ NUEVO (2jul26) · ALERTA GASTO SIN ATRIBUIR ══════════════════════════════
+  // Campañas con gasto en el rango que NO están en campaign_ids de NINGÚN producto.
+  // Es una alarma de calidad de datos: si hay plata huérfana, el CPA por producto
+  // del desglose se ve MEJOR de lo real. Solo se pinta si el total huérfano > 0.
+  // Los NOMBRES de las campañas se traen lazy (solo al expandir la alerta).
+  const _gsaAtrib=new Set()
+  for(const p of productos){for(const cid of (p.campaign_ids||[]))_gsaAtrib.add(String(cid))}
+  const _gsaBy={}
+  let _gsaTotal=0
+  for(const[cid,g]of Object.entries(gastoByCampId)){
+    if(!_gsaAtrib.has(String(cid))&&g>0){_gsaBy[cid]=g;_gsaTotal+=g}
+  }
+  const _gsaPct=gastoTotal>0?(_gsaTotal/gastoTotal*100):0
+  window._gsaData={by:_gsaBy,total:_gsaTotal,loaded:false,nombres:{}}
+  const _gsaHTML=_gsaTotal>0?`
+    <div class="card" style="margin:12px 0;padding:0;overflow:hidden;border-left:4px solid var(--amber)">
+      <div onclick="_gsaToggle()" style="display:flex;align-items:center;gap:10px;padding:12px 16px;cursor:pointer;user-select:none;flex-wrap:wrap">
+        <span id="gsa-arrow" style="font-size:11px;color:var(--muted);width:12px">▶</span>
+        <span style="font-weight:700;color:var(--amber)">⚠️ $${fmt(_gsaTotal)} sin atribuir a ningún producto</span>
+        <span style="font-size:12px;color:var(--muted)">(${_gsaPct.toFixed(0)}% de tu gasto) — el CPA por producto se ve mejor de lo real</span>
+        <span style="margin-left:auto;font-size:11px;color:var(--muted)">${Object.keys(_gsaBy).length} campaña${Object.keys(_gsaBy).length===1?'':'s'}</span>
+      </div>
+      <div id="gsa-body" style="display:none;padding:0 16px 14px"></div>
+    </div>`:''
+  // ══ FIN ALERTA GASTO SIN ATRIBUIR ═══════════════════════════════════════════
+
   // Semáforo global (lógica preservada del original) + estado "día arrancando"
   const tieneOferta=totalOrds>0&&ventaTotal>0
   const esSoloHoy=(desde===hoy&&hasta===hoy)
@@ -2629,7 +2921,7 @@ async function loadDash(){
     </div>`
 
   // RENDER FINAL
-  el.innerHTML=_heroHTML+_4reyesHTML+_desgloseHTML+_bloqueVentasHTML+_bloqueVentasDropiHTML+_bloqueGastosHTML+_bloqueEficienciaHTML+'<div id="novedadesIdBox"></div>'
+  el.innerHTML=_heroHTML+_4reyesHTML+_gsaHTML+_desgloseHTML+_bloqueVentasHTML+_bloqueVentasDropiHTML+_bloqueGastosHTML+_bloqueEficienciaHTML+'<div id="novedadesIdBox"></div>'
   try{_renderNovedadesId()}catch(_){}
 }
 

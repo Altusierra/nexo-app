@@ -691,9 +691,12 @@ document.addEventListener('click',(e)=>{
 const NAV={
   admin:[
     {id:'admin-home',icon:'📊',label:'Dashboard'},
-    {id:'admin-reportes',icon:'📋',label:'Reportes'},
-    {id:'admin-resumen',icon:'📈',label:'Resumen Semanal'},
-    {id:'admin-gasto',icon:'💰',label:'Tracker'},
+    // NUEVO (2jul26 · cajones Dashboard): estas 3 secciones ahora viven DENTRO del Dashboard como
+    // bloques colapsables (lazy). hidden:1 solo las oculta del menú — las páginas y funciones quedan
+    // intactas. Para revertir: quitar hidden:1.
+    {id:'admin-reportes',icon:'📋',label:'Reportes',hidden:1},
+    {id:'admin-resumen',icon:'📈',label:'Resumen Semanal',hidden:1},
+    {id:'admin-gasto',icon:'💰',label:'Tracker',hidden:1},
     {id:'admin-meta',icon:'📡',label:'Meta Ads'},
     {id:'admin-ia',icon:'🤖',label:'Historial IA'},
     {id:'admin-productos',icon:'📦',label:'Productos'},
@@ -721,7 +724,7 @@ const NAV={
 
 function renderNav(){
   const rol=currentRol()
-  const items=NAV[rol]||NAV.auxiliar
+  const items=(NAV[rol]||NAV.auxiliar).filter(i=>!i.hidden) // NUEVO (2jul26): omite ítems hidden (cajones Dashboard)
   const cnt=window._auxCounts||null
   const badgeMap={'aux-novedades':['novedades','red'],'aux-reservado':['confirmar','amber'],'aux-reclame':['reclame','amber'],'aux-seguimiento':['transito','blue']}
   document.getElementById('sb-nav').innerHTML=
@@ -1441,10 +1444,89 @@ async function pageAdminHome(c){
       <div class="fld" style="margin:0"><label style="font-size:10px">📅 Un solo día</label><input type="date" id="dash-dia" title="Elige un solo día: pone Desde y Hasta en esa misma fecha y refresca" style="font-size:12px;padding:6px 8px" onchange="const _d=this.value;if(_d){const _a=document.getElementById('dash-desde'),_b=document.getElementById('dash-hasta');if(_a)_a.value=_d;if(_b)_b.value=_d;loadDash()}"></div>
     </div>
     <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px">${_quickDateBtns('dash-desde','dash-hasta','loadDash()')}</div>
-    <div id="dash-content"><div class="loading">Cargando métricas...</div></div>`
+    <div id="dash-content"><div class="loading">Cargando métricas...</div></div>
+    ${_dashCajonesHTML()}`
   window.loadDash=loadDash
   loadDash()
+  _dashCajonesMini() // NUEVO (2jul26): mini-resúmenes de los cajones (liviano, nunca bloquea el dashboard)
 }
+
+// ══ NUEVO (2jul26) · CAJONES DEL DASHBOARD ══════════════════════════════════
+// Reportes, Resumen Semanal y Tracker ahora viven DENTRO del Dashboard como
+// bloques apilados colapsables (cerrados por defecto). Al abrir uno por 1ª vez
+// se llama a su función de página ORIGINAL (pageAdminGasto / pageAdminResumen /
+// pageAdminReportes) apuntada al cuerpo del cajón → cero lógica duplicada,
+// cero cambios en esas funciones, lazy-load real (no carga nada hasta el clic).
+// Orden (secuencia semáforo, del zoom-hoy hacia atrás): Tracker (día a día) →
+// Resumen Semanal (semana a semana) → Reportes (detalle fino).
+function _dashCajonHTML1(k,icon,titulo,sub){
+  return `<div class="card" style="margin-top:12px;padding:0;overflow:hidden">
+    <div onclick="_dashCajonToggle('${k}')" style="display:flex;align-items:center;gap:10px;padding:13px 16px;cursor:pointer;user-select:none;flex-wrap:wrap">
+      <span id="dcaj-arrow-${k}" style="font-size:11px;color:#8b93a7;width:12px">▶</span>
+      <span style="font-weight:700">${icon} ${titulo}</span>
+      <span style="font-size:11px;color:#8b93a7">${sub}</span>
+      <span id="dcaj-mini-${k}" style="margin-left:auto;font-size:12px;color:#8b93a7;font-variant-numeric:tabular-nums"></span>
+    </div>
+    <div id="dcaj-body-${k}" style="display:none;padding:0 16px 16px"></div>
+  </div>`
+}
+function _dashCajonesHTML(){
+  return `<style>#dash-cajones .page-title,#dash-cajones .page-sub{display:none}</style>
+  <div id="dash-cajones" style="margin-top:18px">
+    <div class="section-title" style="margin-bottom:2px">📂 SECCIONES DEL NEGOCIO</div>
+    ${_dashCajonHTML1('trk','💰','Tracker','¿Cómo va la plata día por día?')}
+    ${_dashCajonHTML1('res','📈','Resumen Semanal','¿Cómo va semana por semana?')}
+    ${_dashCajonHTML1('rep','📋','Reportes','El detalle fino por fecha')}
+  </div>`
+}
+// Toggle + lazy-load: la 1ª apertura renderiza la página original dentro del cajón.
+window._dashCajonToggle=async(k)=>{
+  const body=document.getElementById('dcaj-body-'+k)
+  const arr=document.getElementById('dcaj-arrow-'+k)
+  if(!body)return
+  const abrir=body.style.display==='none'
+  body.style.display=abrir?'block':'none'
+  if(arr)arr.textContent=abrir?'▼':'▶'
+  if(abrir&&!body.dataset.loaded){
+    body.dataset.loaded='1'
+    body.innerHTML='<div class="loading">Cargando...</div>'
+    try{
+      if(k==='trk')await pageAdminGasto(body)
+      else if(k==='res')await pageAdminResumen(body)
+      else if(k==='rep')await pageAdminReportes(body)
+    }catch(e){
+      body.dataset.loaded='' // permite reintentar al volver a abrir
+      body.innerHTML='<div class="alert alert-blue">Error cargando la sección: '+(e.message||e)+'</div>'
+    }
+  }
+}
+// Mini-resúmenes de cabecera (para que los cajones "hablen" aunque estén cerrados).
+// Consultas livianas e independientes del rango del dashboard. Si algo falla, los
+// cajones quedan sin numerito pero NADA se rompe (decorativo por diseño).
+async function _dashCajonesMini(){
+  try{
+    const hoy=today(),d7=_daysAgo(6)
+    const _set=(id,txt)=>{const e=document.getElementById(id);if(e)e.textContent=txt}
+    // 💰 Tracker: gasto 7d (nivel campaign, mismo criterio del dashboard) + confirmadas 7d
+    const{data:ins}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('spend').eq('nivel','campaign').gte('fecha',d7).lte('fecha',hoy).order('id',{ascending:true}).range(_f,_t))
+    let g=0;for(const i of(ins||[]))g+=(i.spend||0)
+    const{data:mps}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('fecha,estado_final').gte('fecha',d7).lte('fecha',hoy).order('id',{ascending:true}).range(_f,_t))
+    const _mon=_getMonday(new Date(hoy+'T12:00:00'))
+    const monIso=`${_mon.getFullYear()}-${String(_mon.getMonth()+1).padStart(2,'0')}-${String(_mon.getDate()).padStart(2,'0')}`
+    let conf=0,ordSem=0
+    for(const m of(mps||[])){
+      if(window._nexoClasifVenta(m.estado_final)==='venta')conf++
+      if((m.fecha||'')>=monIso)ordSem++
+    }
+    _set('dcaj-mini-trk',`7d: Gasto $${fmt(g)} · ${conf} confirmadas`)
+    // 📈 Resumen Semanal: órdenes de la semana actual (Lun-Dom)
+    _set('dcaj-mini-res',`Semana actual: ${ordSem} órdenes`)
+    // 📋 Reportes: reportes de hoy (count liviano, sin traer filas)
+    const{count:repHoy}=await sb.from('reportes_diarios').select('*',{count:'exact',head:true}).eq('fecha',hoy)
+    _set('dcaj-mini-rep',`Hoy: ${repHoy||0} reporte${(repHoy||0)===1?'':'s'}`)
+  }catch(_){/* decorativo: nunca rompe el dashboard */}
+}
+// ══ FIN CAJONES DEL DASHBOARD ═══════════════════════════════════════════════
 
 // 🔧 FIX LÍMITE 1000 (v2 — motor definitivo): Supabase corta cada respuesta al máx. del servidor (1000 por defecto,
 // aunque se pida .limit(10000)). Este helper trae TODO paginando con .range():

@@ -1757,10 +1757,11 @@ async function loadDash(){
   const _usaDropiSub=_grdConDatoD>0
   const _tipGanRealDropi=`REAL (datos de Dropi · por fecha de subida): la ganancia que Dropi YA liquidó de lo entregado en el flujo Dropi, menos lo devuelto y tus gastos.&#10;&#10;Ganancia Dropi (${entD} entregadas): $${fmt(Math.round(_grdGanD))}&#10;− Costo devolución (${devD} devueltas): −$${fmt(Math.round(_grdFDevD))}&#10;− Gasto ads: −$${fmt(gastoTotal)}&#10;− Costo conversación: −$${fmt(costoConv)}&#10;− Gastos fijos (${dias}d): −$${fmt(gastoFijoPeriodo)}&#10;&#10;= $${fmt(ganRealDropiSubida)}&#10;&#10;Cuenta las entregadas por fecha de subida a Dropi (las de '📦 Ventas y órdenes DROPI'). Lo que Dropi aún no liquidó usa el teórico de esa orden.`
   // ══ 📦 PRODUCTOS VENDIDOS (mejora): cierre de cuentas por producto ══════════════
-  // Utilidad PROYECTADA por producto = espejo exacto de la fórmula de Ganancia neta global, repartida por producto:
-  //   ventaLista×(1−dev%) − costo prod − flete×conf − dev%×fleteDev×conf − ads del producto − conversaciones − fijos prorrateados.
-  // Utilidad REAL por producto = espejo de la Ganancia real (Dropi): ganancia de entregadas − flete de devueltas − ads − conv − fijos.
-  // La Σ de cada columna cuadra (±redondeo) con las cards grandes de arriba.
+  // Utilidad PROYECTADA por producto (SIN fijos — ley del owner: los fijos no se reparten por producto):
+  //   ventaLista×(1−dev%) − costo prod − flete×conf − dev%×fleteDev×conf − ads del producto − conversaciones.
+  // Utilidad REAL por producto: ganancia de entregadas − flete de devueltas − ads − conv (SIN fijos).
+  // Los fijos se restan UNA sola vez al negocio completo en la franja "TE QUEDA" debajo de la tabla,
+  // que reconcilia la Σ de la tabla con las cards grandes de arriba (esas SÍ llevan fijos).
   const _pvCierre=(src,confTotalMundo)=>{
     const rows=[];let totUnids=0
     for(const[pn,s]of Object.entries(src)){
@@ -1777,36 +1778,51 @@ async function loadDash(){
       const costoProv=((st.o1*(prod.costo_1u||0))+(st.o2*(prod.costo_2u||0))+(st.o3*(prod.costo_3u||0))+(st.o4*(prod.costo_4u||0)))*_ratio
       let gastoP=0;for(const cid of (prod.campaign_ids||[])){gastoP+=gastoByCampId[cid]||0}
       const convP=(_convByProd[pn]||0)*(prod.costo_conversacion||100)
-      const fijoP=confTotalMundo>0?Math.round(gastoFijoPeriodo*confN/confTotalMundo):0
-      const utilProy=Math.round(ventaLista*(1-_dp)-costoProv-confN*_fo-Math.round(confN*_dp*_fd)-gastoP-convP-fijoP)
-      const utilReal=Math.round(s.ganEnt-s.fdev-gastoP-convP-fijoP)
+      // 🏢 LEY DEL OWNER: los fijos NO se reparten por producto (no son culpa de ningún producto).
+      // Cada producto muestra su ganancia real de operación; los fijos se restan UNA vez al negocio (franja).
+      const utilProy=Math.round(ventaLista*(1-_dp)-costoProv-confN*_fo-Math.round(confN*_dp*_fd)-gastoP-convP)
+      const utilReal=Math.round(s.ganEnt-s.fdev-gastoP-convP)
       // 🔻 Componentes del flujo del dinero (para el desglose semáforo). devProy es RESIDUAL:
       // absorbe el %dev proyectado + el ajuste precio lista/real + redondeos → la fila SUMA EXACTO al peso:
-      // Vendido − devProy − costo − fleteEnv − fleteDev − ads − conv − fijos = PROYECTADA (siempre).
+      // Vendido − devProy − costo − fleteEnv − fleteDev − ads − conv = PROYECTADA (siempre, sin fijos).
       const _venta=Math.round(s.venta)
       const _costo=Math.round(costoProv)
       const _fleteEnv=confN*_fo
       const _fleteDev=Math.round(confN*_dp*_fd)
       const _ads=Math.round(gastoP)
       const _conv=Math.round(convP)
-      const _devProy=_venta-_costo-_fleteEnv-_fleteDev-_ads-_conv-fijoP-utilProy
-      rows.push({pn,ords:s.ords,unids:s.unids,conf:confN,ent:s.ent,venta:_venta,utilProy,utilReal,gastoP,pend:s.pend||0,rech:s.rech||0,dev:s.dev||0,dp:_dp,costo:_costo,fleteEnv:_fleteEnv,fleteDev:_fleteDev,ads:_ads,convC:_conv,fijos:fijoP,devProy:_devProy,gEnt:Math.round(s.ganEnt),fdevR:Math.round(s.fdev)})
+      const _devProy=_venta-_costo-_fleteEnv-_fleteDev-_ads-_conv-utilProy
+      rows.push({pn,ords:s.ords,unids:s.unids,conf:confN,ent:s.ent,venta:_venta,utilProy,utilReal,gastoP,pend:s.pend||0,rech:s.rech||0,dev:s.dev||0,dp:_dp,costo:_costo,fleteEnv:_fleteEnv,fleteDev:_fleteDev,ads:_ads,convC:_conv,devProy:_devProy,gEnt:Math.round(s.ganEnt),fdevR:Math.round(s.fdev)})
       totUnids+=s.unids
     }
     rows.sort((a,b)=>b.venta-a.venta)
     return{rows,totUnids}
   }
+  // 📸 CONF. CRUCE: por (producto, fecha) toma la PRIMERA fotografía del Cruce Dropi (min lote)
+  // y suma por producto en el rango. Lente vtas → fecha_orden · lente dropi → fecha_dropi_orden.
+  // Tolerante: si la tabla/columna no existe aún, la columna muestra "—" y no rompe nada.
+  let _ccVtas={},_ccDropi={}
+  try{
+    const{data:_snV}=await sb.from('cruce_snapshots').select('producto,fecha_orden,confirmadas,lote').eq('tipo','cruce_dropi').gte('fecha_orden',desde).lte('fecha_orden',hasta).order('lote',{ascending:true}).limit(5000)
+    const _sv={}
+    for(const s of(_snV||[])){const k=s.producto+'||'+s.fecha_orden;if(!(k in _sv)){_sv[k]=1;_ccVtas[s.producto]=(_ccVtas[s.producto]||0)+(s.confirmadas||0)}}
+  }catch(_e){}
+  try{
+    const{data:_snD}=await sb.from('cruce_snapshots').select('producto,fecha_dropi_orden,confirmadas,lote').eq('tipo','cruce_dropi').not('fecha_dropi_orden','is',null).gte('fecha_dropi_orden',desde).lte('fecha_dropi_orden',hasta).order('lote',{ascending:true}).limit(5000)
+    const _sd={}
+    for(const s of(_snD||[])){const k=s.producto+'||'+s.fecha_dropi_orden;if(!(k in _sd)){_sd[k]=1;_ccDropi[s.producto]=(_ccDropi[s.producto]||0)+(s.confirmadas||0)}}
+  }catch(_e){}
   const{rows:_pvRows,totUnids:_pvTotUnids}=_pvCierre(_pv,totalOrdsConf)
   const{rows:_pvRowsD,totUnids:_pvTotUnidsD}=_pvCierre(_pvD,confD)
   // Generador del desglose (frase simple + tabla). key: 'vtas' | 'dropi'
   const _pvMkHTML=(rows,key,nota)=>{
     if(!rows.length)return '<div style="padding:12px;color:var(--muted);font-size:12px">Sin datos en este rango.</div>'
-    const T=rows.reduce((a,r)=>{a.ords+=r.ords;a.unids+=r.unids;a.conf+=r.conf;a.ent+=r.ent;a.venta+=r.venta;a.utilProy+=r.utilProy;a.utilReal+=r.utilReal;a.pend+=(r.pend||0);a.rech+=(r.rech||0);a.dev+=(r.dev||0);a.costo+=(r.costo||0);a.fleteEnv+=(r.fleteEnv||0);a.fleteDev+=(r.fleteDev||0);a.ads+=(r.ads||0);a.convC+=(r.convC||0);a.fijos+=(r.fijos||0);a.devProy+=(r.devProy||0);a.gEnt+=(r.gEnt||0);a.fdevR+=(r.fdevR||0);a.dpw+=((r.dp||0)*(r.conf||0));return a},{ords:0,unids:0,conf:0,ent:0,venta:0,utilProy:0,utilReal:0,pend:0,rech:0,dev:0,costo:0,fleteEnv:0,fleteDev:0,ads:0,convC:0,fijos:0,devProy:0,gEnt:0,fdevR:0,dpw:0})
+    const T=rows.reduce((a,r)=>{a.ords+=r.ords;a.unids+=r.unids;a.conf+=r.conf;a.ent+=r.ent;a.venta+=r.venta;a.utilProy+=r.utilProy;a.utilReal+=r.utilReal;a.pend+=(r.pend||0);a.rech+=(r.rech||0);a.dev+=(r.dev||0);a.costo+=(r.costo||0);a.fleteEnv+=(r.fleteEnv||0);a.fleteDev+=(r.fleteDev||0);a.ads+=(r.ads||0);a.convC+=(r.convC||0);a.devProy+=(r.devProy||0);a.gEnt+=(r.gEnt||0);a.fdevR+=(r.fdevR||0);a.dpw+=((r.dp||0)*(r.conf||0));return a},{ords:0,unids:0,conf:0,ent:0,venta:0,utilProy:0,utilReal:0,pend:0,rech:0,dev:0,costo:0,fleteEnv:0,fleteDev:0,ads:0,convC:0,devProy:0,gEnt:0,fdevR:0,dpw:0})
     // 🧮 CUADRE (solo lente Dropi): ℹ️ que explica por qué Confirmadas ≠ Despachadas (Conf = Desp + Pend + Rech)
     if(key==='dropi')window._embPvReg=rows.map(r=>r.pn)
     const _iCu=(idx,conf,pend,rech)=>key!=='dropi'?'':` <span onclick="event.stopPropagation();window._embCuadre(${idx},${conf||0},${pend||0},${rech||0})" title="¿Por qué Confirmadas no coincide con Despachadas? Toca para ver el cuadre" style="cursor:pointer;font-size:11px;opacity:.8;border:1px solid var(--border);border-radius:50%;width:15px;height:15px;display:inline-flex;align-items:center;justify-content:center;color:var(--blue);margin-left:3px;vertical-align:middle;font-weight:700">ℹ</span>`
     const _m=v=>`<span style="color:var(${v>=0?'--green':'--red'});font-weight:700">${v>=0?'$'+fmt(v):'-$'+fmt(Math.abs(v))}</span>`
-    const _bebe=`<div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:13px;line-height:1.6">🧠 Vendiste <strong>${fmt(T.unids)} productos</strong> en <strong>${fmt(T.ords)} órdenes</strong>. Si todo lo confirmado llega: ${_m(T.utilProy)}. Con lo YA entregado (y todos los gastos del período): ${_m(T.utilReal)}.</div>`
+    const _bebe=`<div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:13px;line-height:1.6">🧠 Vendiste <strong>${fmt(T.unids)} productos</strong> en <strong>${fmt(T.ords)} órdenes</strong>. Si todo lo confirmado llega: ${_m(T.utilProy)}. Con lo YA entregado (ads y chats descontados): ${_m(T.utilReal)}. <span style="color:var(--muted);font-size:11px">Ambos ANTES de fijos — los fijos se restan una vez al negocio, en la franja TE QUEDA de abajo.</span></div>`
     // Fondos por bloque del flujo (izquierda → derecha: cómo entra y se va la plata)
     const _BGini='rgba(56,139,222,.09)',_BGdes='rgba(239,68,68,.055)',_BGpro='rgba(245,158,11,.08)',_BGrea='rgba(34,197,94,.06)'
     const _ghh=(t,span,col,bg)=>`<th colspan="${span}" style="text-align:center;padding:5px 8px;font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;white-space:nowrap;color:var(${col});${bg?'background:'+bg+';':''}border-bottom:1px solid var(--border)">${t}</th>`
@@ -1818,25 +1834,31 @@ async function loadDash(){
     const _pctMrg=(u,v,bg,bold)=>{if(!v)return _td('—','var(--subtle)',false,bg);const p=u/v*100;const c=p>=10?'--green':p>=0?'--amber':'--red';return _td(p.toFixed(1)+'%','var('+c+')',bold,bg)}
     const _perEnt=(g,e,bg,bold)=>{if(!e)return _td('—','var(--subtle)',false,bg);const v=Math.round(g/e);return _td((v>=0?'$':'-$')+fmt(Math.abs(v)),'var('+(v>=0?'--green':'--red')+')',bold,bg)}
     const _tipDevP='Venta que se asume perdida por devoluciones (%dev configurado del producto) + ajuste precio lista/real. Cuadre garantizado: Vendido − todos los 🔻 = Proyectada, al peso.'
-    const _tipFijos='Parte de los gastos fijos del período (página Gastos Fijos ÷30 × días) que le toca a este producto, proporcional a sus confirmadas.'
-    const _tipReal='= Gan. entregadas − Dev. reales − los MISMOS 📡Ads, 💬Conv y 🏢Fijos del bloque 🔻 (no se descuentan dos veces).'
+    const _tipReal='= Gan. entregadas − Dev. reales − los MISMOS 📡Ads y 💬Conv del bloque 🔻 (no se descuentan dos veces). SIN gastos fijos: esos se restan UNA sola vez al negocio completo, en la franja TE QUEDA de abajo.'
     const _tipPerEnt='Ganancia Dropi promedio por paquete entregado (antes de ads, conversaciones y fijos). Lo que "da" el producto por unidad.'
+    const _tipPerEntNeto='Lo que deja cada paquete entregado DESPUÉS de descontar devoluciones reales, ads y conversaciones (sin fijos). = ✅ REAL ÷ entregadas. Si aquí es verde, cada entrega deja plata DE VERDAD tras la pauta.'
+    const _tipConfCruce='📸 Confirmadas según la PRIMERA fotografía del Cruce Dropi de cada día del rango. Léelo contra ✅ Conf. (hoy): si Conf. subió = se confirmaron más después · igual = se mantuvo · si bajó = se cancelaron después. "—" = sin fotografía (el sistema retrata desde que se activó).'
+    const _ccMap=key==='dropi'?_ccDropi:_ccVtas
+    const _ccCell=(pn,conf,bg,bold)=>{const v=_ccMap[pn];if(v==null)return _td('—','var(--subtle)',false,bg);const ar=conf>v?' ↗':conf<v?' ↘':'';const c=conf>v?'--green':conf<v?'--red':'--muted';return _td(fmt(v)+ar,'var('+c+')',bold,bg)}
     const _body=rows.map(r=>{
       const _warn=(r.gastoP===0&&r.conf>0)?' <span title="Este producto no tiene campañas vinculadas: no se le descontó gasto de ads. Vincúlalo en Productos para cuentas exactas." style="cursor:help">⚠️</span>':''
       return `<tr style="border-bottom:1px solid var(--border)"><td style="text-align:left;padding:7px 10px;white-space:nowrap;color:var(--text)">${r.pn}${_warn}${_iCu(rows.indexOf(r),r.conf,r.pend,r.rech)}</td>`
-        +_td(fmt(r.ords))+_td(fmt(r.unids),'var(--blue)',true)+_td(fmt(r.conf),'var(--green)')+_td(fmt(r.ent),'var(--green)')+_pctEnt(r.ent,r.conf)
+        +_td(fmt(r.ords))+_td(fmt(r.unids),'var(--blue)',true)+_ccCell(r.pn,r.conf)+_td(fmt(r.conf),'var(--green)')+_td(fmt(r.ent),'var(--green)')+_pctEnt(r.ent,r.conf)
         +_td('$'+fmt(r.venta),'var(--text)',true,_BGini)
-        +_neg(r.devProy,_BGdes,_tipDevP+' ('+((r.dp||0)*100).toFixed(0)+'% cfg)')+_neg(r.costo,_BGdes,'Costo de mercancía de las confirmadas (precios de lista)')+_neg(r.fleteEnv,_BGdes,'Flete de envío: '+fmt(r.conf)+' confirmadas × flete del producto')+_neg(r.fleteDev,_BGdes,'Flete de las devoluciones PROYECTADAS ('+((r.dp||0)*100).toFixed(0)+'% de las confirmadas)')+_neg(r.ads,_BGdes,'Gasto Meta Ads de las campañas vinculadas a este producto')+_neg(r.convC,_BGdes,'Costo de conversaciones del producto en el rango')+_neg(r.fijos,_BGdes,_tipFijos)
+        +_neg(r.devProy,_BGdes,_tipDevP+' ('+((r.dp||0)*100).toFixed(0)+'% cfg)')+_neg(r.costo,_BGdes,'Costo de mercancía de las confirmadas (precios de lista)')+_neg(r.fleteEnv,_BGdes,'Flete de envío: '+fmt(r.conf)+' confirmadas × flete del producto')+_neg(r.fleteDev,_BGdes,'Flete de las devoluciones PROYECTADAS ('+((r.dp||0)*100).toFixed(0)+'% de las confirmadas)')+_neg(r.ads,_BGdes,'Gasto Meta Ads de las campañas vinculadas a este producto')+_neg(r.convC,_BGdes,'Costo de conversaciones del producto en el rango')
         +_tdm(r.utilProy,_BGpro)+_pctMrg(r.utilProy,r.venta,_BGpro)
-        +_td((r.gEnt>=0?'$':'-$')+fmt(Math.abs(r.gEnt)),'var('+(r.gEnt>=0?'--green':'--red')+')',false,_BGrea)+_neg(r.fdevR,_BGrea,'Flete pagado por las '+fmt(r.dev||0)+' devoluciones REALES del rango')+_tdm(r.utilReal,_BGrea,_tipReal)+_perEnt(r.gEnt,r.ent,_BGrea)
+        +_td((r.gEnt>=0?'$':'-$')+fmt(Math.abs(r.gEnt)),'var('+(r.gEnt>=0?'--green':'--red')+')',false,_BGrea)+_neg(r.fdevR,_BGrea,'Flete pagado por las '+fmt(r.dev||0)+' devoluciones REALES del rango')+_tdm(r.utilReal,_BGrea,_tipReal)+_perEnt(r.gEnt,r.ent,_BGrea)+_perEnt(r.utilReal,r.ent,_BGrea)
         +`</tr>`
     }).join('')
+    let _ccTot=0,_ccAny=false
+    for(const r of rows){const v=_ccMap[r.pn];if(v!=null){_ccTot+=v;_ccAny=true}}
+    const _ccFoot=!_ccAny?_td('—','var(--subtle)',true):(()=>{const ar=T.conf>_ccTot?' ↗':T.conf<_ccTot?' ↘':'';const c=T.conf>_ccTot?'--green':T.conf<_ccTot?'--red':'--muted';return _td(fmt(_ccTot)+ar,'var('+c+')',true)})()
     const _foot=`<tr style="border-top:2px solid var(--border);background:var(--card2)"><td style="text-align:left;padding:8px 10px;font-weight:700;color:var(--text)">Σ TOTAL${_iCu(-1,T.conf,T.pend,T.rech)}</td>`
-      +_td(fmt(T.ords),'var(--text)',true)+_td(fmt(T.unids),'var(--blue)',true)+_td(fmt(T.conf),'var(--green)',true)+_td(fmt(T.ent),'var(--green)',true)+_pctEnt(T.ent,T.conf,null,true)
+      +_td(fmt(T.ords),'var(--text)',true)+_td(fmt(T.unids),'var(--blue)',true)+_ccFoot+_td(fmt(T.conf),'var(--green)',true)+_td(fmt(T.ent),'var(--green)',true)+_pctEnt(T.ent,T.conf,null,true)
       +_td('$'+fmt(T.venta),'var(--text)',true,_BGini)
-      +_neg(T.devProy,_BGdes,_tipDevP)+_neg(T.costo,_BGdes)+_neg(T.fleteEnv,_BGdes)+_neg(T.fleteDev,_BGdes)+_neg(T.ads,_BGdes)+_neg(T.convC,_BGdes)+_neg(T.fijos,_BGdes,_tipFijos)
+      +_neg(T.devProy,_BGdes,_tipDevP)+_neg(T.costo,_BGdes)+_neg(T.fleteEnv,_BGdes)+_neg(T.fleteDev,_BGdes)+_neg(T.ads,_BGdes)+_neg(T.convC,_BGdes)
       +_tdm(T.utilProy,_BGpro)+_pctMrg(T.utilProy,T.venta,_BGpro,true)
-      +_td((T.gEnt>=0?'$':'-$')+fmt(Math.abs(T.gEnt)),'var('+(T.gEnt>=0?'--green':'--red')+')',true,_BGrea)+_neg(T.fdevR,_BGrea)+_tdm(T.utilReal,_BGrea,_tipReal)+_perEnt(T.gEnt,T.ent,_BGrea,true)
+      +_td((T.gEnt>=0?'$':'-$')+fmt(Math.abs(T.gEnt)),'var('+(T.gEnt>=0?'--green':'--red')+')',true,_BGrea)+_neg(T.fdevR,_BGrea)+_tdm(T.utilReal,_BGrea,_tipReal)+_perEnt(T.gEnt,T.ent,_BGrea,true)+_perEnt(T.utilReal,T.ent,_BGrea,true)
       +`</tr>`
     // 🎯 Calibración automática %dev: configurado (ponderado por confirmadas) vs real del rango
     let _calib=''
@@ -1854,9 +1876,11 @@ async function loadDash(){
         _calib=`<div style="margin-top:8px;padding:8px 12px;background:var(--card2);border:1px solid var(--border);border-radius:8px;font-size:12px;line-height:1.5">🎯 <b>Calibración %dev:</b> configurado <b>${_cfg.toFixed(1)}%</b> (ponderado) · real de este rango <b>${_real.toFixed(1)}%</b> (${fmt(T.dev)} dev de ${fmt(_res)} resueltas) → <span style="color:var(${_col});font-weight:600">${_msg}</span></div>`
       }
     }
-    const _head1=`<tr><th rowspan="2" style="text-align:left;padding:7px 10px;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--muted);vertical-align:bottom;border-bottom:1px solid var(--border)">Producto</th>${_ghh('📊 Volumen',5,'--muted','')}${_ghh('💵 Inicio',1,'--blue',_BGini)}${_ghh('🔻 Lo que se va descontando',7,'--red',_BGdes)}${_ghh('💰 Proyección',2,'--amber',_BGpro)}${_ghh('✅ Mundo real (entregadas)',4,'--green',_BGrea)}</tr>`
-    const _head2=`<tr style="border-bottom:1px solid var(--border)">${_thh('🧾 Órdenes')}${_thh('📦 Prods')}${_thh('✅ Conf.')}${_thh('🚚 Entr.')}${_thh('📉 %Ent',null,'Entregadas ÷ Confirmadas. La métrica reina del COD: 🟢 ≥70% · 🟡 50-69% · 🔴 <50%')}${_thh('Vendido',_BGini)}${_thh('−Dev. proy',_BGdes,_tipDevP)}${_thh('−Costo',_BGdes)}${_thh('−🚚 Flete env',_BGdes)}${_thh('−↩️ Flete dev',_BGdes)}${_thh('−📡 Ads',_BGdes)}${_thh('−💬 Conv',_BGdes)}${_thh('−🏢 Fijos',_BGdes,_tipFijos)}${_thh('💰 PROYECTADA',_BGpro)}${_thh('📊 %Mrg',_BGpro,'Proyectada ÷ Vendido. Qué % de cada peso vendido se vuelve utilidad: 🟢 ≥10% · 🟡 0-9% · 🔴 <0%')}${_thh('✅ Gan. entreg.',_BGrea,'Ganancia Dropi de lo YA entregado (real si Dropi liquidó, teórico si no)')}${_thh('−↩️ Dev. reales',_BGrea)}${_thh('✅ REAL',_BGrea,_tipReal)}${_thh('💵/entrega',_BGrea,_tipPerEnt)}</tr>`
-    return `${_bebe}<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;min-width:1780px;width:100%"><thead>${_head1}${_head2}</thead><tbody>${_body}</tbody><tfoot>${_foot}</tfoot></table></div>${_calib}<div style="margin-top:8px;font-size:11px;color:var(--subtle);line-height:1.5">🧭 <b>El flujo se lee de izquierda a derecha:</b> 💵 Vendido → 🔻 se descuenta todo → 💰 <b>Proyectada</b> (si las confirmadas llegan). ✅ <b>REAL</b> = ganancia de lo YA entregado − devoluciones reales − los mismos ads/conv/fijos. Cada fila cuadra al peso. ${nota}</div>`
+    const _head1=`<tr><th rowspan="2" style="text-align:left;padding:7px 10px;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--muted);vertical-align:bottom;border-bottom:1px solid var(--border)">Producto</th>${_ghh('📊 Volumen',6,'--muted','')}${_ghh('💵 Inicio',1,'--blue',_BGini)}${_ghh('🔻 Lo que se va descontando',6,'--red',_BGdes)}${_ghh('💰 Proyección',2,'--amber',_BGpro)}${_ghh('✅ Mundo real (entregadas)',5,'--green',_BGrea)}</tr>`
+    const _head2=`<tr style="border-bottom:1px solid var(--border)">${_thh('🧾 Órdenes')}${_thh('📦 Prods')}${_thh('📸 Conf. cruce',null,_tipConfCruce)}${_thh('✅ Conf.')}${_thh('🚚 Entr.')}${_thh('📉 %Ent',null,'Entregadas ÷ Confirmadas. La métrica reina del COD: 🟢 ≥70% · 🟡 50-69% · 🔴 <50%')}${_thh('Vendido',_BGini)}${_thh('−Dev. proy',_BGdes,_tipDevP)}${_thh('−Costo',_BGdes)}${_thh('−🚚 Flete env',_BGdes)}${_thh('−↩️ Flete dev',_BGdes)}${_thh('−📡 Ads',_BGdes)}${_thh('−💬 Conv',_BGdes)}${_thh('💰 PROYECTADA',_BGpro,'Ganancia del producto si las confirmadas llegan. SIN gastos fijos: esos se restan una sola vez al negocio (franja TE QUEDA).')}${_thh('📊 %Mrg',_BGpro,'Proyectada ÷ Vendido. Qué % de cada peso vendido se vuelve utilidad: 🟢 ≥10% · 🟡 0-9% · 🔴 <0%')}${_thh('✅ Gan. entreg.',_BGrea,'Ganancia Dropi de lo YA entregado (real si Dropi liquidó, teórico si no)')}${_thh('−↩️ Dev. reales',_BGrea)}${_thh('✅ REAL',_BGrea,_tipReal)}${_thh('💵/entrega',_BGrea,_tipPerEnt)}${_thh('💵/entrega NETO',_BGrea,_tipPerEntNeto)}</tr>`
+    // 🏢 FRANJA "TE QUEDA": los fijos se restan UNA sola vez al negocio completo (reconcilia con las cards de arriba)
+    const _franja=`<div style="margin-top:8px;padding:10px 14px;background:linear-gradient(135deg,rgba(245,158,11,.07),rgba(34,197,94,.06));border:1px solid var(--border);border-radius:8px;font-size:13px;line-height:1.8">🏢 <b>Los fijos se restan una sola vez al negocio (no por producto):</b><br>💰 Proyectada de productos ${_m(T.utilProy)} − 🏢 Fijos (${dias}d): $${fmt(gastoFijoPeriodo)} = <b>TE QUEDA (proyectado): ${_m(T.utilProy-gastoFijoPeriodo)}</b><br>✅ Real de productos ${_m(T.utilReal)} − 🏢 Fijos: $${fmt(gastoFijoPeriodo)} = <b>TE QUEDA (real): ${_m(T.utilReal-gastoFijoPeriodo)}</b></div>`
+    return `${_bebe}<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;min-width:1880px;width:100%"><thead>${_head1}${_head2}</thead><tbody>${_body}</tbody><tfoot>${_foot}</tfoot></table></div>${_franja}${_calib}<div style="margin-top:8px;font-size:11px;color:var(--subtle);line-height:1.5">🧭 <b>El flujo se lee de izquierda a derecha:</b> 💵 Vendido → 🔻 se descuenta todo → 💰 <b>Proyectada</b> (si las confirmadas llegan). ✅ <b>REAL</b> = ganancia de lo YA entregado − devoluciones reales − los mismos ads/conv. Los 🏢 fijos van UNA vez en la franja TE QUEDA. Cada fila cuadra al peso. ${nota}</div>`
   }
   const _pvBoxVtasHTML=`<div id="pvbox-vtas" style="display:none;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:12px">${_pvMkHTML(_pvRows,'vtas','Lente: fecha de venta (chat).')}</div>`
   const _pvBoxDropiHTML=`<div id="pvbox-dropi" style="display:none;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:12px">${_pvMkHTML(_pvRowsD,'dropi','Lente: fecha de subida a Dropi.')}</div>`
@@ -12428,14 +12452,17 @@ window._nexoNormEstado=function(s){
 window._nexoSnapshotCruce=async function(rows,tipo){
   try{
     if(!rows||!rows.length)return
+    // Normaliza fechas: acepta 'YYYY-MM-DD' o 'DD-MM-YYYY' (formato Excel de Dropi)
+    const _fdN=v=>{const s=String(v||'').slice(0,10);if(/^\d{4}-\d{2}-\d{2}$/.test(s))return s;const p=s.split('-');if(p.length===3&&p[0].length===2&&p[2].length===4)return `${p[2]}-${p[1]}-${p[0]}`;return null}
     const agg={}
     for(const it of rows){
       const est=window._nexoNormEstado(it.est)
       let prod=it.prod||'Sin producto'
       try{if(typeof resolveProdName==='function')prod=resolveProdName(it.prod||'').nombre||prod}catch(_e){}
-      const f=it.fecha||null
-      const k=prod+'||'+(f||'')
-      if(!agg[k])agg[k]={producto:prod,fecha_orden:f,total:0,confirmadas:0,canceladas:0,pconf:0,pendientes:0,rechazadas:0,entregadas:0,devueltas:0}
+      const f=_fdN(it.fecha)
+      const fd=_fdN(it.fdropi)
+      const k=prod+'||'+(f||'')+'||'+(fd||'')
+      if(!agg[k])agg[k]={producto:prod,fecha_orden:f,fecha_dropi_orden:fd,total:0,confirmadas:0,canceladas:0,pconf:0,pendientes:0,rechazadas:0,entregadas:0,devueltas:0}
       const A=agg[k];A.total++
       const cat=DROPI_STATUS[est]?.cat
       if(est==='CANCELADO')A.canceladas++
@@ -12452,51 +12479,6 @@ window._nexoSnapshotCruce=async function(rows,tipo){
       if(error){console.warn('[cruce_snapshots] insert falló (¿ya corriste el SQL de la tabla?):',error.message);break}
     }
   }catch(e){console.warn('[cruce_snapshots] excepción:',e.message)}
-}
-
-// 📸 PANEL DE CONTRASTE: muestra todas las fotografías guardadas para las órdenes de una fecha,
-// de la más vieja a la más nueva, por producto. La PRIMERA (📸) es "cómo quedó el día del cruce";
-// la ÚLTIMA (🟢) es "cómo va hoy". Igual o mejor es normal: se recuperan canceladas, se despachan, etc.
-window._nexoVerContraste=async function(){
-  const f=document.getElementById('contraste-fecha')?.value
-  const body=document.getElementById('contraste-body')
-  if(!body)return
-  if(!f){body.innerHTML='<div class="alert alert-amber">Elige una fecha</div>';return}
-  body.innerHTML='<div style="color:var(--muted);padding:8px">Cargando fotografías...</div>'
-  try{
-    const{data,error}=await sb.from('cruce_snapshots').select('*').eq('fecha_orden',f).order('lote',{ascending:true}).limit(2000)
-    if(error)throw error
-    if(!data||!data.length){body.innerHTML='<div class="alert alert-blue">No hay fotografías para las órdenes de esa fecha. Se crean solas cada vez que corres un cruce (Cruce Dropi o Seguimiento).</div>';return}
-    const porProd={}
-    for(const s of data){(porProd[s.producto]=porProd[s.producto]||[]).push(s)}
-    const _e=x=>String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    const _fmtLote=l=>{try{return new Date(l).toLocaleString('es-CO',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}catch(e){return String(l||'').slice(0,16)}}
-    const _thc=(t,c)=>`<th style="text-align:center;padding:6px;font-size:10px;text-transform:uppercase;color:${c||'var(--muted)'}">${t}</th>`
-    let html=''
-    for(const[prod,arr]of Object.entries(porProd)){
-      arr.sort((a,b)=>String(a.lote||a.created_at||'').localeCompare(String(b.lote||b.created_at||'')))
-      const first=arr[0],last=arr[arr.length-1]
-      const delta=(last.confirmadas||0)-(first.confirmadas||0)
-      html+=`<div style="margin-bottom:14px">
-        <div style="font-weight:800;font-size:13px;color:var(--text);margin-bottom:6px">${_e(prod)} <span style="font-weight:600;color:${delta>=0?'var(--green)':'var(--red)'}">· confirmadas: ${first.confirmadas||0} → ${last.confirmadas||0} (${delta>=0?'+':''}${delta})</span></div>
-        <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;min-width:660px;width:100%">
-        <thead><tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:6px 8px;font-size:10px;text-transform:uppercase;color:var(--muted)">Corrida</th>${_thc('Tipo')}${_thc('Total')}${_thc('Conf','var(--green)')}${_thc('Canc','var(--red)')}${_thc('P.conf','var(--amber)')}${_thc('Pend','var(--amber)')}${_thc('Rech','var(--red)')}${_thc('Entr','var(--green)')}${_thc('Dev','var(--red)')}</tr></thead><tbody>
-        ${arr.map((s,i)=>`<tr style="border-bottom:1px solid var(--border);${i===0?'background:rgba(56,139,222,.10);':''}${(i===arr.length-1&&arr.length>1)?'background:rgba(63,185,80,.10);':''}">
-          <td style="padding:6px 8px;white-space:nowrap;color:var(--text)">${i===0?'📸 ':''}${(i===arr.length-1&&arr.length>1)?'🟢 ':''}${_fmtLote(s.lote||s.created_at)}</td>
-          <td style="text-align:center;padding:6px;color:var(--muted)">${s.tipo==='cruce_dropi'?'Cruce Dropi':'Seguimiento'}</td>
-          <td style="text-align:center;padding:6px;color:var(--text)">${s.total||0}</td>
-          <td style="text-align:center;padding:6px;color:var(--green);font-weight:700">${s.confirmadas||0}</td>
-          <td style="text-align:center;padding:6px;color:var(--red)">${s.canceladas||0}</td>
-          <td style="text-align:center;padding:6px;color:var(--amber)">${s.pconf||0}</td>
-          <td style="text-align:center;padding:6px;color:var(--amber)">${s.pendientes||0}</td>
-          <td style="text-align:center;padding:6px;color:var(--red)">${s.rechazadas||0}</td>
-          <td style="text-align:center;padding:6px;color:var(--green)">${s.entregadas||0}</td>
-          <td style="text-align:center;padding:6px;color:var(--red)">${s.devueltas||0}</td>
-        </tr>`).join('')}
-        </tbody></table></div></div>`
-    }
-    body.innerHTML=html+'<div style="font-size:11.5px;color:var(--muted)">📸 = primera fotografía (el día del cruce) · 🟢 = la más reciente (cómo va hoy)</div>'
-  }catch(e){body.innerHTML=`<div class="alert alert-red">Error: ${e.message}. ¿Ya corriste el SQL de la tabla cruce_snapshots?</div>`}
 }
 
 // ════════ ETAPAS DEL SEMÁFORO DE ÓRDENES (capa de SOLO visualización · Cruce Dropi) ════════
@@ -13821,7 +13803,7 @@ window.actualizarEstadosDropi=async()=>{
   }
   msgEl.innerHTML=`<span style="color:var(--green)">✅ ${ok} actualizadas${fail?` · ${fail} errores`:''}</span>`
   // 📸 Fotografía del cruce (por producto + fecha de orden) — alimenta el panel de contraste
-  window._nexoSnapshotCruce(cruzados.map(r=>({prod:r.mapeo?.producto||r.producto||null,est:r.estatus,fecha:r.mapeo?.fecha||null})),'cruce_dropi').catch(()=>{})
+  window._nexoSnapshotCruce(cruzados.map(r=>({prod:r.mapeo?.producto||r.producto||null,est:r.estatus,fecha:r.mapeo?.fecha||null,fdropi:r.fecha_dropi||r.mapeo?.fecha_dropi||null})),'cruce_dropi').catch(()=>{})
   logAction('dropi_estados_actualizados',{actualizadas:ok,errores:fail}).catch(()=>{})
   // ── ENTREGA 3B: disparar histórico de semáforos (async, no bloquea) ──
   try{
@@ -14428,15 +14410,6 @@ async function pageAuxSeguimiento(c){
     </div>
     <div id="seg-pegados" style="margin-top:18px"></div>
     <div id="seg-resultado" style="margin-top:18px"></div>
-    <div style="margin-top:18px;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:14px 16px">
-      <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px">📸 Contraste de cruces</div>
-      <div style="font-size:12.5px;color:var(--muted);margin-bottom:10px">Cada cruce deja una fotografía. Aquí comparas: "ese día quedaron X confirmadas → hoy van Y". Elige la fecha de las órdenes (día de la venta).</div>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <input type="date" id="contraste-fecha" value="${today()}" style="font-size:13px;padding:8px 10px;background:var(--card2);border:1px solid var(--border);border-radius:8px;color:var(--text)">
-        <button onclick="window._nexoVerContraste()" style="padding:8px 16px;font-size:13px;background:var(--blue);color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:700">Ver contraste</button>
-      </div>
-      <div id="contraste-body" style="margin-top:12px"></div>
-    </div>
     <div class="divider"></div>
     <div class="page-title" style="font-size:16px">📦 Historial de lotes</div>
     <div class="fld" style="max-width:250px;margin-bottom:14px">
@@ -15176,7 +15149,7 @@ window.procesarSeguimiento=async()=>{
     }
     msg.innerHTML+=`<div class="alert alert-blue" style="margin-top:8px">💾 ${updated} estados actualizados automáticamente</div>`
     // 📸 Fotografía del cruce (por producto + fecha de orden) — alimenta el panel de contraste
-    window._nexoSnapshotCruce(resultados.filter(r=>r.mapeo).map(r=>({prod:r.mapeo?.producto||r.producto||null,est:r.estatus,fecha:r.mapeo?.fecha||null})),'seguimiento').catch(()=>{})
+    window._nexoSnapshotCruce(resultados.filter(r=>r.mapeo).map(r=>({prod:r.mapeo?.producto||r.producto||null,est:r.estatus,fecha:r.mapeo?.fecha||null,fdropi:r.fecha_dropi||r.mapeo?.fecha_dropi||null})),'seguimiento').catch(()=>{})
 
     // Rolling 90 días: auto-actualizar dev_pct si es admin y hay 50+ órdenes
     if(esAdmin){

@@ -883,6 +883,208 @@ function _prodCanonMapeo(m){
 }
 window._prodCanonMapeo=_prodCanonMapeo
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 🪟 EMBUDO DROPI: modal guías+teléfonos · acordeón campaña/anuncio · cuadre ℹ️
+// Lee window._embOrds (órdenes del lente Dropi) y window._embAdCamp (ad→campaña).
+// Tolerante: si numero_guia/ad_id no existen todavía en BD, muestra '—' / "Sin ID".
+// ═══════════════════════════════════════════════════════════════════════════
+window._buildAdCampMap=async(adIds)=>{
+  // ad_id → {campId, campN (nombre campaña), adN (nombre anuncio)} vía meta_campanas (ad→adset→campaign)
+  const out={}
+  const unique=[...new Set((adIds||[]).filter(Boolean).map(String))]
+  if(!unique.length)return out
+  let ads=[]
+  for(let i=0;i<unique.length;i+=200){
+    const{data}=await sb.from('meta_campanas').select('meta_id,parent_id,nombre').eq('nivel','ad').in('meta_id',unique.slice(i,i+200))
+    if(data)ads=ads.concat(data)
+  }
+  for(const a of ads)out[a.meta_id]={campId:null,campN:null,adN:a.nombre||null,_ps:a.parent_id||null}
+  const adsetIds=[...new Set(ads.map(a=>a.parent_id).filter(Boolean))]
+  const a2c={}
+  for(let i=0;i<adsetIds.length;i+=200){
+    const{data}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','adset').in('meta_id',adsetIds.slice(i,i+200))
+    if(data)for(const s of data)a2c[s.meta_id]=s.parent_id
+  }
+  const campIds=[...new Set(Object.values(a2c).filter(Boolean))]
+  const cNom={}
+  for(let i=0;i<campIds.length;i+=200){
+    const{data}=await sb.from('meta_campanas').select('meta_id,nombre').eq('nivel','campaign').in('meta_id',campIds.slice(i,i+200))
+    if(data)for(const c of data)cNom[c.meta_id]=c.nombre||null
+  }
+  for(const k of Object.keys(out)){
+    const cid=out[k]._ps?a2c[out[k]._ps]:null
+    out[k].campId=cid||null
+    out[k].campN=cid?(cNom[cid]||null):null
+    delete out[k]._ps
+  }
+  return out
+}
+// ── Acordeón: toggle campañas de un producto (y cierra sus anuncios al colapsar) ──
+window._embTgP=(key,i)=>{
+  const rows=document.querySelectorAll(`.embc-${key}-${i}`)
+  if(!rows.length)return
+  const abrir=rows[0].style.display==='none'
+  rows.forEach(r=>r.style.display=abrir?'':'none')
+  const ch=document.getElementById(`embch-${key}-${i}`);if(ch)ch.textContent=abrir?'▾':'▸'
+  if(!abrir){
+    document.querySelectorAll(`[class^="emba-${key}-${i}-"]`).forEach(r=>r.style.display='none')
+    document.querySelectorAll(`[id^="embcch-${key}-${i}-"]`).forEach(c=>c.textContent='▸')
+  }
+}
+window._embTgC=(key,i,j)=>{
+  const rows=document.querySelectorAll(`.emba-${key}-${i}-${j}`)
+  if(!rows.length)return
+  const abrir=rows[0].style.display==='none'
+  rows.forEach(r=>r.style.display=abrir?'':'none')
+  const ch=document.getElementById(`embcch-${key}-${i}-${j}`);if(ch)ch.textContent=abrir?'▾':'▸'
+}
+// ── Predicados de estado: EXACTAMENTE la misma clasificación del embudo ──
+window._embEstMeta={
+  total:{t:'TODAS LAS ÓRDENES',e:'📦',c:'var(--blue)'},
+  canc:{t:'CANCELADAS',e:'🔴',c:'var(--red)'},
+  pconf:{t:'PEND. CONFIRMACIÓN',e:'🟠',c:'var(--amber)'},
+  rech:{t:'RECHAZADAS',e:'🚫',c:'var(--red)'},
+  pend:{t:'PENDIENTES',e:'⏳',c:'var(--amber)'},
+  desp:{t:'DESPACHADAS',e:'🚚',c:'var(--blue)'},
+  encam:{t:'EN CAMINO',e:'🛣️',c:'var(--blue)'},
+  ent:{t:'ENTREGADAS',e:'✅',c:'var(--green)'},
+  dev:{t:'DEVUELTAS',e:'↩️',c:'var(--red)'},
+  fin:{t:'FINALIZADAS (entregadas + devueltas)',e:'🏁',c:'var(--blue)'}
+}
+window._embEstOk=(m,est)=>{
+  const _es=m.estado_final,_ct=(window.DROPI_STATUS||{})[_es]?.cat
+  const canc=_es==='CANCELADO',rech=_es==='RECHAZADO',pconf=(_es==='PENDIENTE CONFIRMACION'||!_es),pend=_es==='PENDIENTE'
+  const ent=(_ct==='entregado'||_ct==='novedad_ok'),dev=(_ct==='devuelto')
+  const desp=!(canc||rech||pconf||pend)
+  switch(est){
+    case 'total':return true
+    case 'canc':return canc
+    case 'pconf':return pconf
+    case 'rech':return rech
+    case 'pend':return pend
+    case 'desp':return desp
+    case 'encam':return desp&&!ent&&!dev
+    case 'ent':return ent
+    case 'dev':return dev
+    case 'fin':return ent||dev
+    default:return false
+  }
+}
+window._embEsc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+// ── Copiar al portapapeles (con fallback) + feedback ✅ ──
+window._embCopy=async(txt,btn)=>{
+  try{await navigator.clipboard.writeText(txt)}
+  catch(_){const ta=document.createElement('textarea');ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();try{document.execCommand('copy')}catch(__){}document.body.removeChild(ta)}
+  if(btn){const o=btn.textContent;btn.textContent='✅';setTimeout(()=>{btn.textContent=o},900)}
+}
+window._embCopyAll=(kind,btn)=>{
+  const L=window._embList||[]
+  const vals=L.map(r=>kind==='g'?r.g:r.t).filter(v=>v&&v!=='—')
+  if(!vals.length){if(btn){const o=btn.textContent;btn.textContent='⚠️ Sin datos';setTimeout(()=>{btn.textContent=o},1200)}return}
+  window._embCopy(vals.join('\n'),btn)
+}
+window._embModalFiltro=()=>{
+  const q=(document.getElementById('emb-modal-buscar')?.value||'').toLowerCase().replace(/\s/g,'')
+  document.querySelectorAll('#emb-modal-tbody tr').forEach(tr=>{
+    const g=(tr.dataset.g||'').toLowerCase(),t=(tr.dataset.t||'').toLowerCase()
+    tr.style.display=(!q||g.includes(q)||t.includes(q))?'':'none'
+  })
+}
+window._embModalClose=()=>{const el=document.getElementById('emb-modal-overlay');if(el)el.remove()}
+// ── Modal principal: 2 columnas GUÍA | TELÉFONO con copiar 1 / copiar todas ──
+// pi: índice en window._embPN (-1 = todos los productos, -2 = usar window._embCuadreCtx.pn)
+// ci: ''=todas · '_org'=sin ad_id · '_nr'=ad sin campaña resuelta · campId
+// ai: ''=todos · adId concreto      est: clave de estado (canc/desp/ent/...)
+window._embModal=(pi,ci,ai,est)=>{
+  const pn=pi===-1?null:(pi===-2?((window._embCuadreCtx||{}).pn||null):((window._embPN||[])[pi]||null))
+  const AC=window._embAdCamp||{}
+  const ords=(window._embOrds||[]).filter(m=>{
+    if(pn&&window._prodCanonMapeo(m)!==pn)return false
+    const _ad=m.ad_id?String(m.ad_id):''
+    if(ai){if(_ad!==String(ai))return false}
+    else if(ci){
+      const _cid=_ad?((AC[_ad]&&AC[_ad].campId)?String(AC[_ad].campId):'_nr'):'_org'
+      if(_cid!==String(ci))return false
+    }
+    return window._embEstOk(m,est)
+  })
+  const M=window._embEstMeta[est]||window._embEstMeta.total
+  const chip=ai?`📢 Anuncio <code>${window._embEsc(ai)}</code>`:(ci==='_org'?'❓ Sin anuncio (orgánicas)':(ci==='_nr'?'❓ Campaña sin resolver':(ci?`📣 Campaña <code>${window._embEsc(ci)}</code>`:'')))
+  window._embList=ords.map(m=>({g:String(m.numero_guia||'—'),t:String(m.telefono||'—')}))
+  const filas=window._embList.map(r=>`<tr data-g="${window._embEsc(r.g)}" data-t="${window._embEsc(r.t)}" style="border-bottom:1px solid var(--border)">
+    <td style="padding:8px 10px;font-family:monospace;font-size:13px;color:var(--text)">${window._embEsc(r.g)} ${r.g!=='—'?`<button onclick="window._embCopy('${window._embEsc(r.g)}',this)" title="Copiar guía" style="background:none;border:none;cursor:pointer;font-size:12px">📋</button>`:''}</td>
+    <td style="padding:8px 10px;font-family:monospace;font-size:13px;color:var(--text)">${window._embEsc(r.t)} ${r.t!=='—'?`<button onclick="window._embCopy('${window._embEsc(r.t)}',this)" title="Copiar teléfono" style="background:none;border:none;cursor:pointer;font-size:12px">📋</button>`:''}</td></tr>`).join('')
+  window._embModalClose()
+  const ov=document.createElement('div')
+  ov.id='emb-modal-overlay'
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px'
+  ov.onclick=e=>{if(e.target===ov)window._embModalClose()}
+  ov.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;max-width:560px;width:100%;max-height:86vh;display:flex;flex-direction:column;overflow:hidden">
+    <div style="padding:14px 16px;border-bottom:2px solid ${M.c};display:flex;align-items:flex-start;justify-content:space-between;gap:10px">
+      <div>
+        <div style="font-weight:800;font-size:15px;color:${M.c}">${M.e} ${M.t}</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px">${pn?window._embEsc(pn):'Todos los productos'}${chip?' · '+chip:''}</div>
+        <div style="font-size:22px;font-weight:800;color:var(--text);margin-top:4px">${ords.length} <span style="font-size:12px;font-weight:600;color:var(--muted)">órdenes</span></div>
+      </div>
+      <button onclick="window._embModalClose()" style="background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:14px;flex-shrink:0">✕</button>
+    </div>
+    <div style="padding:10px 16px;display:flex;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--border)">
+      <button onclick="window._embCopyAll('g',this)" style="background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer">📦 Copiar TODAS las guías</button>
+      <button onclick="window._embCopyAll('t',this)" style="background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer">📱 Copiar TODOS los teléfonos</button>
+    </div>
+    <div style="padding:10px 16px 0">
+      <input id="emb-modal-buscar" oninput="window._embModalFiltro()" placeholder="🔍 Buscar teléfono o guía..." style="width:100%;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:13px;box-sizing:border-box">
+    </div>
+    <div style="overflow-y:auto;padding:10px 16px 16px;flex:1">
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr style="border-bottom:1px solid var(--border)">
+          <th style="text-align:left;padding:6px 10px;font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)">📦 Guía</th>
+          <th style="text-align:left;padding:6px 10px;font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)">📱 Teléfono</th>
+        </tr></thead>
+        <tbody id="emb-modal-tbody">${filas||'<tr><td colspan="2" style="padding:14px;color:var(--muted);font-size:13px">Sin órdenes en este filtro.</td></tr>'}</tbody>
+      </table>
+      ${ords.length&&window._embList.every(r=>r.g==='—')?'<div style="margin-top:8px;font-size:11px;color:var(--amber)">⚠️ Estas órdenes aún no tienen guía guardada (se llena con el cruce Dropi).</div>':''}
+      <div style="margin-top:8px;font-size:11px;color:var(--subtle)">💡 Toca 📋 para copiar uno solo.</div>
+    </div>
+  </div>`
+  document.body.appendChild(ov)
+}
+// ── 🧮 CUADRE: por qué Confirmadas ≠ Despachadas (Conf = Desp + Pend + Rech) ──
+window._embCuadre=(idx,conf,pend,rech)=>{
+  const pn=idx<0?null:((window._embPvReg||[])[idx]||null)
+  window._embCuadreCtx={pn}
+  const desp=conf-pend-rech
+  const cuadra=(desp+pend+rech)===conf
+  window._embModalClose()
+  const ov=document.createElement('div')
+  ov.id='emb-modal-overlay'
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px'
+  ov.onclick=e=>{if(e.target===ov)window._embModalClose()}
+  const _fila=(e,t,v,extra)=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px;background:var(--card2);border:1px solid var(--border);border-radius:10px;margin-bottom:8px"><div style="font-size:13px;color:var(--text)">${e} ${t}</div><div style="display:flex;align-items:center;gap:8px"><div style="font-size:17px;font-weight:800;color:var(--text)">${fmt(v)}</div>${extra||''}</div></div>`
+  const _btnVer=est=>`<button onclick="window._embModal(-2,'','','${est}')" style="background:var(--card);border:1px solid var(--blue);color:var(--blue);border-radius:7px;padding:4px 9px;font-size:11px;font-weight:700;cursor:pointer">👀 Ver</button>`
+  ov.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;max-width:440px;width:100%;max-height:86vh;overflow-y:auto">
+    <div style="padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;justify-content:space-between;gap:10px">
+      <div>
+        <div style="font-weight:800;font-size:15px;color:var(--text)">🧮 ¿Por qué Confirmadas ≠ Despachadas?</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px">${pn?window._embEsc(pn):'Σ TOTAL (todos los productos)'}</div>
+      </div>
+      <button onclick="window._embModalClose()" style="background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:14px;flex-shrink:0">✕</button>
+    </div>
+    <div style="padding:14px 16px">
+      ${_fila('✅','Confirmadas <span style="font-size:11px;color:var(--muted)">(todo lo que NO se cayó)</span>',conf)}
+      <div style="text-align:center;font-size:12px;color:var(--muted);margin:2px 0 8px">se divide en ⬇️</div>
+      ${_fila('🚚','Ya despachadas',desp)}
+      ${_fila('⏳','Pendientes por despachar',pend,pend>0?_btnVer('pend'):'')}
+      ${_fila('🚫','Rechazadas',rech,rech>0?_btnVer('rech'):'')}
+      <div style="margin-top:10px;padding:10px 12px;border-radius:10px;font-size:13px;font-weight:700;text-align:center;${cuadra?'background:rgba(34,197,94,.12);color:var(--green);border:1px solid var(--green)':'background:rgba(239,68,68,.12);color:var(--red);border:1px solid var(--red)'}">
+        ${fmt(desp)} + ${fmt(pend)} + ${fmt(rech)} = ${fmt(desp+pend+rech)} ${cuadra?'✅ TODO CUADRA':`🔴 NO CUADRA con ${fmt(conf)} — revisar datos`}
+      </div>
+      <div style="margin-top:10px;font-size:11px;color:var(--subtle);line-height:1.5">💡 <b>Confirmadas</b> (tabla de arriba) incluye pendientes y rechazadas que aún no salen. <b>Despachadas</b> (tabla de abajo) solo cuenta lo que YA salió. Por eso pueden diferir sin ser un error.</div>
+    </div>
+  </div>`
+  document.body.appendChild(ov)
+}
+
 // ── HISTORIAL DE IDs DE DROPI ──────────────────────────────────────────────
 // Un producto puede haber tenido VARIOS IDs de Dropi a lo largo del tiempo. El ID
 // VIGENTE (productos.dropi_id) manda para órdenes NUEVAS y el Asignador. Los IDs
@@ -1215,10 +1417,20 @@ async function loadDash(){
   let mapeosDropi=null
   {
     const _qD=cols=>_sbFetchAll((_f,_t)=>sb.from('mapeos').select(cols).gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).order('id',{ascending:true}).range(_f,_t))
-    let _rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi,producto_id_dropi')
+    let _rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi,producto_id_dropi,ad_id,numero_guia')
+    if(_rD.error)_rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi,producto_id_dropi,ad_id')
+    if(_rD.error)_rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi,producto_id_dropi')
     if(_rD.error)_rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi')
     mapeosDropi=_rD.data
   }
+  // 🪟 DETALLE POR ORDEN (guías+teléfonos) + 📣 desglose campaña/anuncio: stash global para modal/acordeón.
+  // Tolerante: si numero_guia/ad_id no llegaron (columna ausente), el modal muestra '—' y el desglose cae a "Sin ID".
+  window._embOrds=mapeosDropi||[]
+  window._embAdCamp={}
+  try{
+    const _adIdsEmb=[...new Set((mapeosDropi||[]).map(m=>m&&m.ad_id).filter(Boolean).map(String))]
+    if(_adIdsEmb.length)window._embAdCamp=await window._buildAdCampMap(_adIdsEmb)
+  }catch(_eEmb){console.warn('[EMB adcamp]',_eEmb)}
   let totD1=0,totD2=0,totD3=0,totD4=0,confD=0,cancD=0,pendD=0,entD=0,devD=0
   let _grdGanD=0,_grdFDevD=0,_grdConDatoD=0
   // NUEVO: listas de detalle para desplegables (fecha de subida Dropi)
@@ -1261,9 +1473,12 @@ async function loadDash(){
     // 📦 PRODUCTOS VENDIDOS (mejora): acumular por producto — solo lee variables ya calculadas arriba
     {
       const _pnV=_prodDD||'Sin producto'
-      if(!_pvD[_pnV])_pvD[_pnV]={ords:0,unids:0,conf:0,unidsConf:0,ent:0,venta:0,ganEnt:0,fdev:0}
+      if(!_pvD[_pnV])_pvD[_pnV]={ords:0,unids:0,conf:0,unidsConf:0,ent:0,venta:0,ganEnt:0,fdev:0,pend:0,rech:0}
       const _pvS=_pvD[_pnV]
       _pvS.ords++;_pvS.unids+=q
+      // 🧮 CUADRE: pend/rech por producto (para explicar Confirmadas = Despachadas + Pend + Rech)
+      if(m.estado_final==='PENDIENTE')_pvS.pend++
+      else if(m.estado_final==='RECHAZADO')_pvS.rech++
       const _esConfD=(m.estado_final!=='CANCELADO')&&!(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)
       if(_esConfD){
         _pvS.conf++;_pvS.unidsConf+=q
@@ -1434,7 +1649,7 @@ async function loadDash(){
       const fijoP=confTotalMundo>0?Math.round(gastoFijoPeriodo*confN/confTotalMundo):0
       const utilProy=Math.round(ventaLista*(1-_dp)-costoProv-confN*_fo-Math.round(confN*_dp*_fd)-gastoP-convP-fijoP)
       const utilReal=Math.round(s.ganEnt-s.fdev-gastoP-convP-fijoP)
-      rows.push({pn,ords:s.ords,unids:s.unids,conf:confN,ent:s.ent,venta:Math.round(s.venta),utilProy,utilReal,gastoP})
+      rows.push({pn,ords:s.ords,unids:s.unids,conf:confN,ent:s.ent,venta:Math.round(s.venta),utilProy,utilReal,gastoP,pend:s.pend||0,rech:s.rech||0})
       totUnids+=s.unids
     }
     rows.sort((a,b)=>b.venta-a.venta)
@@ -1445,7 +1660,10 @@ async function loadDash(){
   // Generador del desglose (frase simple + tabla). key: 'vtas' | 'dropi'
   const _pvMkHTML=(rows,key,nota)=>{
     if(!rows.length)return '<div style="padding:12px;color:var(--muted);font-size:12px">Sin datos en este rango.</div>'
-    const T=rows.reduce((a,r)=>{a.ords+=r.ords;a.unids+=r.unids;a.conf+=r.conf;a.ent+=r.ent;a.venta+=r.venta;a.utilProy+=r.utilProy;a.utilReal+=r.utilReal;return a},{ords:0,unids:0,conf:0,ent:0,venta:0,utilProy:0,utilReal:0})
+    const T=rows.reduce((a,r)=>{a.ords+=r.ords;a.unids+=r.unids;a.conf+=r.conf;a.ent+=r.ent;a.venta+=r.venta;a.utilProy+=r.utilProy;a.utilReal+=r.utilReal;a.pend+=(r.pend||0);a.rech+=(r.rech||0);return a},{ords:0,unids:0,conf:0,ent:0,venta:0,utilProy:0,utilReal:0,pend:0,rech:0})
+    // 🧮 CUADRE (solo lente Dropi): ℹ️ que explica por qué Confirmadas ≠ Despachadas (Conf = Desp + Pend + Rech)
+    if(key==='dropi')window._embPvReg=rows.map(r=>r.pn)
+    const _iCu=(idx,conf,pend,rech)=>key!=='dropi'?'':` <span onclick="event.stopPropagation();window._embCuadre(${idx},${conf||0},${pend||0},${rech||0})" title="¿Por qué Confirmadas no coincide con Despachadas? Toca para ver el cuadre" style="cursor:pointer;font-size:11px;opacity:.8;border:1px solid var(--border);border-radius:50%;width:15px;height:15px;display:inline-flex;align-items:center;justify-content:center;color:var(--blue);margin-left:3px;vertical-align:middle;font-weight:700">ℹ</span>`
     const _m=v=>`<span style="color:var(${v>=0?'--green':'--red'});font-weight:700">${v>=0?'$'+fmt(v):'-$'+fmt(Math.abs(v))}</span>`
     const _bebe=`<div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:13px;line-height:1.6">🧠 Vendiste <strong>${fmt(T.unids)} productos</strong> en <strong>${fmt(T.ords)} órdenes</strong>. Si todo lo confirmado llega: ${_m(T.utilProy)}. Con lo YA entregado (y todos los gastos del período): ${_m(T.utilReal)}.</div>`
     const _th=t=>`<th style="text-align:center;padding:7px 8px;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--muted);white-space:nowrap">${t}</th>`
@@ -1453,9 +1671,9 @@ async function loadDash(){
     const _tdm=v=>`<td style="text-align:center;padding:7px 8px;font-variant-numeric:tabular-nums;font-weight:700;color:var(${v>=0?'--green':'--red'})">${v>=0?'$'+fmt(v):'-$'+fmt(Math.abs(v))}</td>`
     const _body=rows.map(r=>{
       const _warn=(r.gastoP===0&&r.conf>0)?' <span title="Este producto no tiene campañas vinculadas: no se le descontó gasto de ads. Vincúlalo en Productos para cuentas exactas." style="cursor:help">⚠️</span>':''
-      return `<tr style="border-bottom:1px solid var(--border)"><td style="text-align:left;padding:7px 10px;white-space:nowrap;color:var(--text)">${r.pn}${_warn}</td>`+_td(fmt(r.ords))+_td(fmt(r.unids),'var(--blue)',true)+_td(fmt(r.conf),'var(--green)')+_td(fmt(r.ent),'var(--green)')+_td('$'+fmt(r.venta),'var(--text)',true)+_tdm(r.utilProy)+_tdm(r.utilReal)+`</tr>`
+      return `<tr style="border-bottom:1px solid var(--border)"><td style="text-align:left;padding:7px 10px;white-space:nowrap;color:var(--text)">${r.pn}${_warn}${_iCu(rows.indexOf(r),r.conf,r.pend,r.rech)}</td>`+_td(fmt(r.ords))+_td(fmt(r.unids),'var(--blue)',true)+_td(fmt(r.conf),'var(--green)')+_td(fmt(r.ent),'var(--green)')+_td('$'+fmt(r.venta),'var(--text)',true)+_tdm(r.utilProy)+_tdm(r.utilReal)+`</tr>`
     }).join('')
-    const _foot=`<tr style="border-top:2px solid var(--border);background:var(--card2)"><td style="text-align:left;padding:8px 10px;font-weight:700;color:var(--text)">Σ TOTAL</td>`+_td(fmt(T.ords),'var(--text)',true)+_td(fmt(T.unids),'var(--blue)',true)+_td(fmt(T.conf),'var(--green)',true)+_td(fmt(T.ent),'var(--green)',true)+_td('$'+fmt(T.venta),'var(--text)',true)+_tdm(T.utilProy)+_tdm(T.utilReal)+`</tr>`
+    const _foot=`<tr style="border-top:2px solid var(--border);background:var(--card2)"><td style="text-align:left;padding:8px 10px;font-weight:700;color:var(--text)">Σ TOTAL${_iCu(-1,T.conf,T.pend,T.rech)}</td>`+_td(fmt(T.ords),'var(--text)',true)+_td(fmt(T.unids),'var(--blue)',true)+_td(fmt(T.conf),'var(--green)',true)+_td(fmt(T.ent),'var(--green)',true)+_td('$'+fmt(T.venta),'var(--text)',true)+_tdm(T.utilProy)+_tdm(T.utilReal)+`</tr>`
     return `${_bebe}<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;min-width:820px;width:100%"><thead><tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:7px 10px;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--muted)">Producto</th>${_th('🧾 Órdenes')}${_th('📦 Productos')}${_th('✅ Confirmadas')}${_th('🚚 Entregadas')}${_th('💵 Total vendido')}${_th('💰 Util. proyectada')}${_th('✅ Util. REAL')}</tr></thead><tbody>${_body}</tbody><tfoot>${_foot}</tfoot></table></div><div style="margin-top:8px;font-size:11px;color:var(--subtle);line-height:1.5">💰 <b>Proyectada</b> = confirmadas si llegan (descontando %dev, costo, fletes, ads, conversaciones y fijos del producto). ✅ <b>REAL</b> = ganancia de lo YA entregado − devoluciones − ads − conversaciones − fijos. ${nota}</div>`
   }
   const _pvBoxVtasHTML=`<div id="pvbox-vtas" style="display:none;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:12px">${_pvMkHTML(_pvRows,'vtas','Lente: fecha de venta (chat).')}</div>`
@@ -1867,13 +2085,53 @@ async function loadDash(){
     const _cf=v=>`<td style="text-align:center;padding:7px 7px;font-variant-numeric:tabular-nums;color:${v?'var(--text)':'var(--subtle)'}">${v?('$'+fmt(v)):'—'}</td>`
     const _cfenv=(v,cfg,n)=>{if(!v)return `<td style="text-align:center;padding:7px 7px;color:var(--subtle)">—</td>`;const _r=cfg>0,_t=_r?(cfg+' de '+n+' órdenes usan el flete del sistema (config), no el real de Dropi'):('Las '+n+' órdenes usan flete real de Dropi');return `<td title="${_t}" style="text-align:center;padding:7px 7px;font-variant-numeric:tabular-nums;cursor:help;color:${_r?'var(--red)':'var(--text)'}">$${fmt(v)}${_r?' ⚠':''}</td>`}
     const _filasMal=[] // productos donde las cuentas no cuadran (desp o en-camino negativos)
-    const _body=_fl.map(f=>{const desp=f.total-f.canc-f.pconf-f.rech-f.pend,encam=desp-f.ent-f.dev,fin=f.ent+f.dev,fenv=f.fenvN?Math.round(f.fenvSum/f.fenvN):0,fdp=f.fdpN?Math.round(f.fdpSum/f.fdpN):0,fdt=f.fdtN?Math.round(f.fdtSum/f.fdtN):0;if(desp<0||encam<0)_filasMal.push(f.pn);return `<tr style="border-bottom:1px solid var(--border)"><td style="text-align:left;padding:7px 10px;color:${(desp<0||encam<0)?'var(--red)':'var(--text)'};white-space:nowrap" title="${_e(f.pn)}">${(desp<0||encam<0)?'🚨 ':''}${_e(f.pn)}</td>`+_c(f.total,'var(--text)')+_c(f.canc,'var(--red)')+_cp(_p(f.canc,f.total))+_c(f.pconf,'var(--amber)')+_cp(_p(f.pconf,f.total))+_c(f.rech,'var(--red)')+_cp(_p(f.rech,f.total))+_c(f.pend,'var(--amber)')+_hl(_p(f.pend,f.total))+_c(desp,desp<0?'var(--red)':'var(--text)')+_c(encam,'var(--blue)')+_hl(_p(encam,desp))+_c(f.ent,'var(--green)')+_cp(_p(f.ent,fin))+_c(f.dev,'var(--red)')+_cp(_p(f.dev,fin))+_hl(fin+' · '+_p(fin,desp))+_cfenv(fenv,f.fenvCfg,f.fenvN)+_cf(fdp)+_cf(fdt)+`</tr>`}).join('')
+    // ══ 📣 DESGLOSE Producto → Campaña → Anuncio (acordeón) + 🪟 números clickeables (modal guías+teléfonos) ══
+    // Sub-grupos: MISMA clasificación de estados que las filas de producto (cero divergencia de cifras).
+    window._embPN=_fl.map(f=>f.pn)
+    const _AC=window._embAdCamp||{}
+    const _sMk=()=>({total:0,canc:0,pconf:0,rech:0,pend:0,ent:0,dev:0})
+    const _sAcc=(S,m)=>{const _es=m.estado_final,_ct=DROPI_STATUS[_es]?.cat;S.total++;if(_es==='CANCELADO')S.canc++;else if(_es==='RECHAZADO')S.rech++;else if(_es==='PENDIENTE CONFIRMACION'||!_es)S.pconf++;else if(_es==='PENDIENTE')S.pend++;if(_ct==='entregado'||_ct==='novedad_ok')S.ent++;else if(_ct==='devuelto')S.dev++}
+    const _sub={}
+    for(const m of (arr||[])){
+      const _spn=_prodCanonMapeo(m)
+      if(!_sub[_spn])_sub[_spn]={camps:{},order:[]}
+      const _ad=m.ad_id?String(m.ad_id):''
+      const _inf=_ad?_AC[_ad]:null
+      const _cid=_ad?((_inf&&_inf.campId)?String(_inf.campId):'_nr'):'_org'
+      let C=_sub[_spn].camps[_cid]
+      if(!C){C={id:_cid,nom:_cid==='_org'?'Sin anuncio (orgánicas / sin ID)':(_cid==='_nr'?'Campaña sin resolver (ID no encontrado en Meta)':((_inf&&_inf.campN)||_cid)),st:_sMk(),ads:{},aOrder:[]};_sub[_spn].camps[_cid]=C;_sub[_spn].order.push(_cid)}
+      _sAcc(C.st,m)
+      if(_cid!=='_org'){let A=C.ads[_ad];if(!A){A={id:_ad,nom:(_inf&&_inf.adN)||_ad,st:_sMk()};C.ads[_ad]=A;C.aOrder.push(_ad)}_sAcc(A.st,m)}
+    }
+    // Número clickeable (abre modal guías+teléfonos filtrado): pi=índice producto (-1=todos), ci/ai=ids campaña/anuncio
+    const _lk=(v,col,est,pi,ci,ai,extra)=>`<td style="text-align:center;padding:7px 7px;font-variant-numeric:tabular-nums;color:${v>0?(col||'var(--text)'):'var(--subtle)'};${extra||''}">${v>0?`<span onclick="window._embModal(${pi},'${ci||''}','${ai||''}','${est}')" title="Ver guías y teléfonos" style="cursor:pointer;border-bottom:1px dotted currentColor">${v}</span>`:v}</td>`
+    const _hlk=(fin,pct,pi,ci,ai)=>`<td style="text-align:center;padding:7px 7px;font-variant-numeric:tabular-nums;background:${_BG};color:var(--blue);font-weight:700">${fin>0?`<span onclick="window._embModal(${pi},'${ci||''}','${ai||''}','fin')" title="Ver guías y teléfonos" style="cursor:pointer;border-bottom:1px dotted currentColor">${fin}</span>`:fin} · ${pct}</td>`
+    // Semáforo vs el promedio del MISMO producto: 🟢 mejor · 🔴 peor · ⚪ pocas órdenes (<10)
+    const _sem=(st,pC,pD)=>{const _fin=st.ent+st.dev,_sc=st.total>0?st.canc/st.total:0,_sd=_fin>0?st.dev/_fin:null
+      if(st.total<10)return{dot:'⚪',cC:'var(--muted)',cD:'var(--muted)',tip:'Menos de 10 órdenes: aún no se puede juzgar'}
+      const _peor=(_sc>pC+0.001)||(_sd!==null&&_sd>pD+0.001)
+      return{dot:_peor?'🔴':'🟢',cC:_sc>pC+0.001?'var(--red)':(_sc<pC-0.001?'var(--green)':'var(--muted)'),cD:_sd===null?'var(--muted)':(_sd>pD+0.001?'var(--red)':(_sd<pD-0.001?'var(--green)':'var(--muted)')),tip:_peor?'PEOR que el promedio del producto → cuidado / no meter más plata':'MEJOR o igual que el promedio del producto → aquí sí'}}
+    const _subTr=(cls,pad,icon,nom,st,pi,ci,ai,pC,pD,tgl,chevId)=>{const d=st.total-st.canc-st.pconf-st.rech-st.pend,ec=d-st.ent-st.dev,fn=st.ent+st.dev,S=_sem(st,pC,pD)
+      return `<tr class="${cls}" style="display:none;border-bottom:1px solid var(--border);background:rgba(56,139,222,.04)"><td style="text-align:left;padding:6px 10px 6px ${pad}px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px;${tgl?'cursor:pointer;':''}color:var(--text)" title="${_e(nom)} · ${S.tip}" ${tgl?`onclick="${tgl}"`:''}>${tgl?`<span id="${chevId}" style="font-size:9px;color:var(--muted)">▸</span> `:''}<span title="${S.tip}">${S.dot}</span> ${icon} <span style="font-size:11px">${_e(nom)}</span> <code style="font-size:9px;color:var(--subtle)">${ai?ai:(ci&&ci[0]!=='_'?ci:'')}</code></td>`
+      +_lk(st.total,'var(--text)','total',pi,ci,ai)+_lk(st.canc,'var(--red)','canc',pi,ci,ai)+`<td style="text-align:center;padding:6px 7px;font-variant-numeric:tabular-nums;font-weight:700;color:${S.cC}">${_p(st.canc,st.total)}</td>`+_lk(st.pconf,'var(--amber)','pconf',pi,ci,ai)+_cp(_p(st.pconf,st.total))+_lk(st.rech,'var(--red)','rech',pi,ci,ai)+_cp(_p(st.rech,st.total))+_lk(st.pend,'var(--amber)','pend',pi,ci,ai)+_hl(_p(st.pend,st.total))+_lk(d,d<0?'var(--red)':'var(--text)','desp',pi,ci,ai)+_lk(ec,'var(--blue)','encam',pi,ci,ai)+_hl(_p(ec,d))+_lk(st.ent,'var(--green)','ent',pi,ci,ai)+_cp(_p(st.ent,fn))+_lk(st.dev,'var(--red)','dev',pi,ci,ai)+`<td style="text-align:center;padding:6px 7px;font-variant-numeric:tabular-nums;font-weight:700;color:${S.cD}">${_p(st.dev,fn)}</td>`+_hlk(fn,_p(fn,d),pi,ci,ai)+`<td style="text-align:center;padding:6px 7px;color:var(--subtle)">—</td><td style="text-align:center;padding:6px 7px;color:var(--subtle)">—</td><td style="text-align:center;padding:6px 7px;color:var(--subtle)">—</td></tr>`}
+    const _body=_fl.map((f,_pi)=>{const desp=f.total-f.canc-f.pconf-f.rech-f.pend,encam=desp-f.ent-f.dev,fin=f.ent+f.dev,fenv=f.fenvN?Math.round(f.fenvSum/f.fenvN):0,fdp=f.fdpN?Math.round(f.fdpSum/f.fdpN):0,fdt=f.fdtN?Math.round(f.fdtSum/f.fdtN):0;if(desp<0||encam<0)_filasMal.push(f.pn)
+      const _pC=f.total>0?f.canc/f.total:0,_pD=fin>0?f.dev/fin:0
+      const _sp=_sub[f.pn]||{camps:{},order:[]}
+      const _nCa=_sp.order.length
+      const _main=`<tr style="border-bottom:1px solid var(--border)"><td onclick="window._embTgP('${key}',${_pi})" style="text-align:left;padding:7px 10px;color:${(desp<0||encam<0)?'var(--red)':'var(--text)'};white-space:nowrap;cursor:pointer" title="${_e(f.pn)} · Toca para ver el desglose por campaña y anuncio">${(desp<0||encam<0)?'🚨 ':''}<span id="embch-${key}-${_pi}" style="font-size:10px;color:var(--blue)">▸</span> ${_e(f.pn)} <span style="font-size:9px;color:var(--subtle)">📣${_nCa}</span></td>`+_lk(f.total,'var(--text)','total',_pi,'','')+_lk(f.canc,'var(--red)','canc',_pi,'','')+_cp(_p(f.canc,f.total))+_lk(f.pconf,'var(--amber)','pconf',_pi,'','')+_cp(_p(f.pconf,f.total))+_lk(f.rech,'var(--red)','rech',_pi,'','')+_cp(_p(f.rech,f.total))+_lk(f.pend,'var(--amber)','pend',_pi,'','')+_hl(_p(f.pend,f.total))+_lk(desp,desp<0?'var(--red)':'var(--text)','desp',_pi,'','')+_lk(encam,'var(--blue)','encam',_pi,'','')+_hl(_p(encam,desp))+_lk(f.ent,'var(--green)','ent',_pi,'','')+_cp(_p(f.ent,fin))+_lk(f.dev,'var(--red)','dev',_pi,'','')+_cp(_p(f.dev,fin))+_hlk(fin,_p(fin,desp),_pi,'','')+_cfenv(fenv,f.fenvCfg,f.fenvN)+_cf(fdp)+_cf(fdt)+`</tr>`
+      const _campsHtml=_sp.order.map((cid,_ci)=>{const C=_sp.camps[cid]
+        const _hasAds=C.aOrder.length>0
+        const _cRow=_subTr(`embc-${key}-${_pi}`,26,'📣',C.nom,C.st,_pi,cid,'',_pC,_pD,_hasAds?`window._embTgC('${key}',${_pi},${_ci})`:'',`embcch-${key}-${_pi}-${_ci}`)
+        const _aRows=C.aOrder.map(aid=>_subTr(`emba-${key}-${_pi}-${_ci}`,46,'📢',C.ads[aid].nom,C.ads[aid].st,_pi,cid,aid,_pC,_pD,'','' )).join('')
+        return _cRow+_aRows}).join('')
+      return _main+_campsHtml}).join('')
     const T=_fl.reduce((a,f)=>{a.total+=f.total;a.canc+=f.canc;a.pconf+=f.pconf;a.rech+=f.rech;a.pend+=f.pend;a.ent+=f.ent;a.dev+=f.dev;a.fenvSum+=f.fenvSum;a.fenvN+=f.fenvN;a.fenvCfg+=f.fenvCfg;a.fdpSum+=f.fdpSum;a.fdpN+=f.fdpN;a.fdtSum+=f.fdtSum;a.fdtN+=f.fdtN;return a},{total:0,canc:0,pconf:0,rech:0,pend:0,ent:0,dev:0,fenvSum:0,fenvN:0,fenvCfg:0,fdpSum:0,fdpN:0,fdtSum:0,fdtN:0})
     const Td=T.total-T.canc-T.pconf-T.rech-T.pend,Tcam=Td-T.ent-T.dev,Tfin=T.ent+T.dev,Tfenv=T.fenvN?Math.round(T.fenvSum/T.fenvN):0,Tfdp=T.fdpN?Math.round(T.fdpSum/T.fdpN):0,Tfdt=T.fdtN?Math.round(T.fdtSum/T.fdtN):0
     const _ft=(v,col)=>`<td style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;color:${col||'var(--text)'}">${v}</td>`
     const _fthl=s=>`<td style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;background:${_BG};color:var(--blue)">${s}</td>`
     const _ftenv=(v,cfg,n)=>{if(!v)return `<td style="text-align:center;padding:8px 7px;font-weight:700;color:var(--subtle)">—</td>`;const _r=cfg>0,_t=_r?(cfg+' de '+n+' usan flete del sistema (config), no real de Dropi'):('Las '+n+' usan flete real');return `<td title="${_t}" style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;cursor:help;color:${_r?'var(--red)':'var(--text)'}">$${fmt(v)}${_r?' ⚠':''}</td>`}
-    const _foot=`<tr style="border-top:1px solid var(--border)"><td style="text-align:left;padding:8px 10px;font-weight:700;color:var(--text)">Total</td>`+_ft(T.total)+_ft(T.canc)+_ft(_p(T.canc,T.total),'var(--muted)')+_ft(T.pconf)+_ft(_p(T.pconf,T.total),'var(--muted)')+_ft(T.rech,'var(--red)')+_ft(_p(T.rech,T.total),'var(--muted)')+_ft(T.pend)+_fthl(_p(T.pend,T.total))+_ft(Td,Td<0?'var(--red)':undefined)+_ft(Tcam)+_fthl(_p(Tcam,Td))+_ft(T.ent)+_ft(_p(T.ent,Tfin),'var(--muted)')+_ft(T.dev)+_ft(_p(T.dev,Tfin),'var(--muted)')+_fthl(Tfin+' · '+_p(Tfin,Td))+_ftenv(Tfenv,T.fenvCfg,T.fenvN)+_ft(Tfdp?('$'+fmt(Tfdp)):'—')+_ft(Tfdt?('$'+fmt(Tfdt)):'—')+`</tr>`
+    const _ftk=(v,est,col)=>`<td style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;color:${col||'var(--text)'}">${v>0?`<span onclick="window._embModal(-1,'','','${est}')" title="Ver guías y teléfonos de TODOS los productos" style="cursor:pointer;border-bottom:1px dotted currentColor">${v}</span>`:v}</td>`
+    const _foot=`<tr style="border-top:1px solid var(--border)"><td style="text-align:left;padding:8px 10px;font-weight:700;color:var(--text)">Total</td>`+_ftk(T.total,'total')+_ftk(T.canc,'canc')+_ft(_p(T.canc,T.total),'var(--muted)')+_ftk(T.pconf,'pconf')+_ft(_p(T.pconf,T.total),'var(--muted)')+_ftk(T.rech,'rech','var(--red)')+_ft(_p(T.rech,T.total),'var(--muted)')+_ftk(T.pend,'pend')+_fthl(_p(T.pend,T.total))+_ftk(Td,'desp',Td<0?'var(--red)':undefined)+_ftk(Tcam,'encam')+_fthl(_p(Tcam,Td))+_ftk(T.ent,'ent')+_ft(_p(T.ent,Tfin),'var(--muted)')+_ftk(T.dev,'dev')+_ft(_p(T.dev,Tfin),'var(--muted)')+`<td style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;background:${_BG};color:var(--blue)">${Tfin>0?`<span onclick="window._embModal(-1,'','','fin')" title="Ver guías y teléfonos" style="cursor:pointer;border-bottom:1px dotted currentColor">${Tfin}</span>`:Tfin} · ${_p(Tfin,Td)}</td>`+_ftenv(Tfenv,T.fenvCfg,T.fenvN)+_ft(Tfdp?('$'+fmt(Tfdp)):'—')+_ft(Tfdt?('$'+fmt(Tfdt)):'—')+`</tr>`
     const _th=(t,c,hl)=>`<th style="text-align:${t==='Producto'?'left':'center'};padding:7px 7px;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;white-space:nowrap;${hl?('background:'+_BG+';color:var(--blue)'):('color:'+(c||'var(--muted)'))}">${t}</th>`
     const _head=_th('Producto')+_th('Total')+_th('Canc','var(--red)')+_th('%Canc')+_th('P.conf','var(--amber)')+_th('%P.conf')+_th('Rech','var(--red)')+_th('%Rech')+_th('Pend','var(--amber)')+_th('%Pend',null,true)+_th('Desp')+_th('En cam','var(--blue)')+_th('%cam',null,true)+_th('Entr','var(--green)')+_th('%Ent')+_th('Dev','var(--red)')+_th('%Dev')+_th('Final',null,true)+_th('Flete env')+_th('Flete dev')+_th('Flete dev total')
     // 🚨 BLINDAJE: alarma de estados desconocidos + chequeo de cuadre (nunca contar mal en silencio)

@@ -17346,6 +17346,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
   //      botón ACTIVE (estado LIVE de Meta, fallback BD) + entrega real (≥1 anuncio entregando, no-false).
   //      Sin producto = el campId no está en campaign_ids de NINGÚN producto (mapa campToProd).
   let _sinProdBlock=''
+  let _sinProdCount=0 // NUEVO (2jul26): conteo hoisted para la pill ⚠️ SIN PRODUCTO de la fusión principal
   try{
     const _cTPsp=(window._metaPort&&window._metaPort.campToProd)||{}
     const _liveEstSp=window._nexoLiveEstadoByCampId||{}
@@ -17369,6 +17370,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
       _listaSp.push({id:c.id,nombre:c.nombre,accId:c.accId,gasto:gastoByCampId[c.id]||0})
     }
     _listaSp.sort((a,b)=>(b.gasto-a.gasto)||String(a.nombre).localeCompare(String(b.nombre)))
+    _sinProdCount=_listaSp.length
     if(_listaSp.length){
       const _escSp=s=>String(s==null?'':s).replace(/</g,'&lt;').replace(/"/g,'&quot;')
       const _filasSp=_listaSp.map((c,i)=>{
@@ -17383,7 +17385,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
           <button onclick="event.stopPropagation();modalAsignarProductoCamp('${_escSp(c.id)}','${_nomEscSp}','${_escSp(c.accId)}')" style="margin-left:auto;background:var(--amber-bg);border:1px solid var(--amber);border-radius:6px;color:var(--amber);font-size:10.5px;font-weight:700;padding:3px 10px;cursor:pointer;flex-shrink:0" title="⚠️ Sin producto · clic para asignarle uno (mismo modal de las cards)">⚠️ Asignar producto</button>
         </div>`
       }).join('')
-      _sinProdBlock=`<div style="margin:0 0 12px;padding:10px 12px;background:rgba(245,158,11,.05);border:1px solid rgba(245,158,11,.4);border-radius:10px">
+      _sinProdBlock=`<div id="rp-sinprod-block" style="margin:0 0 12px;padding:10px 12px;background:rgba(245,158,11,.05);border:1px solid rgba(245,158,11,.4);border-radius:10px">
         <div onclick="window._rpToggleCuadre('rp-sinprod')" style="cursor:pointer;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--text)" title="Toca para abrir/cerrar la lista. Estas campañas están ACTIVAS (misma regla activa/inactiva del expand de cuenta) pero NO tienen producto: su gasto cae al cajón 'sin asignar' y no entra al CPA de ningún producto.">
           <span id="rp-sinprod-chev" style="display:inline-block;width:12px;font-size:9px;color:var(--amber)">▸</span>
           <span style="font-weight:700;color:var(--amber)">⚠️ ${_listaSp.length} campaña${_listaSp.length===1?'':'s'} ACTIVA${_listaSp.length===1?'':'S'} sin producto asignado</span>
@@ -17392,6 +17394,66 @@ async function _renderResumenProductos(desde,hasta,hoy){
         <div id="rp-sinprod-sub" style="display:none;margin-top:8px">${_filasSp}</div>
       </div>`
     }
+  }catch(_){}
+
+  // ════════ NUEVO (2jul26): FUSIÓN PRINCIPAL — "Todas las campañas JUNTAS" como vista principal ════════
+  // Pills de producto (🌐 TODOS · 📦 uno por producto con gasto+semáforo · ⚠️ SIN PRODUCTO) + grupos
+  // colapsables con fila-subtotal por producto. Los bloques de fusión EXISTENTES (dentro de cada card)
+  // se MUEVEN aquí después del render (window._rpFusionMainInit) — mismo nodo, cero duplicados, todos
+  // los handlers (_rpFusion*) siguen funcionando igual porque los IDs no cambian.
+  let _fusMainHtml=''
+  try{
+    const _escM=s=>String(s==null?'':s).replace(/</g,'&lt;').replace(/"/g,'&quot;')
+    const _slugM=n=>String(n||'x').replace(/[^a-zA-Z0-9]/g,'')
+    const _abrevM=g=>g>=1e6?('$'+(g/1e6).toFixed(1)+'M'):(g>=1000?('$'+Math.round(g/1000)+'k'):('$'+Math.round(g||0)))
+    const _dotM={fuego:'🟣',escalar:'🟢',precaucion:'🟡',stop:'🔴',sin_ventas:'⚪'}
+    const _pillsProd=productosResumen.map(d=>{
+      const s=_slugM(d.nombre),dot=_dotM[d.semCode]||'⚪'
+      return`<button class="rp-fusmain-pill" data-fslug="${s}" onclick="window._rpFusMainProd('${s}')" style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;padding:5px 12px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.04);color:var(--text);border:1px solid var(--border);cursor:pointer" title="📦 ${_escM(d.nombre)} · Gasto del rango: $${fmt(d.gasto)} · CPA $${fmt(d.cpaReal)} · Semáforo ${dot} · CLIC para ver SOLO la fusión de este producto (clic de nuevo vuelve a TODOS). El chip mismo ya es un mini-semáforo: gasto + color sin abrir nada.">📦 ${_escM(d.nombre)} <span style="color:var(--muted);font-weight:600">${_abrevM(d.gasto)}</span> ${dot}</button>`
+    }).join('')
+    const _pillSinProd=_sinProdCount>0?`<button class="rp-fusmain-pill" data-fslug="__sinprod__" onclick="window._rpFusMainProd('__sinprod__')" style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:800;padding:5px 12px;border-radius:999px;white-space:nowrap;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid var(--amber);cursor:pointer" title="⚠️ ${_sinProdCount} campaña${_sinProdCount===1?'':'s'} ACTIVAS gastando plata SIN producto asignado — su gasto no entra al CPA de ningún producto. CLIC para verlas y asignarles producto AQUÍ MISMO con el botón ⚠️ Asignar producto.">⚠️ SIN PRODUCTO: ${_sinProdCount}</button>`:''
+    const _grupos=productosResumen.map(d=>{
+      const s=_slugM(d.nombre),dot=_dotM[d.semCode]||'⚪'
+      const _pctBEg=(d.cpaReal>0&&d.margenBE>0)?Math.round(d.cpaReal/d.margenBE*100):0
+      const _colG=(d.cpaReal>0&&d.margenBE>0&&typeof window!=='undefined'&&window._nexoSemColor)?window._nexoSemColor(d.cpaReal,d.margenBE):'var(--muted)'
+      const _pedG=d.esSoloHoy?d.totalPedidos:(d.pedidosConfirmados>0?d.pedidosConfirmados:d.totalPedidos)
+      return`<div class="rp-fusgrp" data-fslug="${s}" style="border:1px solid var(--border);border-radius:9px;margin-bottom:6px;overflow:hidden">
+        <div onclick="window._rpFusGrpToggle('${s}')" style="cursor:pointer;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 11px;background:rgba(255,255,255,.03);font-size:12.5px;color:var(--text)" title="Fila-subtotal de ${_escM(d.nombre)}: gasto, pedidos y CPA vs BE del rango. CLIC para abrir/cerrar su fusión completa (con TODOS los botones y filtros adentro).">
+          <span id="fusgrp-ch-${s}" style="display:inline-block;width:13px;font-size:10px;color:var(--muted)">▸</span>
+          <span style="font-weight:700">📦 ${_escM(d.nombre)}</span>
+          <span style="font-size:12px">${dot}</span>
+          <span style="font-size:11px;color:var(--muted)">${rankingMap[d.nombre]||'?'}° en ventas</span>
+          <span style="margin-left:auto;display:inline-flex;gap:12px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:11px;color:var(--muted)">💸 <strong style="color:var(--text)">$${fmt(d.gasto)}</strong></span>
+            <span style="font-size:11px;color:var(--muted)">🛒 <strong style="color:var(--text)">${_pedG}</strong></span>
+            <span style="font-size:11px;font-weight:700;color:${_colG}">🎯 $${fmt(d.cpaReal)}${_pctBEg>0?` · ${_pctBEg}% BE`:''}</span>
+          </span>
+        </div>
+        <div class="rp-fusgrp-bd" id="fusgrp-bd-${s}" style="display:none;padding:0 8px 8px"></div>
+      </div>`
+    }).join('')
+    const _grupoSinProd=_sinProdCount>0?`<div class="rp-fusgrp" data-fslug="__sinprod__" style="border:1px solid rgba(245,158,11,.4);border-radius:9px;margin-bottom:6px;overflow:hidden">
+        <div onclick="window._rpFusGrpToggle('__sinprod__')" style="cursor:pointer;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 11px;background:rgba(245,158,11,.06);font-size:12.5px;color:var(--amber)" title="Campañas ACTIVAS gastando SIN producto asignado. CLIC para abrir la lista y asignarles producto aquí mismo.">
+          <span id="fusgrp-ch-__sinprod__" style="display:inline-block;width:13px;font-size:10px;color:var(--amber)">▸</span>
+          <span style="font-weight:800">⚠️ SIN PRODUCTO ASIGNADO: ${_sinProdCount}</span>
+          <span style="font-size:10.5px;color:var(--muted)">— gastan plata que no entra al CPA de ningún producto · asígnalas aquí mismo</span>
+        </div>
+        <div class="rp-fusgrp-bd" id="fusgrp-bd-__sinprod__" style="display:none;padding:8px"></div>
+      </div>`:''
+    _fusMainHtml=`<div id="rp-fusion-main" style="margin:0 0 14px;padding:12px 13px;background:rgba(124,92,250,.05);border:1px solid var(--purple);border-radius:10px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">
+        <span style="font-size:13px;font-weight:800;color:var(--text)">🧩 TODAS LAS CAMPAÑAS JUNTAS</span>
+        <span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:var(--purple-bg);color:var(--purple);border:1px solid var(--purple)">VISTA PRINCIPAL</span>
+        <span style="font-size:10.5px;color:var(--muted)">— elige TODOS o un producto y trabaja aquí sin saltar de card en card. Abre un grupo y adentro está la fusión completa con todos sus botones.</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin:6px 0 3px;font-size:9.5px;letter-spacing:.8px;color:var(--subtle);font-weight:700" title="Filtro de PRODUCTO: una sola opción activa (borde blanco). Clic en la activa vuelve a TODOS. Se cruza con TODOS los filtros de adentro de cada fusión.">📦 PRODUCTO — UNA OPCIÓN · CLIC EN LA ACTIVA = VOLVER A TODOS<span style="flex:1;height:1px;background:var(--border)"></span></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
+        <button class="rp-fusmain-pill" data-fslug="__todos__" onclick="window._rpFusMainProd('__todos__')" style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:800;padding:5px 12px;border-radius:999px;white-space:nowrap;background:rgba(124,92,250,.12);color:var(--purple);border:1px solid var(--purple);cursor:pointer" title="🌐 TODOS: muestra todos los productos agrupados, cada uno con su fila-subtotal (gasto · pedidos · CPA vs BE · semáforo). Abre el que quieras.">🌐 TODOS</button>
+        ${_pillsProd}
+        ${_pillSinProd}
+      </div>
+      <div id="rp-fusion-groups">${_grupos}${_grupoSinProd}</div>
+    </div>`
   }catch(_){}
 
   // 13. HTML final
@@ -17417,6 +17479,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
       ${conteo.sin_ventas>0?_resumenPillCount('sin_ventas',conteo.sin_ventas,'⏳','en ESPERAR','var(--muted)','var(--card2)','ESPERAR — Sin ventas todavía.'):''}
       <button onclick="resumenProductosFilter('',this)" title="Mostrar todos los productos sin filtro" style="margin-left:auto;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:10px;cursor:pointer">Ver todos</button>
     </div>
+
+    ${_fusMainHtml}
 
     ${_sinProdBlock}
 
@@ -18246,7 +18310,9 @@ function _renderProductoCardResumen(data,ranking){
       if(!cpa||cpa<=0)return''
       const col=(typeof window!=='undefined'&&window._nexoSemColor)?window._nexoSemColor(cpa,_BE):(_BE>0?(cpa<=_BE?'var(--green)':'var(--red)'):'var(--muted)')
       const fs=sz==='sm'?'10px':'11px'
-      return`<span style="margin-left:8px;font-size:${fs};font-weight:700;color:${col};border:1px solid ${col};border-radius:999px;padding:1px 8px;white-space:nowrap" title="CPA real = gasto ÷ ventas de esta fila · Break-even: $${fmt(_BE)} · Semáforo: 🟢 ≤70% del BE va bien · 🟡 cuidado, se acerca · 🔴 pasa el BE, pierde plata">🎯 $${fmt(cpa)}</span>`
+      // NUEVO (2jul26): % del BE al lado del CPA — la decisión se vuelve obvia (74% = bien · 110% = apágala)
+      const _pctBEr=(_BE>0)?Math.round(cpa/_BE*100):0
+      return`<span style="margin-left:8px;font-size:${fs};font-weight:700;color:${col};border:1px solid ${col};border-radius:999px;padding:1px 8px;white-space:nowrap" title="CPA real = gasto ÷ ventas de esta fila · Break-even: $${fmt(_BE)} · Este CPA es el ${_pctBEr>0?_pctBEr+'%':'?'} del BE · Semáforo: 🟢 ≤70% del BE va bien · 🟡 cuidado, se acerca · 🔴 pasa el BE, pierde plata">🎯 $${fmt(cpa)}${_pctBEr>0?` <span style="font-size:${sz==='sm'?'8.5px':'9px'};opacity:.85">· ${_pctBEr}% BE</span>`:''}</span>`
     }
     const _gastoTxt=(g)=>g>0?`<span style="margin-left:8px;font-size:10px;color:var(--muted);white-space:nowrap">💸 $${fmt(g)}</span>`:''
     const _btnCopy=(id,label)=>{
@@ -18834,7 +18900,7 @@ function _renderProductoCardResumen(data,ranking){
           ${_optsCampF}
         </select>
         <button onclick="event.stopPropagation();window._rpFusionRango('${_slugProd}','${_cidF}')" style="background:rgba(167,139,250,.12);border:1px solid var(--purple);border-radius:5px;color:var(--purple);font-size:11px;font-weight:700;padding:2px 10px;cursor:pointer">🔍 Aplicar</button>
-        <button onclick="event.stopPropagation();window._rpFusion8dias('${_slugProd}','${_cidF}')" style="background:rgba(134,239,172,.12);border:1px solid var(--green);border-radius:5px;color:var(--green);font-size:11px;font-weight:700;padding:2px 10px;cursor:pointer" title="Carga HOY y los 7 días anteriores (8 columnas) con datos directos — ventas, gasto e IDs completos por día. Ventana que siempre termina en hoy. Se desliza horizontal para verlos todos.">📅 Últimos 8 días</button>
+        <button id="${_cidF}-btn8d" onclick="event.stopPropagation();window._rpFusion8dias('${_slugProd}','${_cidF}')" style="background:rgba(134,239,172,.12);border:1px solid var(--green);border-radius:5px;color:var(--green);font-size:11px;font-weight:700;padding:2px 10px;cursor:pointer" title="POR DEFECTO al abrir la fusión ya está aplicado. Carga HOY y los 7 días anteriores (8 columnas) con datos directos — ventas, gasto e IDs completos por día. Ventana que siempre termina en hoy. Se desliza horizontal para verlos todos.">📅 Últimos 8 días</button>
         <button onclick="event.stopPropagation();window._rpFusionVolver('${_cidF}')" style="background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:5px;color:var(--muted);font-size:11px;padding:2px 10px;cursor:pointer" title="Volver a la vista normal de los 4 días (sin llamados)">↩️ Volver a los 4 días</button>
         <span id="${_cidF}-rango-status" style="font-size:10.5px"></span>
       </div>`
@@ -18854,7 +18920,7 @@ function _renderProductoCardResumen(data,ranking){
         ${_urgPillF('fuego',_contaF.fuego,'🟣 DOBLAR','var(--purple)','var(--purple-bg)','FUEGO: CPA Real Efectivas de hoy brutal (≤45% del BE). Click para filtrar y doblar.')}
         ${_urgPillF('escalar',_contaF.escalar,'🟢 ESCALAR','var(--green)','var(--green-bg)','ESCALAR: CPA Real Efectivas de hoy sano (45–70% del BE). Click para filtrar y subir +30%.')}
         ${_urgPillF('sin_ventas',_contaF.sin_ventas,'⏳ ESPERAR','var(--muted)','var(--card)','ESPERAR: hoy sin ventas todavía y gasto bajo. Click para filtrar y dejar correr.')}
-        <button onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','reset','',this)" title="Quitar TODOS los filtros de una (urgencia + activas/inactivas + día + buscador por ID) y mostrar todas las campañas" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:4px 9px;font-size:10px;cursor:pointer">Ver todas</button>
+        <button id="${_cidF}-btnclr" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','reset','',this)" title="Quitar TODOS los filtros de una (urgencia + activas/inactivas + día + con/sin ventas + buscador por ID) y mostrar todas las campañas" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:4px 9px;font-size:10px;cursor:pointer">Ver todas</button>
         <input type="text" id="${_cidF}-buscarid" placeholder="🆔 Buscar por ID de campaña o anuncio..." onclick="event.stopPropagation()" oninput="window._rpFusionFiltro('${_cidF}','id',this.value)" style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:5px 10px;color:var(--text);font-size:11px;flex:1;min-width:170px;outline:none" title="Pega el ID de una campaña O de un anuncio: te deja la campaña donde está metido ese ID.">
         <button onclick="event.stopPropagation();const i=document.getElementById('${_cidF}-buscarid');if(i){i.value='';window._rpFusionFiltro('${_cidF}','id','')}" title="Limpiar búsqueda por ID" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:4px 9px;font-size:10px;cursor:pointer">✖</button>
       </div>`
@@ -18900,31 +18966,38 @@ function _renderProductoCardResumen(data,ranking){
           <span style="display:inline-block;width:${_cwF.bud+_cwF.id+_cwF.dup}px;flex-shrink:0"></span>
         </div>`
     }
-    return`<div style="margin-top:10px;padding:12px 13px;background:rgba(0,0,0,.18);border-radius:8px;border-left:3px solid var(--purple)">
+    return`<div id="${_cidF}-wrap" class="rp-fus-main" data-fslug="${_slugProd}" style="margin-top:10px;padding:12px 13px;background:rgba(0,0,0,.18);border-radius:8px;border-left:3px solid var(--purple)">
       <div style="font-size:11px;color:var(--muted);margin-bottom:8px;letter-spacing:.2px">🧩 <strong style="color:var(--text)">Todas las campañas JUNTAS</strong> — la misma info de los bloques de arriba pero fusionada: cada campaña aparece UNA sola vez y adentro ves cómo le fue cada día. Ya no toca buscarla bloque por bloque. 👶✨</div>
+      <div style="display:flex;align-items:center;gap:8px;margin:2px 0 3px;font-size:9.5px;letter-spacing:.8px;color:var(--subtle);font-weight:700" title="ZONA 1 · Solo mirar cómo va cada día. Los chips también filtran si los tocas.">📊 ASÍ VAMOS — CÓMO FUE CADA DÍA (TOCA UN CHIP PARA FILTRAR)<span style="flex:1;height:1px;background:var(--border)"></span></div>
       <div onclick="window._rpToggleCuadre('${_cidF}')" style="cursor:pointer;display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0;flex-wrap:wrap" title="Toca para abrir/cerrar · Orden: mejor CPA total arriba, peor abajo">
         <span id="${_cidF}-chev" style="display:inline-block;width:14px;font-size:10px;color:var(--muted)">▸</span>
         <span style="margin-left:4px">🧬 ${_lista.length} campaña${_lista.length===1?'':'s'} fusionada${_lista.length===1?'':'s'} en ${_diasConDatos} día${_diasConDatos===1?'':'s'}</span>
-        <span id="${_cidF}-diachips" style="margin-left:8px;display:inline-flex;flex-wrap:wrap;gap:3px;align-items:center" title="De dónde sale el total: ventas de cada día sumando todas las campañas. Si un día está en 0 igual se muestra, para que sepas que ese día no se vendió NADA.">
-          ${_totPorDiaF.map(t=>{const _onT=(t.n>0||t.ids>0);return`<button class="rp-fus-diapill" data-dia="${t.k}" ${_onT?`onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','dia','${t.k}',this)"`:''} style="cursor:${_onT?'pointer':'default'};font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;${_onT?'background:var(--green-bg);color:var(--green);border:1px solid var(--green)':'background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)'}" title="${t.lab}: ${t.n} venta${t.n===1?'':'s'} Dropi (cuadre) · ${t.ids} por IDs del aux${!_onT?' — ese día no se vendió nada por ninguna fuente':' · CLIC para ver SOLO las campañas que vendieron '+t.lab+' (Dropi o IDs; clic de nuevo lo quita). Se COMBINA con Activas/Inactivas, urgencia y el buscador por ID.'}">${t.lab}: ${t.n}🛒·${t.ids}🆔·${t.conv}💬·📦${t.stk!=null?fmt(t.stk):'—'}</button>`}).join('')}
-          <button class="rp-fus-estpill" data-est="act" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','estado','act',this)" style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:var(--green-bg);color:var(--green);border:1px solid var(--green);cursor:pointer" title="🟢 Activas DE VERDAD: botón prendido en Meta, ≥1 anuncio entregando AHORA, y SIN alerta PRENDER YA. ${_actHdrF} de ${_lista.length}. CLIC para ver SOLO las activas.">🟢 Activas: ${_actHdrF}</button>
-          <button class="rp-fus-estpill" data-est="ventas" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','estado','ventas',this)" style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:var(--red-bg);color:var(--red);border:1px solid var(--red);cursor:pointer" title="🔴 Inactivas ventas (PRENDER YA): hoy $0 de gasto pero CON ventas en los días anteriores — dejan plata sobre la mesa. ${_ventasHdrF} de ${_lista.length}. CLIC para ver SOLO estas y prenderlas.">🔴 Inactivas ventas: ${_ventasHdrF}</button>
-          <button class="rp-fus-estpill" data-est="inact" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','estado','inact',this)" style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border);cursor:pointer" title="⚫ Inactivas HOY: apagadas (o sin entregar) pero que SÍ gastaron plata HOY antes de apagarse — y SIN alerta PRENDER YA. ${_inactHdrF}. CLIC para ver SOLO estas. Las que solo corrieron días anteriores no entran aquí: véelas con los chips de días o 'Ver todas'.">⚫ Inactivas: ${_inactHdrF}</button>
-          <button class="rp-fus-estpill" data-est="hoy" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','estado','hoy',this)" style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.04);color:var(--text);border:1px solid var(--border);cursor:pointer" title="Todas HOY = 🟢 Activas (${_actHdrF}) + ⚫ Inactivas con gasto hoy (${_inactHdrF}) = ${_todasHdrF} campañas que movieron plata HOY. Las 🔴 Inactivas ventas van APARTE. CLIC para ver SOLO estas ${_todasHdrF} (clic de nuevo lo quita). Para ver TODA la lista (${_lista.length}) usa 'Ver todas'.">Todas hoy: ${_todasHdrF}</button>
-          <button class="rp-fus-estpill" data-est="noent" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','estado','noent',this)" style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.05);color:var(--text);border:1px solid var(--border);cursor:pointer" title="🔕 NO ENTREGA: botón prendido en Meta pero NINGÚN anuncio entregando — no gastan ni venden AHORA, aunque SÍ registraron actividad en el período. ${_noEntHdrF} de ${_lista.length}. CLIC para ver SOLO estas y revisar qué tienen apagado adentro (clic de nuevo lo quita). Se combina con los demás filtros.">🔕 No entrega: ${_noEntHdrF}</button>
-          <span style="width:1px;height:15px;background:var(--border);margin:0 3px;align-self:center"></span>
-          <button class="rp-fus-vsvpill" data-vsv="con" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','vsv','con',this)" style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:var(--green-bg);color:var(--green);border:1px solid var(--green);cursor:pointer" title="✅ CON VENTAS: campañas que SÍ vendieron (Dropi confirmadas 🛒 o por 🆔 IDs del aux). Si tienes un día marcado (HOY/AYER/…), cuenta SOLO ese día (HOY va por IDs, sin cruce todavía). Se COMBINA con los demás filtros. CLIC para ver solo estas (clic de nuevo lo quita).">✅ Con ventas: ${_conVtaHdrF}</button>
-          <button class="rp-fus-vsvpill" data-vsv="sin" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','vsv','sin',this)" style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid var(--amber);cursor:pointer" title="⛔ SIN VENTAS: campañas en CERO (ni Dropi ni 🆔). Candidatas a APAGAR. Si tienes un día marcado (HOY/AYER/…), cuenta SOLO ese día. Se COMBINA con los demás filtros. CLIC para ver solo estas (clic de nuevo lo quita).">⛔ Sin ventas: ${_sinVtaHdrF}</button>
-          <span style="font-size:9px;color:var(--subtle)">= ${_totVentasF}</span>
+        <span id="${_cidF}-diachips" style="margin-left:8px;display:inline-flex;flex-wrap:wrap;gap:4px;align-items:center" title="De dónde sale el total: ventas de cada día sumando todas las campañas. Si un día está en 0 igual se muestra, para que sepas que ese día no se vendió NADA.">
+          ${_totPorDiaF.map(t=>{const _onT=(t.n>0||t.ids>0);return`<button class="rp-fus-diapill" data-dia="${t.k}" ${_onT?`onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','dia','${t.k}',this)"`:''} style="cursor:${_onT?'pointer':'default'};font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;${_onT?'background:var(--green-bg);color:var(--green);border:1px solid var(--green)':'background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)'}" title="${t.lab}: ${t.n} venta${t.n===1?'':'s'} Dropi (cuadre) · ${t.ids} por IDs del aux${!_onT?' — ese día no se vendió nada por ninguna fuente':' · CLIC para ver SOLO las campañas que vendieron '+t.lab+' (Dropi o IDs; clic de nuevo lo quita). Se COMBINA con Activas/Inactivas, urgencia y el buscador por ID.'}">${t.lab}: ${t.n}🛒·${t.ids}🆔·${t.conv}💬·📦${t.stk!=null?fmt(t.stk):'—'}</button>`}).join('')}
         </span>
-        <button onclick="event.stopPropagation();window._rpFusionMassBud('${_slugProd}')" style="margin-left:8px;background:rgba(99,102,241,.1);border:1px solid var(--accent);border-radius:6px;color:var(--accent);font-size:10px;font-weight:700;padding:2px 9px;cursor:pointer;flex-shrink:0" title="Cambiar el presupuesto de VARIAS campañas de esta fusión a la vez (mismo modal del expand de cuenta, precargado con estas campañas)">💰 Presupuesto a varias</button>
-        <button onclick="event.stopPropagation();window._rpFusionMassPausa('${_slugProd}')" style="margin-left:6px;background:var(--red-bg);border:1px solid var(--red);border-radius:6px;color:var(--red);font-size:10px;font-weight:700;padding:2px 9px;cursor:pointer;flex-shrink:0" title="APAGAR (pausar) VARIAS campañas de esta fusión a la vez — mismo modal en lote del expand de cuenta, precargado con estas campañas. Las activas salen resaltadas para marcar cuáles apagar.">🔴 Apagar varias</button>
-        <button onclick="event.stopPropagation();window._rpFusionRefreshSem('${_slugProd}',this)" style="margin-left:6px;background:rgba(167,139,250,.1);border:1px solid var(--purple);border-radius:6px;color:var(--purple);font-size:10px;font-weight:700;padding:2px 9px;cursor:pointer;flex-shrink:0" title="Recalcula los puntos CONSOLIDADOS (⭐Dropi y 🆔 IDs) de AYER, ANTIER y TRASANTIER de TODAS las campañas de este producto: primero trae el gasto exacto de cada día desde Meta (mini-sync autoverificado) y luego guarda un punto ⭐Dropi nuevo anclado a ese día — la tira muestra solo el último ⭐, y el 🆔 IDs se recalcula solo porque usa el gasto del ⭐. El punto viejo queda en el Historial 📊 como evidencia. HOY no se toca porque su gasto sigue cambiando.">🔄 Refrescar semáforos</button>
-        <button onclick="event.stopPropagation();window._rpFusionLifetime('${_slugProd}',this)" style="margin-left:6px;background:rgba(94,234,212,.1);border:1px solid #5eead4;border-radius:6px;color:#5eead4;font-size:10px;font-weight:700;padding:2px 9px;cursor:pointer;flex-shrink:0" title="Reemplaza los totales 🛒 VTS y 🆔 TOT por el LIFETIME REAL desde que inició cada campaña (no solo los días visibles): gasto histórico real (meta_insights) + ventas confirmadas Dropi y total de órdenes reales (mapeos). Sin estimar. Los días HOY/AYER/ANTIER/TRAS no se tocan.">📊 Cargar lifetime</button>
         <span style="margin-left:auto;font-weight:700" title="Suma de las ventas 'En campañas' de todos los días de arriba — debe cuadrar con ellos">${_totVentasF}</span>
       </div>
-      ${_ctrlRango}
+      <div style="display:flex;align-items:center;gap:8px;margin:6px 0 3px;font-size:9.5px;letter-spacing:.8px;color:var(--subtle);font-weight:700" title="ZONA 2 · Filtros: cambian LO QUE VES, no tocan Meta. Se CRUZAN entre sí y dentro de cada grupo solo puede haber UNA opción activa. Activo = borde blanco. En 0 = se atenúa solo.">🔍 FILTRA LO QUE VES — SE CRUZAN ENTRE SÍ · UNA OPCIÓN POR GRUPO<span style="flex:1;height:1px;background:var(--border)"></span></div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin:0 0 6px;padding:6px 9px;background:var(--card2);border-radius:8px">
+          <button class="rp-fus-estpill" data-est="act" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','estado','act',this)" style="font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;background:var(--green-bg);color:var(--green);border:1px solid var(--green);cursor:pointer" title="🟢 Activas DE VERDAD: botón prendido en Meta, ≥1 anuncio entregando AHORA, y SIN alerta PRENDER YA. ${_actHdrF} de ${_lista.length}. CLIC para ver SOLO las activas.">🟢 Activas: ${_actHdrF}</button>
+          <button class="rp-fus-estpill" data-est="ventas" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','estado','ventas',this)" style="font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;background:var(--red-bg);color:var(--red);border:1px solid var(--red);cursor:pointer" title="🔴 Inactivas ventas (PRENDER YA): hoy $0 de gasto pero CON ventas en los días anteriores — dejan plata sobre la mesa. ${_ventasHdrF} de ${_lista.length}. CLIC para ver SOLO estas y prenderlas.">🔴 Inactivas ventas: ${_ventasHdrF}</button>
+          <button class="rp-fus-estpill" data-est="inact" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','estado','inact',this)" style="font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border);cursor:pointer" title="⚫ Inactivas HOY: apagadas (o sin entregar) pero que SÍ gastaron plata HOY antes de apagarse — y SIN alerta PRENDER YA. ${_inactHdrF}. CLIC para ver SOLO estas. Las que solo corrieron días anteriores no entran aquí: véelas con los chips de días o 'Ver todas'.">⚫ Inactivas: ${_inactHdrF}</button>
+          <button class="rp-fus-estpill" data-est="hoy" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','estado','hoy',this)" style="font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.04);color:var(--text);border:1px solid var(--border);cursor:pointer" title="Todas HOY = 🟢 Activas (${_actHdrF}) + ⚫ Inactivas con gasto hoy (${_inactHdrF}) = ${_todasHdrF} campañas que movieron plata HOY. Las 🔴 Inactivas ventas van APARTE. CLIC para ver SOLO estas ${_todasHdrF} (clic de nuevo lo quita). Para ver TODA la lista (${_lista.length}) usa 'Ver todas'.">Todas hoy: ${_todasHdrF}</button>
+          <button class="rp-fus-estpill" data-est="noent" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','estado','noent',this)" style="font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.05);color:var(--text);border:1px solid var(--border);cursor:pointer" title="🔕 NO ENTREGA: botón prendido en Meta pero NINGÚN anuncio entregando — no gastan ni venden AHORA, aunque SÍ registraron actividad en el período. ${_noEntHdrF} de ${_lista.length}. CLIC para ver SOLO estas y revisar qué tienen apagado adentro (clic de nuevo lo quita). Se combina con los demás filtros.">🔕 No entrega: ${_noEntHdrF}</button>
+          <span style="width:1px;height:15px;background:var(--border);margin:0 3px;align-self:center"></span>
+          <button class="rp-fus-vsvpill" data-vsv="con" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','vsv','con',this)" style="font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;background:var(--green-bg);color:var(--green);border:1px solid var(--green);cursor:pointer" title="✅ CON VENTAS: campañas que SÍ vendieron (Dropi confirmadas 🛒 o por 🆔 IDs del aux). Si tienes un día marcado (HOY/AYER/…), cuenta SOLO ese día (HOY va por IDs, sin cruce todavía). Se COMBINA con los demás filtros. CLIC para ver solo estas (clic de nuevo lo quita).">✅ Con ventas: ${_conVtaHdrF}</button>
+          <button class="rp-fus-vsvpill" data-vsv="sin" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','vsv','sin',this)" style="font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid var(--amber);cursor:pointer" title="⛔ SIN VENTAS: campañas en CERO (ni Dropi ni 🆔). Candidatas a APAGAR. Si tienes un día marcado (HOY/AYER/…), cuenta SOLO ese día. Se COMBINA con los demás filtros. CLIC para ver solo estas (clic de nuevo lo quita).">⛔ Sin ventas: ${_sinVtaHdrF}</button>
+          <span style="font-size:10.5px;color:var(--subtle)">= ${_totVentasF}</span>
+      </div>
       ${_filtroRowF}
+      ${_ctrlRango}
+      <div style="display:flex;align-items:center;gap:8px;margin:6px 0 3px;font-size:9.5px;letter-spacing:.8px;color:var(--subtle);font-weight:700" title="ZONA 3 · CUIDADO: estos botones SÍ cambian cosas en Meta o recargan datos — no son filtros.">⚡ ACCIONES — ESTO SÍ TOCA META (NO FILTRA)<span style="flex:1;height:1px;background:var(--border)"></span></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
+        <button onclick="event.stopPropagation();window._rpFusionMassBud('${_slugProd}')" style="background:rgba(99,102,241,.1);border:1px solid var(--accent);border-radius:6px;color:var(--accent);font-size:10.5px;font-weight:700;padding:4px 11px;cursor:pointer;flex-shrink:0" title="Cambiar el presupuesto de VARIAS campañas de esta fusión a la vez (mismo modal del expand de cuenta, precargado con estas campañas)">💰 Presupuesto a varias</button>
+        <button onclick="event.stopPropagation();window._rpFusionMassPausa('${_slugProd}')" style="background:var(--red-bg);border:1px solid var(--red);border-radius:6px;color:var(--red);font-size:10.5px;font-weight:700;padding:4px 11px;cursor:pointer;flex-shrink:0" title="APAGAR (pausar) VARIAS campañas de esta fusión a la vez — mismo modal en lote del expand de cuenta, precargado con estas campañas. Las activas salen resaltadas para marcar cuáles apagar.">🔴 Apagar varias</button>
+        <button onclick="event.stopPropagation();window._rpFusionRefreshSem('${_slugProd}',this)" style="background:rgba(167,139,250,.1);border:1px solid var(--purple);border-radius:6px;color:var(--purple);font-size:10.5px;font-weight:700;padding:4px 11px;cursor:pointer;flex-shrink:0" title="Recalcula los puntos CONSOLIDADOS (⭐Dropi y 🆔 IDs) de AYER, ANTIER y TRASANTIER de TODAS las campañas de este producto: primero trae el gasto exacto de cada día desde Meta (mini-sync autoverificado) y luego guarda un punto ⭐Dropi nuevo anclado a ese día — la tira muestra solo el último ⭐, y el 🆔 IDs se recalcula solo porque usa el gasto del ⭐. El punto viejo queda en el Historial 📊 como evidencia. HOY no se toca porque su gasto sigue cambiando.">🔄 Refrescar semáforos</button>
+        <button onclick="event.stopPropagation();window._rpFusionLifetime('${_slugProd}',this)" style="background:rgba(94,234,212,.1);border:1px solid #5eead4;border-radius:6px;color:#5eead4;font-size:10.5px;font-weight:700;padding:4px 11px;cursor:pointer;flex-shrink:0" title="Reemplaza los totales 🛒 VTS y 🆔 TOT por el LIFETIME REAL desde que inició cada campaña (no solo los días visibles): gasto histórico real (meta_insights) + ventas confirmadas Dropi y total de órdenes reales (mapeos). Sin estimar. Los días HOY/AYER/ANTIER/TRAS no se tocan.">📊 Cargar lifetime</button>
+      </div>
       <style>
         .rp-fus-row{transition:background .08s}
         .rp-fus-row:hover{background:rgba(124,92,250,.13)}
@@ -19362,7 +19435,154 @@ window._rpFusionFiltro=function(cidF,tipo,valor,btn){
   }catch(_){}
   // NUEVO: la fila Σ TOTALES se recalcula con las campañas que quedaron visibles
   try{window._rpFusionTotales(cidF)}catch(_){}
+  // NUEVO (2jul26): conteos EN CASCADA (cada pill recalcula su número con los demás filtros puestos;
+  // en 0 se atenúa sola → imposible armar una combinación vacía) + botón Ver todas ↔ ✖ Limpiar filtros
+  try{window._rpFusionCounts&&window._rpFusionCounts(cidF)}catch(_){}
+  try{window._rpFusionClrState&&window._rpFusionClrState(cidF)}catch(_){}
   return vis
+}
+
+// ════════ NUEVO (2jul26): FUSIÓN PRINCIPAL — filtro por producto + grupos + 8 días por defecto ════════
+// La sección "🧩 TODAS LAS CAMPAÑAS JUNTAS · VISTA PRINCIPAL" vive arriba del resumen. Después de cada
+// render, _rpFusionMainInit MUEVE (mismo nodo DOM, cero duplicados) el bloque de fusión de cada card a su
+// grupo del principal, y mueve el bloque ⚠️ sin-producto a su grupo. Todos los IDs y handlers quedan
+// intactos porque el nodo es el mismo. Si algo falla, los bloques se quedan donde estaban (fallback sano).
+window._rpFusMainSel='__todos__'
+window._rpFusionMainInit=function(){
+  const main=document.getElementById('rp-fusion-main');if(!main)return
+  // 1) Mover cada fusión (bloque morado) de su card al grupo de su producto
+  document.querySelectorAll('#rp-cards .rp-fus-main[data-fslug]').forEach(el=>{
+    const bd=document.getElementById('fusgrp-bd-'+el.dataset.fslug)
+    if(bd&&!bd.contains(el))bd.appendChild(el)
+  })
+  // 2) Mover el bloque ⚠️ sin producto a su grupo (si existe)
+  try{const sp=document.getElementById('rp-sinprod-block');const bds=document.getElementById('fusgrp-bd-__sinprod__');if(sp&&bds&&!bds.contains(sp))bds.appendChild(sp)}catch(_){}
+  // 3) Estado inicial: 🌐 TODOS activo (borde blanco) + abrir el grupo MÁS urgente (el primero con fusión)
+  //    con "Últimos 8 días" POR DEFECTO — así carga con TODOS los botones a la vista de una.
+  window._rpFusMainSel='__todos__'
+  window._rpAuto8Done={}
+  window._rpFusMainPaint()
+  const grupos=main.querySelectorAll('#rp-fusion-groups .rp-fusgrp[data-fslug]')
+  for(const g of grupos){
+    const s=g.dataset.fslug
+    if(s!=='__sinprod__'&&document.getElementById('cuadf_'+s+'-wrap')){window._rpFusGrpToggle(s,true);break}
+  }
+}
+// Pinta las pills de producto (activa = borde blanco + halo) y muestra/oculta los grupos según selección
+window._rpFusMainPaint=function(){
+  const sel=window._rpFusMainSel||'__todos__'
+  document.querySelectorAll('.rp-fusmain-pill').forEach(p=>{
+    const on=p.dataset.fslug===sel
+    p.style.outline=on?'2px solid var(--text)':'none'
+    p.style.outlineOffset=on?'2px':''
+    p.style.boxShadow=on?'0 0 0 4px rgba(255,255,255,.08)':'none'
+  })
+  document.querySelectorAll('#rp-fusion-groups .rp-fusgrp').forEach(g=>{
+    g.style.display=(sel==='__todos__'||g.dataset.fslug===sel)?'':'none'
+  })
+}
+// Filtro de PRODUCTO tipo radio: clic en la pill activa vuelve a 🌐 TODOS. Producto puntual → su grupo se abre solo.
+window._rpFusMainProd=function(slug){
+  window._rpFusMainSel=(window._rpFusMainSel===slug)?'__todos__':slug
+  const sel=window._rpFusMainSel
+  window._rpFusMainPaint()
+  if(sel!=='__todos__')window._rpFusGrpToggle(sel,true)
+}
+// Abre/cierra un grupo de producto. Al ABRIR por primera vez: abre la fusión interna (si estaba cerrada)
+// y aplica "Últimos 8 días" POR DEFECTO (una sola vez por producto por carga — no repite llamados).
+window._rpFusGrpToggle=function(slug,forceOpen){
+  const bd=document.getElementById('fusgrp-bd-'+slug),ch=document.getElementById('fusgrp-ch-'+slug)
+  if(!bd)return
+  const isOpen=bd.style.display!=='none'
+  const abrir=forceOpen===true?true:!isOpen
+  bd.style.display=abrir?'':'none'
+  if(ch)ch.textContent=abrir?'▼':'▸'
+  if(!abrir)return
+  if(slug==='__sinprod__'){
+    try{const s=document.getElementById('rp-sinprod-sub');if(s)s.style.display='block'}catch(_){}
+    return
+  }
+  const cidF='cuadf_'+slug
+  try{
+    const sub=document.getElementById(cidF+'-sub')
+    const rg=document.getElementById(cidF+'-rango')
+    const rgVis=!!(rg&&rg.style.display!=='none'&&rg.innerHTML)
+    if(sub&&sub.style.display==='none'&&!rgVis)window._rpToggleCuadre(cidF)
+  }catch(_){}
+  window._rpFusAuto8(slug)
+}
+// "Últimos 8 días" POR DEFECTO — dispara el flujo EXISTENTE (_rpFusion8dias) una sola vez por producto.
+window._rpFusAuto8=function(slug){
+  window._rpAuto8Done=window._rpAuto8Done||{}
+  if(window._rpAuto8Done[slug])return
+  if(!document.getElementById('cuadf_'+slug+'-wrap'))return
+  window._rpAuto8Done[slug]=1
+  try{if(window._rpFusion8dias)window._rpFusion8dias(slug,'cuadf_'+slug)}catch(_){}
+}
+// Réplica EXACTA del predicado de _rpFusionFiltro — SOLO para contar (no toca visibilidad)
+window._rpFusRowOkC=function(row,f){
+  const ds=row.dataset,_esPy=(ds.fsem||'')==='prender_ya'
+  if(f.fsem&&(ds.fsem||'')!==f.fsem)return false
+  if(f.fest==='act'&&(ds.factiva!=='1'||_esPy))return false
+  if(f.fest==='ventas'&&!_esPy)return false
+  if(f.fest==='inact'&&(ds.factiva==='1'||_esPy||ds.fghoy!=='1'))return false
+  if(f.fest==='noent'&&ds.fnoent!=='1')return false
+  if(f.fest==='hoy'&&(_esPy||!(ds.factiva==='1'||ds.fghoy==='1')))return false
+  if(f.fdia&&!(ds.fdias||'').split(',').includes(f.fdia))return false
+  if(f.fid&&!((ds.fcampid||'').includes(f.fid)||(ds.fadids||'').includes(f.fid)))return false
+  if(f.fvsv){
+    const pi=a=>parseInt(ds[a]||'0',10)||0
+    let v
+    if(f.fdia==='p')v=pi('fvp');else if(f.fdia==='a')v=Math.max(pi('fva'),pi('fia'));else if(f.fdia==='b')v=Math.max(pi('fvb'),pi('fib'));else if(f.fdia==='c')v=Math.max(pi('fvc'),pi('fic'));else v=Math.max(pi('fvts'),pi('fitot'))
+    if(f.fvsv==='con'&&!(v>0))return false
+    if(f.fvsv==='sin'&&v>0)return false
+  }
+  return true
+}
+// Conteos EN CASCADA: cada pill muestra cuántas campañas quedarían si la marcas ADEMÁS de los filtros
+// que ya están puestos. En 0 → se atenúa y no se puede tocar (nunca armas una combinación vacía).
+// La pill ACTIVA nunca se bloquea (siempre puedes des-marcarla). En modo LIFETIME no interviene.
+window._rpFusionCounts=function(cidF){
+  const sub=document.getElementById(cidF+'-sub');if(!sub)return
+  const slug=cidF.replace('cuadf_','')
+  if(window._rpLifeOn&&window._rpLifeOn[slug])return
+  const f={fsem:sub.dataset.fsem||'',fest:sub.dataset.festado||'',fdia:sub.dataset.fdia||'',fvsv:sub.dataset.fvsv||'',fid:(sub.dataset.fid||'').trim()}
+  const rows=[...sub.querySelectorAll('.rp-fus-box .rp-fus-row')]
+  if(!rows.length)return
+  const wrap=sub.closest('.rp-fus-main')||sub.parentElement;if(!wrap)return
+  const cnt=(f2)=>{let n=0;for(const r of rows){if(window._rpFusRowOkC(r,f2))n++}return n}
+  const dim=(p,n,activo)=>{const off=(n===0&&!activo);p.style.opacity=off?'.35':'';p.style.pointerEvents=off?'none':''}
+  wrap.querySelectorAll('.rp-fus-urgpill[data-code]').forEach(p=>{
+    if(!p.getAttribute('onclick'))return
+    const code=p.dataset.code,n=cnt({fsem:code,fest:f.fest,fdia:f.fdia,fvsv:f.fvsv,fid:f.fid})
+    if(p.children[1])p.children[1].textContent=String(n)
+    dim(p,n,f.fsem===code)
+  })
+  wrap.querySelectorAll('.rp-fus-estpill[data-est]').forEach(p=>{
+    const est=p.dataset.est,n=cnt({fsem:f.fsem,fest:est,fdia:f.fdia,fvsv:f.fvsv,fid:f.fid})
+    p.textContent=p.textContent.replace(/\d+\s*$/,String(n))
+    dim(p,n,f.fest===est)
+  })
+  wrap.querySelectorAll('.rp-fus-vsvpill[data-vsv]').forEach(p=>{
+    const v=p.dataset.vsv,n=cnt({fsem:f.fsem,fest:f.fest,fdia:f.fdia,fvsv:v,fid:f.fid})
+    p.textContent=p.textContent.replace(/\d+\s*$/,String(n))
+    dim(p,n,f.fvsv===v)
+  })
+  wrap.querySelectorAll('.rp-fus-diapill[data-dia]').forEach(p=>{
+    if(!p.getAttribute('onclick'))return
+    const d=p.dataset.dia,n=cnt({fsem:f.fsem,fest:f.fest,fdia:d,fvsv:f.fvsv,fid:f.fid})
+    dim(p,n,f.fdia===d)
+  })
+}
+// Botón "Ver todas" ↔ "✖ Limpiar filtros": cambia solo cuando hay ALGO marcado (ámbar, imposible perderlo)
+window._rpFusionClrState=function(cidF){
+  const sub=document.getElementById(cidF+'-sub');if(!sub)return
+  const hay=!!((sub.dataset.fsem||'')||(sub.dataset.festado||'')||(sub.dataset.fdia||'')||(sub.dataset.fvsv||'')||((sub.dataset.fid||'').trim()))
+  const b=document.getElementById(cidF+'-btnclr');if(!b)return
+  b.textContent=hay?'✖ Limpiar filtros':'Ver todas'
+  b.style.color=hay?'var(--amber)':'var(--muted)'
+  b.style.borderColor=hay?'var(--amber)':'var(--border)'
+  b.style.fontWeight=hay?'700':''
 }
 
 // ── NUEVO ORDEN POR COLUMNA: clic en el encabezado de una columna numérica → ordena las filas ──
@@ -19870,6 +20090,8 @@ window._rpFusionVolver=function(cidF){
   if(r)r.style.display='none'
   if(s){s.style.display='block';const ch=document.getElementById(cidF+'-chev');if(ch)ch.textContent='▼'}
   if(st)st.textContent=''
+  // NUEVO (2jul26): al volver a 4 días se apaga la marca del botón "Últimos 8 días"
+  try{const _b8=document.getElementById(cidF+'-btn8d');if(_b8){_b8.style.outline='none';_b8.style.outlineOffset=''}}catch(_2){}
   // NUEVO RANGO+: devolver los chips de días del encabezado a su versión de 4 días
   try{const _chipsV=document.getElementById(cidF+'-diachips');if(_chipsV&&window._rpFusionChipsOrig&&window._rpFusionChipsOrig[cidF]!==undefined)_chipsV.innerHTML=window._rpFusionChipsOrig[cidF]}catch(_){}
 }
@@ -19936,6 +20158,8 @@ window._rpFusion8dias=function(slug,cidF){
     if(eH)eH.value=_iso(_h)
     const eC=document.getElementById(cidF+'-camp');if(eC)eC.value='' // siempre TODAS las campañas
     if(window._rpFusionRango)window._rpFusionRango(slug,cidF)
+    // NUEVO (2jul26): el botón queda MARCADO (borde blanco) mientras el rango de 8 días esté aplicado
+    try{const _b8=document.getElementById(cidF+'-btn8d');if(_b8){_b8.style.outline='2px solid var(--text)';_b8.style.outlineOffset='2px'}}catch(_2){}
   }catch(_e){console.warn('rpFusion8dias',_e)}
 }
 
@@ -20452,6 +20676,9 @@ window._actualizarResumenMetaProductos=async function(){
   cont.innerHTML='<div class="loading" style="padding:20px;text-align:center;color:var(--muted);font-size:13px">Cargando resumen por producto...</div>'
   try{
     cont.innerHTML=await _renderResumenProductos(desde,hasta,hoy)||''
+    // NUEVO (2jul26): armar la FUSIÓN PRINCIPAL — mueve las fusiones de las cards a los grupos,
+    // marca 🌐 TODOS (borde blanco) y abre el producto más urgente con "Últimos 8 días" por defecto.
+    try{window._rpFusionMainInit&&window._rpFusionMainInit()}catch(_fm){console.warn('[fusión principal]',_fm)}
   }catch(e){
     console.warn('[resumen productos]',e?.message)
     // NUEVO AVISO DE CARGA: antes quedaba VACÍO en silencio — ahora avisa y deja reintentar de una

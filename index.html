@@ -991,6 +991,90 @@ window._embModalFiltro=()=>{
   })
 }
 window._embModalClose=()=>{const el=document.getElementById('emb-modal-overlay');if(el)el.remove()}
+// ── 🟩 ID clickeable: copia al portapapeles y queda marcado en verde hasta recargar la página ──
+window._embMarked=window._embMarked||new Set()
+window._embMarkId=(el,id)=>{
+  window._embCopy(String(id))
+  window._embMarked.add(String(id))
+  if(el){el.style.background='rgba(34,197,94,.25)';el.style.color='var(--green)';el.style.borderColor='var(--green)'
+    const o=el.textContent;el.textContent='✅ copiado';setTimeout(()=>{el.textContent=o},800)}
+}
+// ── ⚡ ESTADO REAL de campañas/anuncios del desglose — MISMA lógica de la sección Meta Ads ──
+// Campaña: `status` (botón) live + entrega = ≥1 anuncio con effective_status ACTIVE (live).
+// 3 estados: 🟢 ACTIVA · ⏸ APAGADA · 🔕 NO ENTREGA (botón prendido pero nada entregando).
+// Fuente: 1º caches live del portafolio Meta (si ya cargó → coincide 100% con esa sección),
+// 2º llamada directa a la API de Meta (act_X/campaigns + act_X/ads ACTIVE, igual que el portafolio),
+// 3º fallback BD meta_campanas.estado (último sync), marcado "· BD" en el tooltip.
+window._embEstCache=null
+window._embPintarEstados=async()=>{
+  const pills=[...document.querySelectorAll('.emb-est')].filter(p=>!p.dataset.done)
+  if(!pills.length)return
+  try{
+    if(!window._embEstCache){
+      window._embEstCache=(async()=>{
+        const R={est:{},ent:{},adsAct:{},adEstBD:{},campEstBD:{},live:false}
+        // 1) BD (siempre): estado botón por ID según último sync — base y fallback
+        const _ids=[...new Set([...document.querySelectorAll('.emb-est')].map(p=>p.dataset.mid).filter(Boolean))]
+        for(let i=0;i<_ids.length;i+=300){
+          const{data}=await sb.from('meta_campanas').select('meta_id,nivel,estado').in('meta_id',_ids.slice(i,i+300))
+          for(const r of (data||[])){if(r.nivel==='ad')R.adEstBD[String(r.meta_id)]=r.estado||'';else if(r.nivel==='campaign')R.campEstBD[String(r.meta_id)]=r.estado||''}
+        }
+        // 2) Caches live del portafolio Meta (si esa sección ya cargó en esta sesión)
+        if(window._nexoLiveEstadoByCampId&&window._nexoEntregaByCampId&&window._nexoEntregaFuente==='live'){
+          R.est=window._nexoLiveEstadoByCampId;R.ent=window._nexoEntregaByCampId;R.adsAct=window._nexoAdsActivosById||{};R.live=true
+          return R
+        }
+        // 3) Llamada directa a Meta API (misma consulta del portafolio)
+        try{
+          const _tk=await getConfig('meta_access_token')
+          if(!_tk)throw new Error('sin token')
+          const{data:ctas}=await sb.from('meta_cuentas').select('account_id')
+          if(!ctas||!ctas.length)throw new Error('sin cuentas')
+          let ok=false
+          for(const c of ctas){
+            try{
+              const camps=await metaGet(`/act_${c.account_id}/campaigns`,_tk,{fields:'id,status,effective_status',limit:'500'})
+              for(const cp of (camps||[]))if(cp.id)R.est[String(cp.id)]=cp.status||cp.effective_status||''
+              const adsLive=await metaGet(`/act_${c.account_id}/ads`,_tk,{fields:'id,effective_status,campaign_id',filtering:JSON.stringify([{field:'effective_status',operator:'IN',value:['ACTIVE']}]),limit:'500'})
+              for(const ad of (adsLive||[])){if(ad.campaign_id)R.ent[String(ad.campaign_id)]=true;if(ad.id)R.adsAct[String(ad.id)]=true}
+              ok=true
+            }catch(eC){console.warn('[emb estados] cuenta',c.account_id,eC&&eC.message)}
+          }
+          if(ok){for(const k in R.est){if(R.ent[k]===undefined)R.ent[k]=false}R.live=true}
+        }catch(eL){console.warn('[emb estados] live falló, fallback BD:',eL&&eL.message)}
+        return R
+      })()
+    }
+    const R=await window._embEstCache
+    const _pill=(bg,col,bor,txt,tip)=>{return{bg,col,bor,txt,tip}}
+    for(const p of pills){
+      p.dataset.done='1'
+      const mid=String(p.dataset.mid||''),lvl=p.dataset.lvl
+      let P
+      if(lvl==='camp'){
+        const est=R.est[mid]||R.campEstBD[mid]||''
+        const ent=R.ent[mid] // true / false / undefined
+        const _src=R.live?'':' · según último sync (BD), Meta no respondió en vivo'
+        if(!est)P=_pill('rgba(255,255,255,.04)','var(--subtle)','var(--border)','❔','NEXO no tiene esta campaña sincronizada de Meta — sincroniza en Meta Ads para ver su estado')
+        else if(est!=='ACTIVE')P=_pill('rgba(255,255,255,.04)','var(--subtle)','var(--border)','⏸ APAGADA','El botón de la campaña está APAGADO en Meta: no corre'+_src)
+        else if(ent===false)P=_pill('rgba(245,158,11,.12)','var(--amber)','var(--amber)','🔕 NO ENTREGA','TRAMPA de Meta: botón prendido pero NINGÚN anuncio entregando → no gasta ni vende AHORA. Revisa adentro qué está apagado'+_src)
+        else if(ent===true)P=_pill('rgba(34,197,94,.12)','var(--green)','var(--green)','▶ ACTIVA','Activa DE VERDAD: botón prendido y ≥1 anuncio entregando AHORA según Meta')
+        else P=_pill('rgba(34,197,94,.08)','var(--green)','var(--border)','▶ ACTIVA','Botón prendido'+(_src||' · entrega en vivo no disponible'))
+      }else{
+        const estBD=R.adEstBD[mid]||''
+        const act=R.adsAct[mid]===true
+        const _src=R.live?'':' · según último sync (BD)'
+        if(act)P=_pill('rgba(34,197,94,.12)','var(--green)','var(--green)','▶ ACTIVO','Este anuncio está ENTREGANDO AHORA según Meta')
+        else if(estBD&&estBD!=='ACTIVE')P=_pill('rgba(255,255,255,.04)','var(--subtle)','var(--border)','⏸ APAGADO','El anuncio está APAGADO en Meta: si quieres que corra, hay que prenderlo'+_src)
+        else if(estBD==='ACTIVE'&&R.live)P=_pill('rgba(245,158,11,.12)','var(--amber)','var(--amber)','🔕 NO ENTREGA','Botón del anuncio prendido pero Meta NO lo reporta entregando (algo arriba está apagado o en revisión)')
+        else if(estBD==='ACTIVE')P=_pill('rgba(34,197,94,.08)','var(--green)','var(--border)','▶ ACTIVO','Prendido según último sync (BD) — entrega en vivo no disponible')
+        else P=_pill('rgba(255,255,255,.04)','var(--subtle)','var(--border)','❔','NEXO no tiene este anuncio sincronizado de Meta — sincroniza en Meta Ads para ver su estado')
+      }
+      p.style.background=P.bg;p.style.color=P.col;p.style.borderColor=P.bor
+      p.textContent=P.txt;p.title=P.tip
+    }
+  }catch(e){console.warn('[emb estados]',e)}
+}
 // ── Modal principal: 2 columnas GUÍA | TELÉFONO con copiar 1 / copiar todas ──
 // pi: índice en window._embPN (-1 = todos los productos, -2 = usar window._embCuadreCtx.pn)
 // ci: ''=todas · '_org'=sin ad_id · '_nr'=ad sin campaña resuelta · campId
@@ -2111,18 +2195,24 @@ async function loadDash(){
       if(st.total<10)return{dot:'⚪',cC:'var(--muted)',cD:'var(--muted)',tip:'Menos de 10 órdenes: aún no se puede juzgar'}
       const _peor=(_sc>pC+0.001)||(_sd!==null&&_sd>pD+0.001)
       return{dot:_peor?'🔴':'🟢',cC:_sc>pC+0.001?'var(--red)':(_sc<pC-0.001?'var(--green)':'var(--muted)'),cD:_sd===null?'var(--muted)':(_sd>pD+0.001?'var(--red)':(_sd<pD-0.001?'var(--green)':'var(--muted)')),tip:_peor?'PEOR que el promedio del producto → cuidado / no meter más plata':'MEJOR o igual que el promedio del producto → aquí sí'}}
-    const _subTr=(cls,pad,icon,nom,st,pi,ci,ai,pC,pD,tgl,chevId)=>{const d=st.total-st.canc-st.pconf-st.rech-st.pend,ec=d-st.ent-st.dev,fn=st.ent+st.dev,S=_sem(st,pC,pD)
-      return `<tr class="${cls}" style="display:none;border-bottom:1px solid var(--border);background:rgba(56,139,222,.04)"><td style="text-align:left;padding:6px 10px 6px ${pad}px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px;${tgl?'cursor:pointer;':''}color:var(--text)" title="${_e(nom)} · ${S.tip}" ${tgl?`onclick="${tgl}"`:''}>${tgl?`<span id="${chevId}" style="font-size:9px;color:var(--muted)">▸</span> `:''}<span title="${S.tip}">${S.dot}</span> ${icon} <span style="font-size:11px">${_e(nom)}</span> <code style="font-size:9px;color:var(--subtle)">${ai?ai:(ci&&ci[0]!=='_'?ci:'')}</code></td>`
-      +_lk(st.total,'var(--text)','total',pi,ci,ai)+_lk(st.canc,'var(--red)','canc',pi,ci,ai)+`<td style="text-align:center;padding:6px 7px;font-variant-numeric:tabular-nums;font-weight:700;color:${S.cC}">${_p(st.canc,st.total)}</td>`+_lk(st.pconf,'var(--amber)','pconf',pi,ci,ai)+_cp(_p(st.pconf,st.total))+_lk(st.rech,'var(--red)','rech',pi,ci,ai)+_cp(_p(st.rech,st.total))+_lk(st.pend,'var(--amber)','pend',pi,ci,ai)+_hl(_p(st.pend,st.total))+_lk(d,d<0?'var(--red)':'var(--text)','desp',pi,ci,ai)+_lk(ec,'var(--blue)','encam',pi,ci,ai)+_hl(_p(ec,d))+_lk(st.ent,'var(--green)','ent',pi,ci,ai)+_cp(_p(st.ent,fn))+_lk(st.dev,'var(--red)','dev',pi,ci,ai)+`<td style="text-align:center;padding:6px 7px;font-variant-numeric:tabular-nums;font-weight:700;color:${S.cD}">${_p(st.dev,fn)}</td>`+_hlk(fn,_p(fn,d),pi,ci,ai)+`<td style="text-align:center;padding:6px 7px;color:var(--subtle)">—</td><td style="text-align:center;padding:6px 7px;color:var(--subtle)">—</td><td style="text-align:center;padding:6px 7px;color:var(--subtle)">—</td></tr>`}
+    const _subTr=(cls,pad,icon,nom,st,pi,ci,ai,pC,pD,pDsp,tgl,chevId)=>{const d=st.total-st.canc-st.pconf-st.rech-st.pend,ec=d-st.ent-st.dev,fn=st.ent+st.dev,S=_sem(st,pC,pD)
+      // ID visible (nombre queda en tooltip) · clic en ID = copiar + marca verde hasta recargar · pastilla estado Meta (se pinta en vivo)
+      const _theId=ai||((ci&&ci[0]!=='_')?ci:'')
+      const _marked=(window._embMarked&&_theId&&window._embMarked.has(_theId))
+      const _idHtml=_theId?`<code onclick="event.stopPropagation();window._embMarkId(this,'${_theId}')" title="${_e(nom)} — clic para COPIAR el ID (queda marcado en verde hasta recargar)" style="font-size:11px;cursor:pointer;padding:1px 6px;border-radius:6px;border:1px dotted var(--border);${_marked?'background:rgba(34,197,94,.25);color:var(--green);border-color:var(--green)':'color:var(--text)'}">${_theId}</code>`:`<span style="font-size:11px">${_e(nom)}</span>`
+      const _pillHtml=_theId?`<span class="emb-est" data-lvl="${ai?'ad':'camp'}" data-mid="${_theId}" style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)">⏳</span> `:''
+      const _sDsp=st.total>0?d/st.total:0,_cDsp=st.total<10?'var(--muted)':(_sDsp>pDsp+0.001?'var(--green)':(_sDsp<pDsp-0.001?'var(--red)':'var(--muted)'))
+      return `<tr class="${cls}" style="display:none;border-bottom:1px solid var(--border);background:rgba(56,139,222,.04)"><td style="text-align:left;padding:6px 10px 6px ${pad}px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:300px;${tgl?'cursor:pointer;':''}color:var(--text)" title="${_e(nom)} · ${S.tip}" ${tgl?`onclick="${tgl}"`:''}>${tgl?`<span id="${chevId}" style="font-size:9px;color:var(--muted)">▸</span> `:''}<span title="${S.tip}">${S.dot}</span> ${icon} ${_pillHtml}${_idHtml}</td>`
+      +_lk(st.total,'var(--text)','total',pi,ci,ai)+_lk(st.canc,'var(--red)','canc',pi,ci,ai)+`<td style="text-align:center;padding:6px 7px;font-variant-numeric:tabular-nums;font-weight:700;color:${S.cC}">${_p(st.canc,st.total)}</td>`+_lk(st.pconf,'var(--amber)','pconf',pi,ci,ai)+_cp(_p(st.pconf,st.total))+_lk(st.rech,'var(--red)','rech',pi,ci,ai)+_cp(_p(st.rech,st.total))+_lk(st.pend,'var(--amber)','pend',pi,ci,ai)+_hl(_p(st.pend,st.total))+_lk(d,d<0?'var(--red)':'var(--text)','desp',pi,ci,ai)+`<td title="De todo lo que entró por este ID, qué % salió despachado — 🟢 despacha MÁS que el promedio del producto · 🔴 menos (trae órdenes basura)" style="text-align:center;padding:6px 7px;font-variant-numeric:tabular-nums;font-weight:700;cursor:help;color:${_cDsp}">${_p(d,st.total)}</td>`+_lk(ec,'var(--blue)','encam',pi,ci,ai)+_hl(_p(ec,d))+_lk(st.ent,'var(--green)','ent',pi,ci,ai)+_cp(_p(st.ent,fn))+_lk(st.dev,'var(--red)','dev',pi,ci,ai)+`<td style="text-align:center;padding:6px 7px;font-variant-numeric:tabular-nums;font-weight:700;color:${S.cD}">${_p(st.dev,fn)}</td>`+_hlk(fn,_p(fn,d),pi,ci,ai)+`<td style="text-align:center;padding:6px 7px;color:var(--subtle)">—</td><td style="text-align:center;padding:6px 7px;color:var(--subtle)">—</td><td style="text-align:center;padding:6px 7px;color:var(--subtle)">—</td></tr>`}
     const _body=_fl.map((f,_pi)=>{const desp=f.total-f.canc-f.pconf-f.rech-f.pend,encam=desp-f.ent-f.dev,fin=f.ent+f.dev,fenv=f.fenvN?Math.round(f.fenvSum/f.fenvN):0,fdp=f.fdpN?Math.round(f.fdpSum/f.fdpN):0,fdt=f.fdtN?Math.round(f.fdtSum/f.fdtN):0;if(desp<0||encam<0)_filasMal.push(f.pn)
-      const _pC=f.total>0?f.canc/f.total:0,_pD=fin>0?f.dev/fin:0
+      const _pC=f.total>0?f.canc/f.total:0,_pD=fin>0?f.dev/fin:0,_pDsp=f.total>0?desp/f.total:0
       const _sp=_sub[f.pn]||{camps:{},order:[]}
       const _nCa=_sp.order.length
-      const _main=`<tr style="border-bottom:1px solid var(--border)"><td onclick="window._embTgP('${key}',${_pi})" style="text-align:left;padding:7px 10px;color:${(desp<0||encam<0)?'var(--red)':'var(--text)'};white-space:nowrap;cursor:pointer" title="${_e(f.pn)} · Toca para ver el desglose por campaña y anuncio">${(desp<0||encam<0)?'🚨 ':''}<span id="embch-${key}-${_pi}" style="font-size:10px;color:var(--blue)">▸</span> ${_e(f.pn)} <span style="font-size:9px;color:var(--subtle)">📣${_nCa}</span></td>`+_lk(f.total,'var(--text)','total',_pi,'','')+_lk(f.canc,'var(--red)','canc',_pi,'','')+_cp(_p(f.canc,f.total))+_lk(f.pconf,'var(--amber)','pconf',_pi,'','')+_cp(_p(f.pconf,f.total))+_lk(f.rech,'var(--red)','rech',_pi,'','')+_cp(_p(f.rech,f.total))+_lk(f.pend,'var(--amber)','pend',_pi,'','')+_hl(_p(f.pend,f.total))+_lk(desp,desp<0?'var(--red)':'var(--text)','desp',_pi,'','')+_lk(encam,'var(--blue)','encam',_pi,'','')+_hl(_p(encam,desp))+_lk(f.ent,'var(--green)','ent',_pi,'','')+_cp(_p(f.ent,fin))+_lk(f.dev,'var(--red)','dev',_pi,'','')+_cp(_p(f.dev,fin))+_hlk(fin,_p(fin,desp),_pi,'','')+_cfenv(fenv,f.fenvCfg,f.fenvN)+_cf(fdp)+_cf(fdt)+`</tr>`
+      const _main=`<tr style="border-bottom:1px solid var(--border)"><td onclick="window._embTgP('${key}',${_pi})" style="text-align:left;padding:7px 10px;color:${(desp<0||encam<0)?'var(--red)':'var(--text)'};white-space:nowrap;cursor:pointer" title="${_e(f.pn)} · Toca para ver el desglose por campaña y anuncio">${(desp<0||encam<0)?'🚨 ':''}<span id="embch-${key}-${_pi}" style="font-size:10px;color:var(--blue)">▸</span> ${_e(f.pn)} <span style="font-size:9px;color:var(--subtle)">📣${_nCa}</span></td>`+_lk(f.total,'var(--text)','total',_pi,'','')+_lk(f.canc,'var(--red)','canc',_pi,'','')+_cp(_p(f.canc,f.total))+_lk(f.pconf,'var(--amber)','pconf',_pi,'','')+_cp(_p(f.pconf,f.total))+_lk(f.rech,'var(--red)','rech',_pi,'','')+_cp(_p(f.rech,f.total))+_lk(f.pend,'var(--amber)','pend',_pi,'','')+_hl(_p(f.pend,f.total))+_lk(desp,desp<0?'var(--red)':'var(--text)','desp',_pi,'','')+_cp(_p(desp,f.total))+_lk(encam,'var(--blue)','encam',_pi,'','')+_hl(_p(encam,desp))+_lk(f.ent,'var(--green)','ent',_pi,'','')+_cp(_p(f.ent,fin))+_lk(f.dev,'var(--red)','dev',_pi,'','')+_cp(_p(f.dev,fin))+_hlk(fin,_p(fin,desp),_pi,'','')+_cfenv(fenv,f.fenvCfg,f.fenvN)+_cf(fdp)+_cf(fdt)+`</tr>`
       const _campsHtml=_sp.order.map((cid,_ci)=>{const C=_sp.camps[cid]
         const _hasAds=C.aOrder.length>0
-        const _cRow=_subTr(`embc-${key}-${_pi}`,26,'📣',C.nom,C.st,_pi,cid,'',_pC,_pD,_hasAds?`window._embTgC('${key}',${_pi},${_ci})`:'',`embcch-${key}-${_pi}-${_ci}`)
-        const _aRows=C.aOrder.map(aid=>_subTr(`emba-${key}-${_pi}-${_ci}`,46,'📢',C.ads[aid].nom,C.ads[aid].st,_pi,cid,aid,_pC,_pD,'','' )).join('')
+        const _cRow=_subTr(`embc-${key}-${_pi}`,26,'📣',C.nom,C.st,_pi,cid,'',_pC,_pD,_pDsp,_hasAds?`window._embTgC('${key}',${_pi},${_ci})`:'',`embcch-${key}-${_pi}-${_ci}`)
+        const _aRows=C.aOrder.map(aid=>_subTr(`emba-${key}-${_pi}-${_ci}`,46,'📢',C.ads[aid].nom,C.ads[aid].st,_pi,cid,aid,_pC,_pD,_pDsp,'','' )).join('')
         return _cRow+_aRows}).join('')
       return _main+_campsHtml}).join('')
     const T=_fl.reduce((a,f)=>{a.total+=f.total;a.canc+=f.canc;a.pconf+=f.pconf;a.rech+=f.rech;a.pend+=f.pend;a.ent+=f.ent;a.dev+=f.dev;a.fenvSum+=f.fenvSum;a.fenvN+=f.fenvN;a.fenvCfg+=f.fenvCfg;a.fdpSum+=f.fdpSum;a.fdpN+=f.fdpN;a.fdtSum+=f.fdtSum;a.fdtN+=f.fdtN;return a},{total:0,canc:0,pconf:0,rech:0,pend:0,ent:0,dev:0,fenvSum:0,fenvN:0,fenvCfg:0,fdpSum:0,fdpN:0,fdtSum:0,fdtN:0})
@@ -2131,14 +2221,14 @@ async function loadDash(){
     const _fthl=s=>`<td style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;background:${_BG};color:var(--blue)">${s}</td>`
     const _ftenv=(v,cfg,n)=>{if(!v)return `<td style="text-align:center;padding:8px 7px;font-weight:700;color:var(--subtle)">—</td>`;const _r=cfg>0,_t=_r?(cfg+' de '+n+' usan flete del sistema (config), no real de Dropi'):('Las '+n+' usan flete real');return `<td title="${_t}" style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;cursor:help;color:${_r?'var(--red)':'var(--text)'}">$${fmt(v)}${_r?' ⚠':''}</td>`}
     const _ftk=(v,est,col)=>`<td style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;color:${col||'var(--text)'}">${v>0?`<span onclick="window._embModal(-1,'','','${est}')" title="Ver guías y teléfonos de TODOS los productos" style="cursor:pointer;border-bottom:1px dotted currentColor">${v}</span>`:v}</td>`
-    const _foot=`<tr style="border-top:1px solid var(--border)"><td style="text-align:left;padding:8px 10px;font-weight:700;color:var(--text)">Total</td>`+_ftk(T.total,'total')+_ftk(T.canc,'canc')+_ft(_p(T.canc,T.total),'var(--muted)')+_ftk(T.pconf,'pconf')+_ft(_p(T.pconf,T.total),'var(--muted)')+_ftk(T.rech,'rech','var(--red)')+_ft(_p(T.rech,T.total),'var(--muted)')+_ftk(T.pend,'pend')+_fthl(_p(T.pend,T.total))+_ftk(Td,'desp',Td<0?'var(--red)':undefined)+_ftk(Tcam,'encam')+_fthl(_p(Tcam,Td))+_ftk(T.ent,'ent')+_ft(_p(T.ent,Tfin),'var(--muted)')+_ftk(T.dev,'dev')+_ft(_p(T.dev,Tfin),'var(--muted)')+`<td style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;background:${_BG};color:var(--blue)">${Tfin>0?`<span onclick="window._embModal(-1,'','','fin')" title="Ver guías y teléfonos" style="cursor:pointer;border-bottom:1px dotted currentColor">${Tfin}</span>`:Tfin} · ${_p(Tfin,Td)}</td>`+_ftenv(Tfenv,T.fenvCfg,T.fenvN)+_ft(Tfdp?('$'+fmt(Tfdp)):'—')+_ft(Tfdt?('$'+fmt(Tfdt)):'—')+`</tr>`
+    const _foot=`<tr style="border-top:1px solid var(--border)"><td style="text-align:left;padding:8px 10px;font-weight:700;color:var(--text)">Total</td>`+_ftk(T.total,'total')+_ftk(T.canc,'canc')+_ft(_p(T.canc,T.total),'var(--muted)')+_ftk(T.pconf,'pconf')+_ft(_p(T.pconf,T.total),'var(--muted)')+_ftk(T.rech,'rech','var(--red)')+_ft(_p(T.rech,T.total),'var(--muted)')+_ftk(T.pend,'pend')+_fthl(_p(T.pend,T.total))+_ftk(Td,'desp',Td<0?'var(--red)':undefined)+_ft(_p(Td,T.total),'var(--muted)')+_ftk(Tcam,'encam')+_fthl(_p(Tcam,Td))+_ftk(T.ent,'ent')+_ft(_p(T.ent,Tfin),'var(--muted)')+_ftk(T.dev,'dev')+_ft(_p(T.dev,Tfin),'var(--muted)')+`<td style="text-align:center;padding:8px 7px;font-weight:700;font-variant-numeric:tabular-nums;background:${_BG};color:var(--blue)">${Tfin>0?`<span onclick="window._embModal(-1,'','','fin')" title="Ver guías y teléfonos" style="cursor:pointer;border-bottom:1px dotted currentColor">${Tfin}</span>`:Tfin} · ${_p(Tfin,Td)}</td>`+_ftenv(Tfenv,T.fenvCfg,T.fenvN)+_ft(Tfdp?('$'+fmt(Tfdp)):'—')+_ft(Tfdt?('$'+fmt(Tfdt)):'—')+`</tr>`
     const _th=(t,c,hl)=>`<th style="text-align:${t==='Producto'?'left':'center'};padding:7px 7px;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;white-space:nowrap;${hl?('background:'+_BG+';color:var(--blue)'):('color:'+(c||'var(--muted)'))}">${t}</th>`
-    const _head=_th('Producto')+_th('Total')+_th('Canc','var(--red)')+_th('%Canc')+_th('P.conf','var(--amber)')+_th('%P.conf')+_th('Rech','var(--red)')+_th('%Rech')+_th('Pend','var(--amber)')+_th('%Pend',null,true)+_th('Desp')+_th('En cam','var(--blue)')+_th('%cam',null,true)+_th('Entr','var(--green)')+_th('%Ent')+_th('Dev','var(--red)')+_th('%Dev')+_th('Final',null,true)+_th('Flete env')+_th('Flete dev')+_th('Flete dev total')
+    const _head=_th('Producto')+_th('Total')+_th('Canc','var(--red)')+_th('%Canc')+_th('P.conf','var(--amber)')+_th('%P.conf')+_th('Rech','var(--red)')+_th('%Rech')+_th('Pend','var(--amber)')+_th('%Pend',null,true)+_th('Desp')+_th('%Desp')+_th('En cam','var(--blue)')+_th('%cam',null,true)+_th('Entr','var(--green)')+_th('%Ent')+_th('Dev','var(--red)')+_th('%Dev')+_th('Final',null,true)+_th('Flete env')+_th('Flete dev')+_th('Flete dev total')
     // 🚨 BLINDAJE: alarma de estados desconocidos + chequeo de cuadre (nunca contar mal en silencio)
     let _alertas=''
     if(_desconocidos.size)_alertas+=`<div class="alert alert-red" style="margin-top:8px">🚨 <b>ESTADO(S) SIN CLASIFICAR:</b> ${[..._desconocidos].map(_e).join(', ')}. NEXO no conoce este estado de Dropi — se está contando como despachado pero puede ser incorrecto. Avisar al admin para clasificarlo.</div>`
     if(_filasMal.length)_alertas+=`<div class="alert alert-red" style="margin-top:8px">🚨 <b>LAS CUENTAS NO CUADRAN</b> en: ${_filasMal.map(_e).join(', ')}. La suma de estados da más que el total de órdenes — revisar datos.</div>`
-    return `<div style="margin-top:10px"><button onclick="window._dashToggleMat('${key}')" style="display:inline-flex;align-items:center;gap:6px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer" title="Embudo por producto · cuadra con las tarjetas de arriba">📊 Ver por producto <span id="matchev-${key}" style="font-size:10px">▾</span></button>${_alertas}<div id="matbox-${key}" style="display:none;margin-top:10px;overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;min-width:1340px;width:100%"><thead><tr style="border-bottom:1px solid var(--border)">${_head}</tr></thead><tbody>${_body}</tbody><tfoot>${_foot}</tfoot></table></div></div>`
+    return `<div style="margin-top:10px"><button onclick="window._dashToggleMat('${key}');window._embPintarEstados&&window._embPintarEstados()" style="display:inline-flex;align-items:center;gap:6px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer" title="Embudo por producto · cuadra con las tarjetas de arriba">📊 Ver por producto <span id="matchev-${key}" style="font-size:10px">▾</span></button>${_alertas}<div id="matbox-${key}" style="display:none;margin-top:10px;overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;min-width:1400px;width:100%"><thead><tr style="border-bottom:1px solid var(--border)">${_head}</tr></thead><tbody>${_body}</tbody><tfoot>${_foot}</tfoot></table></div></div>`
   }
 
   // RENDER: 3 bloques agrupados (Ventas/Órdenes, Gastos, Eficiencia)

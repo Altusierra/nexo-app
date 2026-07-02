@@ -106,6 +106,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .cards-row.c4{grid-template-columns:1fr 1fr 1fr 1fr}
 .cards-row.c5{grid-template-columns:repeat(5,1fr)}
 .cards-row.c6{grid-template-columns:repeat(6,1fr)}
+.cards-row.c7{grid-template-columns:repeat(7,1fr)}
 .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
 .card-label{font-size:10px;font-weight:600;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px}
 .card-val{font-size:24px;font-weight:600;font-family:monospace}
@@ -250,6 +251,7 @@ tr:hover td{background:var(--card2)}
   .page-title{font-size:18px}
   .page-sub{font-size:12px;margin-bottom:12px}
   .cards-row.c6,.cards-row.c5,.cards-row.c4,.cards-row.c3,.cards-row.c2{grid-template-columns:1fr 1fr;gap:8px}
+  .cards-row.c7{grid-template-columns:1fr 1fr;gap:8px}
   .card{padding:12px}
   .form-grid.g4,.form-grid.g3,.form-grid.g2{grid-template-columns:1fr;gap:10px}
   .modal-box{max-width:100%;padding:18px}
@@ -1069,6 +1071,38 @@ async function pageAdminHome(c){
   loadDash()
 }
 
+// 🔧 FIX LÍMITE 1000 (v2 — motor definitivo): Supabase corta cada respuesta al máx. del servidor (1000 por defecto,
+// aunque se pida .limit(10000)). Este helper trae TODO paginando con .range():
+//   • AUTO-ADAPTATIVO: la 1ª página pide hasta 10.000 → detecta el techo real del server. Si el día de mañana se sube
+//     "Max Rows" en Supabase (Settings→API), el helper usa páginas más grandes SOLO, sin cambiar código.
+//   • PARALELO: tras la 1ª página, trae las siguientes de a 6 simultáneas (≈6× más rápido en rangos grandes).
+//   • ESCALA: techo de seguridad 1.000 páginas → hasta 1M de filas con server en 1000 (10M si server en 10k).
+// ⚠️ REGLA NEXO: TODA query nueva que pueda superar 1.000 filas DEBE usar _sbFetchAll. qf recibe (desde,hasta) y
+// devuelve el query con .range(desde,hasta) y un .order() estable (ideal: .order('id',{ascending:true}) al final).
+// Devuelve {data,error} igual que Supabase — reemplazo directo.
+async function _sbFetchAll(qf){
+  const _MAXPAG=1000,_PAR=6
+  const _p1=await qf(0,9999) // sonda: detecta el techo real del servidor
+  if(_p1.error)return{data:null,error:_p1.error}
+  let _all=_p1.data||[]
+  const _CH=_all.length
+  if(_CH<1000)return{data:_all,error:null} // menos que el mínimo techo posible → no hay más
+  let _from=_CH,_fin=false
+  for(let _pg=1;_pg<_MAXPAG&&!_fin;_pg+=_PAR){
+    const _lote=[]
+    for(let _k=0;_k<_PAR&&(_pg+_k)<_MAXPAG;_k++){const _a=_from+_k*_CH;_lote.push(qf(_a,_a+_CH-1))}
+    const _rs=await Promise.all(_lote)
+    for(const _r of _rs){
+      if(_r.error)return{data:_all.length?_all:null,error:_r.error}
+      const _d=_r.data||[]
+      if(_d.length)_all=_all.concat(_d)
+      if(_d.length<_CH){_fin=true;break}
+    }
+    _from+=_PAR*_CH
+  }
+  return{data:_all,error:null}
+}
+
 async function loadDash(){
   const el=document.getElementById('dash-content')
   if(!el)return
@@ -1078,7 +1112,7 @@ async function loadDash(){
   const hoy=today()
 
   // 1. Gasto real desde Meta Insights (ahora incluye meta_id para atribución por producto)
-  const{data:insData}=await sb.from('meta_insights').select('fecha,spend,meta_id').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
+  const{data:insData}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('fecha,spend,meta_id').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
   const gastoByFecha={}
   const gastoByCampId={}
   let gastoTotal=0
@@ -1089,7 +1123,7 @@ async function loadDash(){
   }
 
   // 2. Órdenes desde mapeos (ahora también trae precio_dropi para Ventas Netas reales)
-  const{data:mapeos}=await sb.from('mapeos').select('cantidad,producto,producto_id,estado_final,fecha,ad_id,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi').gte('fecha',desde).lte('fecha',hasta).limit(10000)
+  const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('cantidad,producto,producto_id,estado_final,fecha,ad_id,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
   let tot1=0,tot2=0,tot3=0,tot4=0,conf=0,canc=0,pend=0,conAd=0,ent=0,dev=0
   let cConf1=0,cConf2=0,cConf3=0,cConf4=0
   const prodStats={}
@@ -1099,6 +1133,8 @@ async function loadDash(){
   let countConPrecioReal=0,countConPrecioEstimado=0
   // NUEVO: listas de detalle para desplegables (fecha de venta)
   const _listConf=[],_listCanc=[],_listPend=[],_listDev=[]
+  // 📦 PRODUCTOS VENDIDOS (mejora): acumulador por producto — mundo fecha de VENTA (no altera contadores existentes)
+  const _pv={}
   for(const m of (mapeos||[])){
     const q=m.cantidad||2
     if(q===1)tot1++;else if(q===2)tot2++;else if(q===3)tot3++;else tot4++
@@ -1138,6 +1174,37 @@ async function loadDash(){
         countConPrecioEstimado++
       }
     }
+    // 📦 PRODUCTOS VENDIDOS (mejora): acumular por producto — solo lee variables ya calculadas arriba
+    {
+      if(!_pv[pn])_pv[pn]={ords:0,unids:0,conf:0,unidsConf:0,ent:0,venta:0,ganEnt:0,fdev:0}
+      const _pvS=_pv[pn]
+      _pvS.ords++;_pvS.unids+=q
+      if(esConf){
+        _pvS.conf++;_pvS.unidsConf+=q
+        // Venta neta confirmada: real si pasó cruce (precio_dropi), estimada si no — espejo de Ventas Netas global
+        if(m.precio_dropi&&m.precio_dropi>0)_pvS.venta+=m.precio_dropi
+        else{
+          const _pp=productos.find(p=>p.nombre===pn)||productos[0]||{}
+          _pvS.venta+=q===1?(_pp.precio_1u||0):q===2?(_pp.precio_2u||0):q===3?(_pp.precio_3u||0):(_pp.precio_4u||0)
+        }
+      }
+      if(_catO==='entregado'||_catO==='novedad_ok'){
+        _pvS.ent++
+        // Ganancia de lo entregado: ganancia_dropi real si Dropi liquidó, teórico de la orden si no — espejo de GANANCIA REAL
+        if(m.ganancia_dropi&&m.ganancia_dropi>0)_pvS.ganEnt+=m.ganancia_dropi
+        else{
+          const _pp=productos.find(p=>p.nombre===pn)||productos[0]||{}
+          const _pr=m.precio_dropi||[0,_pp.precio_1u||0,_pp.precio_2u||0,_pp.precio_3u||0,_pp.precio_4u||0][q]||(_pp.precio_2u||0)
+          const _co=m.costo_snapshot||[0,_pp.costo_1u||0,_pp.costo_2u||0,_pp.costo_3u||0,_pp.costo_4u||0][q]||(_pp.costo_2u||0)
+          const _f=m.flete_snapshot||_pp.flete_outbound||21000
+          const _al=(_pp.tipo_producto==='marca_propia')?(_pp.almacenamiento||0):0
+          _pvS.ganEnt+=(_pr-_co-_f-_al)
+        }
+      }else if(_catO==='devuelto'){
+        const _pp=productos.find(p=>p.nombre===pn)||productos[0]||{}
+        _pvS.fdev+=(m.flete_dev_snapshot||m.flete_snapshot||_pp.flete_devolucion||18000)
+      }
+    }
   }
   const totalOrds=tot1+tot2+tot3+tot4
   const totalOrdsConf=cConf1+cConf2+cConf3+cConf4
@@ -1147,7 +1214,7 @@ async function loadDash(){
   // mapeosDropi: intenta traer producto_id_dropi (verdad del reporte). Si la columna aún no existe en BD, cae al set base (sin romper).
   let mapeosDropi=null
   {
-    const _qD=cols=>sb.from('mapeos').select(cols).gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).limit(10000)
+    const _qD=cols=>_sbFetchAll((_f,_t)=>sb.from('mapeos').select(cols).gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).order('id',{ascending:true}).range(_f,_t))
     let _rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi,producto_id_dropi')
     if(_rD.error)_rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi')
     mapeosDropi=_rD.data
@@ -1156,6 +1223,8 @@ async function loadDash(){
   let _grdGanD=0,_grdFDevD=0,_grdConDatoD=0
   // NUEVO: listas de detalle para desplegables (fecha de subida Dropi)
   const _listConfD=[],_listCancD=[],_listPendD=[],_listDevD=[]
+  // 📦 PRODUCTOS VENDIDOS (mejora): acumulador por producto — mundo DROPI (fecha de subida; no altera contadores existentes)
+  const _pvD={}
   for(const m of (mapeosDropi||[])){
     const q=m.cantidad||2
     if(q===1)totD1++;else if(q===2)totD2++;else if(q===3)totD3++;else totD4++
@@ -1189,6 +1258,37 @@ async function loadDash(){
       _grdFDevD+=_fd
       _listDevD.push({tel:m.telefono||'—',prod:_pn||m.producto||'Sin producto',fd:_fd})
     }
+    // 📦 PRODUCTOS VENDIDOS (mejora): acumular por producto — solo lee variables ya calculadas arriba
+    {
+      const _pnV=_prodDD||'Sin producto'
+      if(!_pvD[_pnV])_pvD[_pnV]={ords:0,unids:0,conf:0,unidsConf:0,ent:0,venta:0,ganEnt:0,fdev:0}
+      const _pvS=_pvD[_pnV]
+      _pvS.ords++;_pvS.unids+=q
+      const _esConfD=(m.estado_final!=='CANCELADO')&&!(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)
+      if(_esConfD){
+        _pvS.conf++;_pvS.unidsConf+=q
+        if(m.precio_dropi&&m.precio_dropi>0)_pvS.venta+=m.precio_dropi
+        else{
+          const _pp=productos.find(p=>p.nombre===_pnV)||productos[0]||{}
+          _pvS.venta+=q===1?(_pp.precio_1u||0):q===2?(_pp.precio_2u||0):q===3?(_pp.precio_3u||0):(_pp.precio_4u||0)
+        }
+      }
+      if(_stD==='entregado'||_stD==='novedad_ok'){
+        _pvS.ent++
+        if(m.ganancia_dropi&&m.ganancia_dropi>0)_pvS.ganEnt+=m.ganancia_dropi
+        else{
+          const _pp=productos.find(p=>p.nombre===_pnV)||productos[0]||{}
+          const _pr=m.precio_dropi||[0,_pp.precio_1u||0,_pp.precio_2u||0,_pp.precio_3u||0,_pp.precio_4u||0][q]||(_pp.precio_2u||0)
+          const _co=m.costo_snapshot||[0,_pp.costo_1u||0,_pp.costo_2u||0,_pp.costo_3u||0,_pp.costo_4u||0][q]||(_pp.costo_2u||0)
+          const _f=m.flete_snapshot||_pp.flete_outbound||21000
+          const _al=(_pp.tipo_producto==='marca_propia')?(_pp.almacenamiento||0):0
+          _pvS.ganEnt+=(_pr-_co-_f-_al)
+        }
+      }else if(_stD==='devuelto'){
+        const _pp=productos.find(p=>p.nombre===_pnV)||productos[0]||{}
+        _pvS.fdev+=(m.flete_dev_snapshot||m.flete_snapshot||_pp.flete_devolucion||18000)
+      }
+    }
   }
   const totalOrdsDropi=totD1+totD2+totD3+totD4
 
@@ -1201,7 +1301,7 @@ async function loadDash(){
   }
 
   // 4. Conversaciones desde reportes_diarios
-  const{data:reps}=await sb.from('reportes_diarios').select('conversaciones,fecha,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
+  const{data:reps}=await _sbFetchAll((_f,_t)=>sb.from('reportes_diarios').select('conversaciones,fecha,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
   let conv=0
   const _convSeen={}
   for(const r of (reps||[])){
@@ -1310,6 +1410,57 @@ async function loadDash(){
   const ganRealDropiSubida=Math.round(_grdGanD-_grdFDevD-gastoTotal-costoConv-gastoFijoPeriodo)
   const _usaDropiSub=_grdConDatoD>0
   const _tipGanRealDropi=`REAL (datos de Dropi · por fecha de subida): la ganancia que Dropi YA liquidó de lo entregado en el flujo Dropi, menos lo devuelto y tus gastos.&#10;&#10;Ganancia Dropi (${entD} entregadas): $${fmt(Math.round(_grdGanD))}&#10;− Costo devolución (${devD} devueltas): −$${fmt(Math.round(_grdFDevD))}&#10;− Gasto ads: −$${fmt(gastoTotal)}&#10;− Costo conversación: −$${fmt(costoConv)}&#10;− Gastos fijos (${dias}d): −$${fmt(gastoFijoPeriodo)}&#10;&#10;= $${fmt(ganRealDropiSubida)}&#10;&#10;Cuenta las entregadas por fecha de subida a Dropi (las de '📦 Ventas y órdenes DROPI'). Lo que Dropi aún no liquidó usa el teórico de esa orden.`
+  // ══ 📦 PRODUCTOS VENDIDOS (mejora): cierre de cuentas por producto ══════════════
+  // Utilidad PROYECTADA por producto = espejo exacto de la fórmula de Ganancia neta global, repartida por producto:
+  //   ventaLista×(1−dev%) − costo prod − flete×conf − dev%×fleteDev×conf − ads del producto − conversaciones − fijos prorrateados.
+  // Utilidad REAL por producto = espejo de la Ganancia real (Dropi): ganancia de entregadas − flete de devueltas − ads − conv − fijos.
+  // La Σ de cada columna cuadra (±redondeo) con las cards grandes de arriba.
+  const _pvCierre=(src,confTotalMundo)=>{
+    const rows=[];let totUnids=0
+    for(const[pn,s]of Object.entries(src)){
+      const prod=productos.find(p=>p.nombre===pn)||productos[0]||{}
+      const _dp=prod.dev_pct||0.19
+      const _fo=prod.flete_outbound||21000
+      const _fd=prod.flete_devolucion||18000
+      const st=prodStatsConf[pn]||{o1:0,o2:0,o3:0,o4:0}
+      const confN=s.conf
+      // Venta y costo por precios de lista sobre las confirmadas de ESTE mundo (prorrateo si difiere del mundo venta)
+      const _confVta=st.o1+st.o2+st.o3+st.o4
+      const _ratio=(_confVta>0&&confN>0)?(confN/_confVta):(confN>0?1:0)
+      const ventaLista=((st.o1*(prod.precio_1u||0))+(st.o2*(prod.precio_2u||0))+(st.o3*(prod.precio_3u||0))+(st.o4*(prod.precio_4u||0)))*_ratio
+      const costoProv=((st.o1*(prod.costo_1u||0))+(st.o2*(prod.costo_2u||0))+(st.o3*(prod.costo_3u||0))+(st.o4*(prod.costo_4u||0)))*_ratio
+      let gastoP=0;for(const cid of (prod.campaign_ids||[])){gastoP+=gastoByCampId[cid]||0}
+      const convP=(_convByProd[pn]||0)*(prod.costo_conversacion||100)
+      const fijoP=confTotalMundo>0?Math.round(gastoFijoPeriodo*confN/confTotalMundo):0
+      const utilProy=Math.round(ventaLista*(1-_dp)-costoProv-confN*_fo-Math.round(confN*_dp*_fd)-gastoP-convP-fijoP)
+      const utilReal=Math.round(s.ganEnt-s.fdev-gastoP-convP-fijoP)
+      rows.push({pn,ords:s.ords,unids:s.unids,conf:confN,ent:s.ent,venta:Math.round(s.venta),utilProy,utilReal,gastoP})
+      totUnids+=s.unids
+    }
+    rows.sort((a,b)=>b.venta-a.venta)
+    return{rows,totUnids}
+  }
+  const{rows:_pvRows,totUnids:_pvTotUnids}=_pvCierre(_pv,totalOrdsConf)
+  const{rows:_pvRowsD,totUnids:_pvTotUnidsD}=_pvCierre(_pvD,confD)
+  // Generador del desglose (frase simple + tabla). key: 'vtas' | 'dropi'
+  const _pvMkHTML=(rows,key,nota)=>{
+    if(!rows.length)return '<div style="padding:12px;color:var(--muted);font-size:12px">Sin datos en este rango.</div>'
+    const T=rows.reduce((a,r)=>{a.ords+=r.ords;a.unids+=r.unids;a.conf+=r.conf;a.ent+=r.ent;a.venta+=r.venta;a.utilProy+=r.utilProy;a.utilReal+=r.utilReal;return a},{ords:0,unids:0,conf:0,ent:0,venta:0,utilProy:0,utilReal:0})
+    const _m=v=>`<span style="color:var(${v>=0?'--green':'--red'});font-weight:700">${v>=0?'$'+fmt(v):'-$'+fmt(Math.abs(v))}</span>`
+    const _bebe=`<div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:13px;line-height:1.6">🧠 Vendiste <strong>${fmt(T.unids)} productos</strong> en <strong>${fmt(T.ords)} órdenes</strong>. Si todo lo confirmado llega: ${_m(T.utilProy)}. Con lo YA entregado (y todos los gastos del período): ${_m(T.utilReal)}.</div>`
+    const _th=t=>`<th style="text-align:center;padding:7px 8px;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--muted);white-space:nowrap">${t}</th>`
+    const _td=(v,col,bold)=>`<td style="text-align:center;padding:7px 8px;font-variant-numeric:tabular-nums;${bold?'font-weight:700;':''}color:${col||'var(--text)'}">${v}</td>`
+    const _tdm=v=>`<td style="text-align:center;padding:7px 8px;font-variant-numeric:tabular-nums;font-weight:700;color:var(${v>=0?'--green':'--red'})">${v>=0?'$'+fmt(v):'-$'+fmt(Math.abs(v))}</td>`
+    const _body=rows.map(r=>{
+      const _warn=(r.gastoP===0&&r.conf>0)?' <span title="Este producto no tiene campañas vinculadas: no se le descontó gasto de ads. Vincúlalo en Productos para cuentas exactas." style="cursor:help">⚠️</span>':''
+      return `<tr style="border-bottom:1px solid var(--border)"><td style="text-align:left;padding:7px 10px;white-space:nowrap;color:var(--text)">${r.pn}${_warn}</td>`+_td(fmt(r.ords))+_td(fmt(r.unids),'var(--blue)',true)+_td(fmt(r.conf),'var(--green)')+_td(fmt(r.ent),'var(--green)')+_td('$'+fmt(r.venta),'var(--text)',true)+_tdm(r.utilProy)+_tdm(r.utilReal)+`</tr>`
+    }).join('')
+    const _foot=`<tr style="border-top:2px solid var(--border);background:var(--card2)"><td style="text-align:left;padding:8px 10px;font-weight:700;color:var(--text)">Σ TOTAL</td>`+_td(fmt(T.ords),'var(--text)',true)+_td(fmt(T.unids),'var(--blue)',true)+_td(fmt(T.conf),'var(--green)',true)+_td(fmt(T.ent),'var(--green)',true)+_td('$'+fmt(T.venta),'var(--text)',true)+_tdm(T.utilProy)+_tdm(T.utilReal)+`</tr>`
+    return `${_bebe}<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;min-width:820px;width:100%"><thead><tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:7px 10px;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--muted)">Producto</th>${_th('🧾 Órdenes')}${_th('📦 Productos')}${_th('✅ Confirmadas')}${_th('🚚 Entregadas')}${_th('💵 Total vendido')}${_th('💰 Util. proyectada')}${_th('✅ Util. REAL')}</tr></thead><tbody>${_body}</tbody><tfoot>${_foot}</tfoot></table></div><div style="margin-top:8px;font-size:11px;color:var(--subtle);line-height:1.5">💰 <b>Proyectada</b> = confirmadas si llegan (descontando %dev, costo, fletes, ads, conversaciones y fijos del producto). ✅ <b>REAL</b> = ganancia de lo YA entregado − devoluciones − ads − conversaciones − fijos. ${nota}</div>`
+  }
+  const _pvBoxVtasHTML=`<div id="pvbox-vtas" style="display:none;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:12px">${_pvMkHTML(_pvRows,'vtas','Lente: fecha de venta (chat).')}</div>`
+  const _pvBoxDropiHTML=`<div id="pvbox-dropi" style="display:none;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:12px">${_pvMkHTML(_pvRowsD,'dropi','Lente: fecha de subida a Dropi.')}</div>`
+
   const roas_bruto=gastoTotal>0?ventaTotal/gastoTotal:0
   const roas_neto=gastoTotal>0?(ganNeta+gastoTotal)/gastoTotal:0
   const cpa=totalOrdsConf>0?gastoTotal/totalOrdsConf:0
@@ -1353,8 +1504,8 @@ async function loadDash(){
     const _desdeAnt=new Date(_hastaAnt);_desdeAnt.setDate(_desdeAnt.getDate()-(dias-1))
     const _dA=_isoDate(_desdeAnt),_hA=_isoDate(_hastaAnt)
     const[{data:insA},{data:mapA}]=await Promise.all([
-      sb.from('meta_insights').select('spend').eq('nivel','campaign').gte('fecha',_dA).lte('fecha',_hA),
-      sb.from('mapeos').select('cantidad,estado_final,precio_dropi').gte('fecha',_dA).lte('fecha',_hA).limit(10000)
+      _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('spend').eq('nivel','campaign').gte('fecha',_dA).lte('fecha',_hA).order('id',{ascending:true}).range(_f,_t)),
+      _sbFetchAll((_f,_t)=>sb.from('mapeos').select('cantidad,estado_final,precio_dropi').gte('fecha',_dA).lte('fecha',_hA).order('id',{ascending:true}).range(_f,_t))
     ])
     const _gastoA=(insA||[]).reduce((s,i)=>s+(i.spend||0),0)
     let _confA=0
@@ -1610,6 +1761,15 @@ async function loadDash(){
       box.style.display='none'
     }
   }
+  // 📦 PRODUCTOS VENDIDOS (mejora): abrir/cerrar el desglose por producto
+  window._pvToggle=function(key){
+    const box=document.getElementById('pvbox-'+key)
+    if(!box)return
+    const _abrir=(box.style.display==='none'||!box.style.display)
+    box.style.display=_abrir?'block':'none'
+    const _ch=document.getElementById('pvchev-'+key)
+    if(_ch)_ch.textContent=_abrir?'▴':'▾'
+  }
   window._dashVerMas=function(key,esDev){
     window._dashVis[key]=(window._dashVis[key]||3)+10
     const box=document.getElementById('dashdet-'+key)
@@ -1730,11 +1890,16 @@ async function loadDash(){
       <div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)">📦 Ventas y órdenes DROPI <span style="color:var(--subtle);font-weight:500;text-transform:none;letter-spacing:0;font-size:11px">· por fecha de subida a Dropi</span></div>
       <button onclick="document.getElementById('dash-fantasmas-file').click()" style="background:var(--card2);border:1px solid var(--amber);color:var(--amber);border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer">🕵️ Auditar fantasmas</button>
     </div>
-    <div class="cards-row c6">
+    <div class="cards-row c7">
       <div class="card">
         <div class="card-label">Órdenes totales</div>
         <div class="card-val">${totalOrdsDropi}</div>
         <div class="card-sub">1u:${totD1} · 2u:${totD2} · 3u:${totD3} · 4u:${totD4}</div>
+      </div>
+      <div class="card c-blue" style="cursor:pointer" onclick="window._pvToggle('dropi')" title="Ver desglose por producto: órdenes, unidades, entregadas, total vendido y utilidades">
+        <div class="card-label">📦 Productos vendidos <span id="pvchev-dropi">▾</span></div>
+        <div class="card-val" style="color:var(--blue)">${fmt(_pvTotUnidsD)}</div>
+        <div class="card-sub">${totalOrdsDropi>0?(_pvTotUnidsD/totalOrdsDropi).toFixed(1):'0'} por orden · ver desglose</div>
       </div>
       <div class="card c-green" style="cursor:pointer" onclick="window._dashToggle('confD',0)" title="Ver detalle">
         <div class="card-label">Confirmados ▾</div>
@@ -1766,17 +1931,23 @@ async function loadDash(){
     <div id="dashdet-devD" style="display:none"></div>
     <div id="dashdet-cancD" style="display:none"></div>
     <div id="dashdet-pendD" style="display:none"></div>
+    ${_pvBoxDropiHTML}
     ${_mkEmbudoProdDropiHTML(mapeosDropi,'dropi')}
     <input type="file" id="dash-fantasmas-file" accept=".xlsx,.xls" style="display:none" onchange="auditarFantasmasDropi()">
     <div id="dash-fantasmas-result" style="margin-top:12px"></div>`
 
   const _bloqueVentasHTML=`
     <div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;margin-top:16px">📦 Ventas y órdenes</div>
-    <div class="cards-row c6">
+    <div class="cards-row c7">
       <div class="card">
         <div class="card-label">Órdenes totales</div>
         <div class="card-val">${totalOrds}</div>
         <div class="card-sub">1u:${tot1} · 2u:${tot2} · 3u:${tot3} · 4u:${tot4}</div>
+      </div>
+      <div class="card c-blue" style="cursor:pointer" onclick="window._pvToggle('vtas')" title="Ver desglose por producto: órdenes, unidades, entregadas, total vendido y utilidades">
+        <div class="card-label">📦 Productos vendidos <span id="pvchev-vtas">▾</span></div>
+        <div class="card-val" style="color:var(--blue)">${fmt(_pvTotUnids)}</div>
+        <div class="card-sub">${totalOrds>0?(_pvTotUnids/totalOrds).toFixed(1):'0'} por orden · ver desglose</div>
       </div>
       <div class="card c-green" style="cursor:pointer" onclick="window._dashToggle('conf',0)" title="Ver detalle">
         <div class="card-label">Confirmados ▾</div>
@@ -1808,6 +1979,7 @@ async function loadDash(){
     <div id="dashdet-dev" style="display:none"></div>
     <div id="dashdet-canc" style="display:none"></div>
     <div id="dashdet-pend" style="display:none"></div>
+    ${_pvBoxVtasHTML}
     <div class="cards-row c4" style="margin-top:12px">
       <div class="card c-purple"><div class="card-label">Conversaciones</div><div class="card-val">${conv}</div><div class="card-sub">Tasa cierre: ${(tasaCierre*100).toFixed(1)}%</div></div>
     </div>
@@ -2005,7 +2177,7 @@ window.auditarFantasmasDropi=async()=>{
     // 2. Mapeos de Nexo con fecha_dropi dentro del rango (intenta traer producto_id_dropi; si no existe, cae al set base)
     let mapeosDropi=null
     {
-      const _qF=cols=>sb.from('mapeos').select(cols).gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).limit(10000)
+      const _qF=cols=>_sbFetchAll((_f,_t)=>sb.from('mapeos').select(cols).gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).order('id',{ascending:true}).range(_f,_t))
       const _base='id,telefono,fecha_dropi,fecha,producto,estado_final,ad_id,nombre_cliente,transportadora,cantidad'
       let _rF=await _qF(_base+',producto_id_dropi')
       if(_rF.error)_rF=await _qF(_base)
@@ -2095,11 +2267,11 @@ async function pageAdminReportes(c){
     el.innerHTML='<div class="loading">Cargando...</div>'
 
     // Mapeos por fecha
-    const{data:mapeos}=await sb.from('mapeos').select('fecha,cantidad,producto,estado_final,ad_id').gte('fecha',desde).lte('fecha',hasta).limit(10000)
+    const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('fecha,cantidad,producto,estado_final,ad_id').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
     // Gasto Meta por fecha (con meta_id para atribuir por producto)
-    const{data:insData}=await sb.from('meta_insights').select('fecha,spend,meta_id').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
+    const{data:insData}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('fecha,spend,meta_id').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
     // Conversaciones desde reportes (con producto_id para desglose por producto)
-    const{data:reps}=await sb.from('reportes_diarios').select('fecha,conversaciones,producto_id,producto_nombre,updated_at,usuarios(nombre),jornada_cerrada').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
+    const{data:reps}=await _sbFetchAll((_f,_t)=>sb.from('reportes_diarios').select('fecha,conversaciones,producto_id,producto_nombre,updated_at,usuarios(nombre),jornada_cerrada').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
 
     const byFecha={}
     for(const m of (mapeos||[])){
@@ -2311,14 +2483,14 @@ async function cargarResumenSemanal(){
   // El filtro por producto se aplica en JS dentro del loop (con resolveProdName: captura
   // variantes de texto y producto_id). Las órdenes sin estado_final NO se descartan:
   // se cuentan como pendientes, igual que en el Dashboard.
-  const{data:mapeos}=await sb.from('mapeos').select('*').gte('fecha',desde).lte('fecha',hasta).limit(10000)
+  const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('*').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
 
   // Producto seleccionado (para filtrar gasto y conversaciones por producto)
   const prodSel=filtroProd?productos.find(p=>p.nombre===filtroProd):null
   const prodCampSet=prodSel?new Set((prodSel.campaign_ids||[]).map(String)):null
 
   // Gasto desde meta_insights (por semana). Si hay producto, solo sus campañas.
-  const{data:insData}=await sb.from('meta_insights').select('fecha,spend,meta_id').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
+  const{data:insData}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('fecha,spend,meta_id').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
   const gastoByWeek={}
   for(const i of (insData||[])){
     if(prodCampSet&&!prodCampSet.has(String(i.meta_id)))continue
@@ -2326,7 +2498,7 @@ async function cargarResumenSemanal(){
   }
 
   // Conversaciones desde reportes_diarios (por semana, dedupe por fecha+producto, último gana)
-  const{data:reportesConv}=await sb.from('reportes_diarios').select('fecha,conversaciones,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
+  const{data:reportesConv}=await _sbFetchAll((_f,_t)=>sb.from('reportes_diarios').select('fecha,conversaciones,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
   const convByWeek={}
   const _convSemSeen={}
   for(const r of (reportesConv||[])){
@@ -2423,7 +2595,7 @@ async function cargarResumenSemanal(){
   // Conjunto distinto al de compra: una orden subida esta semana pudo comprarse otra semana.
   // Agrupa por semana de fecha_dropi y cuenta subidas / confirmadas / entregadas.
   const semanasDropi={}
-  const{data:mapeosDropiRS}=await sb.from('mapeos').select('producto,producto_id,estado_final,fecha_dropi').gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).limit(10000)
+  const{data:mapeosDropiRS}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('producto,producto_id,estado_final,fecha_dropi').gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).order('id',{ascending:true}).range(_f,_t))
   for(const m of (mapeosDropiRS||[])){
     if(prodSel){
       const _r=resolveProdName(m.producto)
@@ -2874,10 +3046,10 @@ async function loadTracker(){
     }
 
     // 4. Mapeos del rango (cruzar con campañas vía ad_id → campaign)
-    const{data:mapeos}=await sb.from('mapeos').select('fecha,cantidad,producto,estado_final,ad_id,ganancia_dropi').gte('fecha',desde).lte('fecha',hasta).limit(20000)
+    const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('fecha,cantidad,producto,estado_final,ad_id,ganancia_dropi').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
 
     // 5. Conversaciones (reportes_diarios) — último gana por fecha+producto
-    const{data:reps}=await sb.from('reportes_diarios').select('fecha,producto_id,conversaciones,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
+    const{data:reps}=await _sbFetchAll((_f,_t)=>sb.from('reportes_diarios').select('fecha,producto_id,conversaciones,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
 
     // 6. Sin atribuir: campañas con gasto pero sin matchear ningún producto
     const gastoCampSinAtrib={}
@@ -4072,11 +4244,11 @@ async function renderProdResultados(prodId,dias,opts){
   const diasEnRango=Math.round((new Date(hastaStr)-new Date(desdeStr))/86400000)+1
 
   // 1. Traer mapeos del producto en el rango
-  const{data:mapeos,error}=await sb.from('mapeos')
+  const{data:mapeos,error}=await _sbFetchAll((_f,_t)=>sb.from('mapeos')
     .select('id,ad_id,ciudad,estado_final,cantidad')
     .eq('producto_id',prodId)
     .gte('fecha',desdeStr).lte('fecha',hastaStr)
-    .limit(20000)
+    .order('id',{ascending:true}).range(_f,_t))
   if(error){
     cont.innerHTML=`<div class="alert alert-red">Error: ${error.message}</div>`;return
   }
@@ -5155,7 +5327,7 @@ async function refreshProdResumen(id){
     if(cids.length){
       for(let i=0;i<cids.length;i+=80){
         const chunk=cids.slice(i,i+80)
-        const{data:ins}=await sb.from('meta_insights').select('spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).in('meta_id',chunk)
+        const{data:ins}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).in('meta_id',chunk).order('id',{ascending:true}).range(_f,_t))
         for(const x of (ins||[]))gasto+=(x.spend||0)
       }
     }
@@ -5166,7 +5338,7 @@ async function refreshProdResumen(id){
     const nombresBuscar=[prod.nombre,...(Array.isArray(prod.aliases)?prod.aliases:[])].filter(Boolean)
     const mapsById=new Map()
     for(const nm of nombresBuscar){
-      const{data:rows}=await sb.from('mapeos').select('id,estado_final,cantidad').ilike('producto',nm).gte('fecha',desde).lte('fecha',hasta).limit(10000)
+      const{data:rows}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('id,estado_final,cantidad').ilike('producto',nm).gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
       if(rows)for(const r of rows)mapsById.set(r.id,r)
     }
     const maps=[...mapsById.values()]
@@ -8043,7 +8215,7 @@ async function cargarPendientesConfirmacion(){
     let envios=[]
     for(let i=0;i<progIds.length;i+=100){
       const batch=progIds.slice(i,i+100)
-      const{data}=await sb.from('confirmacion_envios').select('programacion_id,created_at,dia_relativo,nivel_mensaje,usuario_nombre').in('programacion_id',batch).order('created_at',{ascending:false}).limit(5000)
+      const{data}=await _sbFetchAll((_f,_t)=>sb.from('confirmacion_envios').select('programacion_id,created_at,dia_relativo,nivel_mensaje,usuario_nombre').in('programacion_id',batch).order('created_at',{ascending:false}).range(_f,_t))
       if(data)envios=envios.concat(data)
     }
     const enviosByProg={}
@@ -8214,18 +8386,18 @@ async function cargarPendientesSinFecha(){
     // OJO: 'PENDIENTE' NO va aquí — ese ya lo confirmó el auxiliar y va para despacho, no se le manda mensaje.
     // Limitamos a últimos 90 días para no traer historia infinita
     const hace90=_isoDate(new Date(Date.now()-90*24*60*60*1000))
-    const{data:pendA,error:e1}=await sb.from('mapeos')
+    const{data:pendA,error:e1}=await _sbFetchAll((_f,_t)=>sb.from('mapeos')
       .select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,fecha_dropi,estado_inicial,estado_final,created_at')
       .in('estado_final',['PENDIENTE CONFIRMACION'])
       .gte('fecha',hace90)
-      .order('fecha',{ascending:false}).limit(1000)
+      .order('fecha',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
     if(e1)throw e1
-    const{data:pendB,error:e2}=await sb.from('mapeos')
+    const{data:pendB,error:e2}=await _sbFetchAll((_f,_t)=>sb.from('mapeos')
       .select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,fecha_dropi,estado_inicial,estado_final,created_at')
       .eq('estado_inicial','PENDIENTE CONFIRMACION')
       .is('estado_final',null)
       .gte('fecha',hace90)
-      .order('fecha',{ascending:false}).limit(1000)
+      .order('fecha',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
     if(e2)throw e2
     // Deduplicar por id
     const byId={}
@@ -8253,8 +8425,8 @@ async function cargarPendientesSinFecha(){
     let evsDec=[]
     for(let i=0;i<ids.length;i+=100){
       const batch=ids.slice(i,i+100)
-      const{data:ev}=await sb.from('mapeo_eventos').select('mapeo_id,evento,fuente,created_at')
-        .in('mapeo_id',batch).in('evento',['cancelado','re_cancelado','reactivado']).limit(20000)
+      const{data:ev}=await _sbFetchAll((_f,_t)=>sb.from('mapeo_eventos').select('mapeo_id,evento,fuente,created_at')
+        .in('mapeo_id',batch).in('evento',['cancelado','re_cancelado','reactivado']).order('id',{ascending:true}).range(_f,_t))
       if(ev)evsDec=evsDec.concat(ev)
     }
     evsDec.sort((a,b)=>String(a.created_at||'').localeCompare(String(b.created_at||'')))
@@ -8277,9 +8449,9 @@ async function cargarPendientesSinFecha(){
     let psfEnvios=[]
     for(let i=0;i<sfIds.length;i+=100){
       const batch=sfIds.slice(i,i+100)
-      const{data:ed}=await sb.from('pendientes_sin_fecha_envios')
+      const{data:ed}=await _sbFetchAll((_f,_t)=>sb.from('pendientes_sin_fecha_envios')
         .select('mapeo_id,nivel_mensaje,created_at,usuario_nombre')
-        .in('mapeo_id',batch).order('created_at',{ascending:false}).limit(20000)
+        .in('mapeo_id',batch).order('created_at',{ascending:false}).range(_f,_t))
       if(ed)psfEnvios=psfEnvios.concat(ed)
     }
     // Agrupar por mapeo_id: count total, envios_hoy, ultimo envío, último usuario, último nivel
@@ -8394,11 +8566,11 @@ async function cargarCancelados(){
   try{
     const hace90=_isoDate(new Date(Date.now()-90*24*60*60*1000))
     // 1) Cancelados de los últimos 90 días
-    const{data:canc,error:e1}=await sb.from('mapeos')
+    const{data:canc,error:e1}=await _sbFetchAll((_f,_t)=>sb.from('mapeos')
       .select('id,telefono,nombre_cliente,producto,producto_id,cantidad,ciudad,transportadora,precio_dropi,fecha,fecha_dropi,estado_inicial,estado_final,created_at')
       .eq('estado_final','CANCELADO')
       .gte('fecha',hace90)
-      .order('fecha',{ascending:false}).limit(1000)
+      .order('fecha',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
     if(e1)throw e1
     let lista=canc||[]
     if(!lista.length){el.innerHTML='<div class="alert alert-blue">No hay pedidos cancelados por el cruce Dropi para recuperar.</div>';window._cancCache={items:[],limit:20};return}
@@ -8426,7 +8598,7 @@ async function cargarCancelados(){
     let evEnv=[]
     for(let i=0;i<lids.length;i+=100){
       const batch=lids.slice(i,i+100)
-      const{data}=await sb.from('mapeo_eventos').select('mapeo_id,created_at').in('mapeo_id',batch).eq('evento','canc_mensaje_enviado').order('created_at',{ascending:false}).limit(20000)
+      const{data}=await _sbFetchAll((_f,_t)=>sb.from('mapeo_eventos').select('mapeo_id,created_at').in('mapeo_id',batch).eq('evento','canc_mensaje_enviado').order('created_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
       if(data)evEnv=evEnv.concat(data)
     }
     const hoyStr=today()
@@ -9498,8 +9670,8 @@ async function cargarNovedadesPorFecha(){
       window._novCache={fechaActiva:fecha,items:[],reporteId:null}
       return
     }
-    const{data:items}=await sb.from('novedades_items').select('*').eq('reporte_id',rep.id).limit(5000)
-    const{data:resols}=await sb.from('novedades_resoluciones').select('*').order('created_at',{ascending:false}).limit(10000)
+    const{data:items}=await _sbFetchAll((_f,_t)=>sb.from('novedades_items').select('*').eq('reporte_id',rep.id).order('id',{ascending:true}).range(_f,_t))
+    const{data:resols}=await _sbFetchAll((_f,_t)=>sb.from('novedades_resoluciones').select('*').order('created_at',{ascending:false}).range(_f,_t))
     // Indexar como ARRAYS (no objeto directo) para poder filtrar por timestamp
     const resolByKey={}, contactByKey={}
     for(const r of (resols||[])){
@@ -9981,7 +10153,7 @@ window.procesarNovedadesXlsx=async()=>{
       modo='merge'
 
       // Traer items actuales del reporte
-      const{data:existingItems}=await sb.from('novedades_items').select('id,telefono,orden_id').eq('reporte_id',reporteId).limit(20000)
+      const{data:existingItems}=await _sbFetchAll((_f,_t)=>sb.from('novedades_items').select('id,telefono,orden_id').eq('reporte_id',reporteId).order('id',{ascending:true}).range(_f,_t))
       const existingByKey={}
       for(const ei of (existingItems||[])){
         const k=(ei.telefono||'')+'|'+(ei.orden_id||'')
@@ -10088,7 +10260,7 @@ async function cargarHistorialNovedades(){
     const{data:reportes}=await sb.from('novedades_reportes').select('*').order('fecha_lote',{ascending:false}).limit(60)
     if(!reportes?.length){el.innerHTML='<div class="alert alert-blue">Sin lotes históricos aún</div>';return}
 
-    const{data:resols}=await sb.from('novedades_resoluciones').select('*').order('created_at',{ascending:false}).limit(20000)
+    const{data:resols}=await _sbFetchAll((_f,_t)=>sb.from('novedades_resoluciones').select('*').order('created_at',{ascending:false}).range(_f,_t))
     const resolByKey={}
     for(const r of (resols||[])){
       const k=(r.telefono||'')+'|'+(r.orden_id||'')
@@ -10099,7 +10271,7 @@ async function cargarHistorialNovedades(){
     let allItems=[]
     for(let i=0;i<repIds.length;i+=20){
       const batch=repIds.slice(i,i+20)
-      const{data:its}=await sb.from('novedades_items').select('reporte_id,telefono,orden_id').in('reporte_id',batch).limit(20000)
+      const{data:its}=await _sbFetchAll((_f,_t)=>sb.from('novedades_items').select('reporte_id,telefono,orden_id').in('reporte_id',batch).order('id',{ascending:true}).range(_f,_t))
       if(its)allItems=allItems.concat(its)
     }
     const itemsByRep={}
@@ -10754,14 +10926,14 @@ async function cargarReclamePorFecha(){
       window._reclameCache={fechaActiva:fecha,items:[],reporteId:null}
       return
     }
-    const{data:items}=await sb.from('reclame_items').select('*').eq('reporte_id',rep.id).limit(5000)
+    const{data:items}=await _sbFetchAll((_f,_t)=>sb.from('reclame_items').select('*').eq('reporte_id',rep.id).order('id',{ascending:true}).range(_f,_t))
     const tels=[...new Set((items||[]).map(i=>i.telefono))]
     let envios=[]
     let mapeosProd=[]
     if(tels.length){
       for(let i=0;i<tels.length;i+=100){
         const batch=tels.slice(i,i+100)
-        const{data:ed}=await sb.from('reclame_envios').select('telefono,guia,created_at,usuario_nombre,nivel_mensaje').in('telefono',batch).order('created_at',{ascending:false}).limit(20000)
+        const{data:ed}=await _sbFetchAll((_f,_t)=>sb.from('reclame_envios').select('telefono,guia,created_at,usuario_nombre,nivel_mensaje').in('telefono',batch).order('created_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
         if(ed)envios=envios.concat(ed)
         // Cargar producto del mapeo (asignador) para resolver al nombre canónico
         const{data:md}=await sb.from('mapeos').select('telefono,producto,precio_dropi').in('telefono',batch)
@@ -10817,8 +10989,8 @@ async function cargarReclamePorFecha(){
         const repsViejosIds=repsViejos.map(r=>r.id)
         const repsViejosMap={}
         for(const r of repsViejos)repsViejosMap[r.id]=r
-        const{data:itemsViejos}=await sb.from('reclame_items')
-          .select('*').in('reporte_id',repsViejosIds).limit(20000)
+        const{data:itemsViejos}=await _sbFetchAll((_f,_t)=>sb.from('reclame_items')
+          .select('*').in('reporte_id',repsViejosIds).order('id',{ascending:true}).range(_f,_t))
         if(itemsViejos?.length){
           // Telefonos únicos de los arrastrados
           const telsViejos=[...new Set(itemsViejos.map(i=>i.telefono))]
@@ -10829,9 +11001,9 @@ async function cargarReclamePorFecha(){
           const precioByTelV={...precioByTel}
           for(let i=0;i<telsViejos.length;i+=100){
             const batch=telsViejos.slice(i,i+100)
-            const{data:ed}=await sb.from('reclame_envios')
+            const{data:ed}=await _sbFetchAll((_f,_t)=>sb.from('reclame_envios')
               .select('telefono,guia,created_at,usuario_nombre,nivel_mensaje')
-              .in('telefono',batch).order('created_at',{ascending:false}).limit(20000)
+              .in('telefono',batch).order('created_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
             if(ed)enviosViejos=enviosViejos.concat(ed)
             const{data:mp}=await sb.from('mapeos')
               .select('telefono,producto,estado_final,precio_dropi')
@@ -11111,7 +11283,7 @@ window.procesarReclameXlsx=async()=>{
       modo='merge'
 
       // Traer items actuales del reporte
-      const{data:existingItems}=await sb.from('reclame_items').select('id,telefono,guia').eq('reporte_id',reporteId).limit(20000)
+      const{data:existingItems}=await _sbFetchAll((_f,_t)=>sb.from('reclame_items').select('id,telefono,guia').eq('reporte_id',reporteId).order('id',{ascending:true}).range(_f,_t))
       const existingByKey={}
       for(const ei of (existingItems||[])){
         const k=(ei.telefono||'')+'|'+(ei.guia||'')
@@ -12379,11 +12551,11 @@ window.auxNovedadesHecho=async(force)=>{
     const{data:reps}=await sb.from('novedades_reportes').select('id').gte('fecha_lote',desde)
     const ids=(reps||[]).map(r=>r.id)
     if(!ids.length){window._auxNovHecho={hecho:true,faltan:0};return window._auxNovHecho}
-    const{data:items}=await sb.from('novedades_items')
+    const{data:items}=await _sbFetchAll((_f,_t)=>sb.from('novedades_items')
       .select('telefono,orden_id,prioridad,cat_idx,fecha_novedad,hora_novedad')
-      .in('reporte_id',ids).limit(5000)
-    const{data:resols}=await sb.from('novedades_resoluciones')
-      .select('telefono,orden_id,accion,created_at').order('created_at',{ascending:false}).limit(10000)
+      .in('reporte_id',ids).order('id',{ascending:true}).range(_f,_t))
+    const{data:resols}=await _sbFetchAll((_f,_t)=>sb.from('novedades_resoluciones')
+      .select('telefono,orden_id,accion,created_at').order('created_at',{ascending:false}).range(_f,_t))
     // Indexar resoluciones por clave telefono|orden_id (misma fórmula que _novKey)
     const resolByKey={}, contactByKey={}
     for(const r of (resols||[])){
@@ -12509,14 +12681,14 @@ window.auxReclameHecho=async(force)=>{
     if(!reps||!reps.length){window._auxRecHecho={hecho:true,faltan:0};return window._auxRecHecho}
     const repFecha={}; for(const r of reps)repFecha[r.id]=r.fecha_lote
     const ids=reps.map(r=>r.id)
-    const{data:items}=await sb.from('reclame_items').select('telefono,guia,reporte_id').in('reporte_id',ids).limit(20000)
+    const{data:items}=await _sbFetchAll((_f,_t)=>sb.from('reclame_items').select('telefono,guia,reporte_id').in('reporte_id',ids).order('id',{ascending:true}).range(_f,_t))
     if(!items||!items.length){window._auxRecHecho={hecho:true,faltan:0};return window._auxRecHecho}
     const tels=[...new Set(items.map(i=>i.telefono).filter(Boolean))]
     const enviosMap={}, resueltasMap={}, estadosByTel={}
     const estadosCerrados=new Set(['ENTREGADO','DEVOLUCION','DEVOLUCION_INICIADA','DEVOLUCION INICIADA','EN DEVOLUCION','EN_DEVOLUCION','CANCELADO','DEVUELTA'])
     for(let i=0;i<tels.length;i+=100){
       const batch=tels.slice(i,i+100)
-      const{data:ed}=await sb.from('reclame_envios').select('telefono,guia,nivel_mensaje').in('telefono',batch).limit(20000)
+      const{data:ed}=await _sbFetchAll((_f,_t)=>sb.from('reclame_envios').select('telefono,guia,nivel_mensaje').in('telefono',batch).order('id',{ascending:true}).range(_f,_t))
       for(const e of (ed||[])){
         const k=(e.telefono||'')+'|'+(e.guia||'')
         if(e.nivel_mensaje===99){resueltasMap[k]=true;continue} // resuelta
@@ -12553,8 +12725,8 @@ window.auxReclameHecho=async(force)=>{
 window.auxReservadoHecho=async(force)=>{
   if(window._auxResvHecho&&!force)return window._auxResvHecho
   try{
-    const{data:progs}=await sb.from('programaciones_envio')
-      .select('id,fecha_envio_programada').eq('estado','programado').limit(2000)
+    const{data:progs}=await _sbFetchAll((_f,_t)=>sb.from('programaciones_envio')
+      .select('id,fecha_envio_programada').eq('estado','programado').order('id',{ascending:true}).range(_f,_t))
     if(!progs||!progs.length){window._auxResvHecho={hecho:true,faltan:0};return window._auxResvHecho}
     // Próximos: salen a envío en ≤2 días (hoy, mañana, pasado). Replica _confDiasFalta.
     const proximos=progs.filter(p=>{const d=_confDiasFalta(p.fecha_envio_programada);return d!=null&&d>=0&&d<=2})
@@ -12564,7 +12736,7 @@ window.auxReservadoHecho=async(force)=>{
     const ids=proximos.map(p=>p.id)
     for(let i=0;i<ids.length;i+=100){
       const batch=ids.slice(i,i+100)
-      const{data}=await sb.from('confirmacion_envios').select('programacion_id,created_at').in('programacion_id',batch).limit(10000)
+      const{data}=await _sbFetchAll((_f,_t)=>sb.from('confirmacion_envios').select('programacion_id,created_at').in('programacion_id',batch).range(_f,_t))
       for(const e of (data||[])){
         if((e.created_at||'').split('T')[0]===hoyStr)enviosHoyByProg[e.programacion_id]=(enviosHoyByProg[e.programacion_id]||0)+1
       }
@@ -13266,12 +13438,12 @@ async function loadPuntoEquilibrio(){
     const dias=30
 
     // 3. Gasto ads (meta_insights, nivel campaign)
-    const{data:insData}=await sb.from('meta_insights').select('spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
+    const{data:insData}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
     let gastoTotal=0
     for(const i of (insData||[]))gastoTotal+=i.spend||0
 
     // 4. Órdenes confirmadas por producto (mismo criterio que el Dashboard)
-    const{data:mapeos}=await sb.from('mapeos').select('cantidad,producto,estado_final').gte('fecha',desde).lte('fecha',hasta).limit(10000)
+    const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('cantidad,producto,estado_final').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
     const prodStatsConf={}
     let totalOrdsConf=0
     for(const m of (mapeos||[])){
@@ -13285,7 +13457,7 @@ async function loadPuntoEquilibrio(){
     }
 
     // 5. Conversaciones por producto (dedupe: fecha+producto, último gana)
-    const{data:reps}=await sb.from('reportes_diarios').select('conversaciones,fecha,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
+    const{data:reps}=await _sbFetchAll((_f,_t)=>sb.from('reportes_diarios').select('conversaciones,fecha,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
     const _convByProd={},_seen={}
     for(const r of (reps||[])){
       const resolved=resolveProdName(r.producto_nombre).nombre||(r.producto_nombre||'')
@@ -13827,7 +13999,7 @@ async function cargarSeguimientoHist(){
   // Traer mapeos con estado_final de entrega (no día 1)
   let query=sb.from('mapeos').select('*').not('fecha_dropi','is',null).not('estado_final','is',null)
   if(filtro)query=query.eq('producto',filtro)
-  const{data}=await query.order('fecha_dropi',{ascending:false}).limit(5000)
+  const{data}=await _sbFetchAll((_f,_t)=>query.order('fecha_dropi',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
   if(!data?.length){el.innerHTML='<div class="alert alert-blue">Sin datos de seguimiento aún</div>';return}
 
   // Agrupar por lote (fecha_dropi)
@@ -13973,9 +14145,9 @@ async function cargarDevPorCampana(){
   if(!el)return
   el.innerHTML='<div class="loading">Cargando...</div>'
   // Traer mapeos con resultado final y ad_id
-  const{data}=await sb.from('mapeos').select('ad_id,estado_final,producto')
+  const{data}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('ad_id,estado_final,producto')
     .not('estado_final','is',null).not('ad_id','is',null).neq('ad_id','')
-    .in('estado_final',['ENTREGADO','DEVOLUCION','NOVEDAD SOLUCIONADA']).limit(10000)
+    .in('estado_final',['ENTREGADO','DEVOLUCION','NOVEDAD SOLUCIONADA']).order('id',{ascending:true}).range(_f,_t))
   if(!data?.length){el.innerHTML='<div class="alert alert-blue">Sin datos de entregas con ID de anuncio aún</div>';return}
 
   // Agrupar por ad_id
@@ -14549,14 +14721,14 @@ window.procesarSeguimiento=async()=>{
         // Contar órdenes con resultado final (entregado o devuelto) en los últimos 90 días
         let entregados=0,devueltos=0
         // Primero intentar 90 días, si no hay 50, usar todo
-        const{data:recientes}=await sb.from('mapeos').select('estado_final')
+        const{data:recientes}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('estado_final')
           .eq('producto',prod.nombre).gte('fecha_dropi',fecha90)
-          .in('estado_final',['ENTREGADO','DEVOLUCION']).limit(5000)
+          .in('estado_final',['ENTREGADO','DEVOLUCION']).order('id',{ascending:true}).range(_f,_t))
         let pool=recientes||[]
         if(pool.length<50){
-          const{data:todas}=await sb.from('mapeos').select('estado_final')
+          const{data:todas}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('estado_final')
             .eq('producto',prod.nombre)
-            .in('estado_final',['ENTREGADO','DEVOLUCION']).limit(5000)
+            .in('estado_final',['ENTREGADO','DEVOLUCION']).order('id',{ascending:true}).range(_f,_t))
           pool=todas||[]
         }
         if(pool.length>=50){
@@ -15053,11 +15225,11 @@ window.runRefrescarDropi=async(btn)=>{
         // FIX: antes, si existía UN solo punto cruce_dropi en la cuenta+fecha, se saltaba TODA la cuenta
         // → las campañas que no entraron en el primer cruce se quedaban "esperando cruce" para siempre.
         // Ahora se mira QUÉ ad_ids ya tienen su punto y solo se procesan los que faltan.
-        const{data:yaExiste}=await sb.from('semaforo_historial').select('meta_id').eq('account_id',cuenta.account_id).eq('fecha',f).eq('triggered_by','cruce_dropi').eq('nivel','ad').limit(5000)
+        const{data:yaExiste}=await _sbFetchAll((_f,_t)=>sb.from('semaforo_historial').select('meta_id').eq('account_id',cuenta.account_id).eq('fecha',f).eq('triggered_by','cruce_dropi').eq('nivel','ad').order('id',{ascending:true}).range(_f,_t))
         const _yaCerrados=new Set((yaExiste||[]).map(r=>String(r.meta_id)))
         // Buscar ad_ids con cruce hecho de esta fecha
         // Cruce hecho = estado_final no NULL Y no es 'PENDIENTE CONFIRMACION'
-        const{data:mapeosCruzados}=await sb.from('mapeos').select('ad_id').eq('fecha',f).not('estado_final','is',null).neq('estado_final','PENDIENTE CONFIRMACION').limit(5000)
+        const{data:mapeosCruzados}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('ad_id').eq('fecha',f).not('estado_final','is',null).neq('estado_final','PENDIENTE CONFIRMACION').order('id',{ascending:true}).range(_f,_t))
         if(!mapeosCruzados||!mapeosCruzados.length)continue // sin cruce en este día → skip
         // Filtrar ad_ids que pertenezcan a esta cuenta (vía meta_campanas)
         const adIdsRaw=[...new Set(mapeosCruzados.map(m=>m.ad_id).filter(Boolean))]
@@ -15535,9 +15707,9 @@ async function _renderResumenProductos(desde,hasta,hoy){
   if(!productos||!productos.length)return''
 
   // 1. Traer mapeos del rango (ventas reales por producto)
-  const{data:mapeos}=await sb.from('mapeos')
+  const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos')
     .select('cantidad,producto,estado_final,fecha,ad_id')
-    .gte('fecha',desde).lte('fecha',hasta).limit(10000)
+    .gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
 
   // 2. Gasto por campaña: decisión inteligente.
   //    - Si el rango incluye HOY o AYER (datos vivos) → Meta API en tiempo real.
@@ -15554,7 +15726,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
   try{window._nexoLiveGastoByAdId=null}catch(_){}
   if(!incluyeVivos){
     // Rango solo histórico cerrado → BD directo (Meta no agrega nada nuevo)
-    const{data:insByCamp}=await sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
+    const{data:insByCamp}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
     for(const i of (insByCamp||[])){
       if(!i.meta_id)continue
       gastoByCampId[String(i.meta_id)]=(gastoByCampId[String(i.meta_id)]||0)+(i.spend||0)
@@ -15585,7 +15757,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
         }catch(eAd){console.warn(`[resumen producto] gasto ad en vivo falló cuenta ${cuenta.account_id} (sus IDs usan BD):`,eAd.message)}
       }catch(e){
         console.warn(`[resumen producto] Meta API fallo cuenta ${cuenta.account_id}, fallback BD:`,e.message)
-        const{data:insBD}=await sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').eq('account_id',cuenta.account_id).gte('fecha',desde).lte('fecha',hasta)
+        const{data:insBD}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').eq('account_id',cuenta.account_id).gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
         for(const i of (insBD||[])){
           if(!i.meta_id)continue
           gastoByCampId[String(i.meta_id)]=(gastoByCampId[String(i.meta_id)]||0)+(i.spend||0)
@@ -15595,7 +15767,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
     try{window._nexoLiveGastoByAdId=_gastoLiveAdByAdId}catch(_){}
   }catch(e){
     console.warn('[resumen producto] sin token Meta, fallback BD completa:',e.message)
-    const{data:insByCamp}=await sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta)
+    const{data:insByCamp}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
     for(const i of (insByCamp||[])){
       if(!i.meta_id)continue
       gastoByCampId[String(i.meta_id)]=(gastoByCampId[String(i.meta_id)]||0)+(i.spend||0)
@@ -15655,9 +15827,9 @@ async function _renderResumenProductos(desde,hasta,hoy){
   // Sirve para clasificar las ventas por IDs de AYER por campaña/anuncio en la fusión.
   const reportesPrevAdIdsListByProd={}
   if(desdePrev&&hastaPrev){
-    const{data:mapeosPrev}=await sb.from('mapeos')
+    const{data:mapeosPrev}=await _sbFetchAll((_f,_t)=>sb.from('mapeos')
       .select('cantidad,producto,estado_final,fecha,ad_id')
-      .gte('fecha',desdePrev).lte('fecha',hastaPrev).limit(10000)
+      .gte('fecha',desdePrev).lte('fecha',hastaPrev).order('id',{ascending:true}).range(_f,_t))
     for(const m of (mapeosPrev||[])){
       const pn=resolveProdName(m.producto).nombre||(m.producto||'Sin producto')
       if(!mapeosPrevByProd[pn])mapeosPrevByProd[pn]=[]
@@ -15808,15 +15980,15 @@ async function _renderResumenProductos(desde,hasta,hoy){
     const _r3=_mkRango(_r2.desde)   // trasantier
     _fechasDiasG.b=_r2.hasta;_fechasDiasG.c=_r3.hasta
     const _cargarDiaExtra=async(rg,mapeosOut,gastoOut,repsOut,convOut,repsListOut)=>{
-      const{data:mp}=await sb.from('mapeos').select('cantidad,producto,estado_final,fecha,ad_id').gte('fecha',rg.desde).lte('fecha',rg.hasta).limit(10000)
+      const{data:mp}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('cantidad,producto,estado_final,fecha,ad_id').gte('fecha',rg.desde).lte('fecha',rg.hasta).order('id',{ascending:true}).range(_f,_t))
       for(const m of (mp||[])){
         const pn=resolveProdName(m.producto).nombre||(m.producto||'Sin producto')
         if(!mapeosOut[pn])mapeosOut[pn]=[]
         mapeosOut[pn].push(m)
       }
-      const{data:ins}=await sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',rg.desde).lte('fecha',rg.hasta)
+      const{data:ins}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',rg.desde).lte('fecha',rg.hasta).order('id',{ascending:true}).range(_f,_t))
       for(const i of (ins||[])){if(!i.meta_id)continue;gastoOut[String(i.meta_id)]=(gastoOut[String(i.meta_id)]||0)+(i.spend||0)}
-      const{data:reps}=await sb.from('reportes_diarios').select('ad_ids,producto_id,producto_nombre,fecha,updated_at').gte('fecha',rg.desde).lte('fecha',rg.hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false})
+      const{data:reps}=await _sbFetchAll((_f,_t)=>sb.from('reportes_diarios').select('ad_ids,producto_id,producto_nombre,fecha,updated_at').gte('fecha',rg.desde).lte('fecha',rg.hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
       const _seen=new Set()
       for(const r of (reps||[])){
         const k=(r.fecha||'')+'|'+(r.producto_id||r.producto_nombre||'')
@@ -15828,7 +16000,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
         repsOut[pn]=(repsOut[pn]||0)+ids.length
         if(repsListOut){if(!repsListOut[pn])repsListOut[pn]=[];for(const id of ids)repsListOut[pn].push(id)}
       }
-      const{data:repsC}=await sb.from('reportes_diarios').select('conversaciones,conversaciones_aprox,producto_id,producto_nombre,fecha,updated_at').gte('fecha',rg.desde).lte('fecha',rg.hasta).order('updated_at',{ascending:false})
+      const{data:repsC}=await _sbFetchAll((_f,_t)=>sb.from('reportes_diarios').select('conversaciones,conversaciones_aprox,producto_id,producto_nombre,fecha,updated_at').gte('fecha',rg.desde).lte('fecha',rg.hasta).order('updated_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
       const _seenC=new Set()
       for(const r of (repsC||[])){
         const k=(r.fecha||'')+'|'+(r.producto_id||r.producto_nombre||'')
@@ -15849,7 +16021,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
       const _stkMin=_rangosStk.map(x=>x[1]).filter(Boolean).sort()[0]
       const _stkMax=_rangosStk.map(x=>x[2]).filter(Boolean).sort().slice(-1)[0]
       if(_stkMin&&_stkMax){
-        const{data:_stkRows,error:_stkErr}=await sb.from('reportes_diarios').select('fecha,producto_nombre,stock_cierre,updated_at').gte('fecha',_stkMin).lte('fecha',_stkMax).not('stock_cierre','is',null).order('updated_at',{ascending:false})
+        const{data:_stkRows,error:_stkErr}=await _sbFetchAll((_f,_t)=>sb.from('reportes_diarios').select('fecha,producto_nombre,stock_cierre,updated_at').gte('fecha',_stkMin).lte('fecha',_stkMax).not('stock_cierre','is',null).order('updated_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
         if(!_stkErr)for(const r of (_stkRows||[])){
           const pnS=resolveProdName(r.producto_nombre||'').nombre||(r.producto_nombre||'')
           if(!pnS)continue
@@ -16023,7 +16195,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
       if(_adsG.length){
         const _spendRows=[]
         for(let i=0;i<_adsG.length;i+=300){
-          const{data:insAd}=await sb.from('meta_insights').select(_METSEL).eq('nivel','ad').in('meta_id',_adsG.slice(i,i+300)).gte('fecha',_gDesde).lte('fecha',hasta)
+          const{data:insAd}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select(_METSEL).eq('nivel','ad').in('meta_id',_adsG.slice(i,i+300)).gte('fecha',_gDesde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
           for(const r of (insAd||[]))_spendRows.push(r)
         }
         for(const r of _spendRows){
@@ -16052,7 +16224,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
       const _campIdsMet=[...new Set((productos||[]).flatMap(p=>Array.isArray(p.campaign_ids)?p.campaign_ids.map(String):[]))]
       if(_campIdsMet.length){
         for(let i=0;i<_campIdsMet.length;i+=300){
-          const{data:insC}=await sb.from('meta_insights').select(_METSEL).eq('nivel','campaign').in('meta_id',_campIdsMet.slice(i,i+300)).gte('fecha',_gDesde).lte('fecha',hasta)
+          const{data:insC}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select(_METSEL).eq('nivel','campaign').in('meta_id',_campIdsMet.slice(i,i+300)).gte('fecha',_gDesde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
           for(const r of (insC||[])){
             const id=String(r.meta_id)
             _porBloque(r,(k)=>_accMet(_campMetBloques[k],id,r))
@@ -18390,7 +18562,7 @@ window._rpFusionLifetime=async function(slug,btn){
     // 1) Gasto lifetime por campaña (meta_insights, real — sin filtro de fecha)
     const gLife={}
     if(campIds.length){
-      const{data:ins}=await sb.from('meta_insights').select('spend,meta_id').eq('nivel','campaign').in('meta_id',campIds).limit(100000)
+      const{data:ins}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('spend,meta_id').eq('nivel','campaign').in('meta_id',campIds).order('id',{ascending:true}).range(_f,_t))
       for(const r of (ins||[])){const c=String(r.meta_id);gLife[c]=(gLife[c]||0)+(r.spend||0)}
     }
     // 2) Mapa ad→campaña (meta_campanas: ad→adset→campaign) + nombres de campaña
@@ -18421,9 +18593,8 @@ window._rpFusionLifetime=async function(slug,btn){
     //    del producto (_gTotIds/_gTotConf cuentan TODAS las órdenes aunque algún anuncio no se mapee).
     const idsLife={},confLife={}
     let _gTotIds=0,_gTotConf=0,_orgIds=0,_orgConf=0
-    let _qm=sb.from('mapeos').select('ad_id,estado_final,es_organico').limit(200000)
-    if(prodId)_qm=_qm.eq('producto_id',prodId)
-    const{data:mps}=await _qm
+    const _qmF=()=>{let _q=sb.from('mapeos').select('ad_id,estado_final,es_organico');if(prodId)_q=_q.eq('producto_id',prodId);return _q}
+    const{data:mps}=await _sbFetchAll((_f,_t)=>_qmF().order('id',{ascending:true}).range(_f,_t))
     for(const m of (mps||[])){
       const _esVta=!!(window._nexoClasifVenta&&window._nexoClasifVenta(m.estado_final)==='venta')
       _gTotIds++;if(_esVta)_gTotConf++
@@ -18444,7 +18615,7 @@ window._rpFusionLifetime=async function(slug,btn){
     if(_extraCamps.length){
       for(let _i=0;_i<_extraCamps.length;_i+=300){
         const _lote=_extraCamps.slice(_i,_i+300)
-        const{data:_insX}=await sb.from('meta_insights').select('spend,meta_id').eq('nivel','campaign').in('meta_id',_lote).limit(100000)
+        const{data:_insX}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('spend,meta_id').eq('nivel','campaign').in('meta_id',_lote).order('id',{ascending:true}).range(_f,_t))
         for(const r of (_insX||[])){const c=String(r.meta_id);gLife[c]=(gLife[c]||0)+(r.spend||0)}
       }
     }
@@ -18766,7 +18937,7 @@ window._rpFusionRango=async function(slug,cidF){
     if(!camps.length){_setSt('⚠️ El producto no tiene campañas configuradas','var(--amber)');return}
     _setSt('⏳ Buscando los días... no toques nada','var(--purple)')
     // 1) Ventas confirmadas del producto en el rango (mismos filtros canónicos de _mkCuadre)
-    const{data:mp,error:eMp}=await sb.from('mapeos').select('cantidad,producto,estado_final,fecha,ad_id').gte('fecha',desde).lte('fecha',hasta).limit(20000)
+    const{data:mp,error:eMp}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('cantidad,producto,estado_final,fecha,ad_id').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
     if(eMp)throw eMp
     const _conf=[]
     for(const m of (mp||[])){
@@ -19383,7 +19554,7 @@ async function renderMetaPortafolio(el,isAdmin){
   // 3) Fallback: rango histórico cerrado O live falló → leer BD directo
   if(!_liveListo){
     window._metaCargaInfo.gastoVivo='bd'
-    const{data:insRango}=await sb.from('meta_insights').select('account_id,meta_id,spend').eq('nivel','campaign').gte('fecha',_hDesde).lte('fecha',_hHasta).limit(20000)
+    const{data:insRango}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('account_id,meta_id,spend').eq('nivel','campaign').gte('fecha',_hDesde).lte('fecha',_hHasta).order('id',{ascending:true}).range(_f,_t))
     for(const i of (insRango||[])){
       gastoRangoByAcc[i.account_id]=(gastoRangoByAcc[i.account_id]||0)+(i.spend||0)
       if(i.meta_id)gastoRangoByCampId[String(i.meta_id)]=(gastoRangoByCampId[String(i.meta_id)]||0)+(i.spend||0)
@@ -20602,16 +20773,16 @@ window._rpFusionSemLoad=async function(ccid){
     // Blindaje: si la BD aún no tiene la columna, se reintenta sin ella (las tiras nunca se rompen).
     let _colsSemF='meta_id,nivel,fecha,hora_calculo,semaforo,semaforo_label,cpa_real,ventas,canceladas,pendientes,gasto,triggered_by,cambio_vs_anterior,semaforo_anterior,ventas_efectivas,cpa_real_efectivas,metricas_extra'
     for(let i=0;i<metas.length;i+=100){
-      let{data,error:_eSemF}=await sb.from('semaforo_historial')
+      let{data,error:_eSemF}=await _sbFetchAll((_f,_t)=>sb.from('semaforo_historial')
         .select(_colsSemF)
         .in('meta_id',metas.slice(i,i+100)).gte('fecha',_trasL).lte('fecha',_hoyL)
-        .order('hora_calculo',{ascending:true}).limit(4000)
+        .order('hora_calculo',{ascending:true}).order('id',{ascending:true}).range(_f,_t))
       if(_eSemF&&String(_eSemF.message||'').indexOf('metricas_extra')>=0){
         _colsSemF=_colsSemF.replace(',metricas_extra','')
-        ;({data}=await sb.from('semaforo_historial')
+        ;({data}=await _sbFetchAll((_f,_t)=>sb.from('semaforo_historial')
           .select(_colsSemF)
           .in('meta_id',metas.slice(i,i+100)).gte('fecha',_trasL).lte('fecha',_hoyL)
-          .order('hora_calculo',{ascending:true}).limit(4000))
+          .order('hora_calculo',{ascending:true}).order('id',{ascending:true}).range(_f,_t)))
       }
       if(data)rows=rows.concat(data)
     }
@@ -21414,18 +21585,18 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     // NUEVO (12jun26 · captura completa): traer también metricas_extra para el tooltip del desglose completo.
     // Blindaje: si la BD aún no tiene la columna, se reintenta sin ella (las tiras nunca se rompen).
     let _colsSemA='meta_id,nivel,fecha,hora_calculo,semaforo,semaforo_label,cpa_real,ventas,pendientes,gasto,triggered_by,cambio_vs_anterior,semaforo_anterior,ventas_efectivas,cpa_real_efectivas,metricas_extra'
-    let{data:semData,error:_eSemA}=await sb.from('semaforo_historial')
+    let{data:semData,error:_eSemA}=await _sbFetchAll((_f,_t)=>sb.from('semaforo_historial')
       .select(_colsSemA)
       .eq('account_id',accountId).gte('fecha',_semDesde3).lte('fecha',hasta)
       .order('hora_calculo',{ascending:true})
-      .limit(8000)
+      .order('id',{ascending:true}).range(_f,_t))
     if(_eSemA&&String(_eSemA.message||'').indexOf('metricas_extra')>=0){
       _colsSemA=_colsSemA.replace(',metricas_extra','')
-      ;({data:semData}=await sb.from('semaforo_historial')
+      ;({data:semData}=await _sbFetchAll((_f,_t)=>sb.from('semaforo_historial')
         .select(_colsSemA)
         .eq('account_id',accountId).gte('fecha',_semDesde3).lte('fecha',hasta)
         .order('hora_calculo',{ascending:true})
-        .limit(8000))
+        .order('id',{ascending:true}).range(_f,_t)))
     }
     for(const r of (semData||[])){
       if(!semaforosByMeta[r.meta_id])semaforosByMeta[r.meta_id]=[]
@@ -21472,9 +21643,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   if(!_ayerEnVivo){
     // Fallback: BD (meta_insights con fecha=ayer)
     try{
-      const{data:insPrev}=await sb.from('meta_insights')
+      const{data:insPrev}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights')
         .select('meta_id,nivel,spend,conversions')
-        .eq('account_id',accountId).gte('fecha',_prevDesde).lte('fecha',_prevHasta).limit(20000)
+        .eq('account_id',accountId).gte('fecha',_prevDesde).lte('fecha',_prevHasta).order('id',{ascending:true}).range(_f,_t))
       const _acc={}
       for(const i of (insPrev||[])){
         if(!_acc[i.meta_id])_acc[i.meta_id]={spend:0,conv:0}
@@ -21513,7 +21684,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     }
     if(!enVivo){
       try{
-        const{data:ins}=await sb.from('meta_insights').select('meta_id,nivel,spend,conversions').eq('account_id',accountId).gte('fecha',pDesde).lte('fecha',pHasta).limit(20000)
+        const{data:ins}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('meta_id,nivel,spend,conversions').eq('account_id',accountId).gte('fecha',pDesde).lte('fecha',pHasta).order('id',{ascending:true}).range(_f,_t))
         const _acc={}
         for(const i of (ins||[])){
           if(!_acc[i.meta_id])_acc[i.meta_id]={spend:0,conv:0}
@@ -23434,7 +23605,7 @@ async function _semHistLoad(fechas){
     let q=sb.from('semaforo_historial').select('*').eq('meta_id',ctx.metaId)
     if(Array.isArray(fechas))q=q.in('fecha',fechas)
     else if(fechas&&fechas.desde&&fechas.hasta)q=q.gte('fecha',fechas.desde).lte('fecha',fechas.hasta)
-    const{data,error}=await q.order('hora_calculo',{ascending:true}).limit(1000)
+    const{data,error}=await _sbFetchAll((_f,_t)=>q.order('hora_calculo',{ascending:true}).order('id',{ascending:true}).range(_f,_t))
     if(error){body.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
     if(!data||!data.length){body.innerHTML='<div class="alert alert-blue">Sin registros en este rango</div>';return}
     let rows=data
@@ -24595,7 +24766,7 @@ window.applyMetaDateRange=async()=>{
   // Recalcular gasto en rango para filtro Activas (cuenta = activas + gasto > 0)
   const desde=document.getElementById('meta-desde')?.value||today()
   const hasta=document.getElementById('meta-hasta')?.value||today()
-  const{data:insRango}=await sb.from('meta_insights').select('account_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).limit(20000)
+  const{data:insRango}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('account_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
   const gastoRangoByAcc={}
   for(const i of (insRango||[])){gastoRangoByAcc[i.account_id]=(gastoRangoByAcc[i.account_id]||0)+(i.spend||0)}
   // Para saber qué cuentas tienen campañas ACTIVE

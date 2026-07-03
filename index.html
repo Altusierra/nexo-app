@@ -1700,8 +1700,10 @@ window._sim2Seed=async()=>{
         cr.n++;cr.q[_q]++
         cr.sp+=(m.precio_dropi>0?m.precio_dropi:(prod['precio_'+_q+'u']||0))
         cr.sc+=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:(prod['costo_'+_q+'u']||0))
-        cr.sf+=(m.flete_snapshot>0?m.flete_snapshot:(prod.flete_outbound||21000))
-        cr.sfd+=(m.flete_dev_snapshot>0?m.flete_dev_snapshot:(prod.flete_devolucion||18000))
+        const _sfI=(m.flete_snapshot>0?m.flete_snapshot:(prod.flete_outbound||21000))
+        cr.sf+=_sfI
+        // FIX (2jul26): sf ya trae la ida de TODAS — aquí solo la VUELTA (snapshot real = ida+vuelta → se le resta su ida)
+        cr.sfd+=(m.flete_dev_snapshot>0?Math.max(0,m.flete_dev_snapshot-_sfI):(prod.flete_devolucion||18000))
       }else if(m.estado_final==='RECHAZADO')rech++ // NUEVO (2jul26): separado de canceladas
       else if(cl==='canc')canc++
       else if(cl==='pend')pend++ // NUEVO (2jul26): contar pendientes de confirmación
@@ -1955,7 +1957,7 @@ async function loadDash(){
     if(q===1)tot1++;else if(q===2)tot2++;else if(q===3)tot3++;else tot4++
     if(m.ad_id)conAd++
     let esConf=false
-    if(m.estado_final==='CANCELADO')canc++
+    if(m.estado_final==='CANCELADO'||m.estado_final==='RECHAZADO')canc++ // F3 (2jul26): RECHAZADO no es venta (regla única)
     else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)pend++
     else{conf++;esConf=true}
     const _catO=DROPI_STATUS[m.estado_final]?.cat
@@ -1964,12 +1966,12 @@ async function loadDash(){
     // NUEVO: detalle para desplegables (no altera los contadores de arriba)
     const _telV=m.telefono||'—'
     const _prodV=resolveProdName(m.producto).nombre||m.producto||'Sin producto'
-    if(m.estado_final==='CANCELADO')_listCanc.push({tel:_telV,prod:_prodV})
+    if(m.estado_final==='CANCELADO'||m.estado_final==='RECHAZADO')_listCanc.push({tel:_telV,prod:_prodV})
     else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)_listPend.push({tel:_telV,prod:_prodV})
     else _listConf.push({tel:_telV,prod:_prodV})
     if(_catO==='devuelto'){
       const _prodD=productos.find(p=>p.nombre===_prodV)||productos[0]||{}
-      const _fdV=m.flete_dev_snapshot||m.flete_snapshot||_prodD.flete_devolucion||18000
+      const _fdV=m.flete_dev_snapshot>0?m.flete_dev_snapshot:((m.flete_snapshot||_prodD.flete_outbound||21000)+(_prodD.flete_devolucion||18000)) // ida+vuelta SIEMPRE
       _listDev.push({tel:_telV,prod:_prodV,fd:_fdV})
     }
     const pn=resolveProdName(m.producto).nombre||'Sin producto'
@@ -2002,6 +2004,10 @@ async function loadDash(){
           const _pp=productos.find(p=>p.nombre===pn)||productos[0]||{}
           _pvS.venta+=q===1?(_pp.precio_1u||0):q===2?(_pp.precio_2u||0):q===3?(_pp.precio_3u||0):(_pp.precio_4u||0)
         }
+        // F7 (2jul26): costo y flete REALES de la confirmada — alimentan las columnas −COSTO y −FLETE ENV de la tabla 📦
+        const _ppC=productos.find(p=>p.nombre===pn)||productos[0]||{}
+        _pvS.costoR=(_pvS.costoR||0)+((m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||(q===1?(_ppC.costo_1u||0):q===2?(_ppC.costo_2u||0):q===3?(_ppC.costo_3u||0):(_ppC.costo_4u||0)))
+        _pvS.fleteR=(_pvS.fleteR||0)+((m.flete_snapshot>0?m.flete_snapshot:(_ppC.flete_outbound||21000)))
       }
       if(_catO==='entregado'||_catO==='novedad_ok'){
         _pvS.ent++
@@ -2010,7 +2016,7 @@ async function loadDash(){
         else{
           const _pp=productos.find(p=>p.nombre===pn)||productos[0]||{}
           const _pr=m.precio_dropi||[0,_pp.precio_1u||0,_pp.precio_2u||0,_pp.precio_3u||0,_pp.precio_4u||0][q]||(_pp.precio_2u||0)
-          const _co=m.costo_snapshot||[0,_pp.costo_1u||0,_pp.costo_2u||0,_pp.costo_3u||0,_pp.costo_4u||0][q]||(_pp.costo_2u||0)
+          const _co=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||[0,_pp.costo_1u||0,_pp.costo_2u||0,_pp.costo_3u||0,_pp.costo_4u||0][q]||(_pp.costo_2u||0)
           const _f=m.flete_snapshot||_pp.flete_outbound||21000
           const _al=(_pp.tipo_producto==='marca_propia')?(_pp.almacenamiento||0):0
           _pvS.ganEnt+=(_pr-_co-_f-_al)
@@ -2071,7 +2077,7 @@ async function loadDash(){
         const _pn=_prodCanonMapeo(m)
         const _prod=productos.find(p=>p.nombre===_pn)||productos[0]||{}
         const _precio=m.precio_dropi||[0,_prod.precio_1u||0,_prod.precio_2u||0,_prod.precio_3u||0,_prod.precio_4u||0][q]||(_prod.precio_2u||0)
-        const _costo=m.costo_snapshot||[0,_prod.costo_1u||0,_prod.costo_2u||0,_prod.costo_3u||0,_prod.costo_4u||0][q]||(_prod.costo_2u||0)
+        const _costo=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||[0,_prod.costo_1u||0,_prod.costo_2u||0,_prod.costo_3u||0,_prod.costo_4u||0][q]||(_prod.costo_2u||0)
         const _fo=m.flete_snapshot||_prod.flete_outbound||21000
         const _alm=(_prod.tipo_producto==='marca_propia')?(_prod.almacenamiento||0):0
         _grdGanD+=(_precio-_costo-_fo-_alm)
@@ -2080,7 +2086,7 @@ async function loadDash(){
       devD++
       const _pn=_prodCanonMapeo(m)
       const _prod=productos.find(p=>p.nombre===_pn)||productos[0]||{}
-      const _fd=m.flete_dev_snapshot||m.flete_snapshot||_prod.flete_devolucion||18000
+      const _fd=m.flete_dev_snapshot>0?m.flete_dev_snapshot:((m.flete_snapshot||_prod.flete_outbound||21000)+(_prod.flete_devolucion||18000))
       _grdFDevD+=_fd
       _listDevD.push({tel:m.telefono||'—',prod:_pn||m.producto||'Sin producto',fd:_fd})
     }
@@ -2093,7 +2099,7 @@ async function loadDash(){
       // 🧮 CUADRE: pend/rech por producto (para explicar Confirmadas = Despachadas + Pend + Rech)
       if(m.estado_final==='PENDIENTE')_pvS.pend++
       else if(m.estado_final==='RECHAZADO')_pvS.rech++
-      const _esConfD=(m.estado_final!=='CANCELADO')&&!(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)
+      const _esConfD=(m.estado_final!=='CANCELADO')&&(m.estado_final!=='RECHAZADO')&&!(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final) // F3 (2jul26)
       if(_esConfD){
         _pvS.conf++;_pvS.unidsConf+=q
         if(m.precio_dropi&&m.precio_dropi>0)_pvS.venta+=m.precio_dropi
@@ -2101,6 +2107,10 @@ async function loadDash(){
           const _pp=productos.find(p=>p.nombre===_pnV)||productos[0]||{}
           _pvS.venta+=q===1?(_pp.precio_1u||0):q===2?(_pp.precio_2u||0):q===3?(_pp.precio_3u||0):(_pp.precio_4u||0)
         }
+        // F7 (2jul26): costo y flete REALES de la confirmada
+        const _ppC=productos.find(p=>p.nombre===_pnV)||productos[0]||{}
+        _pvS.costoR=(_pvS.costoR||0)+((m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||(q===1?(_ppC.costo_1u||0):q===2?(_ppC.costo_2u||0):q===3?(_ppC.costo_3u||0):(_ppC.costo_4u||0)))
+        _pvS.fleteR=(_pvS.fleteR||0)+((m.flete_snapshot>0?m.flete_snapshot:(_ppC.flete_outbound||21000)))
       }
       if(_stD==='entregado'||_stD==='novedad_ok'){
         _pvS.ent++
@@ -2108,7 +2118,7 @@ async function loadDash(){
         else{
           const _pp=productos.find(p=>p.nombre===_pnV)||productos[0]||{}
           const _pr=m.precio_dropi||[0,_pp.precio_1u||0,_pp.precio_2u||0,_pp.precio_3u||0,_pp.precio_4u||0][q]||(_pp.precio_2u||0)
-          const _co=m.costo_snapshot||[0,_pp.costo_1u||0,_pp.costo_2u||0,_pp.costo_3u||0,_pp.costo_4u||0][q]||(_pp.costo_2u||0)
+          const _co=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||[0,_pp.costo_1u||0,_pp.costo_2u||0,_pp.costo_3u||0,_pp.costo_4u||0][q]||(_pp.costo_2u||0)
           const _f=m.flete_snapshot||_pp.flete_outbound||21000
           const _al=(_pp.tipo_producto==='marca_propia')?(_pp.almacenamiento||0):0
           _pvS.ganEnt+=(_pr-_co-_f-_al)
@@ -2194,9 +2204,10 @@ async function loadDash(){
     const _prod=productos.find(p=>p.nombre===_pn)||productos[0]||{}
     const _q=m.cantidad||2
     const _precio=m.precio_dropi||[0,_prod.precio_1u||0,_prod.precio_2u||0,_prod.precio_3u||0,_prod.precio_4u||0][_q]||(_prod.precio_2u||0)
-    const _costo=m.costo_snapshot||[0,_prod.costo_1u||0,_prod.costo_2u||0,_prod.costo_3u||0,_prod.costo_4u||0][_q]||(_prod.costo_2u||0)
+    const _costo=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||[0,_prod.costo_1u||0,_prod.costo_2u||0,_prod.costo_3u||0,_prod.costo_4u||0][_q]||(_prod.costo_2u||0)
     const _fo=m.flete_snapshot||_prod.flete_outbound||21000
-    const _fd=m.flete_dev_snapshot||m.flete_snapshot||_prod.flete_devolucion||18000
+    // FIX (2jul26): la ida de la devuelta YA está en _grFOut; aquí solo la VUELTA (snapshot real trae ida+vuelta → se le resta la ida)
+    const _fd=m.flete_dev_snapshot>0?Math.max(0,m.flete_dev_snapshot-_fo):(_prod.flete_devolucion||18000)
     const _alm=(_prod.tipo_producto==='marca_propia')?(_prod.almacenamiento||0):0
     if(_st!=='cancelado')_grFOut+=_fo
     if(_st==='entregado'||_st==='novedad_ok'){_grVEnt+=_precio;_grCEnt+=_costo;_grAlm+=_alm;_grEnt++}
@@ -2218,7 +2229,7 @@ async function loadDash(){
         const _prod=productos.find(p=>p.nombre===_pn)||productos[0]||{}
         const _q=m.cantidad||2
         const _precio=m.precio_dropi||[0,_prod.precio_1u||0,_prod.precio_2u||0,_prod.precio_3u||0,_prod.precio_4u||0][_q]||(_prod.precio_2u||0)
-        const _costo=m.costo_snapshot||[0,_prod.costo_1u||0,_prod.costo_2u||0,_prod.costo_3u||0,_prod.costo_4u||0][_q]||(_prod.costo_2u||0)
+        const _costo=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||[0,_prod.costo_1u||0,_prod.costo_2u||0,_prod.costo_3u||0,_prod.costo_4u||0][_q]||(_prod.costo_2u||0)
         const _fo=m.flete_snapshot||_prod.flete_outbound||21000
         const _alm=(_prod.tipo_producto==='marca_propia')?(_prod.almacenamiento||0):0
         _grdGan+=(_precio-_costo-_fo-_alm)
@@ -2226,7 +2237,8 @@ async function loadDash(){
     }else if(_st==='devuelto'){
       const _pn=resolveProdName(m.producto).nombre
       const _prod=productos.find(p=>p.nombre===_pn)||productos[0]||{}
-      const _fd=m.flete_dev_snapshot||m.flete_snapshot||_prod.flete_devolucion||18000
+      // FIX (2jul26): la devuelta cuesta ida+vuelta COMPLETA (aquí su ida no está en ningún otro término). Snapshot real ya la trae; sin dato = ida pagada + vuelta config
+      const _fd=m.flete_dev_snapshot>0?m.flete_dev_snapshot:((m.flete_snapshot||_prod.flete_outbound||21000)+(_prod.flete_devolucion||18000))
       _grdFDev+=_fd
     }
   }
@@ -2264,17 +2276,21 @@ async function loadDash(){
       const convP=(_convByProd[pn]||0)*(prod.costo_conversacion||100)
       // 🏢 LEY DEL OWNER: los fijos NO se reparten por producto (no son culpa de ningún producto).
       // Cada producto muestra su ganancia real de operación; los fijos se restan UNA vez al negocio (franja).
-      const utilProy=Math.round(ventaLista*(1-_dp)-costoProv-confN*_fo-Math.round(confN*_dp*_fd)-gastoP-convP)
       const utilReal=Math.round(s.ganEnt-s.fdev-gastoP-convP)
-      // 🔻 Componentes del flujo del dinero (para el desglose semáforo). devProy es RESIDUAL:
-      // absorbe el %dev proyectado + el ajuste precio lista/real + redondeos → la fila SUMA EXACTO al peso:
-      // Vendido − devProy − costo − fleteEnv − fleteDev − ads − conv = PROYECTADA (siempre, sin fijos).
+      // F7 (2jul26) · 🔻 Componentes con DATOS REALES del xlsx (fallback lista/config solo si falta el dato):
+      //   −COSTO = costo real de proveedor de las confirmadas · −FLETE ENV = flete real cobrado
+      //   −FLETE DEV = devueltas REALES (ida+vuelta) + proyección ida+vuelta de las que siguen en camino
+      //   −DEV. PROY = SOLO devoluciones: la venta que se proyecta perder (%dev del producto) — ya no absorbe descuadres.
+      // La fila sigue sumando EXACTO: Vendido − devProy − costo − fleteEnv − fleteDev − ads − conv = PROYECTADA.
       const _venta=Math.round(s.venta)
-      const _costo=Math.round(costoProv)
-      const _fleteEnv=confN*_fo
-      const _fleteDev=Math.round(confN*_dp*_fd)
+      const _costo=(s.costoR>0)?Math.round(s.costoR):Math.round(costoProv)
+      const _fleteEnv=(s.fleteR>0)?Math.round(s.fleteR):confN*_fo
+      const _pendResol=Math.max(0,confN-(s.ent||0)-(s.dev||0))
+      // s.fdev viene en IDA+VUELTA por devuelta; la ida de esas ya está dentro de _fleteEnv → aquí SOLO la vuelta + vuelta proyectada de las en camino
+      const _fleteDev=Math.round(Math.max(0,(s.fdev||0)-(s.dev||0)*_fo)+_pendResol*_dp*_fd)
       const _ads=Math.round(gastoP)
       const _conv=Math.round(convP)
+      const utilProy=Math.round(_venta*(1-_dp)-_costo-_fleteEnv-_fleteDev-_ads-_conv)
       const _devProy=_venta-_costo-_fleteEnv-_fleteDev-_ads-_conv-utilProy
       rows.push({pn,ords:s.ords,unids:s.unids,conf:confN,ent:s.ent,venta:_venta,utilProy,utilReal,gastoP,pend:s.pend||0,rech:s.rech||0,dev:s.dev||0,dp:_dp,costo:_costo,fleteEnv:_fleteEnv,fleteDev:_fleteDev,ads:_ads,convC:_conv,devProy:_devProy,gEnt:Math.round(s.ganEnt),fdevR:Math.round(s.fdev)})
       totUnids+=s.unids
@@ -2332,7 +2348,7 @@ async function loadDash(){
       return `<tr style="border-bottom:1px solid var(--border)"><td style="text-align:left;padding:7px 10px;white-space:nowrap;color:var(--text)">${r.pn}${_warn}${_iCu(rows.indexOf(r),r.conf,r.pend,r.rech)}</td>`
         +_td(fmt(r.ords))+_td(fmt(r.unids),'var(--blue)',true)+_ccCell(r.pn,r.conf)+_td(fmt(r.conf),'var(--green)')+_td(fmt(r.ent),'var(--green)')+_pctEnt(r.ent,r.conf)
         +_td('$'+fmt(r.venta),'var(--text)',true,_BGini)
-        +_neg(r.devProy,_BGdes,_tipDevP+' ('+((r.dp||0)*100).toFixed(0)+'% cfg)')+_neg(r.costo,_BGdes,'Costo de mercancía de las confirmadas (precios de lista)')+_neg(r.fleteEnv,_BGdes,'Flete de envío: '+fmt(r.conf)+' confirmadas × flete del producto')+_neg(r.fleteDev,_BGdes,'Flete de las devoluciones PROYECTADAS ('+((r.dp||0)*100).toFixed(0)+'% de las confirmadas)')+_neg(r.ads,_BGdes,'Gasto Meta Ads de las campañas vinculadas a este producto')+_neg(r.convC,_BGdes,'Costo de conversaciones del producto en el rango')
+        +_neg(r.devProy,_BGdes,_tipDevP+' ('+((r.dp||0)*100).toFixed(0)+'% cfg)')+_neg(r.costo,_BGdes,'Costo REAL de proveedor (xlsx Dropi) de las confirmadas · si alguna aún no tiene dato, usa precio de lista')+_neg(r.fleteEnv,_BGdes,'Flete de envío REAL cobrado por Dropi a las '+fmt(r.conf)+' confirmadas')+_neg(r.fleteDev,_BGdes,'VUELTA de las devoluciones: reales del xlsx + proyectada de las que siguen en camino ('+((r.dp||0)*100).toFixed(0)+'% cfg). La IDA de todas ya está en −FLETE ENV')+_neg(r.ads,_BGdes,'Gasto Meta Ads de las campañas vinculadas a este producto')+_neg(r.convC,_BGdes,'Costo de conversaciones del producto en el rango')
         +_tdm(r.utilProy,_BGpro)+_pctMrg(r.utilProy,r.venta,_BGpro)
         +_td((r.gEnt>=0?'$':'-$')+fmt(Math.abs(r.gEnt)),'var('+(r.gEnt>=0?'--green':'--red')+')',false,_BGrea)+_neg(r.fdevR,_BGrea,'Flete pagado por las '+fmt(r.dev||0)+' devoluciones REALES del rango')+_tdm(r.utilReal,_BGrea,_tipReal)+_perEnt(r.gEnt,r.ent,_BGrea)+_perEnt(r.utilReal,r.ent,_BGrea)
         +`</tr>`
@@ -2585,7 +2601,7 @@ async function loadDash(){
         <div class="card-sub">${countConPrecioReal} reales · ${countConPrecioEstimado} estimadas</div>
       </div>
       <div class="card ${ganNeta>=0?'c-green':'c-red'}">
-        <div class="card-label">💰 Ganancia neta (proyectada) ${tieneOferta?`<span style="cursor:help;font-size:11px;opacity:.7;border:1px solid var(--border);border-radius:50%;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted);margin-left:2px;vertical-align:middle;font-weight:400" title="PROYECTADA: sobre las ${totalOrdsConf} confirmadas, asumiendo que se entregan al ${100-Math.round(devPct*100)}%.&#10;&#10;Venta efectiva (${Math.round(devPct*100)}% dev ponderado): $${fmt(ventaEfectiva)}&#10;− Costo producto: −$${fmt(costoProvTotal)}&#10;− Flete: −$${fmt(costoFlete)}&#10;− Devolución: −$${fmt(costoDevolucion)}&#10;− Gasto ads: −$${fmt(gastoTotal)}&#10;− Costo conversación: −$${fmt(costoConv)}&#10;− Gastos fijos (${dias}d): −$${fmt(gastoFijoPeriodo)}&#10;&#10;= $${fmt(ganNeta)}&#10;&#10;(% devolución por producto específico)">ℹ</span>`:''}</div>
+        <div class="card-label">💰 Ganancia neta (proyectada) ${tieneOferta?`<span style="cursor:help;font-size:11px;opacity:.7;border:1px solid var(--border);border-radius:50%;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted);margin-left:2px;vertical-align:middle;font-weight:400" title="${window._nexoTip3(`💰 GANANCIA NETA PROYECTADA: sobre las ${totalOrdsConf} confirmadas, asumiendo que se entregan al ${100-Math.round(devPct*100)}% (% devolución ponderado por producto). ESTA SÍ incluye gastos fijos (${dias}d).`,'venta×(1−dev) − costo producto − flete − devoluciones − gasto ads − costo conversación − gastos fijos',`$${fmt(ventaEfectiva)} − $${fmt(costoProvTotal)} − $${fmt(costoFlete)} − $${fmt(costoDevolucion)} − $${fmt(gastoTotal)} − $${fmt(costoConv)} − $${fmt(gastoFijoPeriodo)}&#10;= $${fmt(ganNeta)}`)}">ℹ</span>`:''}</div>
         <div class="card-val">${tieneOferta?'$'+fmt(ganNeta):'—'}</div>
         <div class="card-sub">${tieneOferta?`Margen ${(ganNeta/ventaTotal*100).toFixed(1)}%`:'Sin oferta'}</div>
         ${tieneOferta?`<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
@@ -3339,12 +3355,13 @@ async function pageAdminReportes(c){
       else{
         r.conf++
         // Sumas REALES solo de confirmadas → de aquí sale el Break-even real del día.
-        // ⚠️ flete_dev_snapshot YA incluye ida+vuelta (regla dura del sistema).
+        // ⚠️ flete_dev_snapshot YA incluye ida+vuelta (regla dura) → aquí se guarda SOLO la vuelta porque cfl ya trae la ida completa (FIX 2jul26: antes duplicaba la ida en la fracción dev)
         r.cN++
         r.cvr+=_pr
         r.cco+=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:(_prodC['costo_'+_qk+'u']||_prodC.costo_2u||0))
-        r.cfl+=(m.flete_snapshot>0?m.flete_snapshot:(_prodC.flete_outbound||21000))
-        r.cfd+=(m.flete_dev_snapshot>0?m.flete_dev_snapshot:(_prodC.flete_devolucion||18000))
+        const _cflI=(m.flete_snapshot>0?m.flete_snapshot:(_prodC.flete_outbound||21000))
+        r.cfl+=_cflI
+        r.cfd+=(m.flete_dev_snapshot>0?Math.max(0,m.flete_dev_snapshot-_cflI):(_prodC.flete_devolucion||18000))
       }
     }
     // Gasto por fecha+producto (campañas no atribuidas → '_sin')
@@ -3619,9 +3636,12 @@ async function cargarResumenSemanal(){
     const prod=prodByKey[pk]||productos[0]||{}
     const q=m.cantidad||2
     const precio=m.precio_dropi||[0,prod.precio_1u||0,prod.precio_2u||0,prod.precio_3u||0,prod.precio_4u||0][q]||(prod.precio_2u||0)
-    const costo=m.costo_snapshot||[0,prod.costo_1u||0,prod.costo_2u||0,prod.costo_3u||0,prod.costo_4u||0][q]||(prod.costo_2u||0)
+    const costo=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||[0,prod.costo_1u||0,prod.costo_2u||0,prod.costo_3u||0,prod.costo_4u||0][q]||(prod.costo_2u||0)
     const fo=m.flete_snapshot||prod.flete_outbound||21000
-    const fd=m.flete_dev_snapshot||prod.flete_devolucion||18000
+    // FIX (2jul26): fdIV = ida+vuelta SIEMPRE (snapshot real ya la trae; sin dato = ida pagada + vuelta config). fdVuelta = solo la vuelta (para teóricos donde la ida ya va en fleteOutTot)
+    const fdIV=m.flete_dev_snapshot>0?m.flete_dev_snapshot:(fo+(prod.flete_devolucion||18000))
+    const fdVuelta=Math.max(0,fdIV-fo)
+    const fd=fdVuelta
     const dp=prod.dev_pct||0.19
     // Almacenamiento: SOLO marca propia tiene costo de bodega por orden; dropshipping = 0
     const alm=(prod.tipo_producto==='marca_propia')?(prod.almacenamiento||0):0
@@ -3648,8 +3668,11 @@ async function cargarResumenSemanal(){
     }
     // Flete devolución real: solo de las devueltas
     if(st==='devuelto'){
-      semanas[w].fleteDevReal+=fd
-      semanas[w].perdidaDev+=fo+fd
+      // FIX (2jul26): fdIV ya trae ida+vuelta — sumarle fo cobraba la ida DOS veces.
+      // fleteDevReal = SOLO vuelta (acompaña a fleteOutTot que ya trae la ida) · fleteDevIV = ida+vuelta (para la fórmula Dropi-neta) · perdidaDev = ida+vuelta
+      semanas[w].fleteDevReal+=fdVuelta
+      semanas[w].fleteDevIV=(semanas[w].fleteDevIV||0)+fdIV
+      semanas[w].perdidaDev+=fdIV
     }
     // Valor de venta que se cayó (cancelados) → plata dejada en la mesa
     if(st==='cancelado'){
@@ -3695,7 +3718,7 @@ async function cargarResumenSemanal(){
     // Real teórico (fallback): cálculo de siempre con teóricos
     const ganRealTeorico=Math.round((d.ventaEnt||0)-(d.costoEnt||0)-(d.fleteOutTot||0)-(d.fleteDevReal||0)-(d.almacenEnt||0)-gasto-costoConv-fijosSemana)
     // #6 Real con datos reales de Dropi: ganancia liquidada de entregados − devolución real − ads − conv − fijos (÷30×7)
-    const ganRealDropi=Math.round((d.ganDropi||0)-(d.fleteDevReal||0)-gasto-costoConv-fijosSemana)
+    const ganRealDropi=Math.round((d.ganDropi||0)-(d.fleteDevIV||d.fleteDevReal||0)-gasto-costoConv-fijosSemana)
     const ganReal=(d.ganDropiConDato>0)?ganRealDropi:ganRealTeorico
     // Ganancia neta logística: solo producto + fletes + almacenamiento (SIN ads, SIN conversación, SIN fijos)
     const ganLogist=Math.round((d.ventaEnt||0)-(d.costoEnt||0)-(d.fleteOutTot||0)-(d.fleteDevReal||0)-(d.almacenEnt||0))
@@ -4240,7 +4263,7 @@ async function loadTracker(){
       //   + teórico de las entregadas que Dropi aún no liquidó − costo devolución − ads − conv.
       const _ganTeoricaPorEnt=promedioPrecio-promedioCosto-fo
       const _aEntSinDato=Math.max(0,aEnt-aEntConDato)
-      const ganRealDropi=Math.round(aGanDropi+_aEntSinDato*_ganTeoricaPorEnt-fleteDevReal-aGasto-aConv*cc)
+      const ganRealDropi=Math.round(aGanDropi+_aEntSinDato*_ganTeoricaPorEnt-(aDev*(fo+fdN))-aGasto-aConv*cc) // FIX (2jul26): devuelta = ida+vuelta aquí
       const ganReal=(aEntConDato>0)?ganRealDropi:ganRealTeorico
       const _usaDropiTrk=aEntConDato>0
       // CPA y ROAS sobre confirmados
@@ -4355,6 +4378,30 @@ async function loadTracker(){
   }
 }
 
+// ══ F9b (2jul26) · LEY: 1 CAMPAÑA = 1 PRODUCTO, SIEMPRE ══
+// Antes de agregar campaign_ids a un producto: si alguna YA vive en OTRO producto,
+// avisa y (con OK) la MUEVE (la quita del otro). Cancelar = no se toca nada.
+window._nexoLeyCampProd=async(cids,prodDestinoId)=>{
+  const conflictos=[]
+  for(const cid of (cids||[])){
+    const dueno=productos.find(p=>p.id!==prodDestinoId&&(Array.isArray(p.campaign_ids)?p.campaign_ids:[]).map(String).includes(String(cid)))
+    if(dueno)conflictos.push({cid:String(cid),prod:dueno})
+  }
+  if(!conflictos.length)return true
+  const det=conflictos.map(c=>`• ${c.cid} → 📦 ${c.prod.nombre}`).join('\n')
+  if(!confirm(`⚠️ LEY: 1 campaña = 1 producto.\n\nEsta(s) campaña(s) YA pertenecen a otro producto:\n${det}\n\n¿MOVERLA(S) aquí? (se quitan del otro producto)\n\nAceptar = mover · Cancelar = no tocar nada`))return false
+  const porProd={}
+  for(const c of conflictos){(porProd[c.prod.id]=porProd[c.prod.id]||{prod:c.prod,cids:[]}).cids.push(c.cid)}
+  for(const k in porProd){
+    const g=porProd[k]
+    const rest=(Array.isArray(g.prod.campaign_ids)?g.prod.campaign_ids:[]).filter(x=>!g.cids.includes(String(x)))
+    const{error}=await sb.from('productos').update({campaign_ids:rest}).eq('id',g.prod.id)
+    if(error){alert('No pude quitarla de '+g.prod.nombre+': '+error.message);return false}
+    logAction('campana_movida_ley1a1',{de:g.prod.id,a:prodDestinoId,cids:g.cids}).catch(()=>{})
+  }
+  return true
+}
+
 // Atribuir una campaña sin atribuir desde el Tracker
 window.atribuirUna=async(cid)=>{
   if(!productos.length){alert('No hay productos configurados');return}
@@ -4366,6 +4413,7 @@ window.atribuirUna=async(cid)=>{
   const prod=productos[idx]
   const existing=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
   if(existing.includes(cid)){alert('Esta campaña ya está atribuida a '+prod.nombre);return}
+  if(!(await window._nexoLeyCampProd([cid],prod.id)))return // F9b: 1 campaña = 1 producto
   const{error}=await sb.from('productos').update({campaign_ids:[...existing,cid]}).eq('id',prod.id)
   if(error){alert(error.message);return}
   await loadProductos()
@@ -4384,6 +4432,7 @@ window.atribuirSinAtribMasivo=async()=>{
   if(isNaN(idx)||idx<0||idx>=productos.length){alert('Número inválido');return}
   const prod=productos[idx]
   const existing=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
+  if(!(await window._nexoLeyCampProd(seleccionadas,prod.id)))return // F9b: 1 campaña = 1 producto
   const merged=[...new Set([...existing,...seleccionadas])]
   const{error}=await sb.from('productos').update({campaign_ids:merged}).eq('id',prod.id)
   if(error){alert(error.message);return}
@@ -6346,6 +6395,7 @@ window.aplicarAtribuir=async(prodId)=>{
   if(!nuevasCids.length){document.getElementById('atr-msg').innerHTML='<div class="alert alert-amber">Selecciona al menos una campaña</div>';return}
   const prod=productos.find(p=>p.id===prodId);if(!prod)return
   const existing=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
+  if(!(await window._nexoLeyCampProd(nuevasCids,prodId)))return // F9b: 1 campaña = 1 producto
   const merged=[...new Set([...existing,...nuevasCids])]
   const msg=document.getElementById('atr-msg')
   msg.innerHTML='<div class="loading">Aplicando...</div>'
@@ -7668,7 +7718,7 @@ window.procesarAsignador=async()=>{
         estado_inicial:estado,
         costo_snapshot:_prodSnap?(_prodSnap['costo_'+_q+'u']||null):null,
         flete_snapshot:_prodSnap?(_prodSnap.flete_outbound||null):null,
-        flete_dev_snapshot:_prodSnap?(_prodSnap.flete_devolucion||null):null,
+        flete_dev_snapshot:_prodSnap?((_prodSnap.flete_outbound||21000)+(_prodSnap.flete_devolucion||18000)):null, // FIX (2jul26): snapshot SIEMPRE = ida+vuelta
         agente_id:_agenteId
       })
     }
@@ -7718,7 +7768,7 @@ window.procesarAsignador=async()=>{
         }))
         if(eventos.length>0){
           const{error:evErr}=await sb.from('mapeo_eventos').insert(eventos)
-          if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+          if(evErr){console.warn('[mapeo_eventos] inserción falló:',evErr.message);window._nexoAvisoBD&&window._nexoAvisoBD('mapeo_eventos',evErr.message)}
         }
       }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
       // ── ENTREGA 3B: disparar histórico de semáforos (async, no bloquea) ──
@@ -7816,72 +7866,77 @@ async function pageAuxReporte(c){
   const modoHist=currentMe()?.modo_historico===true
   c.innerHTML=`<div class="page-title">📝 Reporte del día</div>
     <div class="page-sub">Datos automáticos de Dropi + ventas manuales</div>
-    <div style="font-size:15px;font-weight:800;color:var(--text);margin:4px 0 10px">👇 ¿Qué día vas a llenar?</div>
-    <div id="rep-dia-btns" style="display:flex;gap:12px;margin-bottom:14px">
-      <button id="rep-btn-hoy" onclick="window._setRepDia('hoy')" style="flex:1;border:3px solid var(--border);background:var(--card);color:var(--text);border-radius:16px;padding:18px 12px;cursor:pointer;text-align:center;font-weight:800;font-size:20px;line-height:1.2">📅 HOY<br><small style="font-size:12px;font-weight:600;color:var(--muted)">Ventas de hoy</small></button>
-      <button id="rep-btn-ayer" onclick="window._setRepDia('ayer')" style="flex:1;border:3px solid var(--border);background:var(--card);color:var(--text);border-radius:16px;padding:18px 12px;cursor:pointer;text-align:center;font-weight:800;font-size:20px;line-height:1.2">⏳ AYER<br><small style="font-size:12px;font-weight:600;color:var(--muted)">Lo que faltó</small></button>
-      ${modoHist?`<button id="rep-btn-otro" onclick="window._toggleRepOtroDia()" style="flex:1;border:3px solid var(--border);background:var(--card);color:var(--text);border-radius:16px;padding:18px 12px;cursor:pointer;text-align:center;font-weight:800;font-size:20px;line-height:1.2">📅 Otro día<br><small style="font-size:12px;font-weight:600;color:var(--muted)">Histórico</small></button>`:''}
+    <!-- R3 (2jul26): UN solo selector de fecha manda en TODA la página (órdenes arriba + IDs abajo) -->
+    <div style="background:var(--card);border:2px solid var(--border);border-radius:16px;padding:14px 16px;margin:4px 0 10px">
+      <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:8px">👇 ¿Qué día vas a llenar? <span style="font-size:11px;font-weight:600;color:var(--muted)">(toca la fecha para cambiar)</span></div>
+      <input type="date" id="rep-fecha-sel" value="${today()}" max="${today()}" onchange="window._setRepFecha(this.value)" style="width:100%;max-width:340px;padding:14px;font-size:19px;font-weight:700;border:3px solid var(--border);border-radius:14px;background:var(--card2);color:var(--text);cursor:pointer">
+      <button id="rep-dia-btn" onclick="(()=>{const i=document.getElementById('rep-fecha-sel');if(i){try{i.showPicker?i.showPicker():i.focus()}catch(e){i.focus()}}})()" style="display:block;width:100%;margin-top:10px;border:3px solid var(--green);background:var(--green-bg);color:var(--text);border-radius:16px;padding:16px 12px;cursor:pointer;text-align:center;font-weight:800;font-size:20px;line-height:1.25">📅 HOY</button>
+      <div id="rep-faltan"></div>
     </div>
-    ${modoHist?`<div id="rep-otro-wrap" style="display:none;margin:-4px 0 14px"><label style="display:block;font-size:13px;font-weight:700;color:var(--text);margin-bottom:6px">📅 Elige el día (cualquiera hasta hoy)</label><input type="date" id="rep-otro-fecha" max="${today()}" onchange="window._setRepOtroDia(this.value)" style="width:100%;max-width:320px;padding:14px;font-size:18px;border:3px solid var(--blue);border-radius:14px;background:var(--card);color:var(--text)"></div>`:''}
     <input type="hidden" id="rep-fecha" value="${today()}">
     <input type="hidden" id="rep-tipo-fecha" value="compra">
-    <details style="margin-bottom:14px">
-      <summary style="cursor:pointer;color:var(--muted);font-size:12px">🔧 Otra fecha / ver subidas de Dropi</summary>
-      <div class="form-grid g2" style="max-width:400px;margin-top:10px">
-        <div class="fld"><label>Filtrar por</label>
-          <select id="rep-tipo-fecha-sel" onchange="document.getElementById('rep-tipo-fecha').value=this.value;cargarReporteData()">
-            <option value="compra">Fecha de compra</option>
-            <option value="dropi">Fecha Dropi (subida)</option>
-          </select></div>
-        <div class="fld"><label>Fecha</label>
-          <input type="date" id="rep-fecha-sel" value="${today()}" onchange="document.getElementById('rep-fecha').value=this.value;cargarReporteData()"></div>
-      </div>
-    </details>
     <div id="rep-content"><div class="loading">Cargando...</div></div>`
   window._ventaIdx=0
   cargarReporteData()
+  window._repCargarFaltantes()
 }
 
-// Selecciona día rápido (HOY/AYER) para el reporte del auxiliar
-window._setRepDia=(dia)=>{
-  const f=document.getElementById('rep-fecha')
-  const t=document.getElementById('rep-tipo-fecha')
-  if(t)t.value='compra'
-  if(f)f.value=(dia==='ayer')?_daysAgo(1):today()
-  const fSel=document.getElementById('rep-fecha-sel'),tSel=document.getElementById('rep-tipo-fecha-sel')
-  if(fSel)fSel.value=f.value
-  if(tSel)tSel.value='compra'
-  cargarReporteData()
+// R3 (2jul26): día bonito para el botón gigante — "para que lo vea un tonto y lo entienda un bebé"
+window._repDiaInfo=(fecha)=>{
+  const hoy=today(),ayer=_daysAgo(1)
+  let nombre=''
+  try{nombre=new Date(fecha+'T12:00:00').toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long'}).toUpperCase()}catch(e){nombre=fecha}
+  if(fecha===hoy)return{txt:'📅 HOY · '+nombre,sub:'Ventas de hoy',bc:'var(--green)',bg:'var(--green-bg)'}
+  if(fecha===ayer)return{txt:'🕐 '+nombre+' (AYER)',sub:'🔒 Para guardar: stock + conversaciones obligatorios',bc:'var(--amber)',bg:'var(--amber-bg)'}
+  return{txt:'🕐 '+nombre,sub:'🔒 Para guardar: conversaciones obligatorias',bc:'var(--blue)',bg:'rgba(59,130,246,.12)'}
 }
-// Resalta el botón del día activo
-window._marcarBtnDia=(modo)=>{
-  const bH=document.getElementById('rep-btn-hoy'),bA=document.getElementById('rep-btn-ayer'),bO=document.getElementById('rep-btn-otro')
-  if(bH){bH.style.borderColor='var(--border)';bH.style.background='var(--card)'}
-  if(bA){bA.style.borderColor='var(--border)';bA.style.background='var(--card)'}
-  if(bO){bO.style.borderColor='var(--border)';bO.style.background='var(--card)'}
-  if(modo==='hoy'&&bH){bH.style.borderColor='var(--green)';bH.style.background='var(--green-bg)'}
-  else if(modo==='ayer'&&bA){bA.style.borderColor='var(--amber)';bA.style.background='var(--amber-bg)'}
-  else if(modo==='otro'&&bO){bO.style.borderColor='var(--blue)';bO.style.background='rgba(59,130,246,.12)'}
-}
-// Muestra/oculta el selector de "Otro día" (solo modo histórico)
-window._toggleRepOtroDia=()=>{
-  const w=document.getElementById('rep-otro-wrap');if(!w)return
-  const abierto=w.style.display==='block'
-  w.style.display=abierto?'none':'block'
-  if(!abierto){const i=document.getElementById('rep-otro-fecha');if(i){try{i.focus();i.showPicker&&i.showPicker()}catch(e){}}}
-}
-// Carga el reporte de cualquier día pasado (modo histórico). Nunca permite fechas futuras.
-window._setRepOtroDia=(val)=>{
+// R3: LA fecha manda en toda la página (órdenes + IDs). Nunca futuras.
+window._setRepFecha=(val)=>{
   if(!val)return
-  if(val>today())val=today() // sin futuras
-  const f=document.getElementById('rep-fecha'),t=document.getElementById('rep-tipo-fecha')
+  if(val>today())val=today()
+  const f=document.getElementById('rep-fecha'),t=document.getElementById('rep-tipo-fecha'),s=document.getElementById('rep-fecha-sel')
   if(t)t.value='compra'
   if(f)f.value=val
-  const fSel=document.getElementById('rep-fecha-sel'),tSel=document.getElementById('rep-tipo-fecha-sel'),oF=document.getElementById('rep-otro-fecha')
-  if(fSel)fSel.value=val
-  if(tSel)tSel.value='compra'
-  if(oF)oF.value=val
+  if(s)s.value=val
   cargarReporteData()
+}
+// Compat: atajos viejos HOY/AYER siguen funcionando (cards "¿Qué hago hoy?", enlaces, etc.)
+window._setRepDia=(dia)=>{window._setRepFecha(dia==='ayer'?_daysAgo(1):today())}
+window._setRepOtroDia=(val)=>{window._setRepFecha(val)}
+window._toggleRepOtroDia=()=>{const i=document.getElementById('rep-fecha-sel');if(i){try{i.showPicker?i.showPicker():i.focus()}catch(e){i.focus()}}}
+// Repinta el botón gigante según la fecha elegida (se llama desde cargarReporteData)
+window._marcarBtnDia=()=>{
+  const f=document.getElementById('rep-fecha')?.value||today()
+  const b=document.getElementById('rep-dia-btn');if(!b)return
+  const d=window._repDiaInfo(f)
+  b.style.borderColor=d.bc;b.style.background=d.bg
+  b.innerHTML=`${d.txt}<br><small style="font-size:12px;font-weight:600;color:var(--muted)">${d.sub}</small>`
+}
+// R2b (2jul26): días de los ÚLTIMOS 7 con IDs reportados pero SIN conversaciones → aviso con clic directo
+window._repCargarFaltantes=async()=>{
+  const box=document.getElementById('rep-faltan');if(!box)return
+  try{
+    const desde=_daysAgo(7),hasta=_daysAgo(1)
+    const{data}=await sb.from('reportes_diarios').select('fecha,producto_nombre,ad_ids,conversaciones,conversaciones_aprox')
+      .gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','')
+    const porDia={}
+    for(const r of (data||[])){
+      const c=Math.max(parseInt(r.conversaciones)||0,parseInt(r.conversaciones_aprox)||0)
+      if(c>0)continue
+      (porDia[r.fecha]=porDia[r.fecha]||new Set()).add(r.producto_nombre||'?')
+    }
+    const dias=Object.keys(porDia).sort()
+    if(!dias.length){box.innerHTML='';return}
+    const chips=dias.map(f=>{
+      const d=window._repDiaInfo(f)
+      const prods=[...porDia[f]].slice(0,3).join(', ')+(porDia[f].size>3?'…':'')
+      return`<button onclick="window._setRepFecha('${f}')" style="border:2px solid var(--amber);background:var(--amber-bg);color:var(--text);border-radius:10px;padding:8px 12px;cursor:pointer;font-size:12px;font-weight:700;text-align:left" title="Clic para abrir ese día y completar las conversaciones">${d.txt.replace('🕐 ','')} <span style="font-weight:500;color:var(--muted)">· ${prods}</span></button>`
+    }).join('')
+    box.innerHTML=`<div style="margin-top:12px;padding:10px 12px;background:rgba(245,158,11,.06);border:2px dashed var(--amber);border-radius:12px">
+      <div style="font-size:13px;font-weight:800;color:var(--amber);margin-bottom:6px">⚠️ Te faltan CONVERSACIONES en ${dias.length} día${dias.length===1?'':'s'} — toca el día y complétalas:</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${chips}</div>
+    </div>`
+  }catch(e){console.warn('[rep faltantes]',e?.message)}
 }
 
 const _autoStyle='background:rgba(0,180,80,0.08);border:1px solid rgba(0,180,80,0.2);color:var(--text);cursor:not-allowed'
@@ -7896,14 +7951,13 @@ async function cargarReporteData(){
   if(!fecha){el.innerHTML='<div class="alert alert-blue">Selecciona una fecha</div>';return}
   const esHoy=fecha===today()&&tipo==='compra'
   const esAyer=fecha===_daysAgo(1)&&tipo==='compra'
-  const modoHist=currentMe()?.modo_historico===true
-  // Modo histórico: el auxiliar puede meter IDs de ventas de cualquier fecha de compra
-  const esHistManual=modoHist&&tipo==='compra'&&!!fecha&&!esHoy&&!esAyer
+  // R3 (2jul26): el selector único deja meter IDs de CUALQUIER fecha pasada (ya no depende de modo_historico)
+  const esHistManual=tipo==='compra'&&!!fecha&&fecha<=today()&&!esHoy&&!esAyer
   const permiteVentas=esHoy||esAyer||esHistManual
   const usandoDropi=tipo==='dropi'
   const campo=usandoDropi?'fecha_dropi':'fecha'
   // Resaltar el botón del día activo
-  window._marcarBtnDia(esHoy?'hoy':esAyer?'ayer':(esHistManual?'otro':''))
+  window._marcarBtnDia()
 
   // 1. Auto: mapeos agrupados por producto (resolviendo alias → nombre canónico)
   const{data:mapeos}=await sb.from('mapeos').select('*').eq(campo,fecha)
@@ -8019,7 +8073,8 @@ async function cargarReporteData(){
   // Ventas / IDs (hoy o ayer)
   let ventasHtml=''
   if(permiteVentas){
-    const tit=esHistManual?('📝 Meter IDs del '+fecha+' (modo histórico)'):(esAyer?'📝 Completar los IDs de AYER':'📝 Ventas de hoy (manual)')
+    const _dInfoT=window._repDiaInfo(fecha)
+    const tit=esHistManual?('📝 Meter los IDs del '+_dInfoT.txt.replace('🕐 ','')):(esAyer?'📝 Completar los IDs de AYER':'📝 Ventas de hoy (manual)')
     const bannerVentas=esHistManual
       ?`<div class="aux-banner amber" style="margin-bottom:14px"><span>🕓</span><span><b>Modo histórico activado.</b> Estás metiendo los IDs de las ventas del día <b>${fecha}</b>. Pega los IDs de anuncio y dale guardar.</span></div>`
       :esAyer
@@ -8029,10 +8084,15 @@ async function cargarReporteData(){
           <b>2.</b> Pega los que faltan ✍️<br>
           <b>3.</b> Dale al botón morado de abajo 💾</div>`
       :`<div class="aux-banner amber" style="margin-bottom:14px"><span>✍️</span><span><b>Aquí SÍ escribes tú</b> — anota las ventas</span></div>`
+    const candadoHtml=esAyer
+      ?`<div style="background:rgba(245,158,11,.08);border:2px solid var(--amber);border-radius:12px;padding:10px 14px;margin-bottom:14px;font-size:13px;font-weight:700;color:var(--text)">🔒 Para poder GUARDAR el día de AYER es obligatorio poner <b>💬 conversaciones</b> y <b>📦 stock</b> de cada producto. Sin eso, el botón no guarda.</div>`
+      :esHistManual
+      ?`<div style="background:rgba(59,130,246,.08);border:2px solid var(--blue);border-radius:12px;padding:10px 14px;margin-bottom:14px;font-size:13px;font-weight:700;color:var(--text)">🔒 Para poder GUARDAR este día es obligatorio poner <b>💬 conversaciones</b> de cada producto (el stock ya no aplica para días viejos).</div>`
+      :''
     ventasHtml=`<div class="divider"></div>
     <div class="section-title">${tit}</div>
     <div class="page-sub" style="margin-bottom:6px">Selecciona producto, pega IDs de anuncio y conversaciones aproximadas</div>
-    ${bannerVentas}
+    ${bannerVentas}${candadoHtml}
     <div id="ventas-rows"${esAyer?' style="border:3px solid var(--amber);border-radius:14px;padding:12px;background:rgba(245,158,11,.05)"':''}></div>
     <button class="btn-sm btn-blue" onclick="addVentaRow()" style="margin:14px 0">+ Agregar producto</button>
     <div class="fld" style="margin-bottom:14px"><label>Nota (opcional)</label>
@@ -8043,7 +8103,7 @@ async function cargarReporteData(){
   let modoBanner=''
   if(esHoy)modoBanner=`<div style="background:var(--green-bg);border:3px solid var(--green);border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:15px;font-weight:700;color:var(--text)">✅ Estás anotando las ventas de <b>HOY</b>.</div>`
   else if(esAyer)modoBanner=`<div style="background:var(--amber-bg);border:3px solid var(--amber);border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:15px;font-weight:700;color:var(--text);line-height:1.6">⏳ Estás completando los IDs de <b>AYER</b>.<br><span style="font-weight:500;font-size:13px;color:var(--muted)">Es temporal, hasta que llegue el archivo de Dropi al mediodía. Cuando llegue, esto se reemplaza solo. No pasa nada si lo dejas.</span></div>`
-  else if(esHistManual)modoBanner=`<div style="background:var(--amber-bg);border:3px solid var(--amber);border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:15px;font-weight:700;color:var(--text);line-height:1.6">🕓 Modo histórico — estás metiendo los IDs del día <b>${fecha}</b>.<br><span style="font-weight:500;font-size:13px;color:var(--muted)">Pega los IDs de ese día y dale guardar.</span></div>`
+  else if(esHistManual)modoBanner=`<div style="background:rgba(59,130,246,.10);border:3px solid var(--blue);border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:15px;font-weight:700;color:var(--text);line-height:1.6">🕐 Estás llenando el <b>${window._repDiaInfo(fecha).txt.replace('🕐 ','')}</b>.<br><span style="font-weight:500;font-size:13px;color:var(--muted)">Órdenes de Dropi arriba · tus IDs y conversaciones abajo. Todo de ESTE día.</span></div>`
   el.innerHTML=`
     ${modoBanner}
     <div class="section-title" style="color:var(--green)">📊 Datos ${labelFecha} (auto desde Dropi)</div>
@@ -8108,11 +8168,41 @@ window.habilitarEdicionHist=()=>{
   document.querySelectorAll('.rep-conv').forEach(el=>{el.disabled=false;el.style.cssText=''})
 }
 
+// R1 (2jul26): a qué producto pertenece cada ad_id (ad → adset → campaña → productos.campaign_ids).
+// Devuelve {adId: {prodId,nombre} | null}. null = campaña aún sin producto asignado (se deja pasar).
+window._repAdIdsAProducto=async(ids)=>{
+  const out={};const unicos=[...new Set((ids||[]).filter(Boolean))]
+  if(!unicos.length)return out
+  try{
+    let ads=[]
+    for(let i=0;i<unicos.length;i+=100){
+      const b=unicos.slice(i,i+100)
+      const{data}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','ad').in('meta_id',b)
+      if(data)ads=ads.concat(data)
+    }
+    const adsetIds=[...new Set(ads.map(a=>a.parent_id).filter(Boolean))]
+    let adsets=[]
+    for(let i=0;i<adsetIds.length;i+=100){
+      const b=adsetIds.slice(i,i+100)
+      const{data}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','adset').in('meta_id',b)
+      if(data)adsets=adsets.concat(data)
+    }
+    const adsetToCamp={};for(const a of adsets)adsetToCamp[a.meta_id]=a.parent_id
+    const campToProd={}
+    for(const pr of (productos||[]))for(const cid of (Array.isArray(pr.campaign_ids)?pr.campaign_ids:[]))if(cid&&!campToProd[String(cid)])campToProd[String(cid)]={prodId:pr.id,nombre:pr.nombre}
+    for(const a of ads){
+      const campId=adsetToCamp[a.parent_id]
+      out[a.meta_id]=campId?(campToProd[String(campId)]||null):null
+    }
+  }catch(e){console.warn('[R1 adIds→producto]',e?.message)}
+  return out
+}
+
 window.saveReporteV2=async(fecha)=>{
   const esHoy=fecha===today()
   const esAyer=fecha===_daysAgo(1)
-  const modoHist=currentMe()?.modo_historico===true
-  const permiteVentas=esHoy||esAyer||modoHist
+  // R3 (2jul26): el selector único permite guardar IDs de CUALQUIER día pasado por la vía normal
+  const permiteVentas=fecha<=today()
   const msg=document.getElementById('rep-msg')
 
   if(!permiteVentas){
@@ -8142,6 +8232,51 @@ window.saveReporteV2=async(fecha)=>{
 
   // Save ventas de hoy
   const rows=document.getElementById('ventas-rows')?.children||[]
+  const esOtroDia=!esHoy&&!esAyer
+  // ── R2 (2jul26) · CANDADOS: AYER exige conversaciones + stock · días más viejos exigen conversaciones · HOY no exige ──
+  if(esAyer||esOtroDia){
+    const _faltas=[]
+    for(const row of rows){
+      const idx=row.id.replace('vrow-','')
+      const prodNom=document.getElementById(`vp-${idx}`)?.value
+      if(!prodNom)continue
+      const _cv=document.getElementById(`vc-${idx}`)?.value
+      const _st=document.getElementById(`vs-${idx}`)?.value
+      if(_cv===''||_cv==null||isNaN(parseInt(_cv))||parseInt(_cv)<=0)_faltas.push(`💬 Conversaciones de <b>${prodNom}</b>`)
+      if(esAyer&&(_st===''||_st==null||isNaN(parseInt(_st))))_faltas.push(`📦 Stock de <b>${prodNom}</b>`)
+    }
+    if(_faltas.length){
+      msg.innerHTML=`<div class="alert alert-red" style="line-height:1.7">🔒 <b>NO se guardó.</b> Para ${esAyer?'AYER':'este día'} es OBLIGATORIO:<br>${_faltas.join('<br>')}</div>`
+      msg.scrollIntoView({behavior:'smooth',block:'center'})
+      return
+    }
+  }
+  // ── R1 (2jul26) · LEY: un ID de OTRO producto NO se guarda. ID sin producto (campaña nueva sin asignar) sí pasa ──
+  try{
+    const _todosIds=[],_rowInfo=[]
+    for(const row of rows){
+      const idx=row.id.replace('vrow-','')
+      const prodNom=document.getElementById(`vp-${idx}`)?.value
+      if(!prodNom)continue
+      const prodObj=productos.find(p=>_normProd(p.nombre)===_normProd(prodNom))
+      const ids=(document.getElementById(`vi-${idx}`)?.value||'').split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)
+      _rowInfo.push({prodNom,prodId:prodObj?.id,ids})
+      _todosIds.push(...ids)
+    }
+    if(_todosIds.length){
+      const _mapa=await window._repAdIdsAProducto(_todosIds)
+      const _malos=[]
+      for(const r of _rowInfo)for(const id of r.ids){
+        const dueno=_mapa[id]
+        if(dueno&&r.prodId&&dueno.prodId!==r.prodId)_malos.push(`🎯 <span style="font-family:monospace">${id}</span> es de <b>📦 ${dueno.nombre}</b>, no de ${r.prodNom}`)
+      }
+      if(_malos.length){
+        msg.innerHTML=`<div class="alert alert-red" style="line-height:1.7">🚫 <b>NO se guardó.</b> Estos IDs están en el producto EQUIVOCADO:<br>${_malos.join('<br>')}<br><span style="font-size:11px;color:var(--muted)">Muévelos a la fila del producto correcto y vuelve a guardar. (Los IDs de campañas nuevas sin producto asignado sí pasan.)</span></div>`
+        msg.scrollIntoView({behavior:'smooth',block:'center'})
+        return
+      }
+    }
+  }catch(e){console.warn('[R1 validación IDs]',e?.message)}
   let saved=0
   // Stock a sincronizar con la tabla productos (id → {stock, nombre})
   const stockToSync={}
@@ -8725,7 +8860,7 @@ async function pageAuxReservado(c){
           desde_pagina:'reservados_buscador'
         }
       })
-      if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+      if(evErr){console.warn('[mapeo_eventos] inserción falló:',evErr.message);window._nexoAvisoBD&&window._nexoAvisoBD('mapeo_eventos',evErr.message)}
     }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
 
     // ── ENTREGA 3B: disparar histórico de semáforos (async, no bloquea) ──
@@ -8850,7 +8985,7 @@ async function pageAuxReservado(c){
           }:{})
         }
       })
-      if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+      if(evErr){console.warn('[mapeo_eventos] inserción falló:',evErr.message);window._nexoAvisoBD&&window._nexoAvisoBD('mapeo_eventos',evErr.message)}
     }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
 
     // Si el pedido estaba CANCELADO (recuperación desde el PASO 3), al agendarle fecha
@@ -9975,7 +10110,7 @@ window.enviarMensajePsf=async(mapeoId)=>{
           desde_pagina:'pendientes_sin_fecha'
         }
       })
-      if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+      if(evErr){console.warn('[mapeo_eventos] inserción falló:',evErr.message);window._nexoAvisoBD&&window._nexoAvisoBD('mapeo_eventos',evErr.message)}
     }catch(e2){console.warn('[mapeo_eventos] excepción:',e2.message)}
   }catch(e){console.warn('Error registrando envío PSF:',e);alert('Error: '+e.message);return}
   // Refrescar lista para actualizar contadores
@@ -10024,7 +10159,7 @@ window.enviarMensajeConfirmacion=async(progId)=>{
             telefono:item.telefono
           }
         })
-        if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+        if(evErr){console.warn('[mapeo_eventos] inserción falló:',evErr.message);window._nexoAvisoBD&&window._nexoAvisoBD('mapeo_eventos',evErr.message)}
       }catch(e2){console.warn('[mapeo_eventos] excepción:',e2.message)}
     }
   }catch(e){console.warn('No se pudo registrar envío de confirmación:',e)}
@@ -10475,7 +10610,7 @@ window.aplicarResolucionPendiente=async(progId,nuevoEstado)=>{
           desde_pagina:'pendientes_confirmacion'
         }
       })
-      if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+      if(evErr){console.warn('[mapeo_eventos] inserción falló:',evErr.message);window._nexoAvisoBD&&window._nexoAvisoBD('mapeo_eventos',evErr.message)}
     }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
   }
 
@@ -11205,8 +11340,8 @@ window.procesarNovedadesXlsx=async()=>{
               desde_pagina:'novedades'
             }
           })
-          if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
-        }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
+          if(evErr){console.warn('[mapeo_eventos] inserción falló:',evErr.message);window._nexoAvisoBD('mapeo_eventos',evErr.message)}
+        }catch(e){console.warn('[mapeo_eventos] excepción:',e.message);window._nexoAvisoBD('mapeo_eventos',e.message)}
       }
     }
 
@@ -12480,7 +12615,7 @@ window.enviarReclameUno=async(tel,guia)=>{
             desde_pagina:'reclame'
           }
         })
-        if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+        if(evErr){console.warn('[mapeo_eventos] inserción falló:',evErr.message);window._nexoAvisoBD&&window._nexoAvisoBD('mapeo_eventos',evErr.message)}
       }
     }catch(e2){console.warn('[mapeo_eventos] excepción:',e2.message)}
   }catch(e){console.warn('No se pudo registrar envío:',e)}
@@ -12518,7 +12653,7 @@ window.marcarReclameResuelta=async(tel,guia)=>{
             desde_pagina:'reclame'
           }
         })
-        if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+        if(evErr){console.warn('[mapeo_eventos] inserción falló:',evErr.message);window._nexoAvisoBD&&window._nexoAvisoBD('mapeo_eventos',evErr.message)}
       }
     }catch(e2){console.warn('[mapeo_eventos] excepción:',e2.message)}
     const toast=document.createElement('div')
@@ -12737,7 +12872,7 @@ window._recColaAbrirWa=async()=>{
             desde_pagina:'reclame_cola'
           }
         })
-        if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+        if(evErr){console.warn('[mapeo_eventos] inserción falló:',evErr.message);window._nexoAvisoBD&&window._nexoAvisoBD('mapeo_eventos',evErr.message)}
       }
     }catch(e2){console.warn('[mapeo_eventos] excepción:',e2.message)}
     st.idx++ // avanzar al siguiente tras enviar (como Confirmados); _recColaRender clampa en el último
@@ -12804,7 +12939,7 @@ window._recColaMarcarResuelta=async()=>{
             desde_pagina:'reclame_cola'
           }
         })
-        if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+        if(evErr){console.warn('[mapeo_eventos] inserción falló:',evErr.message);window._nexoAvisoBD&&window._nexoAvisoBD('mapeo_eventos',evErr.message)}
       }
     }catch(e2){console.warn('[mapeo_eventos] excepción:',e2.message)}
     st.idx++
@@ -13014,10 +13149,36 @@ window.DROPI_STATUS=DROPI_STATUS
 // EXACTO con el Resumen por producto y el cuadre "¿De dónde salen los pedidos?".
 // (Antes esas cards usaban DROPI_STATUS.cat y los estados CONFIRMADO/PENDIENTE caían a
 //  "pendientes", descontando ventas reales → CPA de campaña inflado. Bug sección 10 del doc.)
+// F9a (2jul26): si la línea de tiempo (mapeo_eventos) o la fotografía (cruce_snapshots) FALLAN al guardar,
+// aviso VISIBLE una sola vez por sesión — antes era una notica escondida en consola y podían pasar meses sin enterarse.
+window._nexoAvisoBD=(tabla,errMsg)=>{
+  try{
+    window._nexoAvisosBD=window._nexoAvisosBD||{}
+    if(window._nexoAvisosBD[tabla])return
+    window._nexoAvisosBD[tabla]=true
+    const div=document.createElement('div')
+    div.style.cssText='position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:99999;max-width:560px;width:calc(100% - 32px);background:#2a1205;border:2px solid var(--red);border-radius:12px;padding:12px 40px 12px 14px;font-size:12.5px;line-height:1.6;color:#fecaca;box-shadow:0 8px 30px rgba(0,0,0,.5)'
+    div.innerHTML=`<b>⚠️ ${tabla==='mapeo_eventos'?'La LÍNEA DE TIEMPO no está guardando':'La FOTOGRAFÍA del cruce no está guardando'}.</b><br>Supabase rechazó la escritura en <span style="font-family:monospace">${tabla}</span>${errMsg?' ('+String(errMsg).slice(0,90)+')':''}. Casi seguro falta el SQL (tabla + RLS + GRANT) — pídele el SQL a Claude y córrelo. Los demás datos SÍ se guardaron.<button onclick="this.parentElement.remove()" style="position:absolute;top:6px;right:8px;background:transparent;border:none;color:#fecaca;font-size:16px;cursor:pointer">✕</button>`
+    document.body.appendChild(div)
+  }catch(_){}
+}
+
 window._nexoClasifVenta=function(estadoFinal){
   if(estadoFinal==='CANCELADO'||estadoFinal==='RECHAZADO')return 'canc'
   if(estadoFinal==='PENDIENTE CONFIRMACION'||!estadoFinal)return 'pend'
   return 'venta'
+}
+
+// ℹ️ MEJORA 2 (2jul26 · ley del owner): TOOLTIP ESTÁNDAR DE 3 PARTES para TODO número calculado
+// en NEXO — 1) explicación en cristiano (qué es y qué asume) · 2) FÓRMULA genérica · 3) CON TUS
+// DATOS (los números reales de ese momento y el resultado). Mismo formato del CPA BREAK-EVEN.
+// Uso: title="${window._nexoTip3('Qué es...','a ÷ b','$100 ÷ 4 = $25')}"  (los &#10; son saltos de línea del title)
+window._nexoTip3=function(explica,formula,datos){
+  const p=[]
+  if(explica)p.push(String(explica))
+  if(formula)p.push('FÓRMULA:&#10;'+String(formula))
+  if(datos)p.push('CON TUS DATOS:&#10;'+String(datos))
+  return p.join('&#10;&#10;')
 }
 
 // ⭐ NORMALIZADOR ÚNICO DE ESTADOS: tildes fuera, espacios dobles a uno, MAYÚSCULAS, sin bordes.
@@ -13057,9 +13218,9 @@ window._nexoSnapshotCruce=async function(rows,tipo){
     const regs=Object.values(agg).map(a=>({tipo,lote,usuario_id:(typeof me!=='undefined'&&me?me.id:null),...a}))
     for(let i=0;i<regs.length;i+=100){
       const{error}=await sb.from('cruce_snapshots').insert(regs.slice(i,i+100))
-      if(error){console.warn('[cruce_snapshots] insert falló (¿ya corriste el SQL de la tabla?):',error.message);break}
+      if(error){console.warn('[cruce_snapshots] insert falló (¿ya corriste el SQL de la tabla?):',error.message);window._nexoAvisoBD&&window._nexoAvisoBD('cruce_snapshots',error.message);break}
     }
-  }catch(e){console.warn('[cruce_snapshots] excepción:',e.message)}
+  }catch(e){console.warn('[cruce_snapshots] excepción:',e.message);window._nexoAvisoBD&&window._nexoAvisoBD('cruce_snapshots',e.message)}
 }
 
 // ════════ ETAPAS DEL SEMÁFORO DE ÓRDENES (capa de SOLO visualización · Cruce Dropi) ════════
@@ -14325,7 +14486,7 @@ window.actualizarEstadosDropi=async()=>{
     if(r.flete>0)updatePayload.flete_snapshot=r.flete
     // flete de devolución: COSTO DEV FLETE real (ida+vuelta); si Dropi no lo liquidó, usa el PRECIO FLETE de ida.
     // Sobreescribe cualquier estimado viejo. Si ambos vienen en 0, NO se toca lo ya guardado.
-    const _fdReal=(r.flete_dev>0?r.flete_dev:(r.flete>0?r.flete:null))
+    const _fdReal=(r.flete_dev>0?r.flete_dev:(r.flete>0?r.flete+18000:null)) // FIX (2jul26): sin liquidar = ida pagada + vuelta estándar (ida+vuelta SIEMPRE); Dropi la corrige al liquidar
     if(_fdReal!==null)updatePayload.flete_dev_snapshot=_fdReal
     // Ganancia real de Dropi: solo si viene >0, para no sobreescribir un dato real con un vacío
     if(r.ganancia_dropi>0)updatePayload.ganancia_dropi=r.ganancia_dropi
@@ -14377,7 +14538,7 @@ window.actualizarEstadosDropi=async()=>{
               desde_pagina:'cruce_dropi'
             }
           })
-          if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+          if(evErr){console.warn('[mapeo_eventos] inserción falló:',evErr.message);window._nexoAvisoBD&&window._nexoAvisoBD('mapeo_eventos',evErr.message)}
         }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
       }
     }
@@ -14472,7 +14633,8 @@ async function loadPuntoEquilibrio(){
     for(const i of (insData||[]))gastoTotal+=i.spend||0
 
     // 4. Órdenes confirmadas por producto (mismo criterio que el Dashboard)
-    const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('cantidad,producto,estado_final').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+    // F7 (2jul26): trae la plata REAL del xlsx por orden — el Equilibrio deja de vivir 100% en catálogo
+    const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('cantidad,producto,estado_final,precio_dropi,costo_proveedor_dropi,flete_snapshot').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
     const prodStatsConf={}
     let totalOrdsConf=0
     for(const m of (mapeos||[])){
@@ -14480,8 +14642,12 @@ async function loadPuntoEquilibrio(){
       if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)continue
       const q=m.cantidad||2
       const pn=resolveProdName(m.producto).nombre||'Sin producto'
-      if(!prodStatsConf[pn])prodStatsConf[pn]={o1:0,o2:0,o3:0,o4:0}
+      if(!prodStatsConf[pn])prodStatsConf[pn]={o1:0,o2:0,o3:0,o4:0,vReal:0,vRealN:0,cReal:0,cRealN:0,fReal:0,fRealN:0}
       if(q===1)prodStatsConf[pn].o1++;else if(q===2)prodStatsConf[pn].o2++;else if(q===3)prodStatsConf[pn].o3++;else prodStatsConf[pn].o4++
+      // F7: acumular dato REAL por confirmada (venta, costo proveedor, flete cobrado)
+      if(m.precio_dropi>0){prodStatsConf[pn].vReal+=m.precio_dropi;prodStatsConf[pn].vRealN++}
+      if(m.costo_proveedor_dropi>0){prodStatsConf[pn].cReal+=m.costo_proveedor_dropi;prodStatsConf[pn].cRealN++}
+      if(m.flete_snapshot>0){prodStatsConf[pn].fReal+=m.flete_snapshot;prodStatsConf[pn].fRealN++}
       totalOrdsConf++
     }
 
@@ -14505,11 +14671,16 @@ async function loadPuntoEquilibrio(){
       const _fo=prod.flete_outbound||21000
       const _fd=prod.flete_devolucion||18000
       const confProd=st.o1+st.o2+st.o3+st.o4
-      const ventaProd=(st.o1*(prod.precio_1u||0))+(st.o2*(prod.precio_2u||0))+(st.o3*(prod.precio_3u||0))+(st.o4*(prod.precio_4u||0))
+      // F7 (2jul26): plata REAL del xlsx primero; el teórico de catálogo solo cubre las órdenes que aún no tienen dato
+      const ventaTeo=(st.o1*(prod.precio_1u||0))+(st.o2*(prod.precio_2u||0))+(st.o3*(prod.precio_3u||0))+(st.o4*(prod.precio_4u||0))
+      const costoTeo=(st.o1*(prod.costo_1u||0))+(st.o2*(prod.costo_2u||0))+(st.o3*(prod.costo_3u||0))+(st.o4*(prod.costo_4u||0))
+      const ventaProd=(st.vRealN>0)?Math.round(st.vReal+ventaTeo*Math.max(0,confProd-st.vRealN)/Math.max(confProd,1)):ventaTeo
+      const costoProd=(st.cRealN>0)?Math.round(st.cReal+costoTeo*Math.max(0,confProd-st.cRealN)/Math.max(confProd,1)):costoTeo
+      const fleteProd=(st.fRealN>0)?Math.round(st.fReal+_fo*Math.max(0,confProd-st.fRealN)):confProd*_fo
       ventaTotal+=ventaProd
-      costoProvTotal+=(st.o1*(prod.costo_1u||0))+(st.o2*(prod.costo_2u||0))+(st.o3*(prod.costo_3u||0))+(st.o4*(prod.costo_4u||0))
-      costoFlete+=confProd*_fo
-      costoDevolucion+=Math.round(confProd*_dp*_fd)
+      costoProvTotal+=costoProd
+      costoFlete+=fleteProd
+      costoDevolucion+=Math.round(confProd*_dp*_fd) // dev proyectada = SOLO vuelta (la ida de todas ya va en costoFlete)
       ventaEfectiva+=Math.round(ventaProd*(1-_dp))
       costoConv+=(_convByProd[pn]||0)*(prod.costo_conversacion||100)
     }
@@ -15673,7 +15844,7 @@ window.procesarSeguimiento=async()=>{
         if(r.flete>0)segPayload.flete_snapshot=r.flete
         // flete de devolución: COSTO DEV FLETE real (ida+vuelta); si Dropi no lo liquidó, usa el PRECIO FLETE de ida.
         // Sobreescribe cualquier estimado viejo. Si ambos vienen en 0, NO se toca lo ya guardado.
-        const _fdReal=(r.flete_dev>0?r.flete_dev:(r.flete>0?r.flete:null))
+        const _fdReal=(r.flete_dev>0?r.flete_dev:(r.flete>0?r.flete+18000:null)) // FIX (2jul26): sin liquidar = ida pagada + vuelta estándar (ida+vuelta SIEMPRE); Dropi la corrige al liquidar
         if(_fdReal!==null)segPayload.flete_dev_snapshot=_fdReal
         if(r.ganancia_dropi>0)segPayload.ganancia_dropi=r.ganancia_dropi
         if(r.costo_proveedor_dropi>0)segPayload.costo_proveedor_dropi=r.costo_proveedor_dropi
@@ -15722,7 +15893,7 @@ window.procesarSeguimiento=async()=>{
                   desde_pagina:'seguimiento'
                 }
               })
-              if(evErr)console.warn('[mapeo_eventos] inserción falló:',evErr.message)
+              if(evErr){console.warn('[mapeo_eventos] inserción falló:',evErr.message);window._nexoAvisoBD&&window._nexoAvisoBD('mapeo_eventos',evErr.message)}
             }catch(e){console.warn('[mapeo_eventos] excepción:',e.message)}
           }
         }
@@ -16728,7 +16899,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
 
   // 1. Traer mapeos del rango (ventas reales por producto)
   const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos')
-    .select('cantidad,producto,estado_final,fecha,ad_id')
+    .select('cantidad,producto,estado_final,fecha,ad_id,precio_dropi,costo_proveedor_dropi')
     .gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
 
   // 2. Gasto por campaña: decisión inteligente.
@@ -17346,6 +17517,21 @@ async function _renderResumenProductos(desde,hasta,hoy){
   //      botón ACTIVE (estado LIVE de Meta, fallback BD) + entrega real (≥1 anuncio entregando, no-false).
   //      Sin producto = el campId no está en campaign_ids de NINGÚN producto (mapa campToProd).
   let _sinProdBlock=''
+  // F9b (2jul26) · DETECTOR ley 1 campaña = 1 producto: si una campaña vive en 2+ productos, alerta roja
+  let _dupBlock=''
+  try{
+    const _dupMap={}
+    for(const p of (productos||[]))for(const cid of (Array.isArray(p.campaign_ids)?p.campaign_ids:[]))(_dupMap[String(cid)]=_dupMap[String(cid)]||[]).push(p.nombre)
+    const _dups=Object.entries(_dupMap).filter(([,ps])=>ps.length>1)
+    if(_dups.length){
+      const _filas=_dups.map(([cid,ps])=>`<div style="font-family:monospace;font-size:11px;padding:2px 0">🎯 ${cid} → ${ps.map(n=>'📦 '+n).join(' <b style="color:var(--red)">Y</b> ')}</div>`).join('')
+      _dupBlock=`<div style="margin:0 0 12px;padding:10px 12px;background:rgba(239,68,68,.06);border:1px solid var(--red);border-radius:10px">
+        <div style="font-size:12.5px;font-weight:800;color:var(--red);margin-bottom:4px">🚨 LEY ROTA: ${_dups.length} campaña${_dups.length===1?'':'s'} en MÁS DE UN producto</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">1 campaña = 1 producto, SIEMPRE. Mientras estén repetidas, su gasto se cuenta DOBLE (un CPA por cada producto). Arréglalo con el botón 📦 Cambiar de la campaña — el sistema la mueve y la quita del otro solo.</div>
+        ${_filas}
+      </div>`
+    }
+  }catch(_){}
   let _sinProdCount=0 // NUEVO (2jul26): conteo hoisted para la pill ⚠️ SIN PRODUCTO de la fusión principal
   try{
     const _cTPsp=(window._metaPort&&window._metaPort.campToProd)||{}
@@ -17417,16 +17603,26 @@ async function _renderResumenProductos(desde,hasta,hoy){
       const _pctBEg=(d.cpaReal>0&&d.margenBE>0)?Math.round(d.cpaReal/d.margenBE*100):0
       const _colG=(d.cpaReal>0&&d.margenBE>0&&typeof window!=='undefined'&&window._nexoSemColor)?window._nexoSemColor(d.cpaReal,d.margenBE):'var(--muted)'
       const _pedG=d.esSoloHoy?d.totalPedidos:(d.pedidosConfirmados>0?d.pedidosConfirmados:d.totalPedidos)
-      return`<div class="rp-fusgrp" data-fslug="${s}" style="border:1px solid var(--border);border-radius:9px;margin-bottom:6px;overflow:hidden">
-        <div onclick="window._rpFusGrpToggle('${s}')" style="cursor:pointer;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 11px;background:rgba(255,255,255,.03);font-size:12.5px;color:var(--text)" title="Fila-subtotal de ${_escM(d.nombre)}: gasto, pedidos y CPA vs BE del rango. CLIC para abrir/cerrar su fusión completa (con TODOS los botones y filtros adentro).">
-          <span id="fusgrp-ch-${s}" style="display:inline-block;width:13px;font-size:10px;color:var(--muted)">▸</span>
-          <span style="font-weight:700">📦 ${_escM(d.nombre)}</span>
-          <span style="font-size:12px">${dot}</span>
-          <span style="font-size:11px;color:var(--muted)">${rankingMap[d.nombre]||'?'}° en ventas</span>
-          <span style="margin-left:auto;display:inline-flex;gap:12px;align-items:center;flex-wrap:wrap">
-            <span style="font-size:11px;color:var(--muted)">💸 <strong style="color:var(--text)">$${fmt(d.gasto)}</strong></span>
-            <span style="font-size:11px;color:var(--muted)">🛒 <strong style="color:var(--text)">${_pedG}</strong></span>
-            <span style="font-size:11px;font-weight:700;color:${_colG}">🎯 $${fmt(d.cpaReal)}${_pctBEg>0?` · ${_pctBEg}% BE`:''}</span>
+      // NUEVO (2jul26 · Mejora 3): 📦 stock al cierre de HOY y AYER (de reportes_diarios, ya cargado
+      // en window._stockDiaG por producto) + barra NOTORIA: números grandes, pills y borde semáforo.
+      const _stkG=(typeof window!=='undefined'&&window._stockDiaG)?window._stockDiaG:null
+      const _stkHoyG=_stkG&&_stkG.p?_stkG.p[d.nombre]:undefined
+      const _stkAyerG=_stkG&&_stkG.a?_stkG.a[d.nombre]:undefined
+      const _stkBajaG=(_stkHoyG!=null&&_stkAyerG!=null&&_stkHoyG<_stkAyerG)
+      const _colStkG=_stkHoyG==null?'var(--muted)':(_stkBajaG?'var(--amber)':'var(--green)')
+      const _bordMapG={fuego:'var(--purple)',escalar:'var(--green)',precaucion:'var(--amber)',stop:'var(--red)'}
+      const _bordG=_bordMapG[d.semCode]||'var(--border)'
+      return`<div class="rp-fusgrp" data-fslug="${s}" style="border:1px solid var(--border);border-left:5px solid ${_bordG};border-radius:9px;margin-bottom:7px;overflow:hidden">
+        <div onclick="window._rpFusGrpToggle('${s}')" style="cursor:pointer;display:flex;align-items:center;gap:11px;flex-wrap:wrap;padding:11px 13px;background:rgba(255,255,255,.05);font-size:14px;color:var(--text)" title="Fila-subtotal de ${_escM(d.nombre)}: gasto, pedidos, CPA vs BE y 📦 stock HOY/AYER. CLIC para abrir/cerrar su fusión completa (con TODOS los botones y filtros adentro).">
+          <span id="fusgrp-ch-${s}" style="display:inline-block;width:13px;font-size:11px;color:var(--muted)">▸</span>
+          <span style="font-weight:800;font-size:15px">📦 ${_escM(d.nombre)}</span>
+          <span style="font-size:14px">${dot}</span>
+          <span style="font-size:11.5px;color:var(--muted);font-weight:600">${rankingMap[d.nombre]||'?'}° en ventas</span>
+          <span style="margin-left:auto;display:inline-flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:12.5px;color:var(--muted);padding:3px 10px;border-radius:999px;background:rgba(255,255,255,.05);border:1px solid var(--border);white-space:nowrap" title="💸 Gasto del período">💸 <strong style="color:var(--text);font-size:13.5px">$${fmt(d.gasto)}</strong></span>
+            <span style="font-size:12.5px;color:var(--muted);padding:3px 10px;border-radius:999px;background:rgba(255,255,255,.05);border:1px solid var(--border);white-space:nowrap" title="🛒 Pedidos confirmados del período">🛒 <strong style="color:var(--text);font-size:13.5px">${_pedG}</strong></span>
+            <span style="font-size:13px;font-weight:800;color:${_colG};padding:3px 10px;border-radius:999px;border:1.5px solid ${_colG};white-space:nowrap" title="🎯 CPA real vs break-even">🎯 $${fmt(d.cpaReal)}${_pctBEg>0?` · ${_pctBEg}% BE`:''}</span>
+            <span style="font-size:12.5px;font-weight:800;color:${_colStkG};padding:3px 10px;border-radius:999px;border:1.5px solid ${_colStkG};white-space:nowrap" title="📦 Stock al cierre que reporta el aux: HOY y AYER.${_stkBajaG?' Viene BAJANDO respecto a ayer: pilas con el inventario.':''}${_stkHoyG==null?' HOY sin dato todavía (el aux no ha reportado stock).':''}">📦 HOY: ${_stkHoyG!=null?fmt(_stkHoyG):'—'} · AYER: ${_stkAyerG!=null?fmt(_stkAyerG):'—'}</span>
           </span>
         </div>
         <div class="rp-fusgrp-bd" id="fusgrp-bd-${s}" style="display:none;padding:0 8px 8px"></div>
@@ -17444,9 +17640,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">
         <span style="font-size:13px;font-weight:800;color:var(--text)">🧩 TODAS LAS CAMPAÑAS JUNTAS</span>
         <span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:var(--purple-bg);color:var(--purple);border:1px solid var(--purple)">VISTA PRINCIPAL</span>
-        <span style="font-size:10.5px;color:var(--muted)">— elige TODOS o un producto y trabaja aquí sin saltar de card en card. Abre un grupo y adentro está la fusión completa con todos sus botones.</span>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;margin:6px 0 3px;font-size:9.5px;letter-spacing:.8px;color:var(--subtle);font-weight:700" title="Filtro de PRODUCTO: una sola opción activa (borde blanco). Clic en la activa vuelve a TODOS. Se cruza con TODOS los filtros de adentro de cada fusión.">📦 PRODUCTO — UNA OPCIÓN · CLIC EN LA ACTIVA = VOLVER A TODOS<span style="flex:1;height:1px;background:var(--border)"></span></div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
         <button class="rp-fusmain-pill" data-fslug="__todos__" onclick="window._rpFusMainProd('__todos__')" style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:800;padding:5px 12px;border-radius:999px;white-space:nowrap;background:rgba(124,92,250,.12);color:var(--purple);border:1px solid var(--purple);cursor:pointer" title="🌐 TODOS: muestra todos los productos agrupados, cada uno con su fila-subtotal (gasto · pedidos · CPA vs BE · semáforo). Abre el que quieras.">🌐 TODOS</button>
         ${_pillsProd}
@@ -17482,6 +17676,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
 
     ${_fusMainHtml}
 
+    ${_dupBlock}
+
     ${_sinProdBlock}
 
     <div id="rp-cards">
@@ -17500,15 +17696,18 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
 
   // Mapeos del producto (ventas reales con estado)
   const mps=mapeosByProd[prod.nombre]||[]
-  let pConf=0,canc=0,pend=0,o1=0,o2=0,o3=0,o4=0
+  let pConf=0,canc=0,pend=0,o1=0,o2=0,o3=0,o4=0,_vRealSum=0,_vRealN=0,_cRealSum=0,_cRealN=0
   for(const m of mps){
     const q=m.cantidad||2
-    if(m.estado_final==='CANCELADO')canc++
+    if(m.estado_final==='CANCELADO'||m.estado_final==='RECHAZADO')canc++ // F3 (2jul26): RECHAZADO no es venta (regla única)
     else if(m.estado_final==='PENDIENTE CONFIRMACION'||!m.estado_final)pend++
     else{
       pConf++
       // Solo cuenta la oferta cuando esta CONFIRMADA (no inflar venta/costos con cancelados ni pendientes)
       if(q===1)o1++;else if(q===2)o2++;else if(q===3)o3++;else o4++
+      // F6 (2jul26): plata y costo REALES del xlsx por orden confirmada
+      if(m.precio_dropi>0){_vRealSum+=m.precio_dropi;_vRealN++}
+      if(m.costo_proveedor_dropi>0){_cRealSum+=m.costo_proveedor_dropi;_cRealN++}
     }
   }
   const totalMapeos=mps.length
@@ -17555,8 +17754,11 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
 
   // Venta por oferta (solo confirmados; cada día con el precio vigente de ese día)
   const _vcH=_vcDia(_fechasD.p,[o1,o2,o3,o4])
-  const venta=_vcH.venta
-  const costoProv=_vcH.costo
+  // F6 (2jul26): días cerrados con la PLATA REAL del xlsx (precio_dropi/costo real por orden).
+  // Las pocas confirmadas sin dato (hoy/pre-cruce) se prorratean con el teórico vigente.
+  const _sinDatoV=Math.max(0,pConf-_vRealN),_sinDatoC=Math.max(0,pConf-_cRealN)
+  const venta=(_vRealN>0)?Math.round(_vRealSum+(_vcH.venta*_sinDatoV/Math.max(pConf,1))):_vcH.venta
+  const costoProv=(_cRealN>0)?Math.round(_cRealSum+(_vcH.costo*_sinDatoC/Math.max(pConf,1))):_vcH.costo
 
   // Fletes y devoluciones
   const devPct=prod.dev_pct||0.19
@@ -17938,7 +18140,12 @@ function _renderProductoCardResumen(data,ranking){
   const _gridCols='110px 1.1fr 1fr 0.9fr 0.9fr 1fr 0.85fr 0.8fr'
   const _hoyLabel=data.esSoloHoy?'Hoy':'Periodo'
   // Tooltip de cómo sale la ganancia (preservado del diseño anterior)
-  const _tooltipGan=data.desgloseGanancia?`Cómo sale ${plataSign}$${fmt(plataAbs)}:&#10;&#10;Venta efectiva (${Math.round((data.desgloseGanancia.devPct||0.19)*100)}% dev): $${fmt(data.desgloseGanancia.ventaEfectiva)}&#10;− Costo producto: −$${fmt(data.desgloseGanancia.costoProv)}&#10;− Flete: −$${fmt(data.desgloseGanancia.costoFlete)}&#10;− Devolución: −$${fmt(data.desgloseGanancia.costoDev)}&#10;− Gasto ads: −$${fmt(data.desgloseGanancia.gasto)}&#10;− Costo conversación: −$${fmt(data.desgloseGanancia.costoConvProd)}&#10;&#10;= ${plataSign}$${fmt(plataAbs)}&#10;&#10;(No incluye gastos fijos — esos van en Dashboard)`:''
+  // MEJORA 2 (2jul26): tooltip estándar de 3 partes (explicación → FÓRMULA → CON TUS DATOS)
+  const _tooltipGan=data.desgloseGanancia?window._nexoTip3(
+    `💰 GANANCIA NETA ${plataSign}$${fmt(plataAbs)}: la plata que queda del período asumiendo ${Math.round((data.desgloseGanancia.devPct||0.19)*100)}% de devoluciones. NO incluye gastos fijos — esos van en Dashboard.`,
+    'venta×(1−dev) − costo producto − flete envío − flete dev×dev − gasto ads − (costo conv × conversaciones)',
+    `$${fmt(data.desgloseGanancia.ventaEfectiva)} − $${fmt(data.desgloseGanancia.costoProv)} − $${fmt(data.desgloseGanancia.costoFlete)} − $${fmt(data.desgloseGanancia.costoDev)} − $${fmt(data.desgloseGanancia.gasto)} − $${fmt(data.desgloseGanancia.costoConvProd)}&#10;= ${plataSign}$${fmt(plataAbs)}`
+  ):''
   // Filas previas (Ayer / Antier / Trasantier) con color encadenado + borde semáforo en CPA.
   // Cada fila colorea su número comparándose con la fila de ABAJO (más antigua); la última es neutra.
   const _cmpRP=(a,b,dir)=>window._nexoCmpColor(a,b,dir)
@@ -17955,10 +18162,10 @@ function _renderProductoCardResumen(data,ranking){
     const cpaBorde=p.cpa>0?`border-radius:5px;box-shadow:inset 0 0 0 2px ${_semRP(p.cpa,diaKey)};padding:2px 5px`:''
     return`<div style="display:grid;grid-template-columns:${_gridCols};gap:10px;padding:10px 8px;align-items:center;background:${bg};border-left:3px solid ${bl};border-radius:6px;margin-top:4px;min-width:700px">
       <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);font-weight:500"><span style="font-size:13px">${emo||'⏪'}</span><span>${label}</span></div>
-      <div style="text-align:right;font-size:14px;color:${colGan};font-weight:500">${pSign}$${fmt(Math.abs(p.ganancia))}</div>
-      <div style="text-align:right;font-size:14px;color:${colCpa};${cpaBorde}" title="Número = vs día más antiguo · Borde = semáforo break-even ($${fmt((data.margenBEDia&&diaKey&&data.margenBEDia[diaKey]!=null)?data.margenBEDia[diaKey]:data.margenBE)})">${p.cpa>0?'$'+fmt(Math.round(p.cpa)):'—'}</div>
+      <div style="text-align:right;font-size:14px;color:${colGan};font-weight:500" title="${window._nexoTip3(`💰 GANANCIA NETA de ${label}: venta efectiva menos todos los costos del día. NO incluye gastos fijos. Color: vs día más antiguo.`,'venta×(1−dev) − costo producto − flete − flete dev×dev − gasto ads − costo conversación',`= ${pSign}$${fmt(Math.abs(p.ganancia))} (con $${fmt(p.gasto||0)} de ads, ${p.pedidos} pedidos y ${p.conversaciones||0} conversaciones)`)}">${pSign}$${fmt(Math.abs(p.ganancia))}</div>
+      <div style="text-align:right;font-size:14px;color:${colCpa};${cpaBorde}" title="${window._nexoTip3(`🎯 CPA REAL de ${label}. Número = vs día más antiguo · Borde = semáforo break-even ($${fmt((data.margenBEDia&&diaKey&&data.margenBEDia[diaKey]!=null)?data.margenBEDia[diaKey]:data.margenBE)}).`,'gasto ads del día ÷ pedidos confirmados',`$${fmt(p.gasto||0)} ÷ ${p.pedidos||0} = ${p.cpa>0?'$'+fmt(Math.round(p.cpa)):'—'}`)}">${p.cpa>0?'$'+fmt(Math.round(p.cpa)):'—'}</div>
       <div style="text-align:right"><div style="font-size:14px;color:${colPed}">${p.pedidos}</div>${(diaKey==='a'||diaKey==='b'||diaKey==='c')&&(p.pedidosIds||0)>0?`<div style="font-size:11px;color:var(--purple);margin-top:2px" title="🔮 Proyección post-Dropi: ${p.pedidosIds||0} IDs × ${Math.round((data.pctConf||0.62)*100)}% confirmación = lo que se estima confirmará Dropi de esos IDs">🔮 ${(Math.floor((p.pedidosIds||0)*(data.pctConf||0.62)*10)/10).toFixed(1)}</div>`:''}<div style="font-size:11px;color:var(--blue);margin-top:2px" title="Pedidos por IDs reportados de ese día">🆔 IDs: ${p.pedidosIds||0}</div></div>
-      <div style="text-align:right;font-size:14px;color:${colRoas}">${p.roas>0?p.roas.toFixed(2)+'x':'—'}</div>
+      <div style="text-align:right;font-size:14px;color:${colRoas}" title="${window._nexoTip3(`📈 ROAS de ${label}: pesos de venta bruta por cada peso de ads. Color: vs día más antiguo.`,'venta total ÷ gasto ads',`$${fmt(Math.round((p.roas||0)*(p.gasto||0)))} ÷ $${fmt(p.gasto||0)} = ${p.roas>0?p.roas.toFixed(2):'0'}x`)}">${p.roas>0?p.roas.toFixed(2)+'x':'—'}</div>
       <div style="text-align:right;font-size:14px;color:${colGasto}">${p.gasto>0?'$'+fmt(p.gasto):'—'}</div>
       <div style="text-align:right;font-size:14px;color:${colConv}">${(p.conversaciones||0)>0?p.conversaciones:'—'}</div>
       <div style="text-align:right;font-size:14px;color:var(--subtle)" title="El stock no tiene histórico por día — solo el valor actual (fila Hoy)">—</div>
@@ -18020,17 +18227,17 @@ function _renderProductoCardResumen(data,ranking){
         <div style="font-size:18px;font-weight:600;color:${plataColor};line-height:1.1">${plataSign}$${fmt(plataAbs)}</div>
       </div>
       <div style="text-align:right">
-        <div style="font-size:14px;color:${cpaColor};line-height:1.2" title="Break-even: $${fmt(data.margenBE)}${pctBE>0?' · '+pctBE+'% del BE':''}">🎯 $${fmt(data.cpaReal)} ${cpaIcon}</div>
-        ${data.esSoloHoy&&data.cpaRealEfectivo>0?`<div style="font-size:11px;color:var(--purple);margin-top:2px" title="Estimación: gasto / (pedidos × ${Math.round((data.pctConf||0.62)*100)}% confirmación). Solo HOY.">🟣 Ef: $${fmt(data.cpaRealEfectivo)}</div>`:''}
+        <div style="font-size:14px;color:${cpaColor};line-height:1.2" title="${window._nexoTip3(`🎯 CPA REAL: lo que cuesta cada pedido con el gasto real del período. Break-even: $${fmt(data.margenBE)}${pctBE>0?' ('+pctBE+'% del BE)':''} — por debajo ganas, por encima pierdes.`,'gasto ads ÷ pedidos',`$${fmt(data.gasto)} ÷ ${data.esSoloHoy?data.totalPedidos:(data.pedidosConfirmados>0?data.pedidosConfirmados:data.totalPedidos)} = $${fmt(data.cpaReal)} vs BE $${fmt(data.margenBE)}`)}">🎯 $${fmt(data.cpaReal)} ${cpaIcon}</div>
+        ${data.esSoloHoy&&data.cpaRealEfectivo>0?`<div style="font-size:11px;color:var(--purple);margin-top:2px" title="${window._nexoTip3(`🟣 CPA EFECTIVO (solo HOY): ajusta el CPA asumiendo que solo el ${Math.round((data.pctConf||0.62)*100)}% de los pedidos de hoy se confirmará en el cruce Dropi.`,'gasto ÷ (pedidos × % confirmación)',`$${fmt(data.gasto)} ÷ (${data.totalPedidos} × ${Math.round((data.pctConf||0.62)*100)}%) = $${fmt(data.cpaRealEfectivo)}`)}">🟣 Ef: $${fmt(data.cpaRealEfectivo)}</div>`:''}
       </div>
       <div style="text-align:right">
         <div style="font-size:14px;color:var(--text);line-height:1.2" title="${data.esSoloHoy?'Pedidos brutos del día (aún sin cruce Dropi)':(data.pedidosConfirmados>0?'Pedidos confirmados del cruce Dropi. Pendientes y cancelados no cuentan.':'IDs reportados por el auxiliar (cruce Dropi aún sin confirmar). Cuando el cruce confirme, ese manda.')}">📦 ${data.esSoloHoy?data.totalPedidos:(data.pedidosConfirmados>0?data.pedidosConfirmados:data.totalPedidos)}</div>
-        ${data.esSoloHoy&&data.pedidosEfectivos>0?`<div style="font-size:11px;color:var(--purple);margin-top:2px" title="Estimación: ${data.totalPedidos} × ${Math.round((data.pctConf||0.62)*100)}% confirmación">🟣 P.Ef: ${data.pedidosEfectivos.toFixed(2)}</div>`:''}
+        ${data.esSoloHoy&&data.pedidosEfectivos>0?`<div style="font-size:11px;color:var(--purple);margin-top:2px" title="${window._nexoTip3(`🟣 PEDIDOS EFECTIVOS (solo HOY): los que de verdad quedarían tras el cruce, asumiendo ${Math.round((data.pctConf||0.62)*100)}% de confirmación histórica.`,'pedidos de hoy × % confirmación',`${data.totalPedidos} × ${Math.round((data.pctConf||0.62)*100)}% = ${data.pedidosEfectivos.toFixed(2)}`)}">🟣 P.Ef: ${data.pedidosEfectivos.toFixed(2)}</div>`:''}
         <div style="font-size:11px;color:var(--blue);margin-top:2px" title="Pedidos contados por los IDs que reportó el auxiliar. Compáralo con el 📦 de arriba (cruce Dropi) para ver cuánto varían.">🆔 IDs: ${data.pedidosIds||0}</div>
       </div>
       <div style="text-align:right">
-        <div style="font-size:14px;color:${roasColor};font-weight:600;line-height:1.2">${data.roas>0?data.roas.toFixed(2)+'x':'—'}</div>
-        ${beRoas>0?`<div style="font-size:11px;color:var(--muted);margin-top:2px">BE: ${beRoas.toFixed(2)}x</div>`:''}
+        <div style="font-size:14px;color:${roasColor};font-weight:600;line-height:1.2" title="${window._nexoTip3('📈 ROAS: cuántos pesos de venta entran por cada peso gastado en ads. Usa la venta BRUTA del período (sin descontar devoluciones).','venta total ÷ gasto ads',`$${fmt(Math.round((data.roas||0)*(data.gasto||0)))} ÷ $${fmt(data.gasto)} = ${data.roas>0?data.roas.toFixed(2):'0'}x${beRoas>0?` vs BE ${beRoas.toFixed(2)}x`:''}`)}">${data.roas>0?data.roas.toFixed(2)+'x':'—'}</div>
+        ${beRoas>0?`<div style="font-size:11px;color:var(--muted);margin-top:2px" title="${window._nexoTip3('ROAS BREAK-EVEN: el ROAS mínimo para no perder plata — por debajo de este número la campaña pierde.','precio 2u ÷ margen break-even',`$${fmt(data.producto.precio_2u||129900)} ÷ $${fmt(data.margenBE)} = ${beRoas.toFixed(2)}x`)}">BE: ${beRoas.toFixed(2)}x</div>`:''}
       </div>
       <div style="text-align:right">
         <div style="font-size:14px;color:var(--text);line-height:1.2">$${fmt(data.gasto)}</div>
@@ -18967,12 +19174,7 @@ function _renderProductoCardResumen(data,ranking){
         </div>`
     }
     return`<div id="${_cidF}-wrap" class="rp-fus-main" data-fslug="${_slugProd}" style="margin-top:10px;padding:12px 13px;background:rgba(0,0,0,.18);border-radius:8px;border-left:3px solid var(--purple)">
-      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;letter-spacing:.2px">🧩 <strong style="color:var(--text)">Todas las campañas JUNTAS</strong> — la misma info de los bloques de arriba pero fusionada: cada campaña aparece UNA sola vez y adentro ves cómo le fue cada día. Ya no toca buscarla bloque por bloque. 👶✨</div>
-      <div onclick="window._rpToggleCuadre('${_cidF}')" style="cursor:pointer;display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0;flex-wrap:wrap" title="Toca para abrir/cerrar · Orden: mejor CPA total arriba, peor abajo">
-        <span id="${_cidF}-chev" style="display:inline-block;width:14px;font-size:10px;color:var(--muted)">▸</span>
-        <span style="margin-left:4px">🧬 ${_lista.length} campaña${_lista.length===1?'':'s'} fusionada${_lista.length===1?'':'s'} en ${_diasConDatos} día${_diasConDatos===1?'':'s'}</span>
-        <span style="margin-left:auto;font-weight:700" title="Suma de las ventas 'En campañas' de todos los días — el detalle por día está ABAJO de la tabla (📊 ASÍ VAMOS)">${_totVentasF}</span>
-      </div>
+      ${_ctrlRango}
       <div style="display:flex;align-items:center;gap:8px;margin:6px 0 3px;font-size:9.5px;letter-spacing:.8px;color:var(--subtle);font-weight:700" title="ZONA 2 · Filtros: cambian LO QUE VES, no tocan Meta. Se CRUZAN entre sí y dentro de cada grupo solo puede haber UNA opción activa. Activo = borde blanco. En 0 = se atenúa solo.">🔍 FILTRA LO QUE VES — SE CRUZAN ENTRE SÍ · UNA OPCIÓN POR GRUPO<span style="flex:1;height:1px;background:var(--border)"></span></div>
       <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin:0 0 6px;padding:6px 9px;background:var(--card2);border-radius:8px">
           <button class="rp-fus-estpill" data-est="act" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','estado','act',this)" style="font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;background:var(--green-bg);color:var(--green);border:1px solid var(--green);cursor:pointer" title="🟢 Activas DE VERDAD: botón prendido en Meta, ≥1 anuncio entregando AHORA, y SIN alerta PRENDER YA. ${_actHdrF} de ${_lista.length}. CLIC para ver SOLO las activas.">🟢 Activas: ${_actHdrF}</button>
@@ -18986,13 +19188,9 @@ function _renderProductoCardResumen(data,ranking){
           <span id="${_cidF}-vsvtot" style="font-size:10.5px;color:var(--subtle)">= ${_totVentasF}</span>
       </div>
       ${_filtroRowF}
-      ${_ctrlRango}
-      <div style="display:flex;align-items:center;gap:8px;margin:6px 0 3px;font-size:9.5px;letter-spacing:.8px;color:var(--subtle);font-weight:700" title="ZONA 3 · CUIDADO: estos botones SÍ cambian cosas en Meta o recargan datos — no son filtros.">⚡ ACCIONES — ESTO SÍ TOCA META (NO FILTRA)<span style="flex:1;height:1px;background:var(--border)"></span></div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
-        <button onclick="event.stopPropagation();window._rpFusionMassBud('${_slugProd}')" style="background:rgba(99,102,241,.1);border:1px solid var(--accent);border-radius:6px;color:var(--accent);font-size:10.5px;font-weight:700;padding:4px 11px;cursor:pointer;flex-shrink:0" title="Cambiar el presupuesto de VARIAS campañas de esta fusión a la vez (mismo modal del expand de cuenta, precargado con estas campañas)">💰 Presupuesto a varias</button>
-        <button onclick="event.stopPropagation();window._rpFusionMassPausa('${_slugProd}')" style="background:var(--red-bg);border:1px solid var(--red);border-radius:6px;color:var(--red);font-size:10.5px;font-weight:700;padding:4px 11px;cursor:pointer;flex-shrink:0" title="APAGAR (pausar) VARIAS campañas de esta fusión a la vez — mismo modal en lote del expand de cuenta, precargado con estas campañas. Las activas salen resaltadas para marcar cuáles apagar.">🔴 Apagar varias</button>
-        <button onclick="event.stopPropagation();window._rpFusionRefreshSem('${_slugProd}',this)" style="background:rgba(167,139,250,.1);border:1px solid var(--purple);border-radius:6px;color:var(--purple);font-size:10.5px;font-weight:700;padding:4px 11px;cursor:pointer;flex-shrink:0" title="Recalcula los puntos CONSOLIDADOS (⭐Dropi y 🆔 IDs) de AYER, ANTIER y TRASANTIER de TODAS las campañas de este producto: primero trae el gasto exacto de cada día desde Meta (mini-sync autoverificado) y luego guarda un punto ⭐Dropi nuevo anclado a ese día — la tira muestra solo el último ⭐, y el 🆔 IDs se recalcula solo porque usa el gasto del ⭐. El punto viejo queda en el Historial 📊 como evidencia. HOY no se toca porque su gasto sigue cambiando.">🔄 Refrescar semáforos</button>
-        <button onclick="event.stopPropagation();window._rpFusionLifetime('${_slugProd}',this)" style="background:rgba(94,234,212,.1);border:1px solid #5eead4;border-radius:6px;color:#5eead4;font-size:10.5px;font-weight:700;padding:4px 11px;cursor:pointer;flex-shrink:0" title="Reemplaza los totales 🛒 VTS y 🆔 TOT por el LIFETIME REAL desde que inició cada campaña (no solo los días visibles): gasto histórico real (meta_insights) + ventas confirmadas Dropi y total de órdenes reales (mapeos). Sin estimar. Los días HOY/AYER/ANTIER/TRAS no se tocan.">📊 Cargar lifetime</button>
+      <div style="display:flex;align-items:center;gap:8px;margin:6px 0 3px;font-size:9.5px;letter-spacing:.8px;color:var(--subtle);font-weight:700" title="ZONA 1 · Filtro por DÍA: toca un chip para ver SOLO las campañas que vendieron ese día (clic de nuevo lo quita). Se cruza con los demás filtros. El detalle de cada día está en el tooltip y abajo de la tabla.">📊 ASÍ VAMOS — CÓMO FUE CADA DÍA (TOCA UN CHIP PARA FILTRAR)<span style="flex:1;height:1px;background:var(--border)"></span></div>
+      <div id="${_cidF}-diachips" style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:0 0 6px" title="Ventas de cada día sumando todas las campañas (detalle en el tooltip de cada chip). Si un día está en 0 igual se muestra.">
+        ${_totPorDiaF.map(t=>{const _onT=(t.n>0||t.ids>0);return`<button class="rp-fus-diapill" data-dia="${t.k}" ${_onT?`onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','dia','${t.k}',this)"`:''} style="cursor:${_onT?'pointer':'default'};font-size:10.5px;font-weight:700;padding:3px 10px;border-radius:999px;white-space:nowrap;${_onT?'background:var(--green-bg);color:var(--green);border:1px solid var(--green)':'background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)'}" title="${t.lab}: ${t.n} venta${t.n===1?'':'s'} Dropi (cuadre) · ${t.ids} por IDs del aux · ${t.conv} conversaciones · 📦 stock ${t.stk!=null?fmt(t.stk):'—'}${!_onT?' — ese día no se vendió nada por ninguna fuente':' · CLIC para ver SOLO las campañas que vendieron '+t.lab+' (Dropi o IDs; clic de nuevo lo quita). Se COMBINA con Activas/Inactivas, urgencia y el buscador por ID.'}">${t.lab}</button>`}).join('')}
       </div>
       <style>
         .rp-fus-row{transition:background .08s}
@@ -19009,10 +19207,14 @@ function _renderProductoCardResumen(data,ranking){
       </style>
       <div id="${_cidF}-sub" class="rp-fus-sub" style="display:none;margin:2px 0 6px 20px;border-left:1px solid var(--border);padding-left:12px;overflow-x:auto;max-height:76vh;overflow-y:auto"><div style="position:sticky;top:0;z-index:6;min-width:max-content;background:rgba(22,17,28,.97)" title="📌 Encabezados y Σ TOTALES pegados: bajas por la lista y no se pierden">${_hdrColsF}${_totRowFusF('-top')}</div>${_campsF}${_totRowFusF('')}</div>
       <div id="${_cidF}-rango" style="display:none;margin:2px 0 6px 20px;border-left:1px solid var(--purple);padding-left:12px"></div>
-      <div style="display:flex;align-items:center;gap:8px;margin:8px 0 3px;font-size:9.5px;letter-spacing:.8px;color:var(--subtle);font-weight:700" title="ZONA 1 · Solo mirar cómo va cada día. Los chips también filtran si los tocas. Se movió aquí abajo para que arriba queden los filtros de una, sin ruido.">📊 ASÍ VAMOS — CÓMO FUE CADA DÍA (TOCA UN CHIP PARA FILTRAR)<span style="flex:1;height:1px;background:var(--border)"></span></div>
-      <div id="${_cidF}-diachips" style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:0 0 4px" title="De dónde sale el total: ventas de cada día sumando todas las campañas. Si un día está en 0 igual se muestra, para que sepas que ese día no se vendió NADA.">
-        ${_totPorDiaF.map(t=>{const _onT=(t.n>0||t.ids>0);return`<button class="rp-fus-diapill" data-dia="${t.k}" ${_onT?`onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','dia','${t.k}',this)"`:''} style="cursor:${_onT?'pointer':'default'};font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;${_onT?'background:var(--green-bg);color:var(--green);border:1px solid var(--green)':'background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)'}" title="${t.lab}: ${t.n} venta${t.n===1?'':'s'} Dropi (cuadre) · ${t.ids} por IDs del aux${!_onT?' — ese día no se vendió nada por ninguna fuente':' · CLIC para ver SOLO las campañas que vendieron '+t.lab+' (Dropi o IDs; clic de nuevo lo quita). Se COMBINA con Activas/Inactivas, urgencia y el buscador por ID.'}">${t.lab}: ${t.n}🛒·${t.ids}🆔·${t.conv}💬·📦${t.stk!=null?fmt(t.stk):'—'}</button>`}).join('')}
+      <div style="display:flex;align-items:center;gap:8px;margin:6px 0 3px;font-size:9.5px;letter-spacing:.8px;color:var(--subtle);font-weight:700" title="ZONA 3 · CUIDADO: estos botones SÍ cambian cosas en Meta o recargan datos — no son filtros.">⚡ ACCIONES — ESTO SÍ TOCA META (NO FILTRA)<span style="flex:1;height:1px;background:var(--border)"></span></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
+        <button onclick="event.stopPropagation();window._rpFusionMassBud('${_slugProd}')" style="background:rgba(99,102,241,.1);border:1px solid var(--accent);border-radius:6px;color:var(--accent);font-size:10.5px;font-weight:700;padding:4px 11px;cursor:pointer;flex-shrink:0" title="Cambiar el presupuesto de VARIAS campañas de esta fusión a la vez (mismo modal del expand de cuenta, precargado con estas campañas)">💰 Presupuesto a varias</button>
+        <button onclick="event.stopPropagation();window._rpFusionMassPausa('${_slugProd}')" style="background:var(--red-bg);border:1px solid var(--red);border-radius:6px;color:var(--red);font-size:10.5px;font-weight:700;padding:4px 11px;cursor:pointer;flex-shrink:0" title="APAGAR (pausar) VARIAS campañas de esta fusión a la vez — mismo modal en lote del expand de cuenta, precargado con estas campañas. Las activas salen resaltadas para marcar cuáles apagar.">🔴 Apagar varias</button>
+        <button onclick="event.stopPropagation();window._rpFusionRefreshSem('${_slugProd}',this)" style="background:rgba(167,139,250,.1);border:1px solid var(--purple);border-radius:6px;color:var(--purple);font-size:10.5px;font-weight:700;padding:4px 11px;cursor:pointer;flex-shrink:0" title="Recalcula los puntos CONSOLIDADOS (⭐Dropi y 🆔 IDs) de AYER, ANTIER y TRASANTIER de TODAS las campañas de este producto: primero trae el gasto exacto de cada día desde Meta (mini-sync autoverificado) y luego guarda un punto ⭐Dropi nuevo anclado a ese día — la tira muestra solo el último ⭐, y el 🆔 IDs se recalcula solo porque usa el gasto del ⭐. El punto viejo queda en el Historial 📊 como evidencia. HOY no se toca porque su gasto sigue cambiando.">🔄 Refrescar semáforos</button>
+        <button onclick="event.stopPropagation();window._rpFusionLifetime('${_slugProd}',this)" style="background:rgba(94,234,212,.1);border:1px solid #5eead4;border-radius:6px;color:#5eead4;font-size:10.5px;font-weight:700;padding:4px 11px;cursor:pointer;flex-shrink:0" title="Reemplaza los totales 🛒 VTS y 🆔 TOT por el LIFETIME REAL desde que inició cada campaña (no solo los días visibles): gasto histórico real (meta_insights) + ventas confirmadas Dropi y total de órdenes reales (mapeos). Sin estimar. Los días HOY/AYER/ANTIER/TRAS no se tocan.">📊 Cargar lifetime</button>
       </div>
+      <div id="${_cidF}-resumenrng" style="display:none"></div>
     </div>`
   }
   try{_cuadreHtml+=_mkCuadreFusion()}catch(_){}
@@ -19525,12 +19727,8 @@ window._rpFusGrpToggle=function(slug,forceOpen){
     return
   }
   const cidF='cuadf_'+slug
-  try{
-    const sub=document.getElementById(cidF+'-sub')
-    const rg=document.getElementById(cidF+'-rango')
-    const rgVis=!!(rg&&rg.style.display!=='none'&&rg.innerHTML)
-    if(sub&&sub.style.display==='none'&&!rgVis)window._rpToggleCuadre(cidF)
-  }catch(_){}
+  // NUEVO (2jul26 · Mejora 1): los 8 días son LA VISTA POR DEFECTO — ya no se abre la lista de
+  // 4 días mientras carga (esa vive solo detrás del botón "↩️ Volver a los 4 días").
   window._rpFusAuto8(slug)
 }
 // "Últimos 8 días" POR DEFECTO — dispara el flujo EXISTENTE (_rpFusion8dias) una sola vez por producto.
@@ -19654,9 +19852,9 @@ window._rpRangoFiltroFull=function(cidF,tipo,valor,btn){
   else if(tipo==='estado')cont.dataset.festado=(cont.dataset.festado===valor?'':String(valor||''))
   else if(tipo==='vsv')cont.dataset.fvsv=(cont.dataset.fvsv===valor?'':String(valor||''))
   else if(tipo==='id')cont.dataset.fid=String(valor||'').replace(/\D/g,'')
-  else if(tipo==='dia'){/* los chips de día del rango son informativos: sin filtro por día aquí */}
-  else if(tipo==='reset'){cont.dataset.fsem='';cont.dataset.festado='';cont.dataset.fvsv='';cont.dataset.fid='';try{const _inp=document.getElementById(cidF+'-buscarid');if(_inp)_inp.value=''}catch(_){}}
-  const fsem=cont.dataset.fsem||'',fest=cont.dataset.festado||'',fvsv=cont.dataset.fvsv||'',fid=(cont.dataset.fid||'').trim()
+  else if(tipo==='dia')cont.dataset.fdia=(cont.dataset.fdia===String(valor)?'':String(valor??'')) // NUEVO (2jul26 · Mejora 5): filtro por DÍA del rango (índice de columna)
+  else if(tipo==='reset'){cont.dataset.fsem='';cont.dataset.festado='';cont.dataset.fvsv='';cont.dataset.fid='';cont.dataset.fdia='';try{const _inp=document.getElementById(cidF+'-buscarid');if(_inp)_inp.value=''}catch(_){}}
+  const fsem=cont.dataset.fsem||'',fest=cont.dataset.festado||'',fvsv=cont.dataset.fvsv||'',fid=(cont.dataset.fid||'').trim(),fdia=(cont.dataset.fdia||'').trim()
   cont.querySelectorAll('.rp-rng-box').forEach(box=>{
     const row=box.querySelector('.rp-rng-row');if(!row){box.style.display='';return}
     let ok=true
@@ -19669,8 +19867,13 @@ window._rpRangoFiltroFull=function(cidF,tipo,valor,btn){
     if(fest==='hoy'&&(_esPy||!(row.dataset.factiva==='1'||row.dataset.fghoy==='1')))ok=false
     if(fest==='noent'&&row.dataset.fnoent!=='1')ok=false
     if(fid&&!((row.dataset.fcampid||'').includes(fid)||(row.dataset.fadids||'').includes(fid)))ok=false
+    // NUEVO (2jul26 · Mejora 5): día marcado → solo campañas con venta 🛒 o 🆔 ESE día
+    const _vDiaR=fdia?(parseInt(row.dataset['fd'+fdia+'v']||'0',10)||0):0
+    const _iDiaR=fdia?(parseInt(row.dataset['fd'+fdia+'i']||'0',10)||0):0
+    if(fdia&&!(_vDiaR>0||_iDiaR>0))ok=false
     if(fvsv){
-      const v=Math.max(parseInt(row.dataset.fvts||'0',10)||0,parseInt(row.dataset.fitot||'0',10)||0)
+      // Con día marcado, ✅/⛔ cuentan SOLO ese día (igual que en los 4 días); sin día, todo el rango
+      const v=fdia?Math.max(_vDiaR,_iDiaR):Math.max(parseInt(row.dataset.fvts||'0',10)||0,parseInt(row.dataset.fitot||'0',10)||0)
       if(fvsv==='con'&&!(v>0))ok=false
       if(fvsv==='sin'&&v>0)ok=false
     }
@@ -19683,6 +19886,7 @@ window._rpRangoFiltroFull=function(cidF,tipo,valor,btn){
     wrap.querySelectorAll('.rp-fus-urgpill').forEach(p=>{p.style.outline=(fsem&&p.dataset.code===fsem)?'2px solid var(--text)':'none';if(fsem&&p.dataset.code===fsem)p.style.outlineOffset='2px'})
     wrap.querySelectorAll('.rp-fus-estpill').forEach(p=>{p.style.outline=(fest&&p.dataset.est===fest)?'2px solid var(--text)':'none';if(fest&&p.dataset.est===fest)p.style.outlineOffset='2px'})
     wrap.querySelectorAll('.rp-fus-vsvpill').forEach(p=>{p.style.outline=(fvsv&&p.dataset.vsv===fvsv)?'2px solid var(--text)':'none';if(fvsv&&p.dataset.vsv===fvsv)p.style.outlineOffset='2px'})
+    wrap.querySelectorAll('.rp-fus-diapill').forEach(p=>{p.style.outline=(fdia&&p.dataset.dia===fdia)?'2px solid var(--text)':'none';if(fdia&&p.dataset.dia===fdia)p.style.outlineOffset='2px'}) // NUEVO (2jul26 · Mejora 5)
     cont.querySelectorAll('.rp-rng-vsvpill').forEach(p=>{p.style.outline=(fvsv&&p.dataset.vsv===fvsv)?'2px solid var(--text)':'none';if(fvsv&&p.dataset.vsv===fvsv)p.style.outlineOffset='2px'})
   }catch(_){}
 }
@@ -20205,6 +20409,7 @@ window._rpFusionVolver=function(cidF){
   const s=document.getElementById(cidF+'-sub')
   const st=document.getElementById(cidF+'-rango-status')
   if(r){r.style.display='none';r.dataset.rngOn='0'} // NUEVO (2jul26 · Mejora 8): el 🧬 vuelve a manejar los 4 días
+  try{const _rr=document.getElementById(cidF+'-resumenrng');if(_rr)_rr.style.display='none'}catch(_){} // NUEVO (2jul26 · Mejora 7)
   if(s){s.style.display='block';const ch=document.getElementById(cidF+'-chev');if(ch)ch.textContent='▼'}
   if(st)st.textContent=''
   // NUEVO (2jul26): al volver a 4 días se apaga la marca del botón "Últimos 8 días"
@@ -20215,7 +20420,7 @@ window._rpFusionVolver=function(cidF){
   // se limpian los filtros del rango y las filas del rango quedan todas visibles para la próxima.
   try{window._rpRangoPillsRestore(cidF)}catch(_){}
   try{
-    if(r){r.dataset.fsem='';r.dataset.festado='';r.dataset.fvsv='';r.dataset.fid='';r.querySelectorAll('.rp-rng-box').forEach(b=>{b.style.display=''})}
+    if(r){r.dataset.fsem='';r.dataset.festado='';r.dataset.fvsv='';r.dataset.fid='';r.dataset.fdia='';r.querySelectorAll('.rp-rng-box').forEach(b=>{b.style.display=''})}
   }catch(_){}
 }
 
@@ -20340,7 +20545,9 @@ window._rpFusionRango=async function(slug,cidF){
         _seenR.add(kR)
         _convDiaR[r.fecha]=(_convDiaR[r.fecha]||0)+((r.conversaciones||r.conversaciones_aprox)||0)
         const _idsTxtR=(r.ad_ids||'').split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)
-        for(const idA of _idsTxtR){const ckI=_adDeCamp[idA];if(ckI){_idsDiaR[r.fecha]=(_idsDiaR[r.fecha]||0)+1;if(!_idsCampDiaRg[ckI])_idsCampDiaRg[ckI]={};_idsCampDiaRg[ckI][r.fecha]=(_idsCampDiaRg[ckI][r.fecha]||0)+1}}
+        // MEJORA 1 (2jul26): el chip 🆔 cuenta TODOS los IDs del aux (mismo alcance de la card);
+        // el mapa por campaña (_idsCampDiaRg, tabla RANGO) SÍ sigue filtrado a las campañas del rango.
+        for(const idA of _idsTxtR){_idsDiaR[r.fecha]=(_idsDiaR[r.fecha]||0)+1;const ckI=_adDeCamp[idA];if(ckI){if(!_idsCampDiaRg[ckI])_idsCampDiaRg[ckI]={};_idsCampDiaRg[ckI][r.fecha]=(_idsCampDiaRg[ckI][r.fecha]||0)+1}}
       }
     }catch(_){}
     // 📦 NUEVO RANGO: stock al cierre por fecha (consulta aparte y tolerante a columna ausente)
@@ -20448,8 +20655,8 @@ window._rpFusionRango=async function(slug,cidF){
     const _ecoOkR=!!(_ecoR&&((_ecoR.p1||0)>0||(_ecoR.p2||0)>0))
     const _diaAggR={}
     for(const m of _conf){
-      const aidG=m.ad_id?String(m.ad_id):''
-      if(!aidG||!_adDeCamp[aidG])continue
+      // MEJORA 1 (2jul26): el chip 🛒 cuenta TODAS las confirmadas Dropi del producto (mismo
+      // alcance de la card). El filtro por campaña vive SOLO en la tabla/desglose (_fusR).
       const D=_diaAggR[m.fecha]||(_diaAggR[m.fecha]={n:0,o1:0,o2:0,o3:0,o4:0})
       D.n++
       const qG=parseInt(m.cantidad)||1
@@ -20457,7 +20664,40 @@ window._rpFusionRango=async function(slug,cidF){
     }
     const _gDiaR={}
     for(const ckG of camps){const gdG=_gCampDia[ckG]||{};for(const fG of Object.keys(gdG))_gDiaR[fG]=(_gDiaR[fG]||0)+gdG[fG]}
+    // ── MEJORA 1 (2jul26): gasto VIVO de HOY para el chip 💸/💰 — Meta API batch por campañas ──
+    // Si el rango incluye HOY, el gasto de HOY se trae EN VIVO (una llamada batch ?ids= por lote
+    // de 50 campañas con insights de hoy). Días pasados siguen con meta_insights de la BD (ya
+    // cerrados). Si no hay token o Meta falla → se queda el dato de BD (fallback silencioso).
+    // NO toca _fusR ni F.dias: el desglose por campaña de la tabla sigue igual que siempre.
+    const _hoyVivoR=_isoR(new Date())
+    let _gVivoOkR=false
+    if(_todasFechasR.indexOf(_hoyVivoR)>=0){
+      try{
+        const _tkV=await getConfig('meta_access_token')
+        if(_tkV){
+          let _gVivoHoy=0
+          const _trV=encodeURIComponent(JSON.stringify({since:_hoyVivoR,until:_hoyVivoR}))
+          for(let iV=0;iV<camps.length;iV+=50){
+            const _loteV=camps.slice(iV,iV+50)
+            const _uV=`${META_BASE}/?ids=${encodeURIComponent(_loteV.join(','))}&fields=insights.time_range(${_trV}){spend}&access_token=${_tkV}`
+            const _rV=await fetch(_uV)
+            if(!_rV.ok){console.warn('[rango] gasto vivo HOY respondió',_rV.status);continue}
+            const _oV=await _rV.json()
+            if(_oV&&typeof _oV==='object'){
+              for(const ckV of _loteV){
+                const _dV=_oV[ckV]&&_oV[ckV].insights&&_oV[ckV].insights.data
+                if(_dV&&_dV.length){_gVivoOkR=true;for(const rIV of _dV)_gVivoHoy+=parseFloat(rIV.spend)||0}
+              }
+            }
+          }
+          if(_gVivoOkR)_gDiaR[_hoyVivoR]=_gVivoHoy
+        }
+      }catch(_eV){console.warn('[rango] gasto vivo HOY falló, se usa BD:',_eV&&_eV.message)}
+    }
     const _ganDiaR={}
+    // MEJORA 2 (2jul26): desglose por día de la 💰 (los mismos números del cálculo) para el
+    // tooltip de 3 partes del chip: explicación → FÓRMULA → CON TUS DATOS.
+    const _ganDetDiaR={}
     if(_ecoOkR){
       const _devR=_ecoR.devPct!=null?_ecoR.devPct:0.19
       for(const fG of _todasFechasR){
@@ -20469,15 +20709,18 @@ window._rpFusionRango=async function(slug,cidF){
         const _ventaEfG=Math.round(_ventaG*(1-_devR))
         const _convCG=(_convDiaR[fG]||0)*(_ecoR.costoConv||100)
         _ganDiaR[fG]=_ventaEfG-_provG-_fleteG-_devCG-(_gDiaR[fG]||0)-_convCG
+        _ganDetDiaR[fG]={ventaEf:_ventaEfG,prov:_provG,flete:_fleteG,dev:_devCG,gasto:Math.round(_gDiaR[fG]||0),conv:_convCG,devPct:_devR}
       }
     }
     // 6) Render — mismo lenguaje visual de la fusión, semáforo canónico, días con actividad
     const BE=ctx.margenBE||0
     const _esc=s=>String(s==null?'':s).replace(/</g,'&lt;').replace(/"/g,'&quot;')
-    const _pill=(cpa,sz)=>{
+    const _pill=(cpa,sz,gP,nP)=>{
       if(!cpa||cpa<=0)return''
       const col=window._nexoSemColor?window._nexoSemColor(cpa,BE):'var(--muted)'
-      return`<span style="margin-left:8px;font-size:${sz==='sm'?'10px':'11px'};font-weight:700;color:${col};border:1px solid ${col};border-radius:999px;padding:1px 8px;white-space:nowrap" title="CPA real = gasto ÷ ventas · Break-even: $${fmt(BE)} · 🟢 ≤70% del BE va bien · 🟡 cuidado · 🔴 pierde plata">🎯 $${fmt(cpa)}</span>`
+      // MEJORA 2 (2jul26): si vienen gasto y ventas, el tooltip sale en 3 partes CON TUS DATOS
+      const _tip=(gP>0&&nP>0)?window._nexoTip3('🎯 CPA REAL: lo que costó cada venta. 🟢 ≤70% del BE va bien · 🟡 cuidado · 🔴 pierde plata.','gasto ÷ ventas',`$${fmt(Math.round(gP))} ÷ ${nP} = $${fmt(cpa)} vs break-even $${fmt(BE)}`):`CPA real = gasto ÷ ventas · Break-even: $${fmt(BE)} · 🟢 ≤70% del BE va bien · 🟡 cuidado · 🔴 pierde plata`
+      return`<span style="margin-left:8px;font-size:${sz==='sm'?'10px':'11px'};font-weight:700;color:${col};border:1px solid ${col};border-radius:999px;padding:1px 8px;white-space:nowrap" title="${_tip}">🎯 $${fmt(cpa)}</span>`
     }
     const _gTxt=g=>g>0?`<span style="margin-left:8px;font-size:10px;color:var(--muted);white-space:nowrap">💸 $${fmt(g)}</span>`:''
     const _btnC=(id,label)=>{
@@ -20495,7 +20738,7 @@ window._rpFusionRango=async function(slug,cidF){
       const _bLF=_lnF?`border-left:4px solid ${_lnF.bd};`:''
       if(n===0&&(!g||g<=0))return`<div style="display:flex;align-items:center;font-size:${fs};color:var(--subtle);font-style:italic;padding:3px 8px;${_bLF}border-radius:5px"><span style="width:72px;flex-shrink:0;${_lnF?`color:${_lnF.c};opacity:.65;font-weight:600;font-style:normal`:''}">📅 ${_fLab(f)}</span><span style="margin-left:8px">— no corrió ese día —</span><span style="margin-left:auto;font-weight:700;padding-left:10px">0</span></div>`
       if(n===0&&g>0)return`<div class="nx-dia-row" style="display:flex;align-items:center;font-size:${fs};color:var(--amber);padding:3px 8px;background:rgba(245,158,11,.06);${_bLF}border-radius:5px" title="Ese día gastó plata pero vendió CERO: fuga."><span style="width:72px;flex-shrink:0;font-weight:600">📅 ${_fLab(f)}</span>${_gTxt(g)}<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap">🚨 0 ventas</span><span style="margin-left:auto;font-weight:700;padding-left:10px">0</span></div>`
-      return`<div class="nx-dia-row" style="display:flex;align-items:center;font-size:${fs};color:var(--muted);padding:3px 8px;${_lnF?`background:${_lnF.bg};`:''}${_bLF}border-radius:5px"><span style="width:72px;flex-shrink:0;font-weight:700;color:${_lnF?_lnF.c:'var(--text)'}">📅 ${_fLab(f)}</span>${_gTxt(g)}${_pill(cpa,'sm')}<span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px" title="Ventas de este día">${n}</span></div>`
+      return`<div class="nx-dia-row" style="display:flex;align-items:center;font-size:${fs};color:var(--muted);padding:3px 8px;${_lnF?`background:${_lnF.bg};`:''}${_bLF}border-radius:5px"><span style="width:72px;flex-shrink:0;font-weight:700;color:${_lnF?_lnF.c:'var(--text)'}">📅 ${_fLab(f)}</span>${_gTxt(g)}${_pill(cpa,'sm',g,n)}<span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px" title="Ventas de este día">${n}</span></div>`
     }
     const _totVR=_listaR.reduce((s,F)=>s+F.count,0)
     // NUEVO (2jul26 · Mejora 7): el resumen del rango y la tira de días con 💰 YA NO van arriba
@@ -20508,7 +20751,15 @@ window._rpFusionRango=async function(slug,cidF){
       const ganT=_ganDiaR[fT]
       const colT=!_ecoOkR?'var(--muted)':((ganT||0)>=0?'var(--green)':'var(--red)')
       const vivoT=(nT>0||idsT>0||cvT>0||gT>0)
-      return`<span style="font-size:9.5px;font-weight:700;padding:2px 8px;border-radius:999px;white-space:nowrap;background:${vivoT?'rgba(255,255,255,.05)':'rgba(255,255,255,.02)'};color:${vivoT?'var(--text)':'var(--subtle)'};border:1px solid ${vivoT?'var(--border)':'rgba(255,255,255,.06)'}" title="📅 ${_fLab(fT)} · ${nT} venta${nT===1?'':'s'} confirmada${nT===1?'':'s'} en estas campañas · ${idsT} IDs del aux · ${cvT} conversaciones · gasto $${fmt(gT)} · 💰 = venta efectiva − costo proveedor − flete − devoluciones − gasto del día − costo de conversación. NO incluye gastos fijos y SOLO cuenta ventas de las campañas del rango (las ⚠️ fuera no entran).${!_ecoOkR?' · Para ver la 💰 recarga el resumen (falta la economía del producto en memoria).':''}">📅 ${_fLab(fT)} · ${nT}🛒·${idsT}🆔·${cvT}💬·📦${_stkDiaRg[fT]!=null?fmt(_stkDiaRg[fT]):'—'} · 💸$${fmt(gT)} · <span style="color:${colT}">💰${_ecoOkR?(((ganT||0)>=0?'+':'−')+'$'+fmt(Math.abs(ganT||0))):'—'}</span></span>`
+      // NUEVO (2jul26 · Mejora 4): 🎯 CPA REAL del día = gasto ÷ ventas 🛒 (si aún no hay cruce, por 🆔 IDs), con semáforo BE
+      const _nCpaT=nT>0?nT:idsT
+      const _cpaT=(gT>0&&_nCpaT>0)?Math.round(gT/_nCpaT):0
+      const _colCpaT=(_cpaT>0&&typeof window!=='undefined'&&typeof window._nexoSemColor==='function')?window._nexoSemColor(_cpaT,BE):'var(--muted)'
+      // MEJORA 2 (2jul26): tooltip de 3 partes — explicación en cristiano → FÓRMULA → CON TUS DATOS
+      const dT=_ganDetDiaR[fT]||null
+      const _esHoyT=fT===_hoyVivoR
+      const _tipT=`📅 ${_fLab(fT)}: ${nT} venta${nT===1?'':'s'} confirmada${nT===1?'':'s'} Dropi (TODAS las del producto, mismo número de la card — la tabla de abajo sí filtra por campañas) · ${idsT} IDs del aux · ${cvT} conversaciones. Gasto${_esHoyT?(_gVivoOkR?' de HOY: VIVO de Meta API ahora mismo':' de HOY: de la BD (último sync — Meta API no respondió)'):': meta_insights BD (día cerrado)'}. NO incluye gastos fijos (esos van en Dashboard).&#10;&#10;FÓRMULA:&#10;💰 = venta×(1−dev) − costo proveedor − flete envío − (ventas×dev×flete dev) − gasto ads − (conv × costo conv)&#10;🎯 CPA = gasto ÷ ventas 🛒 (si HOY aún no cruza: ÷ 🆔 IDs)&#10;&#10;CON TUS DATOS:${(_ecoOkR&&dT)?`&#10;💰 $${fmt(dT.ventaEf)} − $${fmt(dT.prov)} − $${fmt(dT.flete)} − $${fmt(dT.dev)} − $${fmt(dT.gasto)} − $${fmt(dT.conv)} = ${(ganT||0)>=0?'+':'−'}$${fmt(Math.abs(ganT||0))} (dev ${Math.round((dT.devPct||0)*100)}%)`:'&#10;💰 — (recarga el resumen: falta la economía del producto en memoria)'}${_cpaT>0?`&#10;🎯 $${fmt(gT)} ÷ ${_nCpaT} = $${fmt(_cpaT)} vs break-even $${fmt(BE)}`:''}`
+      return`<span style="font-size:9.5px;font-weight:700;padding:2px 8px;border-radius:999px;white-space:nowrap;background:${vivoT?'rgba(255,255,255,.05)':'rgba(255,255,255,.02)'};color:${vivoT?'var(--text)':'var(--subtle)'};border:1px solid ${vivoT?'var(--border)':'rgba(255,255,255,.06)'}" title="${_tipT}">📅 ${_fLab(fT)} · ${nT}🛒·${idsT}🆔·${cvT}💬·📦${_stkDiaRg[fT]!=null?fmt(_stkDiaRg[fT]):'—'} · 💸$${fmt(gT)}${_esHoyT&&_gVivoOkR?'⚡':''}${_cpaT>0?` · <span style="color:${_colCpaT}">🎯$${fmt(_cpaT)}</span>`:''} · <span style="color:${colT}">💰${_ecoOkR?(((ganT||0)>=0?'+':'−')+'$'+fmt(Math.abs(ganT||0))):'—'}</span></span>`
     }).join('')}</div>`
     if(!_listaR.length){
       html+=`<div style="font-size:11.5px;color:var(--subtle);font-style:italic;padding:6px 0">— Nada que mostrar en este rango: ni ventas ni gasto en estas campañas. —</div>`
@@ -20531,18 +20782,19 @@ window._rpFusionRango=async function(slug,cidF){
     // ID+📋 y de últimas CAMPAÑA+ALERTAS+📅DÍAS. Las columnas 💸GASTO / 🎯CPA / 🎯CPA HOY se quitaron.
     // Cada encabezado de día lleva el MISMO carril de color de sus celdas (h[6]) para alinear visualmente.
     const _laneHdrRg=(ix)=>{const _l=(typeof window!=='undefined'&&window._nexoDiaLane)?window._nexoDiaLane(ix):null;return _l?('background:'+_l.bg+';'):''}
+    // MEJORA 3 (2jul26): orden pedido → 📅DÍAS · ⚡ESTADO · ⏯ON/OFF · [días] · 🆔TOT · 🛒VTS · 💰PRESUP. · 🆔ID · 📋 · 📣CAMPAÑA · 🚨ALERTA
     const _hdrR=`<div style="display:flex;align-items:center;min-width:max-content;padding:4px 8px 2px;border-bottom:1px dashed rgba(255,255,255,.1)">${[
-      ..._todasFechasR.flatMap((fH,iH3)=>fH===_hoyISO_R?[[_cwR.iD,'🆔 '+_fLabHR(fH),'#fcd34d','Ventas por IDs del aux de HOY (T. Cierre, antes del cruce Dropi) — hoy aún no hay cruce Dropi, por eso no va la 🛒',0,'fd'+iH3+'i',_laneHdrRg(iH3)]]:[[_cwR.vD,'🛒 '+_fLabHR(fH),'#86efac','Ventas confirmadas (cuadre Dropi) del '+_fLab(fH)+' — si no cuadran con las 🆔 de al lado salen en ámbar',0,'fd'+iH3+'v',_laneHdrRg(iH3)],[_cwR.iD,'🆔 '+_fLabHR(fH),'#fcd34d','Ventas por IDs del aux del '+_fLab(fH)+' — si no cuadran con las 🛒 de al lado salen en ámbar',0,'fd'+iH3+'i',_laneHdrRg(iH3)]]),
+      [_cwR.dias,'📅 DÍAS','#c4b5fd','Días con actividad (venta o gasto) ÷ días del rango'],
       [_cwR.est,'⚡ ESTADO','#5eead4','Estado REAL (foto de AHORA): 🟢 ACTIVA · ⏸ APAGADA · 🔕 NO ENTREGA · ⚪ SIN ACTIVIDAD. Sale del último llamado en vivo del portafolio'],
       [_cwR.tog,'⏯ ON/OFF','#f9a8d4','Pausar o activar la campaña en Meta (mismo modal de siempre)'],
+      ..._todasFechasR.flatMap((fH,iH3)=>fH===_hoyISO_R?[[_cwR.iD,'🆔 '+_fLabHR(fH),'#fcd34d','Ventas por IDs del aux de HOY (T. Cierre, antes del cruce Dropi) — hoy aún no hay cruce Dropi, por eso no va la 🛒',0,'fd'+iH3+'i',_laneHdrRg(iH3)]]:[[_cwR.vD,'🛒 '+_fLabHR(fH),'#86efac','Ventas confirmadas (cuadre Dropi) del '+_fLab(fH)+' — si no cuadran con las 🆔 de al lado salen en ámbar',0,'fd'+iH3+'v',_laneHdrRg(iH3)],[_cwR.iD,'🆔 '+_fLabHR(fH),'#fcd34d','Ventas por IDs del aux del '+_fLab(fH)+' — si no cuadran con las 🛒 de al lado salen en ámbar',0,'fd'+iH3+'i',_laneHdrRg(iH3)]]),
       [_cwR.iTot,'🆔 TOT','#fcd34d','Total de ventas por IDs del aux sumando TODOS los días del rango — compáralo con 🛒 VTS',0,'fitot'],
       [_cwR.vts,'🛒 VTS','#e2e8f0','Ventas totales confirmadas de la campaña en el rango',0,'fvts'],
       [_cwR.bud,'💰 PRESUP.','#a5b4fc','Cambiar presupuesto (mismo modal de las cards)',0,'budval'],
       [_cwR.id,'🆔 ID','#fcd34d','ID de la campaña (cópialo con el botón 📋)'],
       [_cwR.cp,'📋','#94a3b8','Copiar el ID'],
       [_cwR.nom,'📣 CAMPAÑA','#e2e8f0','Nombre de la campaña',1],
-      [_cwR.alr,'🚨 ALERTA','#fda4af','🛑 PRENDER YA (foto de HOY): hoy $0 pero vendía antes · 📉 NO REMONTA: el CPA de TODO el rango pasa el break-even'],
-      [_cwR.dias,'📅 DÍAS','#c4b5fd','Días con actividad (venta o gasto) ÷ días del rango']
+      [_cwR.alr,'🚨 ALERTA','#fda4af','🛑 PRENDER YA (foto de HOY): hoy $0 pero vendía antes · 📉 NO REMONTA: el CPA de TODO el rango pasa el break-even']
     ].map(h=>h[5]?`<span onclick="event.stopPropagation();window._rpRangoSort('${cidF}','${h[5]}',this)" style="display:inline-block;width:${h[0]}px;flex-shrink:0;font-size:8.5px;font-weight:700;letter-spacing:.3px;color:${h[2]};white-space:nowrap;cursor:pointer;padding-right:6px;user-select:none;${h[6]||''}" title="${h[3]} · CLIC: ordenar de mayor a menor · otro CLIC: de menor a mayor">${h[1]}<span class="rp-sort-arr" data-key="${h[5]}" style="color:var(--text)"></span></span>`:`<span style="display:inline-block;width:${h[0]}px;flex-shrink:0;font-size:8.5px;font-weight:700;letter-spacing:.3px;color:${h[2]};white-space:nowrap;cursor:help;padding-right:6px;${h[6]||''}" title="${h[3]}">${h[1]}</span>`).join('')}</div>`
     const _mkTotRowR=(suf)=>{
       const _tG=_listaR.reduce((s,F)=>s+(F.gasto||0),0)
@@ -20566,13 +20818,13 @@ window._rpFusionRango=async function(slug,cidF){
       // NUEVO (2jul26 · Mejora 5+6): la Σ arranca con los DÍAS (mismo orden nuevo de la tabla);
       // la etiqueta "Σ TOTALES" vive en la columna CAMPAÑA que ahora va al final. Sin GASTO/CPA/CPA HOY.
       return `<div id="${cidF}-rng-totrow${suf}" style="display:flex;align-items:center;font-size:12px;min-height:30px;min-width:max-content;padding:4px 8px;${suf==='-top'?'margin-bottom:3px;border-bottom:1px solid var(--purple);border-radius:6px 6px 0 0':'margin-top:3px;border-top:1px solid var(--purple);border-radius:0 0 6px 6px'};background:rgba(167,139,250,.08)" title="Σ TOTALES del rango: suma de las campañas VISIBLES (respeta los filtros activos). Cada día con su gasto debajo.${suf==='-top'?' Misma fila que la de abajo, repetida aquí para verla sin bajar.':''}">
+        <span style="display:inline-block;width:${_cwR.dias+_cwR.est+_cwR.tog}px;flex-shrink:0"></span>
         ${_diasTotR}
-        <span style="display:inline-block;width:${_cwR.est+_cwR.tog}px;flex-shrink:0"></span>
         ${_tdR(_cwR.iTot,_tI>0?'🆔 '+_tI:'—','#fcd34d',`${cidF}-rng-tot${suf}-itot`)}
         ${_tdR(_cwR.vts,_tV,'var(--text)',`${cidF}-rng-tot${suf}-vts`)}
         <span style="display:inline-block;width:${_cwR.bud+_cwR.id+_cwR.cp}px;flex-shrink:0"></span>
         <span style="display:inline-block;width:${_cwR.nom}px;flex-shrink:0;font-weight:700;color:var(--purple);white-space:nowrap;">Σ TOTALES (<span id="${cidF}-rng-tot${suf}-n">${_listaR.length}</span> campaña${_listaR.length===1?'':'s'})</span>
-        <span style="display:inline-block;width:${_cwR.alr+_cwR.dias}px;flex-shrink:0"></span>
+        <span style="display:inline-block;width:${_cwR.alr}px;flex-shrink:0"></span>
       </div>`
     }
     const _filasR=_listaR.map((F,i)=>{
@@ -20592,7 +20844,7 @@ window._rpFusionRango=async function(slug,cidF){
           const _hovAdR=esFugaAd?` onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='.55'" title="🚨 Gastó y no vendió: bloque apagado a propósito. Pasa el cursor para verlo completo."`:''
           const _badgeVendioR=_vendioAdR?`<span style="margin-left:6px;font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:var(--green-bg);color:var(--green);border:1px solid var(--green)" title="Este anuncio SÍ vendió en el rango: ${A.count} venta${A.count===1?'':'s'}">🏆 VENDIÓ</span>`:''
           return`<div${_hovAdR} style="margin-top:6px;padding:6px 8px;background:${_bgAdR};border-radius:5px;${_bordAdR}">
-            <div style="display:flex;align-items:center;font-size:${_vendioAdR?'12px':'11.5px'};color:${esFugaAd?'var(--amber)':'var(--muted)'}"><span style="font-family:monospace${_vendioAdR?';font-size:12.5px;font-weight:700;color:var(--text)':''}">🖼️ ${_esc(A.adId)}</span>${_btnC(A.adId,'ID del anuncio')}${_badgeVendioR}${_gTxt(A.gasto)}${esFugaAd?`<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap">🚨 gastó y no vendió</span>`:_pill(A.cpaT,'sm')}<span style="margin-left:auto;color:${esFugaAd?'var(--amber)':'var(--text)'};font-weight:700;padding-left:10px">${A.count}</span>${A.ent>0?`<span style="color:#86efac;font-weight:800;font-size:10px;padding-left:10px;white-space:nowrap" title="📦 ENTREGADAS: órdenes que YA llegaron al cliente">📦 ${A.ent}</span>`:''}</div>
+            <div style="display:flex;align-items:center;font-size:${_vendioAdR?'12px':'11.5px'};color:${esFugaAd?'var(--amber)':'var(--muted)'}"><span style="font-family:monospace${_vendioAdR?';font-size:12.5px;font-weight:700;color:var(--text)':''}">🖼️ ${_esc(A.adId)}</span>${_btnC(A.adId,'ID del anuncio')}${_badgeVendioR}${_gTxt(A.gasto)}${esFugaAd?`<span style="margin-left:8px;font-size:10px;font-weight:700;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:1px 8px;white-space:nowrap">🚨 gastó y no vendió</span>`:_pill(A.cpaT,'sm',A.gasto,A.count)}<span style="margin-left:auto;color:${esFugaAd?'var(--amber)':'var(--text)'};font-weight:700;padding-left:10px">${A.count}</span>${A.ent>0?`<span style="color:#86efac;font-weight:800;font-size:10px;padding-left:10px;white-space:nowrap" title="📦 ENTREGADAS: órdenes que YA llegaron al cliente">📦 ${A.ent}</span>`:''}</div>
             <div style="margin:2px 0 0 14px;border-left:1px solid ${esFugaAd?'var(--amber)':'var(--border)'};padding-left:8px">${_fA.map(f=>_filaF(f,A.dias[f].n,A.dias[f].g,A.dias[f].cpa,'sm')).join('')}</div>
           </div>`
         }).join('')
@@ -20656,21 +20908,21 @@ window._rpFusionRango=async function(slug,cidF){
         const _cpaDiaV=(_gN>0&&_vN>0)?Math.round(_gN/_vN):0
         const _cpaDiaI=(!_cpaDiaV&&_gN>0&&_iN>0)?Math.round(_gN/_iN):0
         const _cpaDiaN=_cpaDiaV||_cpaDiaI
-        const _cpaHtmlD=_cpaDiaN>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(_cpaDiaN)}">${_cpaDiaV?'🎯':'🆔'}$${fmt(_cpaDiaN)}</span>`:''
+        const _cpaHtmlD=_cpaDiaN>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(_cpaDiaN)}" title="${window._nexoTip3((_cpaDiaV?'🎯 CPA del día con ventas confirmadas Dropi.':'🆔 CPA del día por IDs del aux (sin cruce aún).'),'gasto del día ÷ '+(_cpaDiaV?'ventas 🛒':'IDs 🆔'),`$${fmt(Math.round(_gN))} ÷ ${_cpaDiaV?_vN:_iN} = $${fmt(_cpaDiaN)} vs BE $${fmt(BE)}`)}">${_cpaDiaV?'🎯':'🆔'}$${fmt(_cpaDiaN)}</span>`:''
         const _devPctRg=(_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19
         const _cpaEntDiaN=(_gN>0&&_vN>0)?Math.round(_gN/(_vN*(1-_devPctRg))):0
-        const _cpaEntHtmlD=_cpaEntDiaN>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(_cpaEntDiaN)}" title="📦 CPA V. ENTREGADAS del día = gasto ÷ (ventas × (1−${Math.round(_devPctRg*100)}% devol))">📦$${fmt(_cpaEntDiaN)}</span>`:''
+        const _cpaEntHtmlD=_cpaEntDiaN>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(_cpaEntDiaN)}" title="${window._nexoTip3('📦 CPA V. ENTREGADAS del día: lo que cuesta cada venta que DE VERDAD llega, descontando devoluciones.','gasto ÷ (ventas × (1−'+Math.round(_devPctRg*100)+'% devol))',`$${fmt(Math.round(_gN))} ÷ (${_vN} × ${Math.round((1-_devPctRg)*100)}%) = $${fmt(_cpaEntDiaN)}`)}">📦$${fmt(_cpaEntDiaN)}</span>`:''
         const _pctConfRg=(ctx.pctConf!=null?ctx.pctConf:0.62)
         // NUEVO (2jul26 · Mejora 4): en HOY el gasto se muestra SIEMPRE que exista, aunque las
         // ventas/IDs vayan en 0 (antes la celda salía "—" y el gasto solo se veía en el botón 💰).
         // Si HOY gastó y va en 0 total, sale con 🚨 en ámbar (misma señal de fuga de los otros días).
         const _gHtmlI_R=(_gN>0&&(_iN>0||fD===_hoyISO_R))?`<span style="display:block;font-size:8.5px;line-height:1.1;color:${(_fugaD&&fD===_hoyISO_R)?'var(--amber)':'var(--subtle)'};font-weight:600">${(_fugaD&&fD===_hoyISO_R)?'🚨':''}${_gAbrR(_gN)}</span>`:''
         const _cpaIdsN_R=(_gN>0&&_iN>0)?Math.round(_gN/_iN):0
-        const _cpaIdsHtml_R=_cpaIdsN_R>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(_cpaIdsN_R)}" title="🆔 CPA IDS del día = gasto ÷ ventas por IDs">🆔$${fmt(_cpaIdsN_R)}</span>`:''
+        const _cpaIdsHtml_R=_cpaIdsN_R>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(_cpaIdsN_R)}" title="${window._nexoTip3('🆔 CPA IDS del día: costo por venta según los IDs del aux (CRUDO, sin ajustar por confirmación).','gasto del día ÷ ventas por IDs',`$${fmt(Math.round(_gN))} ÷ ${_iN} = $${fmt(_cpaIdsN_R)} vs BE $${fmt(BE)}`)}">🆔$${fmt(_cpaIdsN_R)}</span>`:''
         const _cpaEfN_R=(_gN>0&&_iN>0)?Math.round(_gN/(_iN*_pctConfRg)):0
-        const _cpaEfHtml_R=_cpaEfN_R>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(_cpaEfN_R)}" title="🔮 CPA R. EFECTIVAS del día = gasto ÷ (IDs × ${Math.round(_pctConfRg*100)}% confirmación)">🔮$${fmt(_cpaEfN_R)}</span>`:''
+        const _cpaEfHtml_R=_cpaEfN_R>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(_cpaEfN_R)}" title="${window._nexoTip3('🔮 CPA R. EFECTIVAS del día: CPA ajustado asumiendo que solo el '+Math.round(_pctConfRg*100)+'% de los IDs se confirmará en el cruce.','gasto ÷ (IDs × % confirmación)',`$${fmt(Math.round(_gN))} ÷ (${_iN} × ${Math.round(_pctConfRg*100)}%) = $${fmt(_cpaEfN_R)}`)}">🔮$${fmt(_cpaEfN_R)}</span>`:''
         const _vProyN_R=_iN>0?Math.floor(_iN*_pctConfRg*10)/10:0
-        const _vProyHtml_R=_vProyN_R>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:var(--purple)" title="🔮 Ventas proyectadas post-Dropi = ${_iN} IDs × ${Math.round(_pctConfRg*100)}% confirmación">🔮 ${_vProyN_R.toFixed(1)}</span>`:''
+        const _vProyHtml_R=_vProyN_R>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:var(--purple)" title="${window._nexoTip3('🔮 VENTAS PROYECTADAS post-Dropi: las que se estima que el cruce confirmará de estos IDs.','IDs × % confirmación histórica',`${_iN} × ${Math.round(_pctConfRg*100)}% = ${_vProyN_R.toFixed(1)}`)}">🔮 ${_vProyN_R.toFixed(1)}</span>`:''
         return (fD===_hoyISO_R?'':_cR(_cwR.vD,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_cV};font-weight:700;line-height:1.15">${_vN>0?_vN:'—'}</span>${_gHtmlD}${_cpaHtmlD}${_cpaEntHtmlD}</span>`,true,_tipP,false,_bgLaneD,`data-rcol="d${_idxDia}v"`))
           +_cR(_cwR.iD,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_cI3};font-weight:700;line-height:1.15">${_iN>0?_iN:'—'}</span>${_gHtmlI_R}${_cpaIdsHtml_R}${_cpaEfHtml_R}${_vProyHtml_R}</span>`,true,_tipP,false,_bgLaneD,`data-rcol="d${_idxDia}i"`)
       }).join('')
@@ -20678,17 +20930,17 @@ window._rpFusionRango=async function(slug,cidF){
       const _descTotR=(_iTotR!==F.count)&&(_iTotR>0||F.count>0)
       return`<div id="${_rcid}-box" class="rp-rng-box" style="padding:4px 0;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-radius:6px;border-bottom:1px solid rgba(255,255,255,.04)">
         <div class="rp-rng-row" data-fgto="${Math.round(F.gasto||0)}" data-fcpa="${Math.round(F.cpa||0)}" data-fcpah="${(()=>{if(!_hoyEnR||_gHoyR<=0)return 0;const vH2=(F.dias[_hoyISO_R]&&F.dias[_hoyISO_R].count)||0;const iH2=_idsCampR(F.campId,_hoyISO_R);const nH2=vH2>0?vH2:iH2;return nH2>0?Math.round(_gHoyR/nH2):0})()}" data-fitot="${_iTotR}" data-fvts="${F.count||0}" data-fsem="${_semCodeR||''}" data-factiva="${_activaRealR===true?1:0}" data-fghoy="${_gHoyR>0?1:0}" data-fgp="${Math.round(_gHoyR||0)}" data-fnoent="${(_estR==='ACTIVE'&&_entR===false)?1:0}" data-fcampid="${_esc(F.campId)}" data-fadids="${Object.keys(F.ads||{}).join(',')}" ${_todasFechasR.map((fD2,di2)=>`data-fd${di2}v="${(F.dias[fD2]&&F.dias[fD2].count)||0}" data-fd${di2}i="${_idsCampR(F.campId,fD2)}" data-fd${di2}g="${Math.round((F.dias[fD2]&&F.dias[fD2].gasto)||0)}"`).join(' ')} onclick="window._rpToggleCuadre('${_rcid}')" style="cursor:pointer;display:flex;align-items:center;font-size:12px;color:var(--text);min-height:28px;min-width:max-content;padding:2px 8px" title="Toca para ver esta campaña día por día y sus anuncios agrupados por ID">
-          ${_paresDiaR}
+          ${_cR(_cwR.dias,`<span style="font-size:10px;font-weight:700;color:var(--purple)">🗓 ${_fechasF.length}/${_nDias}</span>`,false,'Días con actividad: '+(_fechasF.length?_fechasF.slice().reverse().map(_fLab).join(', '):'ninguno')+' · de '+_nDias+' del rango')}
           ${_cR(_cwR.est,`<span style="display:inline-flex;flex-direction:column;gap:1px;align-items:flex-start;line-height:1.1">${_badgeEstR}<span style="font-size:9px;color:var(--subtle);max-width:${_cwR.est-6}px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🏢 ${_esc(F.accNombre)}</span></span>`,false,'Estado · Cuenta: '+_esc(F.accNombre))}
           ${_cR(_cwR.tog,_btnEstR,false,'',true)}
-          ${_cR(_cwR.iTot,`<span class="rp-life-itot" style="display:inline-block;text-align:right"><span style="display:block;color:${_descTotR?'var(--amber)':(_iTotR>0?'#fcd34d':'var(--subtle)')};font-weight:700;line-height:1.15">${_iTotR>0?'🆔 '+_iTotR:'—'}</span>${(F.gasto>0&&_iTotR>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round(F.gasto/_iTotR))}">🆔$${fmt(Math.round(F.gasto/_iTotR))}</span>`:''}</span>`,true,'Total ventas por IDs del rango: '+_iTotR+(_descTotR?' — no cuadra con las 🛒 VTS totales ('+F.count+')':' — cuadra con las 🛒 VTS totales'))}
-          ${_cR(_cwR.vts,`<span class="rp-life-vts" style="display:inline-block;text-align:right"><span style="display:block;color:var(--text);font-weight:700;line-height:1.15">${F.count}</span>${((F.gasto-_gHoyR)>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round((F.gasto-_gHoyR)/F.count))}">🎯$${fmt(Math.round((F.gasto-_gHoyR)/F.count))}</span>`:''}${((F.gasto-_gHoyR)>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round((F.gasto-_gHoyR)/(F.count*(1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19)))))}" title="📦 CPA V. ENTREGADAS = gasto (sin HOY) ÷ (ventas × (1−devol))">📦$${fmt(Math.round((F.gasto-_gHoyR)/(F.count*(1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19)))))}</span>`:''}${F.ent>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:800;color:#86efac" title="📦 ENTREGADAS: órdenes que YA llegaron al cliente (subconjunto de las confirmadas)">📦 ${F.ent}</span>`:''}</span>`,true,'Ventas totales del rango · 🎯 CPA = gasto (SIN el de HOY) ÷ ventas · 📦 CPA entregadas y nº de entregadas')}
+          ${_paresDiaR}
+          ${_cR(_cwR.iTot,`<span class="rp-life-itot" style="display:inline-block;text-align:right"><span style="display:block;color:${_descTotR?'var(--amber)':(_iTotR>0?'#fcd34d':'var(--subtle)')};font-weight:700;line-height:1.15">${_iTotR>0?'🆔 '+_iTotR:'—'}</span>${(F.gasto>0&&_iTotR>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round(F.gasto/_iTotR))}">🆔$${fmt(Math.round(F.gasto/_iTotR))}</span>`:''}</span>`,true,window._nexoTip3('🆔 TOT: total de ventas por IDs del aux en el rango'+(_descTotR?' — NO cuadra con las 🛒 VTS ('+F.count+'), revisa cruce o IDs':' — cuadra con las 🛒 VTS')+'.','CPA IDS = gasto del rango ÷ IDs',(F.gasto>0&&_iTotR>0)?`$${fmt(Math.round(F.gasto))} ÷ ${_iTotR} = $${fmt(Math.round(F.gasto/_iTotR))}`:`IDs: ${_iTotR}`))}
+          ${_cR(_cwR.vts,`<span class="rp-life-vts" style="display:inline-block;text-align:right"><span style="display:block;color:var(--text);font-weight:700;line-height:1.15">${F.count}</span>${((F.gasto-_gHoyR)>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round((F.gasto-_gHoyR)/F.count))}">🎯$${fmt(Math.round((F.gasto-_gHoyR)/F.count))}</span>`:''}${((F.gasto-_gHoyR)>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round((F.gasto-_gHoyR)/(F.count*(1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19)))))}" title="📦 CPA V. ENTREGADAS = gasto (sin HOY) ÷ (ventas × (1−devol))">📦$${fmt(Math.round((F.gasto-_gHoyR)/(F.count*(1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19)))))}</span>`:''}${F.ent>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:800;color:#86efac" title="📦 ENTREGADAS: órdenes que YA llegaron al cliente (subconjunto de las confirmadas)">📦 ${F.ent}</span>`:''}</span>`,true,window._nexoTip3('🛒 VTS: ventas confirmadas Dropi del rango. Las 🆔 de HOY no entran hasta que el cruce confirme. Como HOY no tiene cruce, sus CPAs se calculan SIN el gasto de hoy.','🎯 CPA = gasto (sin HOY) ÷ ventas · 📦 CPA entregadas = gasto (sin HOY) ÷ (ventas × (1−dev))',((F.gasto-_gHoyR)>0&&F.count>0)?`🎯 $${fmt(Math.round(F.gasto-_gHoyR))} ÷ ${F.count} = $${fmt(Math.round((F.gasto-_gHoyR)/F.count))}&#10;📦 $${fmt(Math.round(F.gasto-_gHoyR))} ÷ (${F.count} × ${Math.round((1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19))*100)}%) = $${fmt(Math.round((F.gasto-_gHoyR)/(F.count*(1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19)))))}`:`Ventas: ${F.count}`))}
           ${_cR(_cwR.bud,_btnBudR,false,'',true)}
           ${_cR(_cwR.id,`<span style="font-family:monospace;font-size:10.5px;color:var(--muted)">${_esc(F.campId)}</span>`,false,'ID de la campaña: '+_esc(F.campId))}
           ${_cR(_cwR.cp,_btnC(F.campId,'ID de la campaña'),false,'',true)}
           ${_cR(_cwR.nom,`<span id="${_rcid}-chev" style="display:inline-block;width:12px;font-size:9px;color:var(--muted)">▸</span><span style="margin-left:3px">${_dotR}📣 ${_esc(F.nombre)}</span>`,false,_esc(F.nombre),false,'')}
           ${_cR(_cwR.alr,_alrR,false,'',true)}
-          ${_cR(_cwR.dias,`<span style="font-size:10px;font-weight:700;color:var(--purple)">🗓 ${_fechasF.length}/${_nDias}</span>`,false,'Días con actividad: '+(_fechasF.length?_fechasF.slice().reverse().map(_fLab).join(', '):'ninguno')+' · de '+_nDias+' del rango')}
         </div>
         <div id="${_rcid}-sub" style="display:none;margin:3px 0 2px 16px;border-left:1px solid var(--border);padding-left:10px;max-width:980px;position:sticky;left:0">
           <div style="font-size:10px;color:var(--subtle);padding:4px 8px 2px;letter-spacing:.3px">1️⃣ La campaña completa, día por día (solo días con actividad):</div>
@@ -20706,15 +20958,18 @@ window._rpFusionRango=async function(slug,cidF){
     for(const F of _listaR){const _itR=_idsCampTotR(F.campId);if((F.count||0)>0||_itR>0)_conR++;else _sinR++}
     try{window._rpRangoNd=window._rpRangoNd||{};window._rpRangoNd[cidF]=_todasFechasR.length}catch(_){}
     const _vsvPillsR=`<span style="font-size:9px;color:var(--subtle);font-weight:700;letter-spacing:.3px">SUBSECCIÓN:</span><button class="rp-rng-vsvpill" data-vsv="con" onclick="event.stopPropagation();window._rpRangoFiltro('${cidF}','con',this)" style="font-size:9px;font-weight:700;padding:2px 9px;border-radius:999px;white-space:nowrap;background:var(--green-bg);color:var(--green);border:1px solid var(--green);cursor:pointer" title="✅ CON VENTAS en el rango (Dropi confirmadas 🛒 o por 🆔 IDs). CLIC para ver SOLO estas (clic de nuevo lo quita). La Σ TOTALES se recalcula con lo que quede.">✅ Con ventas: ${_conR}</button><button class="rp-rng-vsvpill" data-vsv="sin" onclick="event.stopPropagation();window._rpRangoFiltro('${cidF}','sin',this)" style="font-size:9px;font-weight:700;padding:2px 9px;border-radius:999px;white-space:nowrap;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid var(--amber);cursor:pointer" title="⛔ SIN VENTAS en el rango (ni Dropi ni 🆔). Candidatas a APAGAR. CLIC para ver SOLO estas (clic de nuevo lo quita). La Σ TOTALES se recalcula con lo que quede.">⛔ Sin ventas: ${_sinR}</button>`
-    html+=`<div style="display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin:2px 0 6px">${_vsvPillsR}</div><div style="overflow-x:auto;padding-bottom:4px">${_hdrR}${_mkTotRowR('-top')}${_filasR}${_mkTotRowR('')}</div>${_resumenRangoHtml}`
+    html+=`<div style="display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin:2px 0 6px">${_vsvPillsR}</div><div style="overflow-x:auto;padding-bottom:4px">${_hdrR}${_mkTotRowR('-top')}${_filasR}${_mkTotRowR('')}</div>`
     const cont=document.getElementById(cidF+'-rango')
     const sub=document.getElementById(cidF+'-sub')
     if(cont){cont.innerHTML=html;cont.style.display='block';cont.dataset.rngOn='1'}
+    // NUEVO (2jul26 · Mejora 7): el resumen 🗓 + tira de días con 💰 se pinta DESPUÉS de ⚡ ACCIONES
+    // (entre la Σ TOTALES y nada más) en su contenedor propio. "Volver a 4 días" lo esconde.
+    try{const _rr=document.getElementById(cidF+'-resumenrng');if(_rr){_rr.innerHTML=_resumenRangoHtml;_rr.style.display='block'}}catch(_){}
     // NUEVO (2jul26 · Mejora 1): los chips del encabezado (Activas / Inactivas ventas / Inactivas /
     // Todas hoy / 🔕 No entrega / ✅⛔ con-sin ventas / urgencia) pasan a mostrar los conteos DEL RANGO.
     try{window._rpRangoPillsSync(cidF)}catch(_){}
     // Si venían filtros aplicados de un rango anterior en esta misma fusión, se reaplican de una
-    try{if((cont.dataset.fsem||'')||(cont.dataset.festado||'')||(cont.dataset.fvsv||'')||(cont.dataset.fid||''))window._rpRangoFiltroFull(cidF,'','')}catch(_){}
+    try{if((cont.dataset.fsem||'')||(cont.dataset.festado||'')||(cont.dataset.fvsv||'')||(cont.dataset.fid||'')||(cont.dataset.fdia||''))window._rpRangoFiltroFull(cidF,'','')}catch(_){}
     // Cross-highlight de COLUMNA: al pasar el mouse por una celda de día, se resaltan TODAS las de esa
     // misma columna (mismo data-rcol) en la tabla del rango. Listener global registrado una sola vez.
     if(!window._rpColHiInit){
@@ -20733,7 +20988,7 @@ window._rpFusionRango=async function(slug,cidF){
       if(_chipsR){
         window._rpFusionChipsOrig=window._rpFusionChipsOrig||{}
         if(window._rpFusionChipsOrig[cidF]===undefined)window._rpFusionChipsOrig[cidF]=_chipsR.innerHTML
-        _chipsR.innerHTML=_todasFechasR.map(fH=>{const nH=(_diaAggR[fH]&&_diaAggR[fH].n)||0,iH=_idsDiaR[fH]||0,cH=_convDiaR[fH]||0;const onH=(nH>0||iH>0||cH>0);return`<span style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;${onH?'background:var(--green-bg);color:var(--green);border:1px solid var(--green)':'background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)'}" title="${_fLab(fH)} (rango aplicado): ${nH} venta${nH===1?'':'s'} Dropi · ${iH} IDs del aux · ${cH} conversaciones">${_fLab(fH)}: ${nH}🛒·${iH}🆔·${cH}💬·📦${_stkDiaRg[fH]!=null?fmt(_stkDiaRg[fH]):'—'}</span>`}).join('')
+        _chipsR.innerHTML=_todasFechasR.map((fH,_ixCh)=>{const nH=(_diaAggR[fH]&&_diaAggR[fH].n)||0,iH=_idsDiaR[fH]||0,cH=_convDiaR[fH]||0;const onH=(nH>0||iH>0||cH>0);const _labCh=(fH===_hoyISO_R?'HOY ':'')+_fLab(fH).toUpperCase();return`<button class="rp-fus-diapill" data-dia="${_ixCh}" ${onH?`onclick="event.stopPropagation();window._rpFusionFiltro('${cidF}','dia','${_ixCh}',this)"`:''} style="cursor:${onH?'pointer':'default'};font-size:10.5px;font-weight:700;padding:3px 10px;border-radius:999px;white-space:nowrap;${onH?'background:var(--green-bg);color:var(--green);border:1px solid var(--green)':'background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)'}" title="${_fLab(fH)}: ${nH} venta${nH===1?'':'s'} Dropi · ${iH} IDs del aux · ${cH} conversaciones · 📦 stock ${_stkDiaRg[fH]!=null?fmt(_stkDiaRg[fH]):'—'}${onH?' · CLIC para ver SOLO las campañas que vendieron este día (Dropi o IDs; clic de nuevo lo quita). Se CRUZA con los demás filtros.':' — ese día no se vendió nada por ninguna fuente'}">${_labCh}</button>`}).join('')
       }
     }catch(_){}
     try{if(cont)cont.scrollIntoView({behavior:'smooth',block:'start'})}catch(_){}
@@ -21279,7 +21534,11 @@ window.modalAsignarProductoCamp=(campId,campNombre,accountId)=>{
     <div class="modal-sub">🎯 ${(campNombre||campId)}</div>
     ${actual?`<div style="font-size:11px;color:var(--muted);margin-bottom:8px">Actualmente: <span style="color:var(--green)">📦 ${actual.nombre}</span></div>`:''}
     <input id="bp-search" type="text" placeholder="🔍 Buscar producto..." oninput="_filtrarProdCamp()" style="width:100%;padding:9px 11px;margin-bottom:10px;background:var(--card);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px" autocomplete="off">
-    <div id="bp-list" style="max-height:340px;overflow-y:auto">${items}</div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <button id="bp-arch-btn" class="btn-sm btn-outline" onclick="_bpToggleArchivados()" style="border-color:var(--amber);color:var(--amber);font-size:11px;padding:4px 10px" title="Mostrar también los productos ARCHIVADOS para asignarles campañas (útil para mapear campañas viejas). Clic de nuevo los esconde.">📁 Archivados</button>
+      <span id="bp-arch-info" style="font-size:10.5px;color:var(--muted)"></span>
+    </div>
+    <div id="bp-list" style="max-height:340px;overflow-y:auto">${items}<div id="bp-arch-list" style="display:none"></div></div>
     <div id="bp-empty" style="display:none;text-align:center;color:var(--muted);font-size:12px;padding:14px">Sin resultados</div>
     <div id="mc-block" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
       <div style="font-size:13px;color:var(--text);font-weight:700;margin-bottom:3px">➕ ¿Asignar MÁS campañas a este producto?</div>
@@ -21300,6 +21559,38 @@ window.modalAsignarProductoCamp=(campId,campNombre,accountId)=>{
   setTimeout(()=>{const s=document.getElementById('bp-search');if(s)s.focus()},80)
 }
 
+// ═══ NUEVO (2jul26 · Mejora 8): 📁 ARCHIVADOS en el modal de asignar producto ═══
+// Trae los productos archivados UNA sola vez (cache en window._prodArchCache), los pinta como
+// items seleccionables (en ámbar, marcados "archivado") y el botón alterna mostrarlos/esconderlos.
+// Sirve para mapear campañas viejas a productos que ya archivaste sin desarchivarlos.
+window._bpToggleArchivados=async()=>{
+  const wrap=document.getElementById('bp-arch-list'),btn=document.getElementById('bp-arch-btn'),info=document.getElementById('bp-arch-info')
+  if(!wrap)return
+  const abierto=wrap.style.display!=='none'
+  if(abierto){wrap.style.display='none';if(btn)btn.style.background='transparent';if(info)info.textContent='';return}
+  if(!window._prodArchCache){
+    if(info)info.textContent='⏳ Trayendo archivados...'
+    try{
+      const{data,error}=await sb.from('productos').select('*').eq('archivado',true).order('nombre',{ascending:true})
+      if(error)throw error
+      window._prodArchCache=data||[]
+    }catch(e){if(info)info.textContent='❌ No se pudieron traer: '+((e&&e.message)||'error');return}
+  }
+  const lista=window._prodArchCache||[]
+  if(!lista.length){wrap.innerHTML='<div style="text-align:center;color:var(--muted);font-size:11.5px;padding:8px">— No hay productos archivados —</div>'}
+  else{
+    wrap.innerHTML='<div style="font-size:9.5px;letter-spacing:.6px;color:var(--amber);font-weight:700;margin:6px 0 5px">📁 ARCHIVADOS — también se pueden asignar</div>'+lista.map(p=>{
+      const nom=(p.nombre||'(sin nombre)')
+      return `<div class="bp-item" data-id="${p.id}" data-nombre="${_normProd(nom)}" onclick="_selProdCampItem('${p.id}')" style="padding:9px 11px;border:1px solid rgba(245,158,11,.45);border-radius:8px;margin-bottom:5px;cursor:pointer;background:rgba(245,158,11,.06);display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span style="font-size:13px;color:var(--text)">📁 ${nom}</span>
+        <span style="font-size:10px;color:var(--amber);font-weight:600;white-space:nowrap">archivado</span>
+      </div>`
+    }).join('')
+  }
+  wrap.style.display='block'
+  if(btn)btn.style.background='rgba(245,158,11,.15)'
+  if(info)info.textContent=lista.length?(lista.length+' archivado'+(lista.length===1?'':'s')):''
+}
 window._filtrarProdCamp=()=>{
   const q=_normProd(document.getElementById('bp-search')?.value||'')
   const items=document.querySelectorAll('#bp-list .bp-item')
@@ -21318,7 +21609,7 @@ window._selProdCampItem=(id)=>{
   document.querySelectorAll('#bp-list .bp-item').forEach(it=>{
     it.style.outline=(it.dataset.id===id)?'2px solid var(--accent)':'none'
   })
-  const prod=productos.find(p=>p.id===id)
+  const prod=productos.find(p=>p.id===id)||((window._prodArchCache||[]).find(p=>p.id===id)) // NUEVO (2jul26 · Mejora 8): también archivados
   const btn=document.getElementById('bp-confirm')
   if(btn&&prod){
     btn.disabled=false
@@ -21358,7 +21649,7 @@ window._selAllCampMulti=(on)=>{
 window._confirmarProdCamp=async(campId,accountId)=>{
   const prodId=window._selProdCampId
   if(!prodId)return
-  const prodNuevo=productos.find(p=>p.id===prodId)
+  const prodNuevo=productos.find(p=>p.id===prodId)||((window._prodArchCache||[]).find(p=>p.id===prodId)) // NUEVO (2jul26 · Mejora 8): también archivados
   if(!prodNuevo){alert('Producto no encontrado');return}
   // NUEVO: recolectar la campaña original + las marcadas con checkbox
   const ids=new Set([String(campId)])
@@ -22734,7 +23025,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   // Mapeos: por RANGO de fecha (no por lista de ad_ids), así también vemos ad_ids nuevos.
   //         Luego filtramos en memoria a los que pertenecen a ESTA cuenta (vía adToCamp / huérfanos).
   const [mapeosRes,reportesRes,reportesAyerRes,mapeosAyerRes,reportesAntierRes,mapeosAntierRes,reportesTrasantierRes,mapeosTrasantierRes]=await Promise.all([
-    sb.from('mapeos').select('ad_id,estado_final,fecha,fecha_dropi').not('ad_id','is',null).neq('ad_id','').gte('fecha',desde).lte('fecha',hasta),
+    sb.from('mapeos').select('ad_id,estado_final,fecha,fecha_dropi,precio_dropi').not('ad_id','is',null).neq('ad_id','').gte('fecha',desde).lte('fecha',hasta),
     sb.from('reportes_diarios').select('ad_ids,fecha,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false}),
     sb.from('reportes_diarios').select('ad_ids,fecha,producto_id,producto_nombre,updated_at').gte('fecha',_prevDesde).lte('fecha',_prevHasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false}),
     sb.from('mapeos').select('ad_id,estado_final').not('ad_id','is',null).neq('ad_id','').gte('fecha',_prevDesde).lte('fecha',_prevHasta),
@@ -22820,7 +23111,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const cls=window._nexoClasifVenta(m.estado_final)
     if(cls==='canc')v.canceladas++
     else if(cls==='pend')v.pendientes++
-    else v.ventas++  // confirmadas (entregadas, en proceso, devueltas, CONFIRMADO, PENDIENTE, etc.)
+    else{v.ventas++;if(m.precio_dropi>0){v.vReal=(v.vReal||0)+m.precio_dropi;v.vRealN=(v.vRealN||0)+1}}  // confirmadas + plata REAL del xlsx (F6 2jul26)
   }
 
   // Reporte diario (ad_ids manuales del auxiliar)
@@ -23186,8 +23477,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const cpaRealEfectivas=ventasEfectivas>0?m.spend/ventasEfectivas:0
     // El CPA que manda el semáforo es el EFECTIVO cuando es HOY, sino el normal
     const cpaParaSemaforo=esSoloHoy?cpaRealEfectivas:cpaReal
-    // ROAS Real = (Ventas reales × Precio del producto correcto) / Gasto
-    const roasReal=m.spend>0&&ventasReales>0?(ventasReales*ctxCamp.p2)/m.spend:0
+    // ROAS Real (F6 2jul26) = plata REAL del xlsx (precio_dropi) de las ventas con dato + p2 catálogo solo para las que aún no lo tienen (hoy/pre-cruce)
+    const _vRealC=(v.vReal||0)+Math.max(0,ventasReales-(v.vRealN||0))*(ctxCamp.p2||0)
+    const roasReal=m.spend>0&&ventasReales>0?_vRealC/m.spend:0
     const avgCtr=m.ctrs.length?(m.ctrs.reduce((a,b)=>a+b,0)/m.ctrs.length):0
     const ctrEnlace=(m.reach>0)?(m.uout/m.reach*100):0
     const avgCpm=m.cpms.length?(m.cpms.reduce((a,b)=>a+b,0)/m.cpms.length):0
@@ -23883,7 +24175,12 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
       const _fo=p.flete_outbound||21000
       const _fd=p.flete_devolucion||18000
       const _dp=p.dev_pct||0.19
-      const _mBE=_p2*(1-_dp)-_c2-_fo-(_fd*_dp)
+      // F5 (2jul26): BE ÚNICO — mismo del portafolio: resta el costo de conversación estándar del producto
+      // (conversaciones_por_venta × costo_conversacion). Antes el semáforo guardado usaba un BE MÁS ALTO sin conv
+      // y el mismo anuncio podía dar 🟢 en el historial y 🟡 en el portafolio.
+      const _cvS=p.conversaciones_por_venta!=null?p.conversaciones_por_venta:25
+      const _ccvS=(p.costo_conversacion||100)*_cvS
+      const _mBE=_p2*(1-_dp)-_c2-_fo-(_fd*_dp)-_ccvS
       const _pctConf=(p.pct_confirmacion!=null&&!isNaN(p.pct_confirmacion))?Number(p.pct_confirmacion):0.62
       return{margenBE:_mBE,nombre:p.nombre||null,p2:_p2,esFallback:!campToProd[campId],pctConf:_pctConf}
     }
@@ -25305,7 +25602,7 @@ async function _calcMetricasPorAdIds(adIds,desde,hasta,gasto,ctx){
   let mapeos=[]
   for(let i=0;i<adIds.length;i+=100){
     const batch=adIds.slice(i,i+100)
-    const{data}=await sb.from('mapeos').select('ad_id,estado_final,fecha,fecha_dropi').in('ad_id',batch).gte('fecha',desde).lte('fecha',hasta)
+    const{data}=await sb.from('mapeos').select('ad_id,estado_final,fecha,fecha_dropi,precio_dropi').in('ad_id',batch).gte('fecha',desde).lte('fecha',hasta)
     if(data)mapeos=mapeos.concat(data)
   }
   for(const m of mapeos){
@@ -25316,7 +25613,7 @@ async function _calcMetricasPorAdIds(adIds,desde,hasta,gasto,ctx){
       const cls=window._nexoClasifVenta(m.estado_final)
       if(cls==='canc')out.canceladas++
       else if(cls==='pend')out.pendientes++
-      else out.ventas++
+      else{out.ventas++;if(m.precio_dropi>0){out.vReal=(out.vReal||0)+m.precio_dropi;out.vRealN=(out.vRealN||0)+1}} // F6 (2jul26): plata real
     }
   }
   // ── BUGFIX: si no hay mapeos en este nivel, también leer reportes_diarios ──
@@ -25356,7 +25653,8 @@ async function _calcMetricasPorAdIds(adIds,desde,hasta,gasto,ctx){
   }
   const ventasReales=esSoloHoy?out.pendientes:out.ventas
   out.cpaReal=ventasReales>0&&gasto>0?gasto/ventasReales:0
-  out.roasReal=ventasReales>0&&gasto>0?(ventasReales*(ctx?.p2||0))/gasto:0
+  const _vRealD=(out.vReal||0)+Math.max(0,ventasReales-(out.vRealN||0))*(ctx?.p2||0) // F6 (2jul26)
+  out.roasReal=ventasReales>0&&gasto>0?_vRealD/gasto:0
   // ── Ventas Efectivas y CPA Real Efectivas (solo HOY, sin cruce Dropi) ──
   const pctConf=(ctx&&ctx.pctConf!=null)?ctx.pctConf:0.62
   out.ventasEfectivas=esSoloHoy?(ventasReales*pctConf):ventasReales

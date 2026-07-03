@@ -17216,6 +17216,128 @@ async function _syncOneAccount(accountId,token,days,onProgress){
   _p(100,'✅')
 }
 
+// ════════ 🔃 SYNC DE UN DÍA (HOY / AYER) — TODAS LAS CUENTAS + HUÉRFANOS ════════
+// Botones 🔃HOY / 🔃AYER del "Resumen por producto". Un solo clic hace 2 cosas:
+//   1) Trae de Meta el gasto (insights campaign+adset+ad) de ESE día para TODAS
+//      las cuentas, sin ir cuenta por cuenta. Upsert idéntico a _syncOneAccount.
+//   2) Pasada de huérfanos del día: ad_ids de mapeos/reportes de ESA fecha que NO
+//      estén en meta_campanas → los resuelve por ID en Meta (ad→adset→campaign)
+//      y guarda los 3 niveles, para que las ventas se atribuyan a su campaña.
+// Progreso EN EL MISMO BOTÓN: ⏳ 3/8 · 37% → ✅ (⚠️ si alguna cuenta falló, sin frenar).
+// offset: 0 = HOY, 1 = AYER (fechas en zona horaria Bogotá, igual que el resto de NEXO).
+window._nexoSyncDiaTodas=async function(offset,btn){
+  if(btn&&btn.dataset.busy==='1')return
+  const _orig=btn?btn.innerHTML:''
+  const _fin=(html,ms)=>{if(!btn)return;btn.innerHTML=html;setTimeout(()=>{btn.innerHTML=_orig;btn.dataset.busy='';btn.style.opacity=''},ms||4500)}
+  try{
+    if(btn){btn.dataset.busy='1';btn.style.opacity='.75';btn.innerHTML='⏳ 0%'}
+    // ── Fecha objetivo en TZ Bogotá (mismo patrón de _syncOneAccount) ──
+    const _hoyBg=new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
+    let dia=_hoyBg
+    if(offset>0){const _d=new Date(_hoyBg+'T12:00:00Z');_d.setDate(_d.getDate()-offset);dia=_isoDate(_d)}
+    const token=await getConfig('meta_access_token')
+    if(!token){_fin('⚠️ Sin token',3500);return}
+    const{data:cuentas}=await sb.from('meta_cuentas').select('account_id,nombre').order('nombre')
+    if(!cuentas||!cuentas.length){_fin('⚠️ Sin cuentas',3500);return}
+    const totalPasos=cuentas.length+1 // +1 = pasada de huérfanos
+    let ok=0,fail=0
+    const tr=JSON.stringify({since:dia,until:dia})
+    // ── 1) Gasto del día, cuenta por cuenta (si una falla, sigue con la próxima) ──
+    for(let ci=0;ci<cuentas.length;ci++){
+      const cuenta=cuentas[ci]
+      const pct=Math.round((ci/totalPasos)*100)
+      if(btn)btn.innerHTML=`⏳ ${ci+1}/${cuentas.length} · ${pct}%`
+      try{
+        const actId='act_'+cuenta.account_id
+        const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values',time_range:tr,level:'campaign',time_increment:'1',limit:'500'})
+        for(const i of (cIns||[])){
+          if(!i.campaign_id)continue
+          await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        }
+        const sIns=await metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values',time_range:tr,level:'adset',time_increment:'1',limit:'500'})
+        for(const i of (sIns||[])){
+          if(!i.adset_id)continue
+          await sb.from('meta_insights').upsert({meta_id:i.adset_id,nivel:'adset',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        }
+        const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values,quality_ranking,engagement_rate_ranking,conversion_rate_ranking',time_range:tr,level:'ad',time_increment:'1',limit:'500'})
+        for(const i of (aIns||[])){
+          if(!i.ad_id)continue
+          await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,quality_ranking:i.quality_ranking||null,engagement_rate_ranking:i.engagement_rate_ranking||null,conversion_rate_ranking:i.conversion_rate_ranking||null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        }
+        ok++
+      }catch(eCta){fail++;console.warn('[sync-dia] cuenta',cuenta.nombre||cuenta.account_id,'falló:',eCta&&eCta.message)}
+    }
+    // ── 2) Pasada de huérfanos del día: ad_ids usados ESE día sin cadena en meta_campanas ──
+    if(btn)btn.innerHTML=`⏳ huérfanos · ${Math.round((cuentas.length/totalPasos)*100)}%`
+    let _huerResueltos=0,_huerTotal=0
+    try{
+      const _idsDia=new Set()
+      const{data:_mps}=await sb.from('mapeos').select('ad_id').eq('fecha',dia).not('ad_id','is',null).neq('ad_id','')
+      for(const m of (_mps||[])){const _v=String(m.ad_id).trim();if(_v.length>5)_idsDia.add(_v)}
+      const{data:_reps}=await sb.from('reportes_diarios').select('ad_ids').eq('fecha',dia).not('ad_ids','is',null).neq('ad_ids','')
+      for(const r of (_reps||[])){
+        for(const id of String(r.ad_ids||'').split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5))_idsDia.add(id)
+      }
+      const _idsArr=[..._idsDia]
+      // ¿Cuáles YA tienen cadena? (lotes de 300, mismo patrón del resto del código)
+      const _conocidos=new Set()
+      for(let i=0;i<_idsArr.length;i+=300){
+        const{data:_ya}=await sb.from('meta_campanas').select('meta_id').eq('nivel','ad').in('meta_id',_idsArr.slice(i,i+300))
+        for(const x of (_ya||[]))_conocidos.add(String(x.meta_id))
+      }
+      const _huerfanos=_idsArr.filter(id=>!_conocidos.has(id))
+      _huerTotal=_huerfanos.length
+      if(_huerfanos.length){
+        // Resolver ads por ID (batch ?ids=; si el lote cae por un ID muerto → reintento 1x1 y salto muertos)
+        const _fetchIds=async(ids,fields)=>{
+          const out={}
+          for(let i=0;i<ids.length;i+=50){
+            const lote=ids.slice(i,i+50)
+            try{
+              const r=await fetch(`${META_BASE}/?ids=${encodeURIComponent(lote.join(','))}&fields=${encodeURIComponent(fields)}&access_token=${token}`)
+              const j=await r.json()
+              if(j.error)throw new Error(j.error.message)
+              for(const k of Object.keys(j))out[k]=j[k]
+            }catch(_eb){
+              for(const id of lote){
+                try{
+                  const r1=await fetch(`${META_BASE}/${id}?fields=${encodeURIComponent(fields)}&access_token=${token}`)
+                  const j1=await r1.json()
+                  if(!j1.error)out[id]=j1
+                }catch(_e1){/* ID muerto, skip */}
+              }
+            }
+          }
+          return out
+        }
+        const _adsObj=await _fetchIds(_huerfanos,'name,status,effective_status,adset_id,campaign_id,account_id')
+        const _adsetIds=new Set(),_campIds=new Set()
+        for(const o of Object.values(_adsObj)){if(o&&o.adset_id)_adsetIds.add(String(o.adset_id));if(o&&o.campaign_id)_campIds.add(String(o.campaign_id))}
+        const _adsetsObj=_adsetIds.size?await _fetchIds([..._adsetIds],'name,status,effective_status,campaign_id,account_id'):{}
+        const _campsObj=_campIds.size?await _fetchIds([..._campIds],'name,status,effective_status,objective,account_id'):{}
+        // Upsert 3 niveles (mismos campos/onConflict de _syncOneAccount)
+        for(const[cid,c]of Object.entries(_campsObj)){
+          await sb.from('meta_campanas').upsert({meta_id:cid,account_id:(c.account_id||'').replace('act_',''),nivel:'campaign',nombre:c.name||'',estado:c.effective_status||c.status||'',objetivo:c.objective||'',synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+        }
+        for(const[sid,s]of Object.entries(_adsetsObj)){
+          await sb.from('meta_campanas').upsert({meta_id:sid,account_id:(s.account_id||'').replace('act_',''),nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.effective_status||s.status||'',synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+        }
+        for(const[aid,a]of Object.entries(_adsObj)){
+          await sb.from('meta_campanas').upsert({meta_id:aid,account_id:(a.account_id||'').replace('act_',''),nivel:'ad',parent_id:a.adset_id||'',nombre:a.name||'',estado:a.effective_status||a.status||'',synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+          _huerResueltos++
+        }
+      }
+    }catch(eHu){console.warn('[sync-dia] pasada de huérfanos falló:',eHu&&eHu.message)}
+    try{logAction('sync_dia_todas',{dia,cuentas_ok:ok,cuentas_fail:fail,huerfanos:_huerTotal,resueltos:_huerResueltos}).catch(()=>{})}catch(_){}
+    // ── Cierre: ✅ si todo bien; ⚠️ con detalle si alguna cuenta falló ──
+    if(fail===0)_fin(_huerResueltos>0?`✅ +${_huerResueltos} IDs`:'✅',4500)
+    else _fin(`⚠️ ${ok} ok · ${fail} fallo${fail>1?'s':''}`,6000)
+  }catch(e){
+    console.warn('[sync-dia] error:',e&&e.message)
+    _fin('❌ Error',4500)
+  }
+}
+
 // ── RESUMEN POR PRODUCTO (Meta Ads) ────────────────────────
 // Consolida datos por producto desde meta_insights + mapeos + reportes_diarios.
 // Aplica reglas oficiales del semaforo NEXO (45%/70%/100% del break-even).
@@ -18026,7 +18148,9 @@ async function _renderResumenProductos(desde,hasta,hoy){
       ${_resumenPillCount('precaucion',conteo.precaucion,'🟡','en CUIDADO','var(--amber)','var(--amber-bg)','CUIDADO — Click para filtrar productos al límite (CPA entre 70-100% del break-even).')}
       ${_resumenPillCount('stop',conteo.stop,'🔴','en APAGAR','var(--red)','var(--red-bg)','APAGAR — Click para filtrar productos perdiendo plata (CPA > break-even).')}
       ${conteo.sin_ventas>0?_resumenPillCount('sin_ventas',conteo.sin_ventas,'⏳','en ESPERAR','var(--muted)','var(--card2)','ESPERAR — Sin ventas todavía.'):''}
-      <button class="btn-sm btn-outline" onclick="abrirMetaUnDia('hoy')" title="Abre 1 pestaña de Meta Ads (Nexo) solo con HOY, sin esperar a que cargue el portafolio" style="margin-left:auto">Ver Hoy</button>
+      <button class="btn-sm btn-outline" onclick="event.stopPropagation();window._nexoSyncDiaTodas(0,this)" title="Sync total de HOY: trae de Meta el gasto de hoy de TODAS las cuentas de una sola (sin ir cuenta por cuenta) y de paso arregla los IDs huérfanos de hoy (anuncios de ventas cuya campaña aún no estaba en la base). Muestra el avance aquí mismo y pone ✅ al terminar." style="margin-left:auto;border-color:var(--green);color:var(--green)">🔃 HOY</button>
+      <button class="btn-sm btn-outline" onclick="event.stopPropagation();window._nexoSyncDiaTodas(1,this)" title="Sync total de AYER: trae de Meta el gasto de ayer de TODAS las cuentas de una sola y arregla los IDs huérfanos de ayer. Muestra el avance aquí mismo y pone ✅ al terminar." style="border-color:var(--purple);color:var(--purple)">🔃 AYER</button>
+      <button class="btn-sm btn-outline" onclick="abrirMetaUnDia('hoy')" title="Abre 1 pestaña de Meta Ads (Nexo) solo con HOY, sin esperar a que cargue el portafolio">Ver Hoy</button>
       <button onclick="resumenProductosFilter('',this)" title="Mostrar todos los productos sin filtro" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:10px;cursor:pointer">Ver todos</button>
     </div>
 

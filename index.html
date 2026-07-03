@@ -8214,6 +8214,18 @@ window._repAdIdsAProducto=async(ids)=>{
   return out
 }
 
+// MEJORA 6 (3jul26): copia el texto plano del aviso resumen del reporte (ya ordenado
+// para que al pegarlo en WhatsApp se vea limpio de una). Fallback textarea si el
+// navegador bloquea el clipboard API.
+window._repCopiarResumen=async function(btn){
+  const t=window._repResumenTxt||''
+  if(!t)return
+  let ok=false
+  try{await navigator.clipboard.writeText(t);ok=true}catch(_){
+    try{const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();ok=document.execCommand('copy');document.body.removeChild(ta)}catch(_2){}
+  }
+  if(btn){const o=btn.textContent;btn.textContent=ok?'✅ Copiado':'❌ No se pudo';setTimeout(()=>{btn.textContent=o},2200)}
+}
 window.saveReporteV2=async(fecha)=>{
   const esHoy=fecha===today()
   const esAyer=fecha===_daysAgo(1)
@@ -8379,7 +8391,46 @@ window.saveReporteV2=async(fecha)=>{
       conversaciones:conv,usuario_id:currentMe().id,updated_at:new Date().toISOString()
     },{onConflict:'fecha,producto_id,usuario_id'}).catch(()=>{})
   }
-  msg.innerHTML=`<div class="alert alert-green">✅ ${saved} producto(s) guardado(s)</div>`
+  // MEJORA 6 (3jul26): AVISO COMPACTO post-guardar con botón 📋 Copiar — el aux te lo manda
+  // por WhatsApp (captura o texto copiado) y verificas de una que hizo bien su trabajo.
+  // Regla acordada: HOY solo cuenta IDs · AYER (y días pasados) además 💬 conversaciones y 📦 stock.
+  let _resHtml=''
+  try{
+    const _fechaLbl=(()=>{const p=String(fecha).split('-');return p.length===3?(p[2]+'/'+p[1]+'/'+p[0]):fecha})()
+    const _diaTag=esHoy?'HOY':(esAyer?'AYER':_fechaLbl)
+    const _lineas=[]
+    let _totIds=0,_totConv=0
+    for(const row of rows){
+      const idx=row.id.replace('vrow-','')
+      const _pn=document.getElementById(`vp-${idx}`)?.value
+      if(!_pn)continue
+      const _nIds=((document.getElementById(`vi-${idx}`)?.value||'').split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)).length
+      _totIds+=_nIds
+      if(esHoy){
+        _lineas.push({h:`📦 <b>${_pn}</b> · ${_nIds} ID${_nIds===1?'':'s'}`,t:`📦 ${_pn} · ${_nIds} ID${_nIds===1?'':'s'}`})
+      }else{
+        const _cv=parseInt(document.getElementById(`vc-${idx}`)?.value)||0
+        const _stEl=document.getElementById(`vs-${idx}`)
+        const _st=(_stEl&&_stEl.value!=='')?parseInt(_stEl.value):null
+        _totConv+=_cv
+        _lineas.push({h:`📦 <b>${_pn}</b> · ${_nIds} ID${_nIds===1?'':'s'} · 💬 ${_cv} conv${_st!=null?` · 📦 stock ${_st}`:''}`,t:`📦 ${_pn} · ${_nIds} ID${_nIds===1?'':'s'} · 💬 ${_cv} conv${_st!=null?` · 📦 stock ${_st}`:''}`})
+      }
+    }
+    if(_lineas.length){
+      const _quien=(currentMe()&&(currentMe().nombre||currentMe().email))||''
+      const _sep='━━━━━━━━━━━━━━'
+      window._repResumenTxt=`📋 REPORTE NEXO — ${_fechaLbl} (${_diaTag})${_quien?`\nAuxiliar: ${_quien}`:''}\n${_sep}\n`+_lineas.map(l=>l.t).join('\n')+`\n${_sep}\nTotal: ${_totIds} ID${_totIds===1?'':'s'} · ${_lineas.length} producto${_lineas.length===1?'':'s'}${esHoy?'':` · 💬 ${_totConv} conv`}`
+      _resHtml=`<div id="rep-resumen-box" style="margin-top:8px;padding:10px 12px;background:rgba(134,239,172,.06);border:1.5px solid var(--green);border-radius:10px;max-width:520px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <span style="font-size:13px;font-weight:800;color:var(--green)">📋 REPORTE — ${_fechaLbl} <span style="font-size:10.5px;font-weight:700;padding:1px 8px;border-radius:999px;border:1px solid var(--green)">${_diaTag}</span></span>
+          <button onclick="window._repCopiarResumen(this)" style="margin-left:auto;background:var(--green);border:none;border-radius:7px;color:#04110a;font-size:12px;font-weight:800;padding:5px 14px;cursor:pointer;flex-shrink:0" title="Copia TODO el texto del aviso ya ordenado — pégalo en WhatsApp y se ve limpio de una">📋 Copiar</button>
+        </div>
+        <div style="font-size:12px;line-height:1.75;color:var(--text)">${_lineas.map(l=>l.h).join('<br>')}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:6px;border-top:1px dashed rgba(255,255,255,.15);padding-top:5px">Total: <b style="color:var(--text)">${_totIds} ID${_totIds===1?'':'s'}</b> · ${_lineas.length} producto${_lineas.length===1?'':'s'}${esHoy?'':` · 💬 ${_totConv} conv`} <span style="opacity:.75">· ${esHoy?'HOY: stock y conversaciones no aplican':'incluye conv y stock del día'}</span></div>
+      </div>`
+    }
+  }catch(_eRes){console.warn('[resumen reporte]',_eRes&&_eRes.message)}
+  msg.innerHTML=`<div class="alert alert-green">✅ ${saved} producto(s) guardado(s)</div>`+_resHtml
   logAction('reporte_guardado',{fecha,productos:saved}).catch(()=>{})
   // ── ENTREGA 3B: disparar histórico de semáforos con los ad_ids reportados ──
   try{
@@ -17920,7 +17971,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
           <span style="margin-left:auto;display:inline-flex;gap:8px;align-items:center;flex-wrap:wrap">
             <span style="font-size:12.5px;color:var(--muted);padding:3px 10px;border-radius:999px;background:rgba(255,255,255,.05);border:1px solid var(--border);white-space:nowrap" title="💸 Gasto del período">💸 <strong style="color:var(--text);font-size:13.5px">$${fmt(d.gasto)}</strong></span>
             <span style="font-size:12.5px;color:var(--muted);padding:3px 10px;border-radius:999px;background:rgba(255,255,255,.05);border:1px solid var(--border);white-space:nowrap" title="🛒 Pedidos confirmados del período">🛒 <strong style="color:var(--text);font-size:13.5px">${_pedG}</strong></span>
-            <span style="font-size:13px;font-weight:800;color:${_colG};padding:3px 10px;border-radius:999px;border:1.5px solid ${_colG};white-space:nowrap" title="🎯 CPA real vs break-even">🎯 $${fmt(d.cpaReal)}${_pctBEg>0?` · ${_pctBEg}% BE`:''}</span>
+            <span style="font-size:13px;font-weight:800;color:${_colG};padding:3px 10px;border-radius:999px;border:1.5px solid ${_colG};white-space:nowrap" title="🎯 CPA real vs break-even del producto: por debajo del BE ganas, por encima pierdes">🎯 $${fmt(d.cpaReal)}${(d.margenBE>0)?` <span style="font-size:11px;font-weight:700;opacity:.85">/ BE $${fmt(d.margenBE)}</span>`:''}${_pctBEg>0?` · ${_pctBEg}%`:''}</span>
             <span style="font-size:12.5px;font-weight:800;color:${_colStkG};padding:3px 10px;border-radius:999px;border:1.5px solid ${_colStkG};white-space:nowrap" title="📦 Stock al cierre que reporta el aux: HOY y AYER.${_stkBajaG?' Viene BAJANDO respecto a ayer: pilas con el inventario.':''}${_stkHoyG==null?' HOY sin dato todavía (el aux no ha reportado stock).':''}">📦 HOY: ${_stkHoyG!=null?fmt(_stkHoyG):'—'} · AYER: ${_stkAyerG!=null?fmt(_stkAyerG):'—'}</span>
           </span>
         </div>
@@ -19228,7 +19279,13 @@ function _renderProductoCardResumen(data,ranking){
       const _esActF=_estF==='ACTIVE'
       const _llevaF=Math.round((F.dias&&F.dias.p&&F.dias.p.gasto)||0)
       if(!window._budFillT){window._budFillT=setTimeout(()=>{try{window._rpFillBudBtns()}catch(_){}},900)}
-      const _btnBudF=`<button class="rp-budbtn" data-cid="${_esc(F.campId)}" onclick="event.stopPropagation();this.style.background='rgba(34,197,94,.18)';this.style.borderColor='var(--green)';this.style.color='var(--green)';modalPresupuesto('${_esc(F.campId)}','campaign','${_nomEscF}',${_budF||0},'${_esc(_accIdF)}')" style="margin-left:6px;background:rgba(99,102,241,.1);border:1px solid var(--accent);border-radius:5px;color:var(--accent);font-size:10px;font-weight:700;padding:1px 8px;cursor:pointer;flex-shrink:0;line-height:1.25" title="Cambiar presupuesto de esta campaña (mismo modal de las cards). Abajo: gasto que lleva HOY."><span class="rp-budamt">💰 ${_budF>0?'$'+fmt(_budF):'Presupuesto'}</span><span style="display:block;font-size:8.5px;font-weight:600;opacity:.8">lleva $${fmt(_llevaF)}</span></button>`
+      // MEJORA 3 (3jul26): activa+entregando con $0 de HOY = sospechoso → se verifica EN VIVO contra Meta (nunca se asume $0)
+      const _sospF=(data.esSoloHoy&&_llevaF<=0&&_activaRealF===true)
+      if(_sospF&&!window._llevaVerifT){window._llevaVerifT=setTimeout(()=>{window._llevaVerifT=null;try{window._rpVerifLlevaHoy()}catch(_){}},1200)}
+      const _spLlevaF=_sospF
+        ?`<span class="rp-lleva-verif" data-cid="${_esc(F.campId)}" data-vf-pend="1" style="display:block;font-size:8.5px;font-weight:600;color:var(--amber)" title="Marca $0 pero la campaña está ACTIVA y ENTREGANDO: verificando el gasto REAL de HOY contra Meta ahora mismo...">lleva ⏳ verificando…</span>`
+        :`<span style="display:block;font-size:8.5px;font-weight:600;opacity:.8">lleva $${fmt(_llevaF)}</span>`
+      const _btnBudF=`<button class="rp-budbtn" data-cid="${_esc(F.campId)}" onclick="event.stopPropagation();this.style.background='rgba(34,197,94,.18)';this.style.borderColor='var(--green)';this.style.color='var(--green)';modalPresupuesto('${_esc(F.campId)}','campaign','${_nomEscF}',${_budF||0},'${_esc(_accIdF)}')" style="margin-left:6px;background:rgba(99,102,241,.1);border:1px solid var(--accent);border-radius:5px;color:var(--accent);font-size:10px;font-weight:700;padding:1px 8px;cursor:pointer;flex-shrink:0;line-height:1.25" title="Cambiar presupuesto de esta campaña (mismo modal de las cards). Abajo: gasto que lleva HOY."><span class="rp-budamt">💰 ${_budF>0?'$'+fmt(_budF):'Presupuesto'}</span>${_spLlevaF}</button>`
       const _btnEstF=_estF?`<button onclick="event.stopPropagation();this.style.background='rgba(99,102,241,.2)';this.style.borderColor='var(--accent)';this.style.color='var(--accent)';modalEstado('${_esc(F.campId)}','campaign','${_nomEscF}','${_esActF?'ACTIVE':'PAUSED'}','${_esc(_accIdF)}')" style="margin-left:4px;background:rgba(255,255,255,.04);border:1px solid ${_esActF?'var(--amber)':'var(--green)'};border-radius:5px;color:${_esActF?'var(--amber)':'var(--green)'};font-size:10px;font-weight:700;padding:1px 8px;cursor:pointer;flex-shrink:0" title="${_esActF?'Pausar la campaña en Meta':'Activar la campaña en Meta'}">${_esActF?'⏸ Pausar':'▶ Activar'}</button>`
         :`<button onclick="event.stopPropagation();modalEstado('${_esc(F.campId)}','campaign','${_nomEscF}','ACTIVE','${_esc(_accIdF)}')" style="margin-left:4px;background:rgba(255,255,255,.04);border:1px solid var(--amber);border-radius:5px;color:var(--amber);font-size:10px;font-weight:700;padding:1px 8px;cursor:pointer;flex-shrink:0" title="Pausar la campaña en Meta (sin dato vivo del estado)">⏸ Pausar</button><button onclick="event.stopPropagation();modalEstado('${_esc(F.campId)}','campaign','${_nomEscF}','PAUSED','${_esc(_accIdF)}')" style="margin-left:4px;background:rgba(255,255,255,.04);border:1px solid var(--green);border-radius:5px;color:var(--green);font-size:10px;font-weight:700;padding:1px 8px;cursor:pointer;flex-shrink:0" title="Activar la campaña en Meta (sin dato vivo del estado)">▶ Activar</button>`
       // 🔁 NUEVO (Duplicador multi-cuenta · Fase 2): clona la campaña COMPLETA hacia OTRAS cuentas del BM (Edge Function meta-clone)
@@ -19655,6 +19712,52 @@ window._rpToggleCuadre=function(cid){
   }
 }
 
+// ── MEJORA 3 (3jul26) · $0 DE HOY NUNCA SE ASUME ──────────────────────────────
+// Regla: si una campaña está ACTIVA y ENTREGANDO pero su "lleva" de HOY marca $0,
+// ese $0 es SOSPECHOSO (Meta pudo omitirla en el batch o la respuesta llegó incompleta).
+// Esta función re-pregunta a Meta CAMPAÑA POR CAMPAÑA (fuente: API en vivo, nunca BD
+// porque para HOY la BD es dato viejo) y deja el span con la verdad:
+//   · gasto > 0  → "lleva $X ⚡" (dato recuperado en vivo)
+//   · gasto = 0  → "lleva $0 ✓" (cero CONFIRMADO por Meta, no asumido)
+//   · Meta falla → "lleva ⚠️ sin dato" (clic = reintentar) — JAMÁS un $0 disfrazado.
+window._rpVerifLlevaHoy=async function(){
+  const spans=[...document.querySelectorAll('.rp-lleva-verif[data-vf-pend="1"]')]
+  if(!spans.length)return
+  let tk=null
+  try{tk=await getConfig('meta_access_token')}catch(_){}
+  const _hoyVf=new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
+  const _tr=JSON.stringify({since:_hoyVf,until:_hoyVf})
+  let hechos=0
+  for(const sp of spans){
+    if(hechos>=12)break // tope por pasada para no reventar rate limits; el resto queda en ⚠️ clic-reintenta
+    const cid=sp.dataset.cid
+    if(!cid)continue
+    sp.removeAttribute('data-vf-pend')
+    hechos++
+    if(!tk){sp.innerHTML='lleva ⚠️ sin dato';sp.style.color='var(--red)';sp.title='Sin token Meta configurado: NO se pudo verificar el gasto de HOY. NO asumas que es $0.';continue}
+    try{
+      const ins=await metaGet(`/${cid}/insights`,tk,{fields:'spend',time_range:_tr})
+      const g=Math.round((ins&&ins[0]&&parseFloat(ins[0].spend))||0)
+      if(g>0){
+        sp.innerHTML='lleva $'+fmt(g)+' ⚡'
+        sp.style.color='var(--green)'
+        sp.title='Gasto de HOY recuperado EN VIVO de Meta ahora mismo (el batch inicial lo había traído en $0 — dato corregido).'
+        try{if(window._nexoLiveGastoByCampId)window._nexoLiveGastoByCampId[String(cid)]=((window._nexoLiveGastoByCampId[String(cid)]||0)>g)?window._nexoLiveGastoByCampId[String(cid)]:g}catch(_){}
+      }else{
+        sp.innerHTML='lleva $0 ✓'
+        sp.title='Meta CONFIRMA $0 real de gasto HOY para esta campaña (verificado en vivo, no es dato asumido).'
+      }
+    }catch(e){
+      sp.innerHTML='lleva ⚠️ sin dato'
+      sp.style.color='var(--red)'
+      sp.style.cursor='pointer'
+      sp.title='Meta NO respondió por esta campaña: el gasto de HOY es DESCONOCIDO (no asumas $0). Clic para reintentar.'
+      sp.setAttribute('data-vf-pend','1')
+      sp.onclick=(ev)=>{ev.stopPropagation();window._rpVerifLlevaHoy()}
+    }
+  }
+}
+
 // ── Mejora 3: "Sin sincronizar con Meta" → resolver campaña EN VIVO + asignar producto ──
 // Al abrir el bloque por primera vez, consulta Meta (1 sola llamada batch /?ids=...) para saber
 // a qué campaña pertenece cada ad_id huérfano. Agrupa por campaña: misma campaña = UNA fila con
@@ -19685,13 +19788,13 @@ window._rpResolverSinSync=async function(cid){
     // Batch: una sola llamada con todos los IDs que falten (hasta 50 por llamada)
     for(let i=0;i<faltan.length;i+=50){
       const lote=faltan.slice(i,i+50)
-      const r=await fetch(`${META_BASE}/?ids=${encodeURIComponent(lote.join(','))}&fields=${encodeURIComponent('campaign{id,name},account_id')}&access_token=${tk}`)
+      const r=await fetch(`${META_BASE}/?ids=${encodeURIComponent(lote.join(','))}&fields=${encodeURIComponent('campaign{id,name},adset{id,name},account_id')}&access_token=${tk}`)
       const j=await r.json().catch(()=>({}))
       if(!r.ok&&j&&j.error)throw new Error(j.error.message||('Error '+r.status))
       for(const id of lote){
         const o=j&&j[id]
         if(o&&o.campaign&&o.campaign.id){
-          window._nexoAdCampCache[id]={campId:String(o.campaign.id),nombre:o.campaign.name||String(o.campaign.id),accId:String(o.account_id||'').replace(/^act_/,'')}
+          window._nexoAdCampCache[id]={campId:String(o.campaign.id),nombre:o.campaign.name||String(o.campaign.id),accId:String(o.account_id||'').replace(/^act_/,''),adsetId:(o.adset&&o.adset.id)?String(o.adset.id):null,adsetNombre:(o.adset&&o.adset.name)||''}
         }else{
           window._nexoAdCampCache[id]={campId:null}
         }
@@ -19714,6 +19817,28 @@ window._rpResolverSinSync=async function(cid){
     const lista=Object.values(grupos).sort((a,b)=>(b.ads.reduce((s,x)=>s+x.n,0))-(a.ads.reduce((s,x)=>s+x.n,0)))
     window._rpSinSyncResuelto=window._rpSinSyncResuelto||{}
     window._rpSinSyncResuelto[cid]={grupos:lista,sinCamp}
+    // MEJORA 5 (3jul26) · RAÍZ del "no se cura": resolver en vivo NO guardaba nada en la BD →
+    // al recargar, el cuadre (que clasifica leyendo meta_campanas) volvía a marcar los MISMOS IDs
+    // como "Sin sincronizar". Ahora la cadena campaña→adset→anuncio se PERSISTE en meta_campanas
+    // (mismo shape y onConflict de la sync oficial). Silencioso y tolerante: si la BD lo rechaza
+    // (ej: RLS sin permisos), avisa en consola y todo lo demás sigue funcionando igual que antes.
+    try{
+      const _yaP={}
+      for(const id of ids){
+        const c=window._nexoAdCampCache[id]
+        if(!c||!c.campId||!c.adsetId)continue // sin adset no hay cadena completa: se deja como estaba
+        const _acc=c.accId||''
+        if(!_yaP['c_'+c.campId]){
+          _yaP['c_'+c.campId]=1
+          await sb.from('meta_campanas').upsert({meta_id:c.campId,account_id:_acc,nivel:'campaign',nombre:c.nombre||c.campId,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+        }
+        if(!_yaP['s_'+c.adsetId]){
+          _yaP['s_'+c.adsetId]=1
+          await sb.from('meta_campanas').upsert({meta_id:c.adsetId,account_id:_acc,nivel:'adset',parent_id:c.campId,nombre:c.adsetNombre||c.adsetId,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+        }
+        await sb.from('meta_campanas').upsert({meta_id:id,account_id:_acc,nivel:'ad',parent_id:c.adsetId,nombre:id,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+      }
+    }catch(eP){console.warn('[sin sync persistir] no se pudo guardar la cadena en BD (volverá a salir al recargar):',eP&&eP.message)}
     window._rpRenderSinSyncGrupos(cid)
     if(sub)sub.dataset.resuelto='1'
   }catch(e){
@@ -21092,7 +21217,7 @@ window._rpFusionRango=async function(slug,cidF){
     // NUEVO (2jul26 · Mejora 7): el resumen del rango y la tira de días con 💰 YA NO van arriba
     // (eran ruido antes de la tabla) — se arman en variable aparte y se pintan DESPUÉS de la Σ TOTALES.
     let html=''
-    let _resumenRangoHtml=`<div style="font-size:11px;color:var(--purple);padding:8px 0 4px;font-weight:600">🗓 Rango: ${_fLab(desde)} → ${_fLab(hasta)} (${_nDias} día${_nDias===1?'':'s'})${campSel?' · solo 1 campaña':' · todas las campañas'} · ${_listaR.length} campaña${_listaR.length===1?'':'s'} · ${_totVR} venta${_totVR===1?'':'s'}${_fueraCamp>0?` · <span style=\"color:var(--amber)\" title=\"Ventas confirmadas del producto cuyo anuncio no pertenece a estas campañas (otra campaña o sin sincronizar)\">⚠️ ${_fueraCamp} fuera de estas campañas</span>`:''}</div>`
+    let _resumenRangoHtml=`<div style="font-size:11px;color:var(--purple);padding:8px 0 4px;font-weight:600">🗓 Rango: ${_fLab(desde)} → ${_fLab(hasta)} (${_nDias} día${_nDias===1?'':'s'})${campSel?' · solo 1 campaña':' · todas las campañas'} · ${_listaR.length} campaña${_listaR.length===1?'':'s'} · ${_totVR} venta${_totVR===1?'':'s'}${_fueraCamp>0?` · <span style=\"color:var(--amber);cursor:help\" title=\"${window._nexoTip3(`⚠️ FUERA DE ESTAS CAMPAÑAS: ventas CONFIRMADAS del producto (cruce Dropi) que NO se pudieron colgar de ninguna fila de esta tabla. Pasa por 3 motivos: 1) la venta llegó SIN ad_id (venta orgánica o anotada a mano, no hay anuncio que rastrear) · 2) su anuncio pertenece a OTRA campaña del producto que no está en esta tabla/rango · 3) su anuncio todavía NO está sincronizado (la cadena anuncio→campaña no existe en la BD — corre la sync o resuélvelo en el cuadre de abajo). NO es plata perdida ni ventas fantasma: son ventas REALES que simplemente no calzan en estas filas.`,'confirmadas del rango − las que SÍ colgaron de estas campañas',`${_totVR+_fueraCamp} confirmadas − ${_totVR} en estas campañas = ${_fueraCamp} fuera`)}\">⚠️ ${_fueraCamp} fuera de estas campañas</span>`:''}</div>`
     // NUEVO RANGO+: tira con TODOS los días del rango (los días en 0 salen apagaditos)
     _resumenRangoHtml+=`<div style="display:flex;flex-wrap:wrap;gap:4px;padding:2px 0 8px">${_todasFechasR.map(fT=>{
       const nT=(_diaAggR[fT]&&_diaAggR[fT].n)||0,idsT=_idsDiaR[fT]||0,cvT=_convDiaR[fT]||0,gT=Math.round(_gDiaR[fT]||0)
@@ -21234,7 +21359,13 @@ window._rpFusionRango=async function(slug,cidF){
         :`<button onclick="event.stopPropagation();modalEstado('${_esc(F.campId)}','campaign','${_nomEscR}','ACTIVE','${_esc(_accIdR)}')" style="background:rgba(255,255,255,.04);border:1px solid var(--amber);border-radius:5px;color:var(--amber);font-size:10px;font-weight:700;padding:1px 8px;cursor:pointer;flex-shrink:0" title="Pausar la campaña en Meta (sin dato vivo del estado)">⏸ Pausar</button><button onclick="event.stopPropagation();modalEstado('${_esc(F.campId)}','campaign','${_nomEscR}','PAUSED','${_esc(_accIdR)}')" style="margin-left:3px;background:rgba(255,255,255,.04);border:1px solid var(--green);border-radius:5px;color:var(--green);font-size:10px;font-weight:700;padding:1px 8px;cursor:pointer;flex-shrink:0" title="Activar la campaña en Meta (sin dato vivo del estado)">▶ Activar</button>`
       const _hoyEnR=_todasFechasR.indexOf(_hoyISO_R)>=0
       const _gHoyR=_hoyEnR?((F.dias[_hoyISO_R]&&F.dias[_hoyISO_R].gasto)||0):0
-      const _btnBudR=`<button class="rp-budbtn" data-cid="${_esc(F.campId)}" onclick="event.stopPropagation();this.style.background='rgba(34,197,94,.18)';this.style.borderColor='var(--green)';this.style.color='var(--green)';modalPresupuesto('${_esc(F.campId)}','campaign','${_nomEscR}',0,'${_esc(_accIdR)}')" style="background:rgba(99,102,241,.1);border:1px solid var(--accent);border-radius:5px;color:var(--accent);font-size:10px;font-weight:700;padding:1px 8px;cursor:pointer;flex-shrink:0;line-height:1.25" title="Cambiar presupuesto de esta campaña (mismo modal de las cards). Abajo: ${_hoyEnR?'gasto que lleva HOY':'gasto total del rango'}."><span class="rp-budamt">💰 Presupuesto</span><span style="display:block;font-size:8.5px;font-weight:600;opacity:.8">${_hoyEnR?('lleva $'+fmt(Math.round(_gHoyR))):('rango $'+fmt(Math.round(F.gasto||0)))}</span></button>`
+      // MEJORA 3 (3jul26): mismo blindaje del $0 falso en la vista RANGO — activa+entregando con $0 HOY se verifica en vivo
+      const _sospR=(_hoyEnR&&Math.round(_gHoyR)<=0&&_activaRealR===true)
+      if(_sospR&&!window._llevaVerifT){window._llevaVerifT=setTimeout(()=>{window._llevaVerifT=null;try{window._rpVerifLlevaHoy()}catch(_){}},1200)}
+      const _spLlevaR=_sospR
+        ?`<span class="rp-lleva-verif" data-cid="${_esc(F.campId)}" data-vf-pend="1" style="display:block;font-size:8.5px;font-weight:600;color:var(--amber)" title="Marca $0 pero la campaña está ACTIVA y ENTREGANDO: verificando el gasto REAL de HOY contra Meta ahora mismo...">lleva ⏳ verificando…</span>`
+        :`<span style="display:block;font-size:8.5px;font-weight:600;opacity:.8">${_hoyEnR?('lleva $'+fmt(Math.round(_gHoyR))):('rango $'+fmt(Math.round(F.gasto||0)))}</span>`
+      const _btnBudR=`<button class="rp-budbtn" data-cid="${_esc(F.campId)}" onclick="event.stopPropagation();this.style.background='rgba(34,197,94,.18)';this.style.borderColor='var(--green)';this.style.color='var(--green)';modalPresupuesto('${_esc(F.campId)}','campaign','${_nomEscR}',0,'${_esc(_accIdR)}')" style="background:rgba(99,102,241,.1);border:1px solid var(--accent);border-radius:5px;color:var(--accent);font-size:10px;font-weight:700;padding:1px 8px;cursor:pointer;flex-shrink:0;line-height:1.25" title="Cambiar presupuesto de esta campaña (mismo modal de las cards). Abajo: ${_hoyEnR?'gasto que lleva HOY':'gasto total del rango'}."><span class="rp-budamt">💰 Presupuesto</span>${_spLlevaR}</button>`
       const _pillHoyR=(()=>{
         if(!_hoyEnR)return`<span style="color:var(--subtle)">—</span>`
         const vH=(F.dias[_hoyISO_R]&&F.dias[_hoyISO_R].count)||0
@@ -21518,6 +21649,20 @@ async function renderMetaPortafolio(el,isAdmin){
       if(!token)throw new Error('Sin token')
       const timeRange=JSON.stringify({since:_hDesde,until:_hHasta})
       for(const cuenta of cuentas){
+        // MEJORA 1 (3jul26): cuenta BLOQUEADA → Meta obvio no responde por ella. Va DIRECTO a BD
+        // (conserva su gasto histórico del rango) y SIN pushear aviso: ya no es "falla", es lo esperado.
+        if(cuenta.estado==='BLOCKED'){
+          try{
+            const{data:insBlk}=await sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').eq('account_id',cuenta.account_id).gte('fecha',_hDesde).lte('fecha',_hHasta)
+            for(const i of (insBlk||[])){
+              if(!i.meta_id)continue
+              const v=i.spend||0
+              gastoRangoByCampId[String(i.meta_id)]=(gastoRangoByCampId[String(i.meta_id)]||0)+v
+              gastoRangoByAcc[cuenta.account_id]=(gastoRangoByAcc[cuenta.account_id]||0)+v
+            }
+          }catch(_){}
+          continue
+        }
         try{
           const ins=await metaGet(`/act_${cuenta.account_id}/insights`,token,{fields:'campaign_id,spend',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
           for(const i of (ins||[])){
@@ -21575,6 +21720,7 @@ async function renderMetaPortafolio(el,isAdmin){
       let _tk=await getConfig('meta_access_token')
       if(_tk){
         for(const c of cuentas){
+          if(c.estado==='BLOCKED')continue // MEJORA 1 (3jul26): bloqueada → sin llamado a Meta y sin aviso (sus estados quedan con BD)
           if((gastoRangoByAcc[c.account_id]||0)<=0)continue // solo cuentas con gasto real en el rango (no depende del estado viejo de la BD)
           try{
             const camps=await metaGet(`/act_${c.account_id}/campaigns`,_tk,{fields:'id,name,effective_status,status',limit:'500'})
@@ -21617,7 +21763,7 @@ async function renderMetaPortafolio(el,isAdmin){
       try{
         const _tkEnt=await getConfig('meta_access_token')
         if(!_tkEnt)throw new Error('Sin token Meta')
-        const _accsEnt=cuentas.filter(c=>(gastoRangoByAcc[c.account_id]||0)>0)
+        const _accsEnt=cuentas.filter(c=>(gastoRangoByAcc[c.account_id]||0)>0&&c.estado!=='BLOCKED') // MEJORA 1 (3jul26): bloqueadas fuera del llamado de entrega (sin aviso falso)
         if(!_accsEnt.length)throw new Error('Sin cuentas con gasto en el rango')
         let _algunaOk=false
         for(const c of _accsEnt){
@@ -26795,7 +26941,10 @@ window._desbloquearCuenta=async(accId,nombre,btn)=>{
   const{error}=await sb.from('meta_cuentas').update({estado:'ACTIVE'}).eq('account_id',accId)
   if(error){alert('❌ No se pudo desbloquear: '+error.message);if(btn){btn.disabled=false;btn.textContent='🔓 Desbloquear'}return}
   logAction('cuenta_desbloqueada',{account_id:accId,nombre}).catch(()=>{})
-  if(typeof doRefreshPortafolio==='function')doRefreshPortafolio()
+  // MEJORA 5 (3jul26): SIN recargar el portafolio (te quitaba tiempo) — el botón queda en verde
+  // como constancia de que YA quedó guardado (meta_cuentas.estado='ACTIVE'). La cuenta vuelve a
+  // las secciones normales en el próximo render, sin forzar la recarga completa ahora.
+  if(btn){btn.disabled=true;btn.textContent='✅ Desbloqueada';btn.style.background='rgba(134,239,172,.15)';btn.style.borderColor='var(--green)';btn.style.color='var(--green)';btn.style.cursor='default';btn.style.opacity='1'}
 }
 
 // Busca por ID de campaña SOLO dentro de una cuenta (accountId). Deja visible la que

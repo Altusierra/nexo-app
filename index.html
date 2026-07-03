@@ -8126,7 +8126,10 @@ async function cargarReporteData(){
     const ventasExist=reportes?.filter(r=>r.ad_ids)||[]
     if(esAyer||esHistManual){
       // Ayer / histórico: mostrar lo ya guardado para poder verlo/editarlo
-      if(ventasExist.length>0){for(const v of ventasExist)addVentaRow(v.producto_nombre||'',v.ad_ids||'',v.conversaciones_aprox||0,v.stock_cierre)}
+      // MEJORA C (3jul26): incluye también filas SIN ad_ids que dejó el modal del cruce Dropi
+      // (stock_cierre/conversaciones capturados ese día) → la aux solo agrega los IDs.
+      const ventasExistFull=reportes?.filter(r=>r.ad_ids||r.stock_cierre!=null||(r.conversaciones_aprox||0)>0)||[]
+      if(ventasExistFull.length>0){for(const v of ventasExistFull)addVentaRow(v.producto_nombre||'',v.ad_ids||'',v.conversaciones_aprox||0,v.stock_cierre)}
       else addVentaRow()
     }else if(impersonating&&ventasExist.length>0){
       // Admin viendo como aux: muestra los IDs guardados (read-only visual con badge)
@@ -8153,6 +8156,15 @@ window.addVentaRow=(prodNom,adIds,convAp,stockAct)=>{
   // Helper para resolver stock_actual del producto seleccionado (si la columna existe)
   const _stockProd=(name)=>{const p=productos.find(x=>x.nombre===name);return p&&p.stock_actual!=null?p.stock_actual:''}
   const stockInicial=stockAct!=null&&stockAct!==''?stockAct:_stockProd(prodNom)
+  // MEJORA A (3jul26): si la fecha del reporte es HOY, conv+stock NO se muestran (se piden en el
+  // cruce Dropi con el modal obligatorio). Para AYER y días anteriores siguen visibles y obligatorios.
+  const _esHoyRep=((document.getElementById('rep-fecha')?.value)||today())===today()
+  const _fldConvStock=_esHoyRep
+    ?`<label style="font-size:11.5px;color:var(--muted);display:block;line-height:1.6;padding:6px 0">💬 Conv. y 📦 stock de HOY<br>se piden al hacer el <b>cruce Dropi</b> ✅</label>`
+    :`<label>Conv. aprox.</label>
+      <input type="number" id="vc-${idx}" value="${convAp||0}" min="0">
+      <label style="margin-top:8px;font-size:11px;color:var(--muted);display:block">📦 Stock al cierre (unidades)</label>
+      <input type="number" id="vs-${idx}" value="${stockInicial}" min="0" placeholder="Stock actual" oninput="this.dataset.touched='1'" title="Stock disponible al cierre del día. Al guardar se sincroniza con la ficha del producto.">`
   div.innerHTML=`<div class="form-grid g3" style="align-items:start">
     <div class="fld"><label>Producto</label>
       <select id="vp-${idx}" onchange="(()=>{const s=document.getElementById('vs-${idx}');const p=productos.find(x=>x.nombre===this.value);if(s&&p&&p.stock_actual!=null&&!s.dataset.touched)s.value=p.stock_actual}).call(this)">
@@ -8161,10 +8173,7 @@ window.addVentaRow=(prodNom,adIds,convAp,stockAct)=>{
       </select></div>
     <div class="fld"><label>IDs anuncio (uno por línea)</label>
       <textarea id="vi-${idx}" rows="3" placeholder="Pega todos los IDs aquí">${adIds||''}</textarea></div>
-    <div class="fld"><label>Conv. aprox.</label>
-      <input type="number" id="vc-${idx}" value="${convAp||0}" min="0">
-      <label style="margin-top:8px;font-size:11px;color:var(--muted);display:block">📦 Stock al cierre (unidades)</label>
-      <input type="number" id="vs-${idx}" value="${stockInicial}" min="0" placeholder="Stock actual" oninput="this.dataset.touched='1'" title="Stock disponible al cierre del día. Al guardar se sincroniza con la ficha del producto.">
+    <div class="fld">${_fldConvStock}
       <button class="btn-sm btn-red" onclick="document.getElementById('vrow-${idx}').remove()" style="margin-top:6px;font-size:11px">✕ Quitar</button></div>
   </div>`
   container.appendChild(div)
@@ -8257,6 +8266,11 @@ window.saveReporteV2=async(fecha)=>{
       msg.scrollIntoView({behavior:'smooth',block:'center'})
       return
     }
+    // MEJORA C (3jul26): AYER llega pre-llenado con lo que se capturó en el cruce Dropi.
+    // Antes de guardar, confirmación consciente: actualizar conversaciones y revisar el stock.
+    if(esAyer){
+      if(!confirm('📝 ANTES DE GUARDAR AYER, revisa:\n\n💬 ¿Actualizaste las CONVERSACIONES de ayer? (las del cruce eran de mediodía)\n📦 Puedes dejar el mismo stock, pero revisa en Dropi si cambió después del cruce.\n\nOK = guardar así · Cancelar = volver a revisar'))return
+    }
   }
   // ── R1 (2jul26) · LEY: un ID de OTRO producto NO se guarda. ID sin producto (campaña nueva sin asignar) sí pasa ──
   try{
@@ -8292,7 +8306,10 @@ window.saveReporteV2=async(fecha)=>{
     const prodNom=document.getElementById(`vp-${idx}`)?.value
     if(!prodNom)continue
     const adIds=document.getElementById(`vi-${idx}`)?.value?.trim()||''
-    const convAp=parseInt(document.getElementById(`vc-${idx}`)?.value)||0
+    // MEJORA A (3jul26): en HOY los inputs vc-/vs- NO existen (ocultos) → convAp=null para NO pisar
+    // con 0 las conversaciones/stock que ya guardó el modal del cruce Dropi.
+    const _vcEl=document.getElementById(`vc-${idx}`)
+    const convAp=_vcEl?(parseInt(_vcEl.value)||0):null
     const stockInput=document.getElementById(`vs-${idx}`)
     const stockVal=stockInput&&stockInput.value!==''?parseInt(stockInput.value):null
     const prodObj=productos.find(p=>_normProd(p.nombre)===_normProd(prodNom))
@@ -8313,10 +8330,14 @@ window.saveReporteV2=async(fecha)=>{
     // Tolerante: si la columna stock_cierre no existe aún en la BD, reintenta sin ella.
     const _payRep={
       fecha,producto_id:prodObj.id,producto_nombre:prodObj.nombre,
-      conversaciones:(convReal||convAp),conversaciones_aprox:convAp,ad_ids:adIdsMerged,
+      ad_ids:adIdsMerged,
       nota:document.getElementById('rep-nota')?.value||'',
       usuario_id:currentMe().id,updated_at:new Date().toISOString()
     }
+    // MEJORA A (3jul26): las llaves de conversaciones solo van si el input existe (días anteriores)
+    // o si hay conv real de la sección auto — en HOY (inputs ocultos) NO se tocan las del cruce.
+    if(convAp!==null){_payRep.conversaciones_aprox=convAp;_payRep.conversaciones=(convReal||convAp)}
+    else if(convReal>0)_payRep.conversaciones=convReal
     if(stockVal!=null&&!isNaN(stockVal)&&stockVal>=0)_payRep.stock_cierre=stockVal
     let{error}=await sb.from('reportes_diarios').upsert(_payRep,{onConflict:'fecha,producto_id,usuario_id'})
     if(error&&/stock_cierre/i.test(error.message||'')){
@@ -14579,6 +14600,79 @@ window.procesarDropi=async()=>{
   }
 }
 
+// ═══ MEJORA B (3jul26): MODAL OBLIGATORIO stock+conversaciones de HOY al guardar el cruce Dropi ═══
+// Al darle "💾 Actualizar estados en sistema", ANTES de escribir nada, salta este modal con los
+// productos VENDIDOS del cruce ya cargados. La aux llena 📦 stock al cierre + 💬 conversaciones de
+// HOY (obligatorio, no se puede saltar). Se guarda en reportes_diarios (fecha=HOY, sin tocar ad_ids)
+// y en productos.stock_actual → ese stock es el que Meta Ads muestra como "HOY".
+window._cruceStockOK=false
+window._cruceStockModalShow=async(cruzados)=>{
+  // Productos únicos del cruce que existan en config (mismo criterio de saveReporteV2)
+  const _nombres=[...new Set(cruzados.map(r=>r.mapeo?.producto||r.producto||'').filter(Boolean))]
+  const _prods=[]
+  for(const n of _nombres){const p=productos.find(x=>_normProd(x.nombre)===_normProd(n));if(p&&!_prods.some(q=>q.id===p.id))_prods.push(p)}
+  if(!_prods.length){window._cruceStockOK=true;actualizarEstadosDropi();return} // sin productos reconocibles: no bloquear el cruce
+  // Precargar lo ya guardado HOY (si es el 2º cruce del día, edita en vez de re-escribir a ciegas)
+  const _hoyR=today();let _prev={}
+  try{
+    const{data}=await sb.from('reportes_diarios').select('producto_id,conversaciones_aprox,stock_cierre').eq('fecha',_hoyR).in('producto_id',_prods.map(p=>p.id))
+    for(const r of (data||[]))_prev[r.producto_id]={conv:r.conversaciones_aprox,stock:r.stock_cierre}
+  }catch(_e){}
+  window._cruceStockProds=_prods
+  const _filas=_prods.map((p,i)=>{const pv=_prev[p.id]||{};return `<div style="display:grid;grid-template-columns:1fr 110px 110px;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--border)">
+      <div style="font-weight:700;font-size:13px">📦 ${p.nombre}</div>
+      <div><label style="font-size:10px;color:var(--muted);display:block;margin-bottom:3px">💬 Conv. HOY</label><input type="number" id="csm-conv-${i}" min="0" value="${pv.conv!=null?pv.conv:''}" placeholder="0" style="width:100%"></div>
+      <div><label style="font-size:10px;color:var(--muted);display:block;margin-bottom:3px">📦 Stock cierre</label><input type="number" id="csm-stock-${i}" min="0" value="${pv.stock!=null?pv.stock:(p.stock_actual!=null?p.stock_actual:'')}" placeholder="unidades" style="width:100%"></div>
+    </div>`}).join('')
+  const _ov=document.createElement('div')
+  _ov.id='cruce-stock-modal'
+  _ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px'
+  _ov.innerHTML=`<div class="card" style="max-width:560px;width:100%;max-height:85vh;overflow-y:auto;border:2px solid var(--accent)">
+    <div class="section-title" style="margin-bottom:4px">📝 Antes de guardar el cruce</div>
+    <div style="font-size:12.5px;color:var(--muted);margin-bottom:10px;line-height:1.6">Anota el <b>📦 stock al cierre</b> y las <b>💬 conversaciones de HOY</b> de los productos vendidos. <b>Es obligatorio</b> — este stock es el que Meta Ads muestra como HOY.</div>
+    ${_filas}
+    <div id="csm-msg" style="margin-top:10px"></div>
+    <button class="btn-full btn-primary" onclick="window._cruceStockModalSave()" style="margin-top:12px">💾 Guardar y continuar con el cruce</button>
+  </div>`
+  document.body.appendChild(_ov)
+}
+window._cruceStockModalSave=async()=>{
+  const _prods=window._cruceStockProds||[]
+  const _msgM=document.getElementById('csm-msg')
+  const _vals=[],_faltasM=[]
+  _prods.forEach((p,i)=>{
+    const cv=document.getElementById(`csm-conv-${i}`)?.value
+    const st=document.getElementById(`csm-stock-${i}`)?.value
+    if(cv===''||cv==null||isNaN(parseInt(cv))||parseInt(cv)<=0)_faltasM.push(`💬 Conversaciones de <b>${p.nombre}</b>`)
+    if(st===''||st==null||isNaN(parseInt(st))||parseInt(st)<0)_faltasM.push(`📦 Stock de <b>${p.nombre}</b>`)
+    _vals.push({p,conv:parseInt(cv)||0,stock:parseInt(st)})
+  })
+  if(_faltasM.length){if(_msgM)_msgM.innerHTML=`<div class="alert alert-red" style="line-height:1.7">🔒 <b>Falta llenar:</b><br>${_faltasM.join('<br>')}</div>`;return}
+  if(_msgM)_msgM.innerHTML='<div class="alert alert-blue">Guardando...</div>'
+  const _hoyR=today()
+  for(const v of _vals){
+    // Upsert SIN ad_ids ni nota → no pisa lo que la aux tenga/ponga en el reporte de HOY
+    const _payC={fecha:_hoyR,producto_id:v.p.id,producto_nombre:v.p.nombre,conversaciones:v.conv,conversaciones_aprox:v.conv,stock_cierre:v.stock,usuario_id:currentMe().id,updated_at:new Date().toISOString()}
+    let{error}=await sb.from('reportes_diarios').upsert(_payC,{onConflict:'fecha,producto_id,usuario_id'})
+    if(error&&/stock_cierre/i.test(error.message||'')){delete _payC.stock_cierre;({error}=await sb.from('reportes_diarios').upsert(_payC,{onConflict:'fecha,producto_id,usuario_id'}))}
+    if(error){if(_msgM)_msgM.innerHTML=`<div class="alert alert-red">❌ ${v.p.nombre}: ${error.message}</div>`;return}
+    // Sincronizar ficha del producto (mismos fallbacks tolerantes de saveReporteV2)
+    try{
+      const{error:eSt}=await sb.from('productos').update({stock_actual:v.stock,stock_updated_at:new Date().toISOString(),stock_updated_by:currentMe().id}).eq('id',v.p.id)
+      if(eSt){
+        const{error:eSt2}=await sb.from('productos').update({stock_actual:v.stock,stock_updated_at:new Date().toISOString()}).eq('id',v.p.id)
+        if(eSt2){await sb.from('productos').update({stock_actual:v.stock}).eq('id',v.p.id).catch(()=>{})}
+      }
+      const pMem=productos.find(x=>x.id===v.p.id)
+      if(pMem){pMem.stock_actual=v.stock;pMem.stock_updated_at=new Date().toISOString()}
+    }catch(_e){console.warn('[cruce stock sync]',v.p.nombre,_e?.message)}
+  }
+  logAction('cruce_stock_conv_hoy',{productos:_vals.map(v=>({nombre:v.p.nombre,conv:v.conv,stock:v.stock}))}).catch(()=>{})
+  document.getElementById('cruce-stock-modal')?.remove()
+  window._cruceStockOK=true
+  actualizarEstadosDropi()
+}
+
 window.actualizarEstadosDropi=async()=>{
   const res=window._dropiResultados
   if(!res)return
@@ -14622,6 +14716,11 @@ window.actualizarEstadosDropi=async()=>{
       return
     }
   }
+
+  // MEJORA B (3jul26): stock+conv de HOY OBLIGATORIOS antes de escribir el cruce.
+  // Pase de un solo uso: el modal lo prende al guardar OK y aquí se consume.
+  if(!window._cruceStockOK){window._cruceStockModalShow(cruzados);return}
+  window._cruceStockOK=false
 
   msgEl.innerHTML='<span style="color:var(--blue)">Actualizando...</span>'
   let ok=0,fail=0
@@ -17739,6 +17838,12 @@ async function _renderResumenProductos(desde,hasta,hoy){
     for(const k in (window._liveCampsAll||{})){
       const lv=window._liveCampsAll[k]
       if(!_univSp[String(k)])_univSp[String(k)]={id:String(k),nombre:(lv&&lv.nombre)||String(k),accId:(lv&&lv.account_id)?String(lv.account_id):'',estadoBD:''}
+    }
+    // MEJORA 5 (3jul26): red de seguridad — si Meta reportó el estado VIVO de una campaña que no
+    // está ni en la BD ni en _liveCampsAll (ej: lanzada HOY hace un momento), entra igual al
+    // universo (con el ID como nombre) para que aparezca en la lista y se le pueda asignar producto.
+    for(const k in _liveEstSp){
+      if(!_univSp[String(k)])_univSp[String(k)]={id:String(k),nombre:String(k),accId:'',estadoBD:''}
     }
     const _listaSp=[]
     for(const k in _univSp){
@@ -21023,7 +21128,9 @@ window._rpFusionRango=async function(slug,cidF){
     const _gAbrR=(g)=>g>=1e6?('$'+(g/1e6).toFixed(3)+'M'):(g>=1000?('$'+Math.round(g/1000)+'k'):('$'+Math.round(g)))
     const _semColR=(cpa)=>(typeof window!=='undefined'&&typeof window._nexoSemColor==='function')?window._nexoSemColor(cpa,BE):'var(--muted)'
     const _stickyR='position:sticky;left:0;z-index:2;background:rgba(22,17,28,.97);'
-    const _cwR={nom:330,acc:66,alr:118,dias:64,gto:96,cpa:102,hoy:108,tog:90,est:150,vD:66,iD:60,iTot:70,vts:54,bud:124,id:150,cp:34}
+    // MEJORA 1 (3jul26): tabla COMPACTA — dias 64→56, est 150→120, tog 90→82, bud 124→114.
+    // MEJORA 2 (3jul26): la columna cp (📋) desaparece — el botón vive DENTRO de id (150+34→158).
+    const _cwR={nom:330,acc:66,alr:118,dias:56,gto:96,cpa:102,hoy:108,tog:82,est:120,vD:66,iD:60,iTot:70,vts:54,bud:114,id:158}
     const _cR=(w,htmlC,right,tip,noClip,extra,attrs)=>`<span ${attrs||''} style="display:inline-flex;flex-direction:column;justify-content:center;align-items:${right?'flex-end':'flex-start'};align-self:stretch;width:${w}px;flex-shrink:0;white-space:nowrap;${noClip?'':'overflow:hidden;text-overflow:ellipsis;'}${right?'text-align:right;padding-right:8px;':'padding-right:6px;'}${extra||''}" ${tip?`title="${tip}"`:''}>${htmlC}</span>`
     // NUEVO (2jul26 · Mejora 5+6): orden nuevo → DÍAS primero, luego ESTADO, ON/OFF, totales,
     // ID+📋 y de últimas CAMPAÑA+ALERTAS+📅DÍAS. Las columnas 💸GASTO / 🎯CPA / 🎯CPA HOY se quitaron.
@@ -21034,12 +21141,11 @@ window._rpFusionRango=async function(slug,cidF){
       [_cwR.dias,'📅 DÍAS','#c4b5fd','Días con actividad (venta o gasto) ÷ días del rango'],
       [_cwR.est,'⚡ ESTADO','#5eead4','Estado REAL (foto de AHORA): 🟢 ACTIVA · ⏸ APAGADA · 🔕 NO ENTREGA · ⚪ SIN ACTIVIDAD. Sale del último llamado en vivo del portafolio'],
       [_cwR.tog,'⏯ ON/OFF','#f9a8d4','Pausar o activar la campaña en Meta (mismo modal de siempre)'],
-      ..._todasFechasR.flatMap((fH,iH3)=>fH===_hoyISO_R?[[_cwR.iD,'🆔 '+_fLabHR(fH),'#fcd34d','Ventas por IDs del aux de HOY (T. Cierre, antes del cruce Dropi) — hoy aún no hay cruce Dropi, por eso no va la 🛒',0,'fd'+iH3+'i',_laneHdrRg(iH3)]]:[[_cwR.vD,'🛒 '+_fLabHR(fH),'#86efac','Ventas confirmadas (cuadre Dropi) del '+_fLab(fH)+' — si no cuadran con las 🆔 de al lado salen en ámbar',0,'fd'+iH3+'v',_laneHdrRg(iH3)],[_cwR.iD,'🆔 '+_fLabHR(fH),'#fcd34d','Ventas por IDs del aux del '+_fLab(fH)+' — si no cuadran con las 🛒 de al lado salen en ámbar',0,'fd'+iH3+'i',_laneHdrRg(iH3)]]),
+      ..._todasFechasR.flatMap((fH,iH3)=>fH===_hoyISO_R?[[_cwR.iD,'🆔 '+_fLabHR(fH),'#fcd34d','Ventas por IDs del aux de HOY (T. Cierre, antes del cruce Dropi) — hoy aún no hay cruce Dropi, por eso no va la 🛒',0,'fd'+iH3+'i',_laneHdrRg(iH3)]]:[[_cwR.iD,'🆔 '+_fLabHR(fH),'#fcd34d','Ventas por IDs del aux del '+_fLab(fH)+' — si no cuadran con las 🛒 de al lado salen en ámbar',0,'fd'+iH3+'i',_laneHdrRg(iH3)],[_cwR.vD,'🛒 '+_fLabHR(fH),'#86efac','Ventas confirmadas (cuadre Dropi) del '+_fLab(fH)+' — si no cuadran con las 🆔 de al lado salen en ámbar',0,'fd'+iH3+'v',_laneHdrRg(iH3)]]),
       [_cwR.iTot,'🆔 TOT','#fcd34d','Total de ventas por IDs del aux sumando TODOS los días del rango — compáralo con 🛒 VTS',0,'fitot'],
       [_cwR.vts,'🛒 VTS','#e2e8f0','Ventas totales confirmadas de la campaña en el rango',0,'fvts'],
       [_cwR.bud,'💰 PRESUP.','#a5b4fc','Cambiar presupuesto (mismo modal de las cards)',0,'budval'],
-      [_cwR.id,'🆔 ID','#fcd34d','ID de la campaña (cópialo con el botón 📋)'],
-      [_cwR.cp,'📋','#94a3b8','Copiar el ID'],
+      [_cwR.id,'🆔 ID','#fcd34d','ID de la campaña (cópialo con el botón 📋 de al lado)'],
       [_cwR.nom,'📣 CAMPAÑA','#e2e8f0','Nombre de la campaña',1],
       [_cwR.alr,'🚨 ALERTA','#fda4af','🛑 PRENDER YA (foto de HOY): hoy $0 pero vendía antes · 📉 NO REMONTA: el CPA de TODO el rango pasa el break-even']
     ].map(h=>h[5]?`<span onclick="event.stopPropagation();window._rpRangoSort('${cidF}','${h[5]}',this)" style="display:inline-block;width:${h[0]}px;flex-shrink:0;font-size:8.5px;font-weight:700;letter-spacing:.3px;color:${h[2]};white-space:nowrap;cursor:pointer;padding-right:6px;user-select:none;${h[6]||''}" title="${h[3]} · CLIC: ordenar de mayor a menor · otro CLIC: de menor a mayor">${h[1]}<span class="rp-sort-arr" data-key="${h[5]}" style="color:var(--text)"></span></span>`:`<span style="display:inline-block;width:${h[0]}px;flex-shrink:0;font-size:8.5px;font-weight:700;letter-spacing:.3px;color:${h[2]};white-space:nowrap;cursor:help;padding-right:6px;${h[6]||''}" title="${h[3]}">${h[1]}</span>`).join('')}</div>`
@@ -21060,7 +21166,7 @@ window._rpFusionRango=async function(slug,cidF){
         // (antes HOY salía sin gasto porque solo la columna 🛒 lo pintaba y HOY no tiene 🛒).
         const _gHoyTotHtml=(fT2===_hoyISO_R)?`<span id="${cidF}-rng-tot${suf}-d${_dti}g" style="display:block;font-size:8.5px;line-height:1.1;color:var(--subtle);font-weight:600">${gF>0?_gAbrR(gF):''}</span>`:''
         const _colIdT=`<span style="display:inline-block;width:${_cwR.iD}px;flex-shrink:0;white-space:nowrap;text-align:right;padding-right:8px;${_bgT}"${fT2===_hoyISO_R?` title="${_fLab(fT2)}: ${iF} por IDs · gasto $${fmt(Math.round(gF))}"`:''}><span style="display:inline-block;text-align:right"><span id="${cidF}-rng-tot${suf}-d${_dti}i" style="display:block;color:#fcd34d;font-weight:700;line-height:1.15">${iF>0?iF:'—'}</span>${_gHoyTotHtml}</span></span>`
-        return _colVdT+_colIdT
+        return _colIdT+_colVdT // MEJORA 4 (3jul26): primero 🆔 del día, después 🛒
       }).join('')
       // NUEVO (2jul26 · Mejora 5+6): la Σ arranca con los DÍAS (mismo orden nuevo de la tabla);
       // la etiqueta "Σ TOTALES" vive en la columna CAMPAÑA que ahora va al final. Sin GASTO/CPA/CPA HOY.
@@ -21069,7 +21175,7 @@ window._rpFusionRango=async function(slug,cidF){
         ${_diasTotR}
         ${_tdR(_cwR.iTot,_tI>0?'🆔 '+_tI:'—','#fcd34d',`${cidF}-rng-tot${suf}-itot`)}
         ${_tdR(_cwR.vts,_tV,'var(--text)',`${cidF}-rng-tot${suf}-vts`)}
-        <span style="display:inline-block;width:${_cwR.bud+_cwR.id+_cwR.cp}px;flex-shrink:0"></span>
+        <span style="display:inline-block;width:${_cwR.bud+_cwR.id}px;flex-shrink:0"></span>
         <span style="display:inline-block;width:${_cwR.nom}px;flex-shrink:0;font-weight:700;color:var(--purple);white-space:nowrap;">Σ TOTALES (<span id="${cidF}-rng-tot${suf}-n">${_listaR.length}</span> campaña${_listaR.length===1?'':'s'})</span>
         <span style="display:inline-block;width:${_cwR.alr}px;flex-shrink:0"></span>
       </div>`
@@ -21170,8 +21276,9 @@ window._rpFusionRango=async function(slug,cidF){
         const _cpaEfHtml_R=_cpaEfN_R>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(_cpaEfN_R)}" title="${window._nexoTip3('🔮 CPA R. EFECTIVAS del día: CPA ajustado asumiendo que solo el '+Math.round(_pctConfRg*100)+'% de los IDs se confirmará en el cruce.','gasto ÷ (IDs × % confirmación)',`$${fmt(Math.round(_gN))} ÷ (${_iN} × ${Math.round(_pctConfRg*100)}%) = $${fmt(_cpaEfN_R)}`)}">🔮$${fmt(_cpaEfN_R)}</span>`:''
         const _vProyN_R=_iN>0?Math.floor(_iN*_pctConfRg*10)/10:0
         const _vProyHtml_R=_vProyN_R>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:var(--purple)" title="${window._nexoTip3('🔮 VENTAS PROYECTADAS post-Dropi: las que se estima que el cruce confirmará de estos IDs.','IDs × % confirmación histórica',`${_iN} × ${Math.round(_pctConfRg*100)}% = ${_vProyN_R.toFixed(1)}`)}">🔮 ${_vProyN_R.toFixed(1)}</span>`:''
-        return (fD===_hoyISO_R?'':_cR(_cwR.vD,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_cV};font-weight:700;line-height:1.15">${_vN>0?_vN:'—'}</span>${_gHtmlD}${_cpaHtmlD}${_cpaEntHtmlD}</span>`,true,_tipP,false,_bgLaneD,`data-rcol="d${_idxDia}v"`))
-          +_cR(_cwR.iD,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_cI3};font-weight:700;line-height:1.15">${_iN>0?_iN:'—'}</span>${_gHtmlI_R}${_cpaIdsHtml_R}${_cpaEfHtml_R}${_vProyHtml_R}</span>`,true,_tipP,false,_bgLaneD,`data-rcol="d${_idxDia}i"`)
+        // MEJORA 4 (3jul26): primero la celda 🆔 del día, después la 🛒 (mismo orden nuevo del encabezado)
+        return _cR(_cwR.iD,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_cI3};font-weight:700;line-height:1.15">${_iN>0?_iN:'—'}</span>${_gHtmlI_R}${_cpaIdsHtml_R}${_cpaEfHtml_R}${_vProyHtml_R}</span>`,true,_tipP,false,_bgLaneD,`data-rcol="d${_idxDia}i"`)
+          +(fD===_hoyISO_R?'':_cR(_cwR.vD,`<span style="display:inline-block;text-align:right"><span style="display:block;color:${_cV};font-weight:700;line-height:1.15">${_vN>0?_vN:'—'}</span>${_gHtmlD}${_cpaHtmlD}${_cpaEntHtmlD}</span>`,true,_tipP,false,_bgLaneD,`data-rcol="d${_idxDia}v"`))
       }).join('')
       const _iTotR=_idsCampTotR(F.campId)
       const _descTotR=(_iTotR!==F.count)&&(_iTotR>0||F.count>0)
@@ -21184,8 +21291,7 @@ window._rpFusionRango=async function(slug,cidF){
           ${_cR(_cwR.iTot,`<span class="rp-life-itot" style="display:inline-block;text-align:right"><span style="display:block;color:${_descTotR?'var(--amber)':(_iTotR>0?'#fcd34d':'var(--subtle)')};font-weight:700;line-height:1.15">${_iTotR>0?'🆔 '+_iTotR:'—'}</span>${(F.gasto>0&&_iTotR>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round(F.gasto/_iTotR))}">🆔$${fmt(Math.round(F.gasto/_iTotR))}</span>`:''}</span>`,true,window._nexoTip3('🆔 TOT: total de ventas por IDs del aux en el rango'+(_descTotR?' — NO cuadra con las 🛒 VTS ('+F.count+'), revisa cruce o IDs':' — cuadra con las 🛒 VTS')+'.','CPA IDS = gasto del rango ÷ IDs',(F.gasto>0&&_iTotR>0)?`$${fmt(Math.round(F.gasto))} ÷ ${_iTotR} = $${fmt(Math.round(F.gasto/_iTotR))}`:`IDs: ${_iTotR}`))}
           ${_cR(_cwR.vts,`<span class="rp-life-vts" style="display:inline-block;text-align:right"><span style="display:block;color:var(--text);font-weight:700;line-height:1.15">${F.count}</span>${((F.gasto-_gHoyR)>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round((F.gasto-_gHoyR)/F.count))}">🎯$${fmt(Math.round((F.gasto-_gHoyR)/F.count))}</span>`:''}${((F.gasto-_gHoyR)>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round((F.gasto-_gHoyR)/(F.count*(1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19)))))}" title="📦 CPA V. ENTREGADAS = gasto (sin HOY) ÷ (ventas × (1−devol))">📦$${fmt(Math.round((F.gasto-_gHoyR)/(F.count*(1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19)))))}</span>`:''}${F.ent>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:800;color:#86efac" title="📦 ENTREGADAS: órdenes que YA llegaron al cliente (subconjunto de las confirmadas)">📦 ${F.ent}</span>`:''}</span>`,true,window._nexoTip3('🛒 VTS: ventas confirmadas Dropi del rango. Las 🆔 de HOY no entran hasta que el cruce confirme. Como HOY no tiene cruce, sus CPAs se calculan SIN el gasto de hoy.','🎯 CPA = gasto (sin HOY) ÷ ventas · 📦 CPA entregadas = gasto (sin HOY) ÷ (ventas × (1−dev))',((F.gasto-_gHoyR)>0&&F.count>0)?`🎯 $${fmt(Math.round(F.gasto-_gHoyR))} ÷ ${F.count} = $${fmt(Math.round((F.gasto-_gHoyR)/F.count))}&#10;📦 $${fmt(Math.round(F.gasto-_gHoyR))} ÷ (${F.count} × ${Math.round((1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19))*100)}%) = $${fmt(Math.round((F.gasto-_gHoyR)/(F.count*(1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19)))))}`:`Ventas: ${F.count}`))}
           ${_cR(_cwR.bud,_btnBudR,false,'',true)}
-          ${_cR(_cwR.id,`<span style="font-family:monospace;font-size:10.5px;color:var(--muted)">${_esc(F.campId)}</span>`,false,'ID de la campaña: '+_esc(F.campId))}
-          ${_cR(_cwR.cp,_btnC(F.campId,'ID de la campaña'),false,'',true)}
+          ${_cR(_cwR.id,`<span style="display:inline-flex;align-items:center;margin-left:-6px">${_btnC(F.campId,'ID de la campaña')}<span style="font-family:monospace;font-size:10.5px;color:var(--muted);margin-left:5px">${_esc(F.campId)}</span></span>`,false,'ID de la campaña: '+_esc(F.campId),true)}
           ${_cR(_cwR.nom,`<span id="${_rcid}-chev" style="display:inline-block;width:12px;font-size:9px;color:var(--muted)">▸</span><span style="margin-left:3px">${_dotR}📣 ${_esc(F.nombre)}</span>`,false,_esc(F.nombre),false,'')}
           ${_cR(_cwR.alr,_alrR,false,'',true)}
         </div>
@@ -21221,7 +21327,9 @@ window._rpFusionRango=async function(slug,cidF){
     // misma columna (mismo data-rcol) en la tabla del rango. Listener global registrado una sola vez.
     if(!window._rpColHiInit){
       window._rpColHiInit=true
-      const _hiCol=(el,on)=>{try{const col=el.getAttribute('data-rcol');if(!col)return;const box=el.closest('[id$="-rango"]')||document;box.querySelectorAll('[data-rcol="'+col+'"]').forEach(c=>c.classList.toggle('rp-col-hi',on))}catch(_){}}
+      // MEJORA 3 (3jul26): si la columna es de un día (dNv o dNi), se resalta la PAREJA completa
+      // del día (🆔 + 🛒 juntas). Las demás columnas siguen resaltándose solas.
+      const _hiCol=(el,on)=>{try{const col=el.getAttribute('data-rcol');if(!col)return;const box=el.closest('[id$="-rango"]')||document;const _mPar=col.match(/^d(\d+)[vi]$/);const _selHi=_mPar?('[data-rcol="d'+_mPar[1]+'v"],[data-rcol="d'+_mPar[1]+'i"]'):('[data-rcol="'+col+'"]');box.querySelectorAll(_selHi).forEach(c=>c.classList.toggle('rp-col-hi',on))}catch(_){}}
       document.addEventListener('mouseover',e=>{const c=e.target&&e.target.closest?e.target.closest('[data-rcol]'):null;if(c)_hiCol(c,true)})
       document.addEventListener('mouseout',e=>{const c=e.target&&e.target.closest?e.target.closest('[data-rcol]'):null;if(c)_hiCol(c,false)})
     }
@@ -21469,12 +21577,16 @@ async function renderMetaPortafolio(el,isAdmin){
         for(const c of cuentas){
           if((gastoRangoByAcc[c.account_id]||0)<=0)continue // solo cuentas con gasto real en el rango (no depende del estado viejo de la BD)
           try{
-            const camps=await metaGet(`/act_${c.account_id}/campaigns`,_tk,{fields:'id,effective_status,status',limit:'500'})
+            const camps=await metaGet(`/act_${c.account_id}/campaigns`,_tk,{fields:'id,name,effective_status,status',limit:'500'})
             for(const cp of (camps||[])){
               if(!cp.id)continue
               // Usamos `status` (lo que el usuario tiene PRENDIDO/PAUSADO), no `effective_status`
               // (que Meta puede reportar PAUSED aunque la campaña esté activa y entregando).
               liveEstadoByCampId[String(cp.id)]=cp.status||cp.effective_status||''
+              // MEJORA 5 (3jul26): TODA campaña vista EN VIVO queda registrada con nombre y cuenta.
+              // Así las lanzadas HOY (que aún no están en meta_campanas) SÍ entran al universo de
+              // ⚠️ SIN PRODUCTO ASIGNADO sin tener que abrir la cuenta una por una.
+              try{window._liveCampsAll=window._liveCampsAll||{};if(!window._liveCampsAll[String(cp.id)])window._liveCampsAll[String(cp.id)]={meta_id:String(cp.id),nombre:cp.name||String(cp.id),account_id:String(c.account_id)}}catch(_){}
             }
           }catch(eCta){
             console.warn('[header live estados] fallo cuenta',c.account_id,':',eCta.message)
@@ -21677,8 +21789,31 @@ async function renderMetaPortafolio(el,isAdmin){
     }
   }catch(_eBlk){console.warn('[bloqueadas] no se pudo verificar el BM:',_eBlk&&_eBlk.message)}
 
+  // MEJORA (3jul26): chip SALUD DEL CRON nocturno — verificación por EVIDENCIA (solo front, no toca la Edge).
+  // El cron 'noche' (meta-sync-nocturno, ~2 AM) hace 2 cosas: gasto de todos + refrescar Dropi.
+  // Evidencia 1 (la fuerte): filas en meta_insights con fecha=AYER y synced_at de esta madrugada
+  //   (00:00–08:59 Bogotá) → el cron corrió y cargó el gasto de ayer. Si esto NO existe → rojo.
+  // Evidencia 2 (detalle): puntos ⭐ triggered_by='cruce_dropi' creados en esa misma ventana. Puede ser 0
+  //   legítimamente (la Edge OMITE ads que ya tenían su punto), por eso NO tumba el verde: solo informa.
+  let _cronChip=''
+  try{
+    const _hoyB=today()
+    const _vDesde=new Date(_hoyB+'T00:00:00-05:00').toISOString()
+    const _vHasta=new Date(_hoyB+'T08:59:59-05:00').toISOString()
+    const _ayerB=(()=>{const d=new Date(_hoyB+'T12:00:00-05:00');d.setDate(d.getDate()-1);return d.toLocaleDateString('en-CA',{timeZone:'America/Bogota'})})()
+    const[_qGas,_qStar]=await Promise.all([
+      sb.from('meta_insights').select('meta_id',{count:'exact',head:true}).eq('fecha',_ayerB).gte('synced_at',_vDesde).lte('synced_at',_vHasta),
+      sb.from('semaforo_historial').select('id',{count:'exact',head:true}).eq('triggered_by','cruce_dropi').gte('hora_calculo',_vDesde).lte('hora_calculo',_vHasta)
+    ])
+    const _nGasCr=(_qGas&&_qGas.count)||0,_nStarCr=(_qStar&&_qStar.count)||0
+    const _tipCron=('¿Qué revisa? Que el robot de la madrugada (cron ~2 AM) SÍ haya corrido anoche.\n\n✓ Gasto: busca métricas de AYER guardadas HOY entre 12:00 a.m. y 8:59 a.m. (huella synced_at que deja el cron).\n✓ Dropi ⭐: puntos de cruce creados en esa misma ventana (0 puede ser normal si ya estaban al día de antes).\n\nCON TUS DATOS: '+_nGasCr+' métricas de ayer sincronizadas en la madrugada · '+_nStarCr+' puntos ⭐ Dropi de madrugada.').replace(/"/g,'&quot;')
+    _cronChip=_nGasCr>0
+      ?`<span title="${_tipCron}" style="display:inline-flex;align-items:center;gap:5px;margin-left:8px;padding:2px 9px;background:var(--green-bg);border:1px solid var(--green);border-radius:999px;font-size:10.5px;font-weight:700;color:var(--green);cursor:help">🌙 Cron OK · gasto ayer ✓ · ⭐ ${_nStarCr} Dropi</span>`
+      :`<span title="${_tipCron}" style="display:inline-flex;align-items:center;gap:5px;margin-left:8px;padding:2px 9px;background:rgba(239,68,68,.10);border:1px solid var(--red);border-radius:999px;font-size:10.5px;font-weight:800;color:var(--red);cursor:help">🌙 ❌ Cron NO corrió anoche — revisa pg_cron</span>`
+  }catch(_eCr){console.warn('[cron-chip] no se pudo verificar:',_eCr&&_eCr.message)}
+
   let html=_banB+_blkBanner+`<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--border)">
-    <div style="font-size:12px;color:var(--muted)">Última sync: <strong style="color:var(--text)">${lastStr}</strong></div>
+    <div style="font-size:12px;color:var(--muted)">Última sync: <strong style="color:var(--text)">${lastStr}</strong>${_cronChip}</div>
     <button class="btn-sm btn-primary" onclick="analizarConIA('portafolio','all','Portafolio completo')">🤖 Analizar con IA</button>
   </div>`
 
@@ -26649,7 +26784,10 @@ window._confirmarCuentaBloqueada=async(accId,nombre,btn)=>{
   const{error}=await sb.from('meta_cuentas').update({estado:'BLOCKED'}).eq('account_id',accId)
   if(error){alert('❌ No se pudo marcar como bloqueada: '+error.message);if(btn){btn.disabled=false;btn.textContent='🚫 Confirmar bloqueada'}return}
   logAction('cuenta_bloqueada',{account_id:accId,nombre}).catch(()=>{})
-  if(typeof doRefreshPortafolio==='function')doRefreshPortafolio()
+  // MEJORA (3jul26): SIN recargar el portafolio — el botón queda en verde como constancia de que
+  // la acción YA quedó guardada (meta_cuentas.estado='BLOCKED'). Al recargar manual, la alerta
+  // desaparece sola porque la cuenta ya no cumple la condición de "parece bloqueada".
+  if(btn){btn.disabled=true;btn.textContent='✅ Bloqueada confirmada';btn.style.background='rgba(134,239,172,.15)';btn.style.borderColor='var(--green)';btn.style.color='var(--green)';btn.style.cursor='default';btn.style.opacity='1'}
 }
 window._desbloquearCuenta=async(accId,nombre,btn)=>{
   if(!confirm('🔓 ¿Desbloquear la cuenta "'+(nombre||accId)+'"?\n\nVuelve a las secciones normales (Todas / Activas / Inactivas).'))return

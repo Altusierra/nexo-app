@@ -1481,6 +1481,8 @@ function _dashCajonesHTML(){
     \${_dashCajonHTML1('trk','💰','Tracker','¿Cómo va la plata día por día?')} -->
     ${_dashCajonHTML1('res','📈','Resumen Semanal','¿Cómo va semana por semana?')}
     ${_dashCajonHTML1('rep','📋','Reportes','El detalle fino por fecha')}
+    <!-- NUEVO (3jul26 · Mejora 3): Novedades ID vive ahora AQUÍ, de última (debajo de Reportes). -->
+    <div id="novedadesIdBox" style="margin-top:12px"></div>
   </div>`
 }
 // Toggle + lazy-load: la 1ª apertura renderiza la página original dentro del cajón.
@@ -3029,7 +3031,10 @@ async function loadDash(){
     </div>`
 
   // RENDER FINAL
-  el.innerHTML=_heroHTML+_4reyesHTML+_gsaHTML+_desgloseHTML+_bloqueVentasHTML+_bloqueVentasDropiHTML+_bloqueGastosHTML+_bloqueEficienciaHTML+'<div id="novedadesIdBox"></div>'
+  // NUEVO (3jul26 · Mejora 3): el box de Novedades ID ya NO va aquí — se movió al final de los
+  // cajones del negocio (debajo de 📋 Reportes, en _dashCajonesHTML). _renderNovedadesId() lo
+  // sigue encontrando por id igual que antes; solo cambió de casa.
+  el.innerHTML=_heroHTML+_4reyesHTML+_gsaHTML+_desgloseHTML+_bloqueVentasHTML+_bloqueVentasDropiHTML+_bloqueGastosHTML+_bloqueEficienciaHTML
   try{_renderNovedadesId()}catch(_){}
 }
 
@@ -15534,15 +15539,32 @@ window._renderNovedadesId=async function(){
   const patronHtml=patrones.length?`<div style="border:1px solid var(--amber);background:var(--amber-bg);border-radius:10px;padding:10px;margin:10px 0">
     ${patrones.map(p=>`<div style="font-size:12.5px;margin-bottom:3px">⚠️ <b>${p.n}</b> órdenes de <b>${p.real}</b> traían anuncios de <b>${p.antes}</b>. 👉 Revisa si una campaña de ${p.antes} tiene anuncios de ${p.real} mal enlazados.</div>`).join('')}
   </div>`:''
-  const histHtml=hist.length?`
-    <div style="font-weight:700;font-size:14px;color:var(--green);margin:12px 0 6px">✅ CORREGIDAS (${hist.length})</div>
-    ${hist.map(h=>`<div style="border-top:1px solid var(--border);padding:9px 0">
+  // NUEVO (3jul26 · Mejora 3): las CORREGIDAS ya no salen todas — arranca mostrando 1 sola y el
+  // botón "Ver 3 más" va destapando de a 3 (1 → 4 → 7 ...). El límite vive en memoria de sesión
+  // (window._novHistShow): al recargar vuelve a 1. Datos y formato de cada item: INTACTOS.
+  window._novHistData=hist
+  window._novHistShow=Math.max(1,window._novHistShow||1)
+  window._novHistBloque=function(){
+    const _h=window._novHistData||[]
+    if(!_h.length)return''
+    const _n=Math.min(_h.length,Math.max(1,window._novHistShow||1))
+    const _items=_h.slice(0,_n).map(h=>`<div style="border-top:1px solid var(--border);padding:9px 0">
       <div style="font-size:13px;margin-bottom:4px">📦 <b>${h.producto_real||'—'}</b> · Guía <code style="color:var(--muted)">${h.numero_guia||'—'}</code> · Tel <code style="color:var(--muted)">${h.telefono||'—'}</code></div>
       <div style="font-size:11.5px;color:var(--red)">❌ ANTES: ID <code>${h.ad_antes||'—'}</code> → era de ${h.prod_antes||'—'}</div>
       <div style="font-size:11.5px;color:var(--green)">✅ AHORA: ${h.tipo==='organica'?'Sin anuncio (orgánica) → fuera del CPA':('ID <code>'+(h.ad_despues||'—')+'</code> → es de '+(h.prod_despues||'—'))}</div>
       <div style="font-size:10.5px;color:var(--muted);margin-top:3px">👤 ${h.corregido_por||'—'} · ${_fmtFecha(h.corregido_at||h.created_at)} · ${h.fuente||'—'}</div>
-    </div>`).join('')}
-  `:''
+    </div>`).join('')
+    const _btn=_h.length>_n?`<div style="padding:8px 0 2px"><button onclick="window._novHistVerMas()" style="padding:6px 14px;font-size:12px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:8px;cursor:pointer;font-weight:600" title="Muestra 3 corregidas más (ahora ves ${_n} de ${_h.length})">➕ Ver 3 más (${_h.length-_n} ocultas)</button></div>`:''
+    return`
+    <div style="font-weight:700;font-size:14px;color:var(--green);margin:12px 0 6px">✅ CORREGIDAS (${_h.length})</div>
+    ${_items}${_btn}`
+  }
+  window._novHistVerMas=function(){
+    window._novHistShow=(window._novHistShow||1)+3
+    const _w=document.getElementById('nov-hist-wrap')
+    if(_w)_w.innerHTML=window._novHistBloque()
+  }
+  const histHtml=hist.length?`<div id="nov-hist-wrap">${window._novHistBloque()}</div>`:''
   box.innerHTML=`<div class="card" style="margin-bottom:14px">
     <div style="font-weight:700;font-size:16px;margin-bottom:10px">🆔 Novedades ID <span style="color:var(--muted);font-weight:400;font-size:13px">— anuncios que apuntaban a otro producto</span></div>
     ${pendHtml}${patronHtml}${histHtml}
@@ -16085,9 +16107,13 @@ window.runMetaSync=async(days)=>{
     const accounts=await metaGet('/me/adaccounts',token,{fields:'account_id,name,currency,timezone_name,account_status'})
     log(`✅ ${accounts.length} cuentas`)
 
+    // MEJORA 3 (3jul26): las cuentas marcadas BLOCKED conservan su estado en el sync —
+    // solo se desbloquean con el botón 🔓 (confirmación manual, como pediste).
+    const _blkSetS1=new Set()
+    try{const{data:_blkS1}=await sb.from('meta_cuentas').select('account_id').eq('estado','BLOCKED');for(const b of (_blkS1||[]))_blkSetS1.add(String(b.account_id))}catch(_){}
     for(const a of accounts){
       const accId=a.account_id||a.id.replace('act_','')
-      await sb.from('meta_cuentas').upsert({account_id:accId,nombre:a.name||'',moneda:a.currency||'COP',timezone:a.timezone_name||'',estado:a.account_status===1?'ACTIVE':'INACTIVE',synced_at:new Date().toISOString()},{onConflict:'account_id'})
+      await sb.from('meta_cuentas').upsert({account_id:accId,nombre:a.name||'',moneda:a.currency||'COP',timezone:a.timezone_name||'',estado:_blkSetS1.has(String(accId))?'BLOCKED':(a.account_status===1?'ACTIVE':'INACTIVE'),synced_at:new Date().toISOString()},{onConflict:'account_id'})
     }
 
     const until=today()
@@ -16159,18 +16185,6 @@ async function pageAdminMeta(c){
   const iaConfigured=await getConfig('claude_api_configured')
 
   c.innerHTML=`<div class="page-title">📡 Meta Ads</div>
-    <div class="page-sub">Conexión con Meta Graph API y portafolio de campañas</div>
-    <div class="card" style="margin-bottom:16px;border:1px solid var(--accent)">
-      <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;font-weight:600">📅 Abrir fechas en Meta (al instante)</div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-        <button class="btn-sm" onclick="abrirMetaComparativa3()" style="background:var(--accent);color:#fff;font-weight:600;padding:6px 12px;border:none;border-radius:6px;cursor:pointer" title="Abre 3 pestañas: Ayer · Antier · Últimos 3 días">📅 Ver Ayer/Antier/3d</button>
-        <button class="btn-sm btn-outline" onclick="abrirMetaUnDia('hoy')" title="Abre 1 pestaña solo con HOY">Ver Hoy</button>
-        <button class="btn-sm btn-outline" onclick="abrirMetaUnDia('ayer')" title="Abre 1 pestaña solo con AYER">Ver Ayer</button>
-        <button class="btn-sm btn-outline" onclick="abrirMetaUnDia('antier')" title="Abre 1 pestaña solo con ANTIER">Ver Antier</button>
-        <button class="btn-sm btn-outline" onclick="abrirMetaUnDia('3d')" title="Abre 1 pestaña con los últimos 3 días">Ver 3d</button>
-      </div>
-      <div style="font-size:10px;color:var(--muted);margin-top:6px">Abre Meta Ads ya con las fechas puestas. No tienes que esperar a que cargue el portafolio.</div>
-    </div>
     <div id="meta-portafolio"><div class="loading">Cargando portafolio...</div></div>
     <div class="divider"></div>
     <div class="card" style="max-width:600px;margin-bottom:20px">
@@ -16309,9 +16323,13 @@ window.runMetaSyncAllAccounts=async(days,btn)=>{
     try{
       if(btn)btn.textContent='⏳ Actualizando cuentas...'
       const _accsFresh=await metaGet('/me/adaccounts',token,{fields:'account_id,name,currency,timezone_name,account_status'})
+      // MEJORA 3 (3jul26): las cuentas marcadas BLOCKED conservan su estado en el sync —
+      // solo se desbloquean con el botón 🔓 (confirmación manual, como pediste).
+      const _blkSetS2=new Set()
+      try{const{data:_blkS2}=await sb.from('meta_cuentas').select('account_id').eq('estado','BLOCKED');for(const b of (_blkS2||[]))_blkSetS2.add(String(b.account_id))}catch(_){}
       for(const a of (_accsFresh||[])){
         const _aid=a.account_id||a.id.replace('act_','')
-        await sb.from('meta_cuentas').upsert({account_id:_aid,nombre:a.name||'',moneda:a.currency||'COP',timezone:a.timezone_name||'',estado:a.account_status===1?'ACTIVE':'INACTIVE',synced_at:new Date().toISOString()},{onConflict:'account_id'})
+        await sb.from('meta_cuentas').upsert({account_id:_aid,nombre:a.name||'',moneda:a.currency||'COP',timezone:a.timezone_name||'',estado:_blkSetS2.has(String(_aid))?'BLOCKED':(a.account_status===1?'ACTIVE':'INACTIVE'),synced_at:new Date().toISOString()},{onConflict:'account_id'})
       }
     }catch(eNom){console.warn('[sync todas] no se pudieron refrescar nombres:',eNom&&eNom.message)}
     const{data:cuentas}=await sb.from('meta_cuentas').select('account_id,nombre').order('nombre')
@@ -17451,10 +17469,28 @@ async function _renderResumenProductos(desde,hasta,hoy){
     if(typeof window._pintarVentasCuentaStrip==='function')setTimeout(()=>window._pintarVentasCuentaStrip(),0)
   }catch(_){}
 
+  // MEJORA 7 (3jul26): los selectores de fecha (rango + día único) viven AHORA en el encabezado
+  // del Resumen por producto (centro). Son los MISMOS ids de siempre (meta-desde / meta-hasta /
+  // meta-dia-unico) → applyMetaDateRange y todo lo que los lee sigue funcionando igual.
+  // Se pintan también en el estado "Sin actividad" para poder cambiar de fechas desde ahí.
+  const _selFechasHtml=`<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;justify-content:center">
+      <span style="color:var(--subtle);font-size:11px">rango:</span>
+      <input type="date" id="meta-desde" value="${desde}" style="background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:4px 6px;border-radius:6px" onchange="applyMetaDateRange()" title="Desde">
+      <span style="color:var(--muted);font-size:11px">→</span>
+      <input type="date" id="meta-hasta" value="${hasta}" style="background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:4px 6px;border-radius:6px" onchange="applyMetaDateRange()" title="Hasta">
+      <span style="color:var(--subtle);font-size:11px;margin:0 4px">o un día:</span>
+      <input type="date" id="meta-dia-unico" value="${desde===hasta?desde:''}" style="background:var(--card2);border:1px solid var(--purple);color:var(--text);font-size:11px;padding:4px 6px;border-radius:6px" onchange="setMetaDiaUnico(this.value)" title="Día específico — sincroniza Desde y Hasta a ese mismo día">
+    </div>`
+
   if(productosResumen.length===0){
     return`<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin-bottom:16px">
-      <div style="font-size:11px;color:var(--muted);margin-bottom:4px;letter-spacing:.3px">Resumen por producto</div>
-      <div style="color:var(--muted);font-size:13px">Sin actividad en este rango</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+        <div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px;letter-spacing:.3px">Resumen por producto</div>
+          <div style="color:var(--muted);font-size:13px">Sin actividad en este rango</div>
+        </div>
+        ${_selFechasHtml}
+      </div>
     </div>`
   }
 
@@ -17653,11 +17689,12 @@ async function _renderResumenProductos(desde,hasta,hoy){
   // 13. HTML final
   return`
   <div class="resumen-productos" data-sem-port="${semCodePort}" style="background:${portC.bg};border:1px solid ${portC.border};border-radius:12px;padding:16px 18px;margin-bottom:16px">
-    <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:12px;padding-bottom:12px;border-bottom:1px solid var(--border)">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;padding-bottom:12px;border-bottom:1px solid var(--border)">
       <div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:4px;letter-spacing:.3px">Resumen por producto</div>
         <div style="font-size:17px;font-weight:600">${fechaLabel}</div>
       </div>
+      ${_selFechasHtml}
       <div style="text-align:right">
         <div style="font-size:11px;color:var(--muted);margin-bottom:2px">Plata neta del periodo</div>
         <div style="font-size:24px;font-weight:700;color:${plataNetaTotal>=0?'var(--green)':'var(--red)'}">${plataNetaTotal>=0?'+':'−'}$${fmt(Math.abs(plataNetaTotal))}</div>
@@ -17671,7 +17708,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
       ${_resumenPillCount('precaucion',conteo.precaucion,'🟡','en CUIDADO','var(--amber)','var(--amber-bg)','CUIDADO — Click para filtrar productos al límite (CPA entre 70-100% del break-even).')}
       ${_resumenPillCount('stop',conteo.stop,'🔴','en APAGAR','var(--red)','var(--red-bg)','APAGAR — Click para filtrar productos perdiendo plata (CPA > break-even).')}
       ${conteo.sin_ventas>0?_resumenPillCount('sin_ventas',conteo.sin_ventas,'⏳','en ESPERAR','var(--muted)','var(--card2)','ESPERAR — Sin ventas todavía.'):''}
-      <button onclick="resumenProductosFilter('',this)" title="Mostrar todos los productos sin filtro" style="margin-left:auto;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:10px;cursor:pointer">Ver todos</button>
+      <button class="btn-sm btn-outline" onclick="abrirMetaUnDia('hoy')" title="Abre 1 pestaña de Meta Ads (Nexo) solo con HOY, sin esperar a que cargue el portafolio" style="margin-left:auto">Ver Hoy</button>
+      <button onclick="resumenProductosFilter('',this)" title="Mostrar todos los productos sin filtro" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:10px;cursor:pointer">Ver todos</button>
     </div>
 
     ${_fusMainHtml}
@@ -18339,12 +18377,16 @@ function _renderProductoCardResumen(data,ranking){
       : `<div style="font-size:11px;color:var(--subtle);padding:3px 0">— ninguna —</div>`
     // Huérfanos: tienen ad_id pero la cadena ad→adset→campaña se rompió en BD (con motivo). CERRADO al inicio.
     const _huerRows=Object.entries(cu.huerfanosIds||{}).sort((a,b)=>b[1].count-a[1].count).map(([adId,o],i)=>`<div style="padding:6px 8px;background:${i%2===0?'rgba(255,255,255,.025)':'transparent'};border-radius:5px"><div style="display:flex;align-items:center;font-size:11.5px;color:var(--amber)"><span style="font-family:monospace">🖼️ ${_esc(adId)}</span>${_btnCopy(adId,'ID del anuncio')}<span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px">${o.count}</span></div><div style="font-size:10px;color:var(--muted);padding-left:2px">↳ ${_esc(o.paso)}</div></div>`).join('')
+    // NUEVO (3jul26 · Mejora 2): los huérfanos ya NO son solo lista — al abrir se consulta Meta EN VIVO
+    // (mismo motor de "Sin sincronizar") pa' ver a qué campaña pertenece cada ID y ASIGNARLE producto
+    // ahí mismo (botón ⚠️ Producto / masivo), sin salir de la sección ni recargar nada.
+    if(_huerN>0){try{const _hm={};for(const _hk in (cu.huerfanosIds||{}))_hm[_hk]=(cu.huerfanosIds[_hk]&&cu.huerfanosIds[_hk].count)||0;(window._rpSinSyncData=window._rpSinSyncData||{})[_cid+'_h']=_hm}catch(_){}}
     const _huerHtml=_huerN>0?`
-      <div onclick="window._rpToggleCuadre('${_cid}_h')" style="cursor:pointer;display:flex;align-items:center;font-size:13px;color:var(--amber);padding:5px 0" title="Anuncios con ad_id cuya cadena ad→conjunto→campaña está incompleta en la base. Corre un Sync de la cuenta para arreglarlo.">
+      <div onclick="window._rpToggleSinSync('${_cid}_h')" style="cursor:pointer;display:flex;align-items:center;font-size:13px;color:var(--amber);padding:5px 0" title="Anuncios con ad_id cuya cadena ad→conjunto→campaña está incompleta en la base. Al abrir, se busca EN VIVO en Meta a qué campaña pertenece cada ID y puedes asignarle producto ahí mismo (o corre un Sync de la cuenta).">
         <span id="${_cid}_h-chev" style="display:inline-block;width:14px;font-size:10px;color:var(--amber)">▸</span>
         <span style="margin-left:4px">⚠️ Anuncios huérfanos (cadena rota)</span><span style="margin-left:auto;font-weight:700">${_huerN}</span>
       </div>
-      <div id="${_cid}_h-sub" style="display:none;margin:2px 0 6px 20px;border-left:1px solid var(--amber);padding-left:12px">${_huerRows}</div>`
+      <div id="${_cid}_h-sub" style="display:none;margin:2px 0 6px 20px;border-left:1px solid var(--amber);padding-left:12px"><div id="${_cid}_h-res">${_huerRows}</div></div>`
       :`<div style="display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0 5px 18px" title="Anuncios con ad_id cuya cadena ad→conjunto→campaña está rota en la base. Hoy hay 0: todo bien. Este es el 3er número de la suma de abajo.">
         <span>⚠️ Anuncios huérfanos (cadena rota)</span><span style="margin-left:auto;font-weight:700">0</span>
       </div>`
@@ -18392,6 +18434,18 @@ function _renderProductoCardResumen(data,ranking){
   _cuadreHtml+=_mkCuadreBlock(data.prevData&&data.prevData.cuadre,(data.esSoloHoy?'ayer':'el período anterior'),'a','var(--green)')
   _cuadreHtml+=_mkCuadreBlock(data.prevData2&&data.prevData2.cuadre,(data.esSoloHoy?'antier':'el 2º período'),'b','var(--subtle)')
   _cuadreHtml+=_mkCuadreBlock(data.prevData3&&data.prevData3.cuadre,(data.esSoloHoy?'trasantier':'el 3º período'),'c','var(--subtle)')
+  // NUEVO (3jul26 · Mejora 1): SEGUNDA copia de los mismos bloques "¿De dónde salen los pedidos?"
+  // pero con sufijos *2 (IDs de DOM propios → los toggles no chocan con los originales). Se guarda
+  // por producto en window._rpCuadrePorProd y el resumen del RANGO (_rpFusionRango) la pinta debajo
+  // de las píldoras de días. Los bloques originales de aquí abajo quedan INTACTOS en su lugar.
+  try{
+    let _cuadreHtmlRg=''
+    _cuadreHtmlRg+=_mkCuadreBlock(data.cuadre,(data.esSoloHoy?'hoy':'el período'),'p2','var(--amber)')
+    _cuadreHtmlRg+=_mkCuadreBlock(data.prevData&&data.prevData.cuadre,(data.esSoloHoy?'ayer':'el período anterior'),'a2','var(--green)')
+    _cuadreHtmlRg+=_mkCuadreBlock(data.prevData2&&data.prevData2.cuadre,(data.esSoloHoy?'antier':'el 2º período'),'b2','var(--subtle)')
+    _cuadreHtmlRg+=_mkCuadreBlock(data.prevData3&&data.prevData3.cuadre,(data.esSoloHoy?'trasantier':'el 3º período'),'c2','var(--subtle)')
+    ;(window._rpCuadrePorProd=window._rpCuadrePorProd||{})[_slugProd]=_cuadreHtmlRg
+  }catch(_){}
 
   // ── NUEVO: FUSIÓN 4 DÍAS — todas las campañas juntas, agrupadas por ID ──
   // Reorganiza los MISMOS datos de los 4 bloques de arriba (data.cuadre / prevData*.cuadre):
@@ -19065,7 +19119,7 @@ function _renderProductoCardResumen(data,ranking){
     // FIX: doble conteo por día — n = ventas cuadre (Dropi) · ids = ventas por IDs del aux (así AYER ya no sale "muerto" si el cruce no llegó)
     const _convPorDiaF={p:(data.conversaciones||0),a:(data.prevData&&data.prevData.conversaciones)||0,b:(data.prevData2&&data.prevData2.conversaciones)||0,c:(data.prevData3&&data.prevData3.conversaciones)||0}
     const _stkDiaF=(k)=>{const g=window._stockDiaG&&window._stockDiaG[k]?window._stockDiaG[k][data.nombre]:undefined;if(g!=null)return g;if(k==='p'&&data.producto&&data.producto.stock_actual!=null)return data.producto.stock_actual;return null}
-    const _totPorDiaF=_dias.map(d=>({k:d.k,lab:d.lab,n:_lista.reduce((s,F)=>s+((F.dias[d.k]&&F.dias[d.k].count)||0),0),ids:_lista.reduce((s,F)=>s+_idsCampDiaF(d.k,F.campId),0),conv:_convPorDiaF[d.k]||0,stk:_stkDiaF(d.k)}))
+    const _totPorDiaF=_dias.map(d=>({k:d.k,lab:d.lab,n:_lista.reduce((s,F)=>s+((F.dias[d.k]&&F.dias[d.k].count)||0),0),ids:_lista.reduce((s,F)=>s+_idsCampDiaF(d.k,F.campId),0),conv:_convPorDiaF[d.k]||0,stk:_stkDiaF(d.k),g:_lista.reduce((s,F)=>s+((F.dias[d.k]&&F.dias[d.k].gasto)||0),0)}))
     // NUEVO (Mejora 5): conteo 🟢 Activas / ⚫ Inactivas de la fusión — misma regla del punto _dotF de cada fila
     // FIX: estos chips son una FOTO DE HOY — ⚫ Inactivas solo cuenta las apagadas que SÍ gastaron HOY.
     // Todas = Activas + Inactivas (con gasto hoy) = campañas que movieron plata HOY. Inactivas ventas (PRENDER YA)
@@ -19201,7 +19255,7 @@ function _renderProductoCardResumen(data,ranking){
       ${_filtroRowF}
       <div style="display:flex;align-items:center;gap:8px;margin:6px 0 3px;font-size:9.5px;letter-spacing:.8px;color:var(--subtle);font-weight:700" title="ZONA 1 · Filtro por DÍA: toca un chip para ver SOLO las campañas que vendieron ese día (clic de nuevo lo quita). Se cruza con los demás filtros. El detalle de cada día está en el tooltip y abajo de la tabla.">📊 ASÍ VAMOS — CÓMO FUE CADA DÍA (TOCA UN CHIP PARA FILTRAR)<span style="flex:1;height:1px;background:var(--border)"></span></div>
       <div id="${_cidF}-diachips" style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:0 0 6px" title="Ventas de cada día sumando todas las campañas (detalle en el tooltip de cada chip). Si un día está en 0 igual se muestra.">
-        ${_totPorDiaF.map(t=>{const _onT=(t.n>0||t.ids>0);return`<button class="rp-fus-diapill" data-dia="${t.k}" ${_onT?`onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','dia','${t.k}',this)"`:''} style="cursor:${_onT?'pointer':'default'};font-size:10.5px;font-weight:700;padding:3px 10px;border-radius:999px;white-space:nowrap;${_onT?'background:var(--green-bg);color:var(--green);border:1px solid var(--green)':'background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)'}" title="${t.lab}: ${t.n} venta${t.n===1?'':'s'} Dropi (cuadre) · ${t.ids} por IDs del aux · ${t.conv} conversaciones · 📦 stock ${t.stk!=null?fmt(t.stk):'—'}${!_onT?' — ese día no se vendió nada por ninguna fuente':' · CLIC para ver SOLO las campañas que vendieron '+t.lab+' (Dropi o IDs; clic de nuevo lo quita). Se COMBINA con Activas/Inactivas, urgencia y el buscador por ID.'}">${t.lab}</button>`}).join('')}
+        ${_totPorDiaF.map(t=>{const _onT=(t.n>0||t.ids>0||(t.g||0)>0);return`<button class="rp-fus-diapill" data-dia="${t.k}" ${_onT?`onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','dia','${t.k}',this)"`:''} style="cursor:${_onT?'pointer':'default'};font-size:10.5px;font-weight:700;padding:3px 10px;border-radius:999px;white-space:nowrap;${_onT?'background:var(--green-bg);color:var(--green);border:1px solid var(--green)':'background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)'}" title="${t.lab}: ${t.n} venta${t.n===1?'':'s'} Dropi (cuadre) · ${t.ids} por IDs del aux · ${t.conv} conversaciones · gasto $${fmt(Math.round(t.g||0))} · 📦 stock ${t.stk!=null?fmt(t.stk):'—'}${!_onT?' — ese día no hubo gasto ni ventas por ninguna fuente':' · CLIC para ver TODAS las campañas que GASTARON '+t.lab+' (con o sin ventas; clic de nuevo lo quita). Se COMBINA con Activas/Inactivas, urgencia y el buscador por ID.'}">${t.lab}</button>`}).join('')}
       </div>
       <style>
         .rp-fus-row{transition:background .08s}
@@ -19401,8 +19455,16 @@ window._rpResolverSinSync=async function(cid){
     if(sub)sub.dataset.resuelto='1'
   }catch(e){
     console.warn('[sin sync resolver] fallo:',e&&e.message)
-    res.innerHTML=`<div style="font-size:11px;color:var(--amber);padding:4px 8px 6px">⚠️ No se pudo consultar Meta en vivo (${String(e&&e.message||'error').slice(0,80)}) — mostrando solo los IDs.</div>`+_flatOriginal
+    // NUEVO (3jul26 · Mejora 2): botón 🔄 Reintentar ahí mismo — antes tocaba cerrar/abrir o recargar.
+    res.innerHTML=`<div style="font-size:11px;color:var(--amber);padding:4px 8px 6px">⚠️ No se pudo consultar Meta en vivo (${String(e&&e.message||'error').slice(0,80)}) — mostrando solo los IDs. <button onclick="event.stopPropagation();window._rpReintentarSinSync('${cid}')" style="margin-left:6px;background:rgba(245,158,11,.1);border:1px solid var(--amber);border-radius:5px;color:var(--amber);font-size:10.5px;font-weight:700;padding:1px 9px;cursor:pointer" title="Vuelve a consultar Meta en vivo estos mismos IDs, sin recargar nada">🔄 Reintentar</button></div>`+_flatOriginal
   }
+}
+// NUEVO (3jul26 · Mejora 2): reintenta la consulta EN VIVO de un desglose (huérfanos o sin sync)
+// limpiando las marcas de resuelto/resolviendo. No recarga nada más — solo ese pedacito.
+window._rpReintentarSinSync=function(cid){
+  const sub=document.getElementById(cid+'-sub')
+  if(sub){delete sub.dataset.resuelto;sub.dataset.resolviendo='1'}
+  window._rpResolverSinSync(cid).finally(()=>{const _s2=document.getElementById(cid+'-sub');if(_s2)delete _s2.dataset.resolviendo})
 }
 window._rpRenderSinSyncGrupos=function(cid){
   const res=document.getElementById(cid+'-res')
@@ -19594,8 +19656,13 @@ window._rpFusionFiltro=function(cidF,tipo,valor,btn){
     if(fest==='noent'&&row.dataset.fnoent!=='1')ok=false
     // NUEVO: 'hoy' = el chip "Todas hoy" — activas O apagadas con gasto HOY (sin PRENDER YA): las que movieron plata HOY
     if(fest==='hoy'&&(_esPy||!(row.dataset.factiva==='1'||row.dataset.fghoy==='1')))ok=false
-    // NUEVO: filtro por día — la campaña debe haber VENDIDO ese día (mismas claves p/a/b/c de las pills verdes)
-    if(fdia&&!(row.dataset.fdias||'').split(',').includes(fdia))ok=false
+    // MEJORA 2 (3jul26): filtro por día — TODA campaña que GASTÓ ese día (data-fg{p|a|b|c}) o vendió
+    // ese día (data-fdias). Antes solo mostraba las que vendieron; las de gasto sin ventas quedaban ocultas.
+    if(fdia){
+      const _vtaDiaF4=(row.dataset.fdias||'').split(',').includes(fdia)
+      const _gDiaF4=parseInt(row.dataset['fg'+fdia]||'0',10)||0
+      if(!(_vtaDiaF4||_gDiaF4>0))ok=false
+    }
     // NUEVO (11jun26): el buscador también encuentra IDs de ANUNCIOS — deja la campaña que contiene ese ad
     if(fid&&!((row.dataset.fcampid||'').includes(fid)||(row.dataset.fadids||'').includes(fid)))ok=false
     // NUEVO: ✅/⛔ con o sin ventas. Si hay un DÍA marcado, mira las ventas de ESE día (HOY = por 🆔 IDs, sin cruce todavía);
@@ -19878,10 +19945,13 @@ window._rpRangoFiltroFull=function(cidF,tipo,valor,btn){
     if(fest==='hoy'&&(_esPy||!(row.dataset.factiva==='1'||row.dataset.fghoy==='1')))ok=false
     if(fest==='noent'&&row.dataset.fnoent!=='1')ok=false
     if(fid&&!((row.dataset.fcampid||'').includes(fid)||(row.dataset.fadids||'').includes(fid)))ok=false
-    // NUEVO (2jul26 · Mejora 5): día marcado → solo campañas con venta 🛒 o 🆔 ESE día
+    // MEJORA 2 (3jul26): día marcado → TODA campaña que GASTÓ ese día (con o sin ventas).
+    // Antes solo mostraba las que vendieron (🛒 o 🆔) y escondía las que gastaron en cero.
+    // Las que NO gastaron NI vendieron ese día siguen ocultas.
     const _vDiaR=fdia?(parseInt(row.dataset['fd'+fdia+'v']||'0',10)||0):0
     const _iDiaR=fdia?(parseInt(row.dataset['fd'+fdia+'i']||'0',10)||0):0
-    if(fdia&&!(_vDiaR>0||_iDiaR>0))ok=false
+    const _gDiaR=fdia?(parseInt(row.dataset['fd'+fdia+'g']||'0',10)||0):0
+    if(fdia&&!(_gDiaR>0||_vDiaR>0||_iDiaR>0))ok=false
     if(fvsv){
       // Con día marcado, ✅/⛔ cuentan SOLO ese día (igual que en los 4 días); sin día, todo el rango
       const v=fdia?Math.max(_vDiaR,_iDiaR):Math.max(parseInt(row.dataset.fvts||'0',10)||0,parseInt(row.dataset.fitot||'0',10)||0)
@@ -20776,6 +20846,10 @@ window._rpFusionRango=async function(slug,cidF){
       const _tipT=`📅 ${_fLab(fT)}: ${nT} venta${nT===1?'':'s'} confirmada${nT===1?'':'s'} Dropi (TODAS las del producto, mismo número de la card — la tabla de abajo sí filtra por campañas) · ${idsT} IDs del aux · ${cvT} conversaciones. Gasto${_esHoyT?(_gVivoOkR?' de HOY: VIVO de Meta API ahora mismo':' de HOY: de la BD (último sync — Meta API no respondió)'):': meta_insights BD (día cerrado)'}. NO incluye gastos fijos (esos van en Dashboard).&#10;&#10;FÓRMULA:&#10;💰 = venta×(1−dev) − costo proveedor − flete envío − (ventas×dev×flete dev) − gasto ads − (conv × costo conv)&#10;🎯 CPA = gasto ÷ ventas 🛒 (si HOY aún no cruza: ÷ 🆔 IDs)&#10;&#10;CON TUS DATOS:${(_ecoOkR&&dT)?`&#10;💰 $${fmt(dT.ventaEf)} − $${fmt(dT.prov)} − $${fmt(dT.flete)} − $${fmt(dT.dev)} − $${fmt(dT.gasto)} − $${fmt(dT.conv)} = ${(ganT||0)>=0?'+':'−'}$${fmt(Math.abs(ganT||0))} (dev ${Math.round((dT.devPct||0)*100)}%)`:'&#10;💰 — (recarga el resumen: falta la economía del producto en memoria)'}${_cpaT>0?`&#10;🎯 $${fmt(gT)} ÷ ${_nCpaT} = $${fmt(_cpaT)} vs break-even $${fmt(BE)}`:''}`
       return`<span style="font-size:9.5px;font-weight:700;padding:2px 8px;border-radius:999px;white-space:nowrap;background:${vivoT?'rgba(255,255,255,.05)':'rgba(255,255,255,.02)'};color:${vivoT?'var(--text)':'var(--subtle)'};border:1px solid ${vivoT?'var(--border)':'rgba(255,255,255,.06)'}" title="${_tipT}">📅 ${_fLab(fT)} · ${nT}🛒·${idsT}🆔·${cvT}💬·📦${_stkDiaRg[fT]!=null?fmt(_stkDiaRg[fT]):'—'} · 💸$${fmt(gT)}${_esHoyT&&_gVivoOkR?'⚡':''}${_cpaT>0?` · <span style="color:${_colCpaT}">🎯$${fmt(_cpaT)}</span>`:''} · <span style="color:${colT}">💰${_ecoOkR?(((ganT||0)>=0?'+':'−')+'$'+fmt(Math.abs(ganT||0))):'—'}</span></span>`
     }).join('')}</div>`
+    // NUEVO (3jul26 · Mejora 1): debajo de las píldoras de días van los bloques "¿De dónde salen
+    // los pedidos?" DEL PRODUCTO (copia con IDs *2 generada en el Resumen por producto — cada
+    // producto trae los suyos). Si la card del producto aún no renderizó, no pinta nada y ya.
+    try{const _cuadRg=(window._rpCuadrePorProd||{})[slug];if(_cuadRg)_resumenRangoHtml+=`<div style="padding:2px 0 6px">${_cuadRg}</div>`}catch(_){}
     if(!_listaR.length){
       html+=`<div style="font-size:11.5px;color:var(--subtle);font-style:italic;padding:6px 0">— Nada que mostrar en este rango: ni ventas ni gasto en estas campañas. —</div>`
     }
@@ -21003,7 +21077,7 @@ window._rpFusionRango=async function(slug,cidF){
       if(_chipsR){
         window._rpFusionChipsOrig=window._rpFusionChipsOrig||{}
         if(window._rpFusionChipsOrig[cidF]===undefined)window._rpFusionChipsOrig[cidF]=_chipsR.innerHTML
-        _chipsR.innerHTML=_todasFechasR.map((fH,_ixCh)=>{const nH=(_diaAggR[fH]&&_diaAggR[fH].n)||0,iH=_idsDiaR[fH]||0,cH=_convDiaR[fH]||0;const onH=(nH>0||iH>0||cH>0);const _labCh=(fH===_hoyISO_R?'HOY ':'')+_fLab(fH).toUpperCase();return`<button class="rp-fus-diapill" data-dia="${_ixCh}" ${onH?`onclick="event.stopPropagation();window._rpFusionFiltro('${cidF}','dia','${_ixCh}',this)"`:''} style="cursor:${onH?'pointer':'default'};font-size:10.5px;font-weight:700;padding:3px 10px;border-radius:999px;white-space:nowrap;${onH?'background:var(--green-bg);color:var(--green);border:1px solid var(--green)':'background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)'}" title="${_fLab(fH)}: ${nH} venta${nH===1?'':'s'} Dropi · ${iH} IDs del aux · ${cH} conversaciones · 📦 stock ${_stkDiaRg[fH]!=null?fmt(_stkDiaRg[fH]):'—'}${onH?' · CLIC para ver SOLO las campañas que vendieron este día (Dropi o IDs; clic de nuevo lo quita). Se CRUZA con los demás filtros.':' — ese día no se vendió nada por ninguna fuente'}">${_labCh}</button>`}).join('')
+        _chipsR.innerHTML=_todasFechasR.map((fH,_ixCh)=>{const nH=(_diaAggR[fH]&&_diaAggR[fH].n)||0,iH=_idsDiaR[fH]||0,cH=_convDiaR[fH]||0;const gH=_listaR.reduce((s,F)=>s+((F.dias[fH]&&F.dias[fH].gasto)||0),0);const onH=(nH>0||iH>0||cH>0||gH>0);const _labCh=(fH===_hoyISO_R?'HOY ':'')+_fLab(fH).toUpperCase();return`<button class="rp-fus-diapill" data-dia="${_ixCh}" ${onH?`onclick="event.stopPropagation();window._rpFusionFiltro('${cidF}','dia','${_ixCh}',this)"`:''} style="cursor:${onH?'pointer':'default'};font-size:10.5px;font-weight:700;padding:3px 10px;border-radius:999px;white-space:nowrap;${onH?'background:var(--green-bg);color:var(--green);border:1px solid var(--green)':'background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)'}" title="${_fLab(fH)}: ${nH} venta${nH===1?'':'s'} Dropi · ${iH} IDs del aux · ${cH} conversaciones · gasto $${fmt(Math.round(gH))} · 📦 stock ${_stkDiaRg[fH]!=null?fmt(_stkDiaRg[fH]):'—'}${onH?' · CLIC para ver TODAS las campañas que GASTARON este día (con o sin ventas; clic de nuevo lo quita). Se CRUZA con los demás filtros.':' — ese día no hubo gasto ni ventas por ninguna fuente'}">${_labCh}</button>`}).join('')
       }
     }catch(_){}
     try{if(cont)cont.scrollIntoView({behavior:'smooth',block:'start'})}catch(_){}
@@ -21075,8 +21149,11 @@ function _resumenFechaLabel(desde,hasta,hoy){
 window._actualizarResumenMetaProductos=async function(){
   const cont=document.getElementById('meta-resumen-productos')
   if(!cont)return
-  const desde=document.getElementById('meta-desde')?.value||today()
-  const hasta=document.getElementById('meta-hasta')?.value||today()
+  // MEJORA 7 (3jul26): los inputs viven DENTRO del resumen → mientras está en "Cargando..." no
+  // existen. Fallback al rango persistido en window._metaRangoSel (no se pierde el rango elegido).
+  const desde=document.getElementById('meta-desde')?.value||window._metaRangoSel?.desde||today()
+  const hasta=document.getElementById('meta-hasta')?.value||window._metaRangoSel?.hasta||today()
+  window._metaRangoSel={desde,hasta}
   const hoy=today()
   cont.innerHTML='<div class="loading" style="padding:20px;text-align:center;color:var(--muted);font-size:13px">Cargando resumen por producto...</div>'
   try{
@@ -21136,8 +21213,8 @@ async function renderMetaPortafolio(el,isAdmin){
   //   - Rango solo histórico cerrado → BD directo.
   // El conteo "Con actividad" del header debe reflejar la realidad de Meta,
   // igual que lo hace el expand de la cuenta cuando le das click.
-  const _hHasta=document.getElementById('meta-hasta')?.value||window._metaRangoInicial?.hasta||today()
-  const _hDesde=document.getElementById('meta-desde')?.value||window._metaRangoInicial?.desde||_hHasta
+  const _hHasta=document.getElementById('meta-hasta')?.value||window._metaRangoSel?.hasta||window._metaRangoInicial?.hasta||today()
+  const _hDesde=document.getElementById('meta-desde')?.value||window._metaRangoSel?.desde||window._metaRangoInicial?.desde||_hHasta
   const _hTodayBg=new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
   const _hAyerBgDt=new Date(_hTodayBg+'T12:00:00Z');_hAyerBgDt.setDate(_hAyerBgDt.getDate()-1)
   const _hAyerBg=_isoDate(_hAyerBgDt)
@@ -21358,6 +21435,20 @@ async function renderMetaPortafolio(el,isAdmin){
       if(cid&&!campToProd[cid])campToProd[cid]=p
     }
   }
+  // MEJORA 6 (3jul26): las campañas asignadas a productos ARCHIVADOS también cuentan como
+  // "con producto". Antes loadProductos() solo trae NO archivados → toda campaña asignada a un
+  // archivado (ej. Triflex) volvía a aparecer en ⚠️ SIN PRODUCTO tras recargar. Se cargan aquí
+  // los archivados (solo id/nombre/campaign_ids — liviano) y se agregan al mapa SIN pisar activos.
+  try{
+    const{data:_prodArchMap}=await sb.from('productos').select('*').eq('archivado',true)
+    window._prodArchTodos=_prodArchMap||[]
+    for(const p of (_prodArchMap||[])){
+      const cids=Array.isArray(p.campaign_ids)?p.campaign_ids:[]
+      for(const cid of cids){
+        if(cid&&!campToProd[cid])campToProd[cid]=p
+      }
+    }
+  }catch(_eArc){console.warn('[campToProd] no se pudieron cargar archivados:',_eArc&&_eArc.message)}
   // Función helper: dado un campId, devuelve {p2,c2,fo,fd,dp,margenBE,roasBE,nombre,esGlobal,pctConf}
   function _ctxProductoPorCamp(campId){
     const p=campToProd[campId]
@@ -21382,8 +21473,10 @@ async function renderMetaPortafolio(el,isAdmin){
   }
 
   // Default dates: last 30 days
-  const defHasta=window._metaRangoInicial?.hasta||today()
-  const defDesde=window._metaRangoInicial?.desde||defHasta // Arranca en HOY por defecto (antes era rango de 30 dias)
+  // MEJORA 7 (3jul26): prioridad → rango por URL → inputs en pantalla → rango persistido → HOY.
+  // Antes un refresh del portafolio pisaba el rango elegido y volvía a HOY.
+  const defHasta=window._metaRangoInicial?.hasta||document.getElementById('meta-hasta')?.value||window._metaRangoSel?.hasta||today()
+  const defDesde=window._metaRangoInicial?.desde||document.getElementById('meta-desde')?.value||window._metaRangoSel?.desde||defHasta // Arranca en HOY por defecto (antes era rango de 30 dias)
   // El rango pre-cargado por URL solo aplica a esta primera carga
   window._metaRangoInicial=null
 
@@ -21400,12 +21493,55 @@ async function renderMetaPortafolio(el,isAdmin){
   const _banB=_okB
     ?`<div id="meta-carga-banner" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding:7px 11px;background:var(--green-bg);border:1px solid var(--green);border-radius:8px;font-size:11.5px;color:var(--green)"><span style="font-size:14px">✅</span><span><strong>Datos cargados correctamente</strong> — ${cuentas.length} cuenta${cuentas.length===1?'':'s'} · ${(campanas||[]).length} campañas · ${_detB}</span><button onclick="doRefreshPortafolio(this)" style="margin-left:auto;background:transparent;border:1px solid var(--green);border-radius:6px;color:var(--green);font-size:10.5px;font-weight:700;padding:2px 10px;cursor:pointer" title="Volver a cargar todo el portafolio">🔄 Recargar</button></div>`
     :`<div id="meta-carga-banner" style="margin-bottom:10px;padding:8px 11px;background:rgba(245,158,11,.08);border:1px solid var(--amber);border-radius:8px;font-size:11.5px;color:var(--amber)"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="font-size:14px">⚠️</span><span><strong>Cargó con avisos</strong> — donde Meta no respondió se muestra la BD (último sync) · ${_detB}</span><button onclick="doRefreshPortafolio(this)" style="margin-left:auto;background:rgba(245,158,11,.15);border:1px solid var(--amber);border-radius:6px;color:var(--amber);font-size:10.5px;font-weight:700;padding:2px 10px;cursor:pointer" title="Vuelve a lanzar TODOS los llamados de la carga">🔄 Reintentar</button></div><div style="font-size:10.5px;margin-top:4px;opacity:.92;line-height:1.5">${_ciB.fallas.slice(0,6).map(fB=>'· '+String(fB).replace(/</g,'&lt;')).join('<br>')}${_ciB.fallas.length>6?('<br>· …y '+(_ciB.fallas.length-6)+' más (mira la consola)'):''}</div></div>`
-  let html=_banB+`<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--border)">
+  // MEJORA 3 (3jul26): verificación contra el BM — llamada liviana a /me/adaccounts (solo account_id).
+  // · Cuenta en BD que YA NO aparece en el BM → aviso "parece bloqueada" + botón 🚫 Confirmar (TÚ decides, no se marca sola).
+  // · Cuenta marcada BLOCKED que SÍ aparece de nuevo en el BM → aviso "volvió" + botón 🔓 Desbloquear.
+  // Si Meta no responde este llamado, no se avisa nada (cero falsos positivos por caídas de red).
+  let _blkBanner=''
+  try{
+    const _tkBlk=await getConfig('meta_access_token')
+    if(_tkBlk){
+      const _accsBM=await metaGet('/me/adaccounts',_tkBlk,{fields:'account_id',limit:'500'})
+      if(Array.isArray(_accsBM)&&_accsBM.length){
+        const _bmSet=new Set(_accsBM.map(a=>String(a.account_id||String(a.id||'').replace('act_',''))))
+        const _sospBlk=cuentas.filter(c=>c.estado!=='BLOCKED'&&!_bmSet.has(String(c.account_id)))
+        const _volvBlk=cuentas.filter(c=>c.estado==='BLOCKED'&&_bmSet.has(String(c.account_id)))
+        const _nomEscBlk=c=>String(c.nombre||'').replace(/\\/g,'').replace(/'/g,"\\'").replace(/"/g,'')
+        if(_sospBlk.length){
+          const _filasS=_sospBlk.map(c=>`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:4px 0;font-size:11.5px"><span>🏢 <strong>${(c.nombre||c.account_id)}</strong> <span style="font-family:monospace;font-size:10px;opacity:.75">${c.account_id}</span> — ya NO aparece en el BM</span><button onclick="window._confirmarCuentaBloqueada('${c.account_id}','${_nomEscBlk(c)}',this)" style="margin-left:auto;background:rgba(239,68,68,.15);border:1px solid var(--red);border-radius:6px;color:var(--red);font-size:10.5px;font-weight:700;padding:2px 10px;cursor:pointer" title="Confirmar que esta cuenta fue bloqueada: pasa a la sección 🚫 Bloqueadas (botón junto a Inactivas). Puedes desbloquearla cuando quieras.">🚫 Confirmar bloqueada</button></div>`).join('')
+          _blkBanner+=`<div style="margin-bottom:10px;padding:8px 11px;background:rgba(239,68,68,.07);border:1px solid var(--red);border-radius:8px;color:var(--red)"><div style="display:flex;align-items:center;gap:8px;font-size:11.5px;flex-wrap:wrap"><span style="font-size:14px">⚠️</span><span><strong>${_sospBlk.length===1?'Esta cuenta parece bloqueada':_sospBlk.length+' cuentas parecen bloqueadas'}</strong> — Meta respondió pero ya no ${_sospBlk.length===1?'la':'las'} lista en el BM. Confírmalo tú con el botón (no se marca sola).</span></div><div style="margin-top:4px">${_filasS}</div></div>`
+        }
+        if(_volvBlk.length){
+          const _filasV=_volvBlk.map(c=>`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:4px 0;font-size:11.5px"><span>🏢 <strong>${(c.nombre||c.account_id)}</strong> <span style="font-family:monospace;font-size:10px;opacity:.75">${c.account_id}</span> — estaba bloqueada y YA está de nuevo en el BM</span><button onclick="window._desbloquearCuenta('${c.account_id}','${_nomEscBlk(c)}',this)" style="margin-left:auto;background:var(--green-bg);border:1px solid var(--green);border-radius:6px;color:var(--green);font-size:10.5px;font-weight:700;padding:2px 10px;cursor:pointer" title="La cuenta volvió a aparecer en el BM. Clic para desbloquearla: vuelve a las secciones normales (Todas/Activas/Inactivas).">🔓 Desbloquear</button></div>`).join('')
+          _blkBanner+=`<div style="margin-bottom:10px;padding:8px 11px;background:var(--green-bg);border:1px solid var(--green);border-radius:8px;color:var(--green)"><div style="display:flex;align-items:center;gap:8px;font-size:11.5px;flex-wrap:wrap"><span style="font-size:14px">🔓</span><span><strong>${_volvBlk.length===1?'Una cuenta bloqueada volvió al BM':_volvBlk.length+' cuentas bloqueadas volvieron al BM'}</strong> — ¿${_volvBlk.length===1?'la':'las'} desbloqueas?</span></div><div style="margin-top:4px">${_filasV}</div></div>`
+        }
+      }
+    }
+  }catch(_eBlk){console.warn('[bloqueadas] no se pudo verificar el BM:',_eBlk&&_eBlk.message)}
+
+  let html=_banB+_blkBanner+`<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--border)">
     <div style="font-size:12px;color:var(--muted)">Última sync: <strong style="color:var(--text)">${lastStr}</strong></div>
     <button class="btn-sm btn-primary" onclick="analizarConIA('portafolio','all','Portafolio completo')">🤖 Analizar con IA</button>
   </div>`
 
-  // Bloque 1: VER CUENTAS (buscador + filtros estado)
+  // MEJORA 5 (3jul26): el bloque "🔍 VER CUENTAS" se MOVIÓ — ahora se pinta justo encima
+  // de las tarjetas de cuentas (después del Resumen por producto), no aquí arriba.
+
+  // MEJORA 7 (3jul26): la sección "📅 ¿Qué días quieres ver?" se ELIMINÓ — los selectores de
+  // rango + día único ahora viven en el encabezado del Resumen por producto (centro).
+  // El rango elegido se persiste en window._metaRangoSel para sobrevivir re-renders
+  // (los inputs se destruyen/recrean con cada render del resumen).
+  window._metaRangoSel={desde:defDesde,hasta:defHasta}
+
+  // MEJORA 8 (3jul26): el bloque "🔄 ACTUALIZAR DATOS" se MOVIÓ — ahora se pinta al FINAL,
+  // después de la última tarjeta de cuenta (queda entre las cuentas y Credenciales).
+
+  // Resumen por producto (consolidado por producto, ordenado por urgencia, colapsable).
+  // Usa el rango global de Meta Ads (meta-desde / meta-hasta) — se refresca con applyMetaDateRange().
+  html+=`<div id="meta-resumen-productos" style="margin-bottom:16px"><div class="loading" style="padding:20px;text-align:center;color:var(--muted);font-size:13px">Cargando resumen por producto...</div></div>`
+
+  // MEJORA 5 (3jul26): 🔍 VER CUENTAS ahora vive AQUÍ, justo encima de las tarjetas de cuentas.
+  // MEJORA 3 (3jul26): nuevo botón 🚫 Bloqueadas (cuentas que salieron del BM y confirmaste como bloqueadas).
   html+=`<div style="margin-bottom:10px">
     <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;font-weight:600">🔍 Ver cuentas</div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
@@ -21413,46 +21549,9 @@ async function renderMetaPortafolio(el,isAdmin){
       <button class="btn-sm btn-outline" id="mf-all" onclick="setMetaFilter('all')">Todas</button>
       <button class="btn-sm btn-primary" id="mf-ACTIVE" onclick="setMetaFilter('ACTIVE')">Activas</button>
       <button class="btn-sm btn-outline" id="mf-INACTIVE" onclick="setMetaFilter('INACTIVE')">Inactivas</button>
+      <button class="btn-sm btn-outline" id="mf-BLOCKED" onclick="setMetaFilter('BLOCKED')" style="border-color:var(--red);color:var(--red)" title="Cuentas publicitarias que ya NO están en el BM (Meta las quitó — normalmente por bloqueo) y que TÚ confirmaste como bloqueadas. Cada una tiene botón 🔓 Desbloquear.">🚫 Bloqueadas</button>
     </div>
   </div>`
-
-  // Bloque 2: ¿QUÉ DÍAS QUIERES VER? (botones rápidos + rango personalizado + día específico)
-  html+=`<div style="margin-bottom:10px">
-    <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;font-weight:600">📅 ¿Qué días quieres ver?</div>
-    <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
-      <button class="btn-sm btn-outline" onclick="setMetaDiaUnico(0)">Hoy</button>
-      <button class="btn-sm btn-outline" onclick="setMetaDiaUnico(1)">Ayer</button>
-      <button class="btn-sm btn-outline" onclick="setMetaDiaUnico(2)">Antier</button>
-      <button class="btn-sm btn-outline" onclick="setMetaRangoMes(0)">Este mes</button>
-      <button class="btn-sm btn-outline" onclick="setMetaRangoMes(-1)">Mes pasado</button>
-      <span style="color:var(--subtle);font-size:11px;margin:0 4px">o rango:</span>
-      <input type="date" id="meta-desde" value="${defDesde}" style="background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:4px 6px;border-radius:6px" onchange="applyMetaDateRange()" title="Desde">
-      <span style="color:var(--muted);font-size:11px">→</span>
-      <input type="date" id="meta-hasta" value="${defHasta}" style="background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:4px 6px;border-radius:6px" onchange="applyMetaDateRange()" title="Hasta">
-      <span style="color:var(--subtle);font-size:11px;margin:0 4px">o un día:</span>
-      <input type="date" id="meta-dia-unico" value="" style="background:var(--card2);border:1px solid var(--purple);color:var(--text);font-size:11px;padding:4px 6px;border-radius:6px" onchange="setMetaDiaUnico(this.value)" title="Día específico — sincroniza Desde y Hasta a ese mismo día">
-    </div>
-    <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-      <button class="btn-sm" onclick="abrirMetaComparativa3()" style="background:var(--accent);color:#fff;font-weight:600;padding:6px 12px;border:none;border-radius:6px;cursor:pointer" title="Abre 3 pestañas en Meta Ads con las fechas ya puestas: Ayer · Antier · Últimos 3 días">📅 Ver Ayer/Antier/3d en Meta</button>
-      <span style="font-size:10px;color:var(--muted)">Abre 3 pestañas en Meta Ads ya con las fechas listas 👉 Ayer · Antier · Últimos 3 días. Así comparas sin cambiar fechas a mano.</span>
-    </div>
-  </div>`
-
-  // Bloque 3: ACTUALIZAR DATOS (solo admin)
-  if(isAdmin){
-    html+=`<div style="margin-bottom:14px">
-      <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;font-weight:600">🔄 Actualizar datos</div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap">
-        <button class="btn-sm btn-primary" onclick="runMetaSyncAllAccounts(7,this)">🔄 Sync 7d todas</button>
-        <button class="btn-sm btn-green" onclick="runMetaSyncAllAccounts('all',this)">📥 Sync completo todas</button>
-        <button class="btn-sm btn-outline" onclick="runRefrescarDropi(this)" title="Crea snapshots ⭐ Cruce Dropi en el timeline del semáforo para los últimos 3 días (ayer, anteayer, hace 3). Solo procesa cuentas con gasto en el rango y solo crea puntos si no existen ya." style="border-color:var(--purple);color:var(--purple)">🔄 Refrescar Dropi</button>
-      </div>
-    </div>`
-  }
-
-  // Resumen por producto (consolidado por producto, ordenado por urgencia, colapsable).
-  // Usa el rango global de Meta Ads (meta-desde / meta-hasta) — se refresca con applyMetaDateRange().
-  html+=`<div id="meta-resumen-productos" style="margin-bottom:16px"><div class="loading" style="padding:20px;text-align:center;color:var(--muted);font-size:13px">Cargando resumen por producto...</div></div>`
 
   // Render accounts as accordions
   for(const cuenta of cuentas){
@@ -21462,8 +21561,10 @@ async function renderMetaPortafolio(el,isAdmin){
     const statusIcon=hasData?'✅':'⚠️'
     const ca=conActByAcc[cuenta.account_id]||{con:0,activas:0,pausadas:0}
     // Badge dinámico: refleja actividad real en el rango (coincide con el filtro "Con actividad" del expand)
-    const badgeReal=ca.con>0?'ACTIVE':'SIN ACTIVIDAD'
-    const badgeColor=ca.con>0?'green':'red'
+    // MEJORA 3 (3jul26): si la cuenta está BLOQUEADA (confirmada por ti), el badge lo dice y sale botón 🔓
+    const _esBlk=cuenta.estado==='BLOCKED'
+    const badgeReal=_esBlk?'🚫 BLOQUEADA':(ca.con>0?'ACTIVE':'SIN ACTIVIDAD')
+    const badgeColor=_esBlk?'red':(ca.con>0?'green':'red')
 
     html+=`<div class="meta-cuenta-wrap" data-estado="${cuenta.estado}" data-tienegastohoy="${tieneGastoRango[cuenta.account_id]?1:0}" data-nombre="${(cuenta.nombre||cuenta.account_id).toLowerCase()}" data-accid="${cuenta.account_id}" style="margin-bottom:8px">
       <div class="card" style="padding:12px;cursor:pointer;user-select:none;border-left:4px solid var(--hier-cuenta)" onclick="toggleMetaCuenta('${cuenta.account_id}')">
@@ -21482,6 +21583,7 @@ async function renderMetaPortafolio(el,isAdmin){
             ${isAdmin?`<label onclick="event.stopPropagation()" style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--muted);cursor:pointer" title="Si está marcado, esta cuenta NO suma en el Tracker global">
               <input type="checkbox" ${cuenta.excluir_global?'checked':''} onchange="event.stopPropagation();toggleExcluirGlobal('${cuenta.account_id}',this.checked)"> Excluir global
             </label>`:''}
+            ${_esBlk?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();window._desbloquearCuenta('${cuenta.account_id}','${(cuenta.nombre||'').replace(/'/g,"\\'")}',this)" title="Desbloquear esta cuenta: vuelve a las secciones normales (Todas/Activas/Inactivas)" style="padding:6px 10px;font-size:11px;border-color:var(--green);color:var(--green)">🔓 Desbloquear</button>`:''}
             <button class="btn-sm btn-outline" onclick="event.stopPropagation();analizarConIA('cuenta','${cuenta.account_id}','${(cuenta.nombre||cuenta.account_id).replace(/'/g,"\\'")}')" title="Analizar con IA" style="padding:6px 10px;font-size:11px">🤖</button>
             <button class="btn-sm btn-outline" onclick="event.stopPropagation();refrescarSemaforosCuenta('${cuenta.account_id}',this)" title="Refrescar último punto del semáforo de todas las campañas reportadas hoy de esta cuenta" style="padding:6px 10px;font-size:11px;border-color:var(--purple);color:var(--purple)">🔄 Refrescar</button>
             <button class="btn-sm btn-outline" onclick="event.stopPropagation();runMetaSyncAccount('${cuenta.account_id}','${(cuenta.nombre||'').replace(/'/g,"\\'")}',3)" title="Sync 3 días" style="padding:6px 10px;font-size:11px">🔄 3d</button>
@@ -21492,6 +21594,19 @@ async function renderMetaPortafolio(el,isAdmin){
         </div>
       </div>
       <div id="meta-acc-${cuenta.account_id}" style="display:none;padding:4px 0 4px 12px"></div>
+    </div>`
+  }
+
+  // MEJORA 8 (3jul26): 🔄 ACTUALIZAR DATOS ahora vive AQUÍ — después de la última cuenta,
+  // antes de Credenciales (que se pinta fuera de este contenedor, en pageAdminMeta).
+  if(isAdmin){
+    html+=`<div style="margin:14px 0">
+      <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;font-weight:600">🔄 Actualizar datos</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn-sm btn-primary" onclick="runMetaSyncAllAccounts(7,this)">🔄 Sync 7d todas</button>
+        <button class="btn-sm btn-green" onclick="runMetaSyncAllAccounts('all',this)">📥 Sync completo todas</button>
+        <button class="btn-sm btn-outline" onclick="runRefrescarDropi(this)" title="Crea snapshots ⭐ Cruce Dropi en el timeline del semáforo para los últimos 3 días (ayer, anteayer, hace 3). Solo procesa cuentas con gasto en el rango y solo crea puntos si no existen ya." style="border-color:var(--purple);color:var(--purple)">🔄 Refrescar Dropi</button>
+      </div>
     </div>`
   }
 
@@ -21692,18 +21807,45 @@ window._confirmarProdCamp=async(campId,accountId)=>{
     if(error){fallidas++;_fallidasDet.push(cid+' — '+(error.message||'error desconocido'));console.warn('[asignar multi] fallo',cid,error.message)}else{ok++}
   }
   if(ok===0&&saltadas>0&&fallidas===0){closeModal();return}
+  // MEJORA 6 (3jul26): VERIFICACIÓN REAL contra Supabase — se relee el producto y se comprueba
+  // que CADA campaña de la lista quedó de verdad en campaign_ids. Si alguna no quedó (fallo
+  // silencioso de RPC/RLS), pasa a fallidas con motivo claro. Nada de ✅ falsos.
+  let _verSet=null
+  try{
+    const{data:_verProd,error:_verErr}=await sb.from('productos').select('campaign_ids').eq('id',prodId).single()
+    if(!_verErr&&_verProd){
+      _verSet=new Set((Array.isArray(_verProd.campaign_ids)?_verProd.campaign_ids:[]).map(String))
+      for(const cid of lista){
+        if(!_verSet.has(String(cid))&&!_fallidasDet.some(f=>f.startsWith(cid+' '))){
+          ok=Math.max(0,ok-1);fallidas++
+          _fallidasDet.push(cid+' — NO quedó guardada en Supabase (verificación post-guardado)')
+          console.warn('[asignar multi] verificación: no quedó guardada',cid)
+        }
+      }
+    }
+  }catch(_eVer){console.warn('[asignar multi] no se pudo verificar contra Supabase:',_eVer&&_eVer.message)}
   // Refrescar productos en memoria + el mapa campToProd del portafolio (misma referencia que el closure)
+  // MEJORA 6 (3jul26): el mapa se reconstruye INCLUYENDO archivados — si el producto elegido es un
+  // archivado (ej. Triflex), sus campañas ya no vuelven a ⚠️ SIN PRODUCTO al refrescar.
   await loadProductos()
+  try{
+    const{data:_archFresh}=await sb.from('productos').select('*').eq('archivado',true)
+    window._prodArchTodos=_archFresh||[]
+  }catch(_){}
   if(window._metaPort&&window._metaPort.campToProd){
     const m=window._metaPort.campToProd
     for(const k in m)delete m[k]
     for(const p of (productos||[])){
       for(const cid of (Array.isArray(p.campaign_ids)?p.campaign_ids:[])){if(cid&&!m[cid])m[cid]=p}
     }
+    for(const p of (window._prodArchTodos||[])){
+      for(const cid of (Array.isArray(p.campaign_ids)?p.campaign_ids:[])){if(cid&&!m[cid])m[cid]=p}
+    }
   }
   logAction('campana_producto_asignado',{producto_id:prodId,producto_nombre:prodNuevo.nombre,campaigns:lista,asignadas:ok,saltadas,fallidas}).catch(()=>{})
   closeModal()
   let msg='✅ '+ok+' campaña'+(ok===1?'':'s')+' asignada'+(ok===1?'':'s')+' a '+prodNuevo.nombre
+  if(_verSet)msg+=' (verificado en Supabase ✔)'
   if(saltadas)msg+=' · '+saltadas+' ya estaba'+(saltadas===1?'':'n')
   if(fallidas)msg+=' · ⚠️ '+fallidas+' falló'+(fallidas===1?'':'aron')+':\n'+_fallidasDet.join('\n')+'\n(Vuelve a intentar solo con esa: abre ⚠️ Asignar producto de nuevo)'
   alert(msg)
@@ -26317,9 +26459,14 @@ window.filterMetaCuentas=()=>{
   document.querySelectorAll('.meta-cuenta-wrap').forEach(el=>{
     const nombre=el.dataset.nombre||''
     const tieneGastoHoy=el.dataset.tienegastohoy==='1'
+    const esBloqueada=el.dataset.estado==='BLOCKED' // MEJORA 3 (3jul26)
     const matchSearch=!q||nombre.includes(q)
     let matchFilter=true
-    if(filter==='ACTIVE')matchFilter=tieneGastoHoy
+    // MEJORA 3 (3jul26): las bloqueadas SOLO se ven con el botón 🚫 Bloqueadas;
+    // en Todas / Activas / Inactivas quedan ocultas (sección aparte).
+    if(filter==='BLOCKED')matchFilter=esBloqueada
+    else if(esBloqueada)matchFilter=false
+    else if(filter==='ACTIVE')matchFilter=tieneGastoHoy
     else if(filter==='INACTIVE')matchFilter=!tieneGastoHoy
     el.style.display=(matchSearch&&matchFilter)?'':'none'
   })
@@ -26327,10 +26474,32 @@ window.filterMetaCuentas=()=>{
 
 window.setMetaFilter=(filter)=>{
   window._metaFilterState=filter
-  document.querySelectorAll('#mf-all,#mf-ACTIVE,#mf-INACTIVE').forEach(b=>{
+  document.querySelectorAll('#mf-all,#mf-ACTIVE,#mf-INACTIVE,#mf-BLOCKED').forEach(b=>{
     b.className=b.id==='mf-'+filter?'btn-sm btn-primary':'btn-sm btn-outline'
+    // MEJORA 3 (3jul26): el botón Bloqueadas conserva su color rojo cuando no está activo
+    if(b.id==='mf-BLOCKED'&&b.id!=='mf-'+filter){b.style.borderColor='var(--red)';b.style.color='var(--red)'}
+    else if(b.id==='mf-BLOCKED'){b.style.borderColor='';b.style.color=''}
   })
   filterMetaCuentas()
+}
+
+// MEJORA 3 (3jul26): confirmar bloqueo / desbloquear cuenta publicitaria.
+// El estado 'BLOCKED' vive en meta_cuentas.estado (mismo campo de siempre — sin migración de BD).
+window._confirmarCuentaBloqueada=async(accId,nombre,btn)=>{
+  if(!confirm('🚫 ¿Confirmas que la cuenta "'+(nombre||accId)+'" está BLOQUEADA?\n\nPasa a la sección 🚫 Bloqueadas (botón junto a Inactivas). Puedes desbloquearla cuando quieras.'))return
+  if(btn){btn.disabled=true;btn.textContent='⏳ Guardando...'}
+  const{error}=await sb.from('meta_cuentas').update({estado:'BLOCKED'}).eq('account_id',accId)
+  if(error){alert('❌ No se pudo marcar como bloqueada: '+error.message);if(btn){btn.disabled=false;btn.textContent='🚫 Confirmar bloqueada'}return}
+  logAction('cuenta_bloqueada',{account_id:accId,nombre}).catch(()=>{})
+  if(typeof doRefreshPortafolio==='function')doRefreshPortafolio()
+}
+window._desbloquearCuenta=async(accId,nombre,btn)=>{
+  if(!confirm('🔓 ¿Desbloquear la cuenta "'+(nombre||accId)+'"?\n\nVuelve a las secciones normales (Todas / Activas / Inactivas).'))return
+  if(btn){btn.disabled=true;btn.textContent='⏳ Guardando...'}
+  const{error}=await sb.from('meta_cuentas').update({estado:'ACTIVE'}).eq('account_id',accId)
+  if(error){alert('❌ No se pudo desbloquear: '+error.message);if(btn){btn.disabled=false;btn.textContent='🔓 Desbloquear'}return}
+  logAction('cuenta_desbloqueada',{account_id:accId,nombre}).catch(()=>{})
+  if(typeof doRefreshPortafolio==='function')doRefreshPortafolio()
 }
 
 // Busca por ID de campaña SOLO dentro de una cuenta (accountId). Deja visible la que
@@ -26459,8 +26628,9 @@ window.applyMetaDateRange=async()=>{
     if(chevron)chevron.textContent='▸'
   })
   // Recalcular gasto en rango para filtro Activas (cuenta = activas + gasto > 0)
-  const desde=document.getElementById('meta-desde')?.value||today()
-  const hasta=document.getElementById('meta-hasta')?.value||today()
+  const desde=document.getElementById('meta-desde')?.value||window._metaRangoSel?.desde||today()
+  const hasta=document.getElementById('meta-hasta')?.value||window._metaRangoSel?.hasta||today()
+  window._metaRangoSel={desde,hasta} // MEJORA 7 (3jul26): persistir — los inputs viven dentro del resumen
   const{data:insRango}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('account_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
   const gastoRangoByAcc={}
   for(const i of (insRango||[])){gastoRangoByAcc[i.account_id]=(gastoRangoByAcc[i.account_id]||0)+(i.spend||0)}

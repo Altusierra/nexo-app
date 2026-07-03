@@ -7823,9 +7823,11 @@ window.procesarAsignador=async()=>{
 
 window.copiarCSVAsignador=()=>{
   if(!_ultimosResultados.length)return
-  const h='Ciudad ingresada\tDpto. ingresado\tUds.\tDEPARTAMENTO\tCIUDAD\tEmoji\t¿Enviar?\tTRANSPORTADORA (OPCIONAL)\tMatch'
+  // NUEVO (3jul26 · Mejora 1): 2 columnas extra al FINAL (después de Match): TELEFONO e ID ANUNCIO
+  // — los ingresados en cada línea del asignador. Formato viejo sin tel/ad → celdas vacías.
+  const h='Ciudad ingresada\tDpto. ingresado\tUds.\tDEPARTAMENTO\tCIUDAD\tEmoji\t¿Enviar?\tTRANSPORTADORA (OPCIONAL)\tMatch\tTELEFONO\tID ANUNCIO'
   const rows=_ultimosResultados.map(f=>[
-    f.raw.ciudad,f.raw.dept||'',f.raw.qty+'u',f.deptoDropi,f.ciudadDropi,_stateEmoji(f.estado,f.match),_stateText(f.estado,f.alt),f.carrier==='—'?'':f.carrier,f.match
+    f.raw.ciudad,f.raw.dept||'',f.raw.qty+'u',f.deptoDropi,f.ciudadDropi,_stateEmoji(f.estado,f.match),_stateText(f.estado,f.alt),f.carrier==='—'?'':f.carrier,f.match,f.raw.tel||'',f.raw.adId||''
   ].join('\t'))
   const txt=[h,...rows].join('\n')
   navigator.clipboard.writeText(txt).then(()=>{
@@ -8444,6 +8446,141 @@ async function pageAuxPedidos(c){
     </div>`
 }
 
+// ══ NUEVO (3jul26 · Mejora 2): MENSAJES RÁPIDOS DESDE EL XLSX DE HOY ══════════
+// Sube el xlsx de Dropi ANTES del cruce, saca SOLO los PENDIENTE CONFIRMACION y deja
+// mandarles el mensaje de una (plantillas PSF: confirman sin necesitar fecha programada).
+// Cada envío queda en la tabla mensajes_enviados de Supabase POR TELÉFONO → si el número
+// sigue pendiente en otro xlsx/día, sale con su contador "📨 lleva X · último [fecha]".
+// SQL de la tabla: ver aviso en pantalla si aún no existe (degrada elegante: lista sin contador).
+window._xlsxPendCache={items:[],tablaOk:true}
+window.procesarXlsxPendientes=async()=>{
+  const fileInput=document.getElementById('xlsxpend-file')
+  const msg=document.getElementById('xlsxpend-msg')
+  if(!fileInput||!fileInput.files.length){if(msg)msg.innerHTML='<div class="alert alert-red">Selecciona el xlsx de Dropi primero</div>';return}
+  if(msg)msg.innerHTML='<div class="alert alert-blue">Procesando xlsx...</div>'
+  try{
+    const buf=await fileInput.files[0].arrayBuffer()
+    const wbook=XLSX.read(buf,{type:'array'})
+    const rows=XLSX.utils.sheet_to_json(wbook.Sheets[wbook.SheetNames[0]],{defval:''})
+    if(!rows.length){if(msg)msg.innerHTML='<div class="alert alert-red">Archivo vacío</div>';return}
+    // Filtro: SOLO PENDIENTE CONFIRMACION (tolerante a tilde: CONFIRMACIÓN)
+    const _normEst=s=>String(s||'').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()
+    const filtered=rows.filter(r=>_normEst(r['ESTATUS'])==='PENDIENTE CONFIRMACION')
+    if(!filtered.length){if(msg)msg.innerHTML='<div class="alert alert-yellow">No hay pedidos en PENDIENTE CONFIRMACION en este archivo</div>';const c0=document.getElementById('xlsxpend-content');if(c0)c0.innerHTML='';return}
+    const items=filtered.map(r=>{
+      const tel=String(r['TELÉFONO']||r['TELEFONO']||'').replace(/\D/g,'')
+      const nombre=String(r['NOMBRE CLIENTE']||`${r['NOMBRE']||''} ${r['APELLIDO']||''}`).trim()
+      const ciudad=String(r['CIUDAD DESTINO']||r['CIUDAD']||'').trim()
+      const producto=String(r['PRODUCTO']||'').trim()
+      const cantidad=parseInt(r['CANTIDAD']||'0')||null
+      const ordenId=String(r['ID']||'').trim()
+      const fechaOrden=String(r['FECHA']||'').trim()
+      return{telefono:tel,nombre_cliente:nombre,ciudad,producto,cantidad,ordenId,fechaOrden,envios:0,envios_hoy:0,ultimo:null}
+    }).filter(i=>i.telefono.length>=7)
+    if(!items.length){if(msg)msg.innerHTML='<div class="alert alert-yellow">Los PENDIENTE CONFIRMACION del archivo no traen teléfono válido</div>';return}
+    // Contador por teléfono desde mensajes_enviados (batches de 100 pa' no pasar el cap de filas)
+    let tablaOk=true
+    const porTel={}
+    try{
+      const tels=[...new Set(items.map(i=>i.telefono))]
+      const hoyISO=today()
+      for(let i=0;i<tels.length;i+=100){
+        const batch=tels.slice(i,i+100)
+        const{data,error}=await sb.from('mensajes_enviados').select('telefono,fecha,created_at').in('telefono',batch)
+        if(error)throw error
+        for(const e of (data||[])){
+          const o=porTel[e.telefono]||(porTel[e.telefono]={envios:0,envios_hoy:0,ultimo:null})
+          o.envios++
+          if(String(e.fecha)===hoyISO)o.envios_hoy++
+          if(!o.ultimo||String(e.created_at)>String(o.ultimo))o.ultimo=e.created_at
+        }
+      }
+    }catch(e){
+      tablaOk=false
+      console.warn('[xlsxpend] mensajes_enviados no disponible:',e&&e.message)
+      try{window._nexoAvisoBD&&window._nexoAvisoBD('mensajes_enviados',e&&e.message)}catch(_){}
+    }
+    for(const it of items){const o=porTel[it.telefono];if(o){it.envios=o.envios;it.envios_hoy=o.envios_hoy;it.ultimo=o.ultimo}}
+    // Orden pedido por Altu: primero los que van en 0 HOY (y entre esos, 0 totales primero);
+    // los que ya tienen el cupo de hoy lleno se van de últimos.
+    const _cuotaX=_cuotaDiaria('confirmacion',2)
+    items.sort((a,b)=>{
+      const af=a.envios_hoy>=_cuotaX?1:0,bf=b.envios_hoy>=_cuotaX?1:0
+      if(af!==bf)return af-bf
+      if(a.envios_hoy!==b.envios_hoy)return a.envios_hoy-b.envios_hoy
+      return a.envios-b.envios
+    })
+    window._xlsxPendCache={items,tablaOk}
+    const sinMsgHoy=items.filter(i=>(i.envios_hoy||0)===0).length
+    if(msg)msg.innerHTML=`<div class="alert alert-green">✅ ${items.length} pendiente(s) de confirmación en el archivo · ${sinMsgHoy} sin mensaje hoy</div>${tablaOk?'':`<div class="alert alert-yellow" style="margin-top:6px">⚠️ La tabla <code>mensajes_enviados</code> no existe aún en Supabase — la lista funciona pero SIN contador. Pídele a Claude el SQL o córrelo desde el traspaso.</div>`}`
+    logAction('xlsxpend_procesado',{total:items.length,sin_msg_hoy:sinMsgHoy}).catch(()=>{})
+    window._xlsxPendRender()
+  }catch(e){
+    if(msg)msg.innerHTML=`<div class="alert alert-red">Error procesando: ${(e&&e.message)||e}</div>`
+  }
+}
+window._xlsxPendRender=()=>{
+  const el=document.getElementById('xlsxpend-content')
+  if(!el)return
+  const items=(window._xlsxPendCache&&window._xlsxPendCache.items)||[]
+  if(!items.length){el.innerHTML='';return}
+  const _cuotaX=_cuotaDiaria('confirmacion',2)
+  const _e=s=>String(s==null?'':s).replace(/</g,'&lt;')
+  el.innerHTML=items.map((m,i)=>{
+    const lleno=(m.envios_hoy||0)>=_cuotaX
+    const ult=m.ultimo?new Date(m.ultimo).toLocaleDateString('es-CO',{day:'numeric',month:'short'}):null
+    const badge=(m.envios||0)>0
+      ?`<span class="pill" style="background:${lleno?'rgba(239,68,68,.12)':'rgba(245,158,11,.12)'};color:${lleno?'var(--red)':'var(--amber)'};border:1px solid ${lleno?'var(--red)':'var(--amber)'};font-size:10.5px;font-weight:700">📨 lleva ${m.envios} · hoy ${m.envios_hoy}/${_cuotaX}${ult?` · último ${ult}`:''}</span>`
+      :`<span class="pill" style="background:rgba(34,197,94,.12);color:var(--green);border:1px solid var(--green);font-size:10.5px;font-weight:700">🆕 sin mensajes</span>`
+    return`<div class="card" style="margin-bottom:8px;padding:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap${lleno?';opacity:.65':''}">
+      <div style="flex:1;min-width:180px">
+        <div style="font-size:13px;font-weight:600">${_e(m.telefono)}${m.nombre_cliente?` · <span style="font-weight:400;color:var(--muted)">${_e(m.nombre_cliente)}</span>`:''}</div>
+        <div style="font-size:11px;color:var(--muted)">${_e(m.ciudad||'—')} · ${_e(m.producto||'—')}${m.cantidad?` (${m.cantidad}u)`:''}${m.ordenId?` · Dropi ${_e(m.ordenId)}`:''}</div>
+        <div style="margin-top:4px">${badge}</div>
+      </div>
+      <button class="btn-sm ${lleno?'btn-outline':'btn-green'}" ${lleno?'disabled style="opacity:.6;font-weight:700"':'style="font-weight:700"'} onclick="enviarMensajeXlsxPend(${i})">${lleno?'✋ Cupo de hoy lleno':'💬 Enviar mensaje'}</button>
+    </div>`
+  }).join('')
+}
+window.enviarMensajeXlsxPend=async(idx)=>{
+  const items=(window._xlsxPendCache&&window._xlsxPendCache.items)||[]
+  const m=items[idx]
+  if(!m){alert('No se encontró el pedido');return}
+  const _cuotaX=_cuotaDiaria('confirmacion',2)
+  if((m.envios_hoy||0)>=_cuotaX){alert('Ya enviaste los '+_cuotaX+' mensajes permitidos hoy a este número.');return}
+  // Plantillas PSF: piden confirmar SIN depender de fecha programada (el pedido de hoy no tiene).
+  // Nivel según envíos TOTALES previos al número: 0→1er, 1→2do, 2→3er, 3+→último.
+  const idxTpl=Math.min(m.envios||0,3)
+  const etiqueta=['1er mensaje','2do mensaje','3er mensaje','último mensaje'][idxTpl]
+  const mensaje=armarMensajePsf(m,idxTpl)
+  const telLimpio=String(m.telefono||'').replace(/\D/g,'')
+  if(telLimpio.length<7){alert('Teléfono inválido');return}
+  const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  if(!waThrottleCheck('xlsxpend'))return
+  navigator.clipboard.writeText(mensaje).catch(()=>{}) // copia para pegar con Ctrl+V (emojis salen bien al pegar)
+  window.open(`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`,'_blank','noopener')
+  waThrottleRegistrar('xlsxpend')
+  // Registro POR TELÉFONO en mensajes_enviados (el contador que sobrevive entre días/equipos)
+  try{
+    const{error}=await sb.from('mensajes_enviados').insert({
+      telefono:m.telefono,
+      fecha:today(),
+      seccion:'xlsx_pendientes',
+      producto:m.producto||null,
+      nivel:idxTpl+1,
+      usuario_id:me?.id||null,
+      usuario_nombre:me?.nombre||null
+    })
+    if(error){console.warn('[xlsxpend] no se pudo registrar envío:',error.message);try{window._nexoAvisoBD&&window._nexoAvisoBD('mensajes_enviados',error.message)}catch(_){}}
+  }catch(e){console.warn('[xlsxpend] excepción registrando envío:',e&&e.message)}
+  logAction('xlsxpend_mensaje_enviado',{tel:m.telefono,producto:m.producto||null,nivel:idxTpl+1,etiqueta}).catch(()=>{})
+  // Actualiza el contador EN memoria y repinta la lista — sin recargar nada
+  m.envios=(m.envios||0)+1
+  m.envios_hoy=(m.envios_hoy||0)+1
+  m.ultimo=new Date().toISOString()
+  window._xlsxPendRender()
+}
+
 // ── AUXILIAR: CONFIRMAR RESERVADO ──────────────────────────
 async function pageAuxReservado(c){
   c.innerHTML=`<div class="page-title">🔍 Confirmar y recuperar pedidos</div>
@@ -8509,6 +8646,26 @@ async function pageAuxReservado(c){
       <div class="page-sub" style="margin-bottom:14px">Pedidos cancelados por el cruce Dropi. Ofréceles asegurar el envío con un adelanto (se descuenta del total) para recuperarlos. Al confirmarlos o agendarles fecha, salen de aquí.</div>
       <div style="margin-bottom:14px"><button class="btn-sm btn-primary" onclick="iniciarPendColaCanc()" style="font-weight:700;padding:9px 16px">▶️ Modo envío rápido</button> <span data-wa-pill="canc" style="vertical-align:middle">${typeof _waPillHTML==='function'?_waPillHTML('canc'):''}</span></div>
       <div id="canc-content"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div></div>
+    </div>
+
+    <!-- NUEVO (3jul26 · Mejora 2): mensajes rápidos a los PENDIENTE CONFIRMACION del xlsx de HOY,
+         ANTES del cruce — así el cruce ya llega con más confirmados. Contador por teléfono en la
+         tabla mensajes_enviados de Supabase (sobrevive días y equipos). -->
+    <div style="margin-top:28px;padding-top:18px;border-top:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <span style="font-size:20px">⚡</span>
+        <div style="font-size:18px;font-weight:700">PASO 4 — Mensajes rápidos del XLSX (pendientes de HOY)</div>
+      </div>
+      <div class="page-sub" style="margin-bottom:14px">Sube el xlsx de Dropi de HOY (sin esperar el cruce): la app saca SOLO los <strong>PENDIENTE CONFIRMACION</strong> y les mandas el mensaje de una. Cada envío queda contado por teléfono: si el número sigue pendiente mañana, verás cuántos mensajes ya lleva.</div>
+      <div class="card" style="margin-bottom:14px;padding:12px">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+          <input type="file" id="xlsxpend-file" accept=".xlsx,.xls" style="font-size:12px;flex:1;min-width:200px">
+          <button class="btn-sm btn-primary" onclick="procesarXlsxPendientes()" style="font-weight:700">📤 Procesar XLSX</button>
+          <span data-wa-pill="xlsxpend" style="vertical-align:middle">${typeof _waPillHTML==='function'?_waPillHTML('xlsxpend'):''}</span>
+        </div>
+        <div id="xlsxpend-msg" style="margin-top:8px"></div>
+      </div>
+      <div id="xlsxpend-content"></div>
     </div>`
 
   // Cargar lista de pendientes de confirmación al entrar
@@ -9047,7 +9204,8 @@ const WA_SECCIONES={
   novedades:'NOVEDADES',
   conf:'CONFIRMAR CON FECHA',
   psf:'RECUPERAR SIN FECHA',
-  canc:'RECUPERAR CANCELADOS'
+  canc:'RECUPERAR CANCELADOS',
+  xlsxpend:'PENDIENTES DEL XLSX' // NUEVO (3jul26 · Mejora 2): mensajes rápidos desde el xlsx de HOY
 }
 let _waInterval=null,_waModalSec=null
 function _waKey(sec){return 'wa_throttle_'+sec}

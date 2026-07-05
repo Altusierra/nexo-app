@@ -7204,7 +7204,77 @@ function _parseFecha(s){
   return `${yy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`
 }
 
+// ══ FASE 2 (5jul26) · PARSER DE CORCHETES DEL ASIGNADOR ══════════════════════
+// La hoja base ahora emite líneas con 15 campos entre corchetes (fórmula S nueva).
+// Contador de niveles: comas dentro de un campo NUNCA cortan; corchetes anidados
+// BALANCEADOS son contenido; [] = campo vacío; trim por campo. El parser viejo de
+// comas queda INTACTO más abajo (compatibilidad: líneas sin "[" siguen igual).
+function _parseCorchetesNiveles(linea){
+  let nivel=0,buffer=null,error=null
+  const campos=[]
+  for(const ch of String(linea||'')){
+    if(ch==='['){
+      if(nivel===0)buffer=''
+      else buffer+=ch
+      nivel++
+    }else if(ch===']'){
+      nivel--
+      if(nivel<0){error='corchete "]" de más (desbalanceado)';nivel=0}
+      else if(nivel===0){campos.push(String(buffer||'').trim());buffer=null}
+      else buffer+=ch
+    }else{
+      if(nivel>=1)buffer+=ch
+      // nivel 0 → separadores entre campos (comas/espacios): se ignoran
+    }
+  }
+  if(nivel!==0)error='falta cerrar un corchete "[" (desbalanceado)'
+  return{campos,error}
+}
+function _parseLineaCorchetes(linea){
+  // Orden de campos: LA MISMA config del Dashboard que usa el Constructor (única fuente de verdad).
+  const orden=(window._hbOrden&&window._hbOrden.length)?window._hbOrden:HB_ORDEN_LINEA
+  const{campos,error}=_parseCorchetesNiveles(linea)
+  const avisos=[]
+  if(error)avisos.push(error+' — revisá la línea')
+  if(campos.length!==orden.length)avisos.push(`se esperaban ${orden.length} campos y llegaron ${campos.length}`)
+  const v={};orden.forEach((k,i)=>v[k]=String(campos[i]==null?'':campos[i]).trim())
+  const tel=String(v.telefono||'').replace(/\D/g,'')
+  const qty=parseInt(v.cantidad,10)
+  const fechaIso=_parseFecha(v.fecha||'')
+  const adId=String(v.ad_id||'').trim()
+  const carrier=String(v.transportadora||'').trim()
+  const precio=String(v.precio||'').trim()
+  // ── OBLIGATORIOS (regla de ADS): si falta alguno, la línea NO procesa (las demás siguen) ──
+  const faltan=[]
+  if(!v.ciudad)faltan.push('CIUDAD')
+  if(!v.departamento)faltan.push('DEPARTAMENTO')
+  if(!v.direccion)faltan.push('DIRECCIÓN')
+  if(!tel)faltan.push('TELÉFONO')
+  if(!(qty>=1))faltan.push('CANTIDAD')
+  if(!fechaIso)faltan.push('FECHA (M/D/YYYY)')
+  if(!v.producto)faltan.push('PRODUCTO')
+  if(!v.agente)faltan.push('AGENTE')
+  if(!String(v.id_dropi||'').trim())faltan.push('ID_DROPI')
+  if(!precio)faltan.push('PRECIO')
+  if(!String(v.nombre||'').trim()&&!String(v.apellido||'').trim())faltan.push('NOMBRE o APELLIDO (al menos uno de los dos)')
+  // ── AVISOS SUAVES (forma): informan, el auxiliar decide continuar ──
+  if(tel&&tel.length!==10)avisos.push(`el teléfono "${v.telefono}" no parece un celular de 10 dígitos`)
+  if(adId&&!/^\d{18}$/.test(adId))avisos.push(`el ad_id "${adId}" no tiene 18 dígitos`)
+  if(!adId&&!faltan.length)avisos.push('sin ad_id (¿venta orgánica? se pierde la trazabilidad del anuncio)')
+  if(v.fecha&&!/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(String(v.fecha).trim()))avisos.push(`la fecha "${v.fecha}" no viene como M/D/YYYY`)
+  if(String(v.id_dropi||'').trim()&&!/^\d+$/.test(String(v.id_dropi).trim()))avisos.push(`el ID Dropi "${v.id_dropi}" no es numérico`)
+  if(String(v.cantidad||'').trim()&&!/^\d{1,2}$/.test(String(v.cantidad).trim()))avisos.push(`la cantidad "${v.cantidad}" no es un entero corto (1-2 dígitos)`)
+  if(precio&&!/^\d+$/.test(precio))avisos.push(`el precio "${precio}" no es numérico plano (sin puntos ni comas)`)
+  return{tipo:'nuevo',formato:'corchetes',ciudad:v.ciudad,qty:qty>=1?qty:1,dept:v.departamento,tel,fecha:fechaIso,fechaRaw:v.fecha,
+    producto:v.producto,agente:v.agente,idDropi:String(v.id_dropi||'').trim(),adId,isI:carrier.toUpperCase().includes('INTERRAP'),carrier,
+    direccion:v.direccion,tiempoEntrega:v.tiempo_entrega||'',nombre:v.nombre||'',apellido:v.apellido||'',precio,
+    errores:faltan,avisos,raw:linea}
+}
+// ══ FIN PARSER DE CORCHETES ══════════════════════════════════════════════════
+
 function _parseLineaAsignador(linea){
+  // FASE 2 (5jul26): si la línea trae corchetes, es el formato NUEVO de la hoja base.
+  if(String(linea||'').includes('['))return _parseLineaCorchetes(linea)
   // Formato obligatorio: CIUDAD, UNIDADES, DPTO, TELEFONO, FECHA, PRODUCTO, AGENTE, ID_DROPI, ID_ANUNCIO, [carrier]
   const partes=linea.split(/[,;\t]/).map(p=>p.trim())
   // Quitar partes vacías al final: para formato nuevo (9+) no bajar de 9, para viejo no bajar de 3
@@ -7487,8 +7557,33 @@ window.procesarAsignador=async()=>{
   const resEl=document.getElementById('asign-resultado')
   if(!lineas.length){msg.innerHTML='<div class="alert alert-red">No hay líneas para procesar</div>';return}
 
+  // ── FASE 2 (5jul26): config compartida Dashboard↔Asignador (orden de campos del formato corchetes) ──
+  try{const _cHb=await hbLoadConfig();window._hbOrden=(_cHb&&Array.isArray(_cHb.orden_linea)&&_cHb.orden_linea.length)?_cHb.orden_linea:null;window._hbCfgAsig=_cHb}catch(_){window._hbOrden=null;window._hbCfgAsig=null}
+  const _softAck=window._hbSoftAck===true;window._hbSoftAck=false
+
   // PASO 1: parsear todas las líneas y separar válidas / errores
   const parsed=lineas.map(_parseLineaAsignador)
+
+  // ── FASE 2: líneas de CORCHETES con OBLIGATORIOS vacíos NO procesan (en rojo, con teléfono) — las demás siguen ──
+  const descartadas=[]
+  parsed.forEach((p,i)=>{
+    if(p.formato==='corchetes'&&p.errores&&p.errores.length>0){
+      descartadas.push({linea:i+1,tel:p.tel||'',faltan:p.errores.slice(),avisos:(p.avisos||[]).slice(),raw:p.raw})
+      p.tipo='descartada' // los guards de tipo!=='nuevo' la saltan en todo el flujo
+    }
+  })
+  window._hbDescartadas=descartadas
+
+  // ── FASE 2: AVISOS SUAVES (forma) — informan sin bloquear; el auxiliar verifica y continúa ──
+  const _avisosSoft=[]
+  parsed.forEach((p,i)=>{if(p.formato==='corchetes'&&p.tipo==='nuevo'&&p.avisos&&p.avisos.length)_avisosSoft.push({linea:i+1,tel:p.tel||'',avisos:p.avisos})})
+  if(_avisosSoft.length&&!_softAck){
+    msg.innerHTML=`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text)"><strong>⚠️ ${_avisosSoft.length} línea(s) con datos que se ven raros. Verificá en Seller Chat y continuá si está bien:</strong><ul style="margin-top:6px;margin-left:14px;font-size:12px">
+      ${_avisosSoft.map(a=>`<li><strong>Línea ${a.linea}</strong>${a.tel?` · 📞 ${a.tel}`:''}: ${a.avisos.join(' · ')}</li>`).join('')}
+    </ul>${descartadas.length?`<div style="font-size:12px;margin-top:6px">🚫 Además hay ${descartadas.length} línea(s) que NO van a procesar por datos obligatorios vacíos (se listan al procesar).</div>`:''}
+    <div style="margin-top:10px"><button class="btn-sm btn-amber" onclick="window._hbSoftAck=true;procesarAsignador()">✓ Verifiqué — continuar así</button></div></div>`
+    return
+  }
   const conErrores=[]
   parsed.forEach((p,i)=>{
     if(p.tipo==='nuevo'&&p.errores.length>0)conErrores.push({linea:i+1,raw:p.raw,faltan:p.errores})
@@ -7669,6 +7764,7 @@ window.procesarAsignador=async()=>{
   const correcciones=[] // log de correcciones para audit
   for(const p of parsed){
     if(p.tipo==='vacio')continue
+    if(p.tipo==='descartada')continue // FASE 2: obligatorios vacíos — la línea NO procesa (ya listada en rojo)
     const q=_norm(p.ciudad)
     const df=_fuzzy(D,q,p.dept)
     let estado,carrier,alt='',match='—',ciudadDropi='—',deptoDropi='—'
@@ -7821,14 +7917,19 @@ window.procesarAsignador=async()=>{
   resEl.innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
       <div>${resumenHtml}</div>
-      <button class="btn-sm btn-primary" onclick="copiarCSVAsignador()">📋 Copiar CSV</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <!-- FASE 2 (5jul26): "Copiar CSV" OCULTO por decisión de ADS (lo reemplaza el masivo). Revertir = quitar display:none -->
+        <button class="btn-sm btn-primary" style="display:none" onclick="copiarCSVAsignador()">📋 Copiar CSV</button>
+        <button class="btn-sm btn-primary" onclick="copiarMasivoDropi()">📦 Copiar para Dropi masivo</button>
+      </div>
     </div>
     <div class="table-wrap"><table>
-      <tr><th>Ciudad ingresada</th><th>Dpto. ingresado</th><th>Uds.</th><th>DEPARTAMENTO</th><th>CIUDAD</th><th>Emoji</th><th>¿Enviar?</th><th>TRANSPORTADORA (OPCIONAL)</th><th>Match</th></tr>
+      <tr><th>Ciudad ingresada</th><th>Dpto. ingresado</th><th style="background:rgba(255,192,0,.22)">Uds. ✏️</th><th style="background:rgba(255,192,0,.22)">Precio ✏️</th><th>DEPARTAMENTO</th><th>CIUDAD</th><th>Emoji</th><th>¿Enviar?</th><th>TRANSPORTADORA (OPCIONAL)</th><th>Match</th></tr>
       ${filas.map(f=>`<tr>
         <td data-label="Ciudad ingresada">${f.raw.ciudad}${f.raw.tipo==='nuevo'&&f.raw.tel?`<br><span style="font-size:10px;color:var(--muted)">📞 ${f.raw.tel}${f.raw.adId?' · ad':' · ORG'}</span>`:''}${f.prodCorregido?`<br><span style="font-size:10px;color:var(--amber)">🔄 Producto corregido: "${(f.prodEscrito||'').replace(/[<>]/g,'')}" → ${(f.prodNombre||'').replace(/[<>]/g,'')}</span>`:''}</td>
         <td data-label="Dpto. ingresado">${f.raw.dept||'—'}</td>
-        <td data-label="Uds.">${f.raw.qty}u</td>
+        <td data-label="Uds." style="background:rgba(255,192,0,.14)">${f.raw.qty}u</td>
+        <td data-label="Precio" style="background:rgba(255,192,0,.14)">${f.raw.precio?('$'+String(f.raw.precio).replace(/[<>]/g,'')):'—'}</td>
         <td data-label="DEPARTAMENTO">${f.deptoDropi}</td>
         <td data-label="CIUDAD"><strong>${f.ciudadDropi}</strong></td>
         <td data-label="Emoji">${_stateEmoji(f.estado,f.match)}</td>
@@ -7838,6 +7939,57 @@ window.procesarAsignador=async()=>{
       </tr>`).join('')}
     </table></div>
   `
+  // ── FASE 2 (5jul26): panel ROJO de líneas NO procesadas (obligatorios vacíos) — visible junto a los resultados ──
+  if(window._hbDescartadas&&window._hbDescartadas.length){
+    resEl.insertAdjacentHTML('afterbegin',`<div class="alert alert-red" style="margin-bottom:10px"><strong>🚫 ${window._hbDescartadas.length} línea(s) NO procesada(s) por datos obligatorios vacíos — corrígelas en la hoja y vuelve a pegarlas:</strong><ul style="margin-top:6px;margin-left:14px;font-size:12px">
+      ${window._hbDescartadas.map(e=>`<li><strong>Línea ${e.linea}</strong>${e.tel?` · 📞 ${e.tel}`:''}: falta ${e.faltan.join(', ')}${e.avisos&&e.avisos.length?`<br><span style="color:var(--amber)">⚠️ ${e.avisos.join(' · ')}</span>`:''}<br><code style="font-size:10px;color:var(--muted)">${String(e.raw||'').replace(/</g,'&lt;')}</code></li>`).join('')}
+    </ul></div>`)
+  }
+}
+
+// ── FASE 2 (5jul26): COPIAR PARA DROPI MASIVO — las 18 columnas EXACTAS de la plantilla ──
+// Fila 1 = encabezados (configurables en Dashboard → Hoja Base — Constructor); luego una fila
+// por pedido, alineada con la tabla. Emoji del semáforo VIAJA dentro de la dirección (columna C).
+// Las 6 columnas vacías (NOTA, ID VARIABLE, CODIGO POSTAL, CEDULA, COLONIA, SEGURO) van como
+// celdas vacías para que todo caiga en su posición al pegar. Precio/cantidad: tal cual llegan.
+window.copiarMasivoDropi=async()=>{
+  if(!_ultimosResultados.length)return
+  let _hdrs=null
+  try{const _c=window._hbCfgAsig||await hbLoadConfig();if(_c&&Array.isArray(_c.masivo_headers)&&_c.masivo_headers.length===18)_hdrs=_c.masivo_headers}catch(_){}
+  if(!_hdrs)_hdrs=HB_MASIVO_HEADERS
+  const _cl=s=>String(s==null?'':s).replace(/[\t\n\r]/g,' ').trim()
+  const rows=_ultimosResultados.map(f=>{
+    const r=f.raw||{}
+    const emoji=_stateEmoji(f.estado,f.match)
+    return[
+      _cl(r.nombre||''),                                   // A NOMBRES
+      _cl(r.apellido||''),                                 // B APELLIDOS
+      _cl(emoji+(r.direccion||'')),                        // C DIRECCIÓN Y BARRIO (emoji+direccion)
+      f.deptoDropi==='—'?'':_cl(f.deptoDropi),             // D DEPARTAMENTO (normalizado)
+      f.ciudadDropi==='—'?'':_cl(f.ciudadDropi),           // E CIUDAD (normalizada)
+      _cl(r.tel||''),                                      // F TELÉFONO
+      _cl(r.idDropi||''),                                  // G ID DE PRODUCTO
+      _cl(r.qty!=null?r.qty:''),                           // H CANTIDAD
+      _cl(r.precio||''),                                   // I PRECIO TOTAL (SIN PUNTOS NI COMAS)
+      'CON RECAUDO',                                       // J CON RECAUDO (constante)
+      '',                                                  // K NOTA (vacía)
+      _cl(r.tiempoEntrega||''),                            // L EMAIL (OPCIONAL) ← tiempo de entrega, A PROPÓSITO
+      '',                                                  // M ID DE VARIABLE (vacía)
+      '',                                                  // N CODIGO POSTAL (vacía)
+      f.carrier==='—'?'':_cl(f.carrier),                   // O TRANSPORTADORA (vacía en SIN COBERTURA)
+      '',                                                  // P CEDULA (vacía)
+      '',                                                  // Q COLONIA (vacía)
+      ''                                                   // R SEGURO (vacía)
+    ].join('\t')
+  })
+  const txt=[_hdrs.join('\t'),...rows].join('\n')
+  const _okMsg=()=>{const msg=document.getElementById('asign-msg');if(msg)msg.innerHTML='<div class="alert alert-green">✅ Masivo Dropi copiado ('+rows.length+' pedidos) — pega en el Excel y súbelo a Dropi</div>'}
+  navigator.clipboard.writeText(txt).then(_okMsg).catch(()=>{
+    const ta=document.createElement('textarea')
+    ta.value=txt;ta.style.position='fixed';ta.style.opacity='0'
+    document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta)
+    _okMsg()
+  })
 }
 
 window.copiarCSVAsignador=()=>{
@@ -29656,6 +29808,13 @@ initApp()
 const HB_CFG_KEY='constructor_hoja_base'
 const HB_SC_HEADERS=['client_name','client_country','client_phone','client_tag','ad_id','first_message_created','last_message_created','ciudad','estado','llegar','nombre','precio','apellido','cantidad','producto','direccion','departamento']
 const HB_BUCKET='exports-sellerchat'
+// ══ FASE 2 (5jul26): la fórmula de CORCHETES es LA DEFAULT OFICIAL (reemplaza a la vieja).
+// 15 campos, orden CONGELADO (si algún día se agrega uno, va AL FINAL — nunca en el medio).
+const HB_FORMULA_V2='="["& E{r} &"]"& ", " & "["& H{r} &"]" &  ", " & "["& D{r} &"]" &  ", " & "["& F{r} &"]" &  ", " & "["& P{r} &"]" & ", " & "["& Q{r} &"]" & ", " & "["& C{r} &"]" & ", " & "["& N{r} &"]" & ", "& "["&L{r}&"]" &", " & "["& G{r} &"]" & ", " & "["& A{r} &"]" &", " & "["& I{r} &"]" & ", " & "["& B{r} &"]" &", "& "["& R{r} &"]" &  ", " & "["& O{r} &"]"'
+// Orden en que el ASIGNADOR lee los campos de cada línea (misma config = única fuente de verdad)
+const HB_ORDEN_LINEA=['ciudad','cantidad','departamento','telefono','fecha','producto','direccion','agente','tiempo_entrega','id_dropi','nombre','precio','apellido','ad_id','transportadora']
+// Encabezados EXACTOS de la plantilla del masivo de Dropi (los pasó ADS verbatim — editables en Dashboard)
+const HB_MASIVO_HEADERS=['NOMBRES','APELLIDOS','DIRECCIÓN Y BARRIO','DEPARTAMENTO','CIUDAD','TELÉFONO','ID DE PRODUCTO','CANTIDAD','PRECIO TOTAL (SIN PUNTOS NI COMAS)','CON RECAUDO','NOTA','EMAIL (OPCIONAL)','ID DE VARIABLE (OPCIONAL)','CODIGO POSTAL (OPCIONAL)','TRANSPORTADORA (OPCIONAL)','CEDULA (OPCIONAL)','COLONIA (OBLIGATORIO SOLO PARA QUIKEN)','SEGURO (SOLO APLICA PARA ENVIA)']
 // Letras A..AA (27 columnas)
 function hbColL(i){return i<26?String.fromCharCode(65+i):'A'+String.fromCharCode(65+i-26)}
 function hbDefaultConfig(){
@@ -29682,9 +29841,13 @@ function hbDefaultConfig(){
   ]
   for(let i=19;i<27;i++)cols.push({col:hbColL(i),header:'',fuente:'vacia'})
   return{
+    version:2, // FASE 2 (5jul26): con la fórmula de corchetes como default oficial
     columnas:cols,
     formula_col:'S',
-    formula:'=E{r} & ", " & H{r} & ", " & D{r}& ", " & F{r}& ", " & P{r}& ", " & Q{r}& ", " & N{r}& ", " & G{r}& ", " & R{r}& ", " & O{r}'
+    formula:HB_FORMULA_V2,
+    // Fórmula VIEJA (pre-Fase 2, referencia): '=E{r} & ", " & H{r} & ", " & D{r}& ", " & F{r}& ", " & P{r}& ", " & Q{r}& ", " & N{r}& ", " & G{r}& ", " & R{r}& ", " & O{r}'
+    orden_linea:HB_ORDEN_LINEA.slice(),
+    masivo_headers:HB_MASIVO_HEADERS.slice()
   }
 }
 async function hbLoadConfig(){
@@ -29698,6 +29861,11 @@ async function hbLoadConfig(){
         const full=[];for(let i=0;i<27;i++){const L=hbColL(i);full.push(byCol[L]||{col:L,header:'',fuente:'vacia'})}
         cfg.columnas=full
         if(!cfg.formula_col)cfg.formula_col='S'
+        // FASE 2 (5jul26): actualización ONE-SHOT — la fórmula de corchetes es LA default oficial.
+        // Configs guardadas antes de la Fase 2 (sin version) se suben solas: fórmula nueva + llaves nuevas.
+        if(!cfg.version||cfg.version<2){cfg.formula=HB_FORMULA_V2;cfg.orden_linea=HB_ORDEN_LINEA.slice();cfg.masivo_headers=HB_MASIVO_HEADERS.slice();cfg.version=2}
+        if(!Array.isArray(cfg.orden_linea)||!cfg.orden_linea.length)cfg.orden_linea=HB_ORDEN_LINEA.slice()
+        if(!Array.isArray(cfg.masivo_headers)||cfg.masivo_headers.length!==18)cfg.masivo_headers=HB_MASIVO_HEADERS.slice()
         return cfg
       }
     }
@@ -29736,6 +29904,16 @@ function hbFechaValida(s){
 }
 const hbEsc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
 const hbEscA=s=>hbEsc(s).replace(/"/g,'&quot;')
+// FASE 2 (5jul26): si un dato trae corchetes DESBALANCEADOS ("[" suelto), se limpian del dato.
+// Los BALANCEADOS se dejan (el parser del Asignador los aguanta). Así ninguna línea sale mal armada.
+function hbSanear(v){
+  const s=String(v==null?'':v)
+  if(s.indexOf('[')<0&&s.indexOf(']')<0)return s
+  let n=0,bad=false
+  for(const ch of s){if(ch==='[')n++;else if(ch===']'){n--;if(n<0){bad=true;break}}}
+  if(n!==0)bad=true
+  return bad?s.replace(/[\[\]]/g,''):s
+}
 
 // ── 3. VALIDACIÓN DEL NOMBRE DEL ARCHIVO (filas__AGENTE__fecha__oferta) ─────
 function hbValidarNombre(rawName){
@@ -29823,7 +30001,8 @@ async function hbLeerExcel(file){
 // ── 7. PROCESAR UN ARCHIVO (independiente: uno malo NO bloquea a los buenos) ─
 async function hbProcesarArchivo(file,ctx){
   const f={name:file.name,size:file.size,estado:'error',error:'',notas:[],rows:[],buf:null,
-           filasDecl:0,agenteStr:'',fechaDecl:'',oferta:false,agente:'',agenteId:null,producto:null}
+           filasDecl:0,agenteStr:'',fechaDecl:'',oferta:false,agente:'',agenteId:null,producto:null,
+           ofertaConf:{},corrPrecios:[]} // FASE 2 (5jul26): verificación de precios de oferta por combos
   // a) nombre
   const vn=hbValidarNombre(file.name)
   if(!vn.ok){f.error=vn.error;return f}
@@ -29850,11 +30029,42 @@ async function hbProcesarArchivo(file,ctx){
     if(r.fecha!==f.fechaDecl)anomalas++
     else r.confirmada=true
   }
-  f.estado=anomalas>0?'revision':'listo'
+  f.estado=anomalas>0?'revision':(f.oferta?'oferta':'listo') // FASE 2: oferta → verificar precios antes de listo
   return f
 }
 const hbPendientes=f=>f.rows.filter(r=>!r.confirmada)
 const hbCorregidas=f=>f.rows.filter(r=>r.corr)
+// ══ FASE 2 (5jul26): VERIFICACIÓN DE PRECIOS DE OFERTA (por grupos cantidad+precio) ══
+// Agrupa por cantidad y, dentro, por precio. Todo precio distinto se muestra por separado
+// con sus teléfonos. Detector cruzado: si un precio "raro" coincide con el precio típico
+// de OTRA cantidad → pista de que quizás la cantidad quedó mal puesta.
+function hbGruposOferta(f){
+  const map={}
+  f.rows.forEach((r,ri)=>{
+    const c=String(r.sc.cantidad==null?'':r.sc.cantidad).trim()||'?'
+    const p=String(r.sc.precio==null?'':r.sc.precio).trim()||'?'
+    const k=c+'|'+p
+    ;(map[k]=map[k]||{cant:c,precio:p,idxs:[]}).idxs.push(ri)
+  })
+  const gs=Object.values(map).sort((a,b)=>((parseInt(a.cant)||0)-(parseInt(b.cant)||0))||(b.idxs.length-a.idxs.length))
+  const mayor={} // cantidad → precio del grupo más grande de esa cantidad
+  for(const g of gs)if(!(g.cant in mayor))mayor[g.cant]=g.precio
+  gs.forEach(g=>{
+    g.conf=!!(f.ofertaConf&&f.ofertaConf[g.cant+'|'+g.precio])
+    g.hint=''
+    if(mayor[g.cant]!==g.precio){
+      for(const[c2,p2]of Object.entries(mayor)){
+        if(c2!==g.cant&&p2===g.precio){g.hint=`💡 $${g.precio} es el precio típico del combo de ${c2}u — ¿será la CANTIDAD la que quedó mal puesta?`;break}
+      }
+    }
+  })
+  return gs
+}
+const hbOfertaTodoOk=f=>hbGruposOferta(f).every(g=>g.conf)
+function hbOfertaRecalc(f){
+  if(f.estado==='revision'||f.estado==='error')return
+  f.estado=(f.oferta&&!hbOfertaTodoOk(f))?'oferta':'listo'
+}
 
 // ── 8. ESTADO GLOBAL + PÁGINA DEL AUXILIAR ──────────────────────────────────
 window._hb=null
@@ -29963,9 +30173,40 @@ function hbRender(){
           </div>
         </div>`
       })
+    }else if(f.estado==='oferta'){
+      // ══ FASE 2 (5jul26): VERIFICAR PRECIOS DE OFERTA ══
+      const gs=hbGruposOferta(f);f._ofG=gs
+      const pend=gs.filter(g=>!g.conf).length
+      badge=`<span style="color:var(--amber);font-weight:800">💲 VERIFICAR PRECIOS DE OFERTA (${pend} grupo${pend===1?'':'s'} pendiente${pend===1?'':'s'}) · ${hbEsc(f.agente)} → ${hbEsc(f.producto?.nombre||'')}</span>`
+      body=`<div class="alert" style="margin-top:8px;background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:13px">
+        Este archivo es de <b>OFERTA</b> 🏷️ — confirma cada combo contra Seller Chat: ¿ese precio corresponde a esas unidades? Corrige el que no cuadre (precio y/o cantidad). Nada pasa hasta confirmar todos.</div>`
+      gs.forEach((g,gi)=>{
+        if(g.conf){
+          body+=`<div style="margin-top:6px;font-size:13px;color:var(--green)">✓ <b>${hbEsc(g.cant)}u → $${hbEsc(g.precio)}</b> · ${g.idxs.length} venta(s) — confirmado</div>`
+          return
+        }
+        const tels=g.idxs.map(ri=>f.rows[ri].tel).filter(Boolean)
+        body+=`<div class="card" style="background:var(--card2);margin-top:8px;border-left:3px solid var(--amber);padding:12px">
+          <div style="font-size:14px"><b>${hbEsc(g.cant)} unidad${g.cant==='1'?'':'es'} → $${hbEsc(g.precio)}</b> · ${g.idxs.length} venta(s)</div>
+          ${g.hint?`<div style="font-size:12px;color:var(--amber);margin-top:4px">${hbEsc(g.hint)}</div>`:''}
+          ${tels.length?`<details style="margin-top:6px;font-size:12px"><summary style="cursor:pointer;color:var(--muted)">📞 ver los ${tels.length} teléfono(s) para buscar en Seller Chat</summary><div style="font-family:monospace;margin-top:4px;line-height:1.8">${tels.map(hbEsc).join(' · ')}</div></details>`:''}
+          <div id="hb-oedit-${fi}-${gi}" style="display:none;margin-top:8px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+              <div class="fld" style="margin:0"><label>Cantidad correcta</label><input type="text" id="hb-oc-${fi}-${gi}" value="${hbEscA(g.cant)}" style="width:90px;font-family:monospace"></div>
+              <div class="fld" style="margin:0"><label>Precio correcto (sin puntos)</label><input type="text" id="hb-op-${fi}-${gi}" value="${hbEscA(g.precio)}" style="width:150px;font-family:monospace"></div>
+              <button class="btn-sm btn-primary" onclick="hbOfertaAplicar(${fi},${gi})">💾 Aplicar a las ${g.idxs.length}</button>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+            <button class="btn-sm btn-green" onclick="hbOfertaOkG(${fi},${gi})">✓ Está perfecto</button>
+            <button class="btn-sm btn-amber" onclick="hbOfertaEdit(${fi},${gi})">✏️ Corregir precio / cantidad</button>
+          </div>
+        </div>`
+      })
     }else{
       const nc=hbCorregidas(f).length
-      badge=`<span style="color:var(--green);font-weight:800">✓ ${hbEsc(f.agente)} → ${hbEsc(f.producto?.nombre||'')} · ${f.rows.length}/${f.filasDecl} filas${f.oferta?' · 🏷️ oferta':''}${nc?` · ✏️ ${nc} corregida${nc===1?'':'s'}`:''}</span>`
+      const np=(f.corrPrecios||[]).reduce((a,x)=>a+(x.ventas||0),0) // FASE 2: ventas con precio/cantidad ajustados
+      badge=`<span style="color:var(--green);font-weight:800">✓ ${hbEsc(f.agente)} → ${hbEsc(f.producto?.nombre||'')} · ${f.rows.length}/${f.filasDecl} filas${f.oferta?' · 🏷️ oferta verificada':''}${nc?` · ✏️ ${nc} corregida${nc===1?'':'s'}`:''}${np?` · 💲 ${np} precio(s)/cant. ajustado(s)`:''}</span>`
     }
     const notas=f.notas.length?`<div style="font-size:12px;color:var(--amber);margin-top:6px">${f.notas.map(hbEsc).join('<br>')}</div>`:''
     html+=`<div class="card" style="margin-top:10px">
@@ -30001,7 +30242,7 @@ window.hbQuitar=(fi)=>{if(!window._hb)return;window._hb.files.splice(fi,1);hbRen
 window.hbRowOk=(fi,ri)=>{
   const f=window._hb?.files[fi];if(!f)return
   f.rows[ri].confirmada=true
-  if(!hbPendientes(f).length)f.estado='listo'
+  if(!hbPendientes(f).length){f.estado='listo';hbOfertaRecalc(f)} // FASE 2: si es oferta, sigue verificación de precios
   hbRender()
 }
 window.hbRowEditar=(fi,ri)=>{
@@ -30017,8 +30258,32 @@ window.hbRowAplicar=(fi,ri)=>{
   if(!na){alert('El ID del anuncio no puede quedar vacío.');return}
   r.corr={fecha_antes:r.fecha,fecha_despues:nf,ad_id_antes:r.adId,ad_id_despues:na,tel:r.tel}
   r.fecha=nf;r.mdy=hbISOaMDY(nf);r.adId=na;r.sc.ad_id=na;r.confirmada=true
-  if(!hbPendientes(f).length)f.estado='listo'
+  if(!hbPendientes(f).length){f.estado='listo';hbOfertaRecalc(f)} // FASE 2: si es oferta, sigue verificación de precios
   hbRender()
+}
+// ══ FASE 2 (5jul26): handlers de la verificación de precios de oferta ══
+window.hbOfertaOkG=(fi,gi)=>{
+  const f=window._hb?.files[fi];if(!f)return
+  const g=(f._ofG||[])[gi];if(!g)return
+  f.ofertaConf[g.cant+'|'+g.precio]=true
+  hbOfertaRecalc(f);hbRender()
+}
+window.hbOfertaEdit=(fi,gi)=>{
+  const el=document.getElementById(`hb-oedit-${fi}-${gi}`)
+  if(el)el.style.display=el.style.display==='none'?'block':'none'
+}
+window.hbOfertaAplicar=(fi,gi)=>{
+  const f=window._hb?.files[fi];if(!f)return
+  const g=(f._ofG||[])[gi];if(!g)return
+  const nc=(document.getElementById(`hb-oc-${fi}-${gi}`)?.value||'').trim()
+  const np=(document.getElementById(`hb-op-${fi}-${gi}`)?.value||'').replace(/[.\s,]/g,'').trim()
+  if(!/^\d{1,2}$/.test(nc)){alert('La cantidad debe ser un entero corto (1-2 dígitos).');return}
+  if(!/^\d+$/.test(np)){alert('El precio debe ser numérico plano, sin puntos ni comas (ej: 129700).');return}
+  for(const ri of g.idxs){const r=f.rows[ri];r.sc.cantidad=nc;r.sc.precio=np}
+  f.corrPrecios.push({antes:{cantidad:g.cant,precio:g.precio},despues:{cantidad:nc,precio:np},ventas:g.idxs.length,tels:g.idxs.map(ri=>f.rows[ri].tel)})
+  f.ofertaConf[nc+'|'+np]=true
+  delete f.ofertaConf[g.cant+'|'+g.precio]
+  hbOfertaRecalc(f);hbRender()
 }
 window.hbConfirmarSinVentas=async(fecha)=>{
   const st=window._hb;if(!st)return
@@ -30039,6 +30304,7 @@ window.hbConfirmarSinVentas=async(fecha)=>{
 // SheetJS gratis no escribe colores; este mini-escritor OOXML sí (ZIP sin compresión).
 const HB_PALETA=['FFE2EFDA','FFDDEBF7','FFFFF2CC','FFFCE4D6','FFE4DFEC','FFD9E1F2'] // suaves, ciclan
 const HB_AMBAR='FFFFC000' // fila CORREGIDA (distinto a los colores de bloque)
+const HB_ROSA='FFF4CCCC'  // FASE 2 (5jul26): fila de OFERTA (rosa suave — el auxiliar la ubica para ajustar precio)
 function hbCrc32(bytes){
   if(!hbCrc32.T){const T=new Int32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);T[n]=c}hbCrc32.T=T}
   let c=0^(-1)
@@ -30078,10 +30344,11 @@ function hbBuildXlsx(cfg,filas){
   const fillsXml=['<fill><patternFill patternType="none"/></fill>','<fill><patternFill patternType="gray125"/></fill>']
   for(const c of HB_PALETA)fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${c}"/><bgColor indexed="64"/></patternFill></fill>`)
   fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${HB_AMBAR}"/><bgColor indexed="64"/></patternFill></fill>`)
+  fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${HB_ROSA}"/><bgColor indexed="64"/></patternFill></fill>`) // FASE 2: rosa oferta
   let xfs='<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
-  for(let k=0;k<nFills+1;k++)xfs+=`<xf numFmtId="49" fontId="0" fillId="${2+k}" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/>`
+  for(let k=0;k<nFills+2;k++)xfs+=`<xf numFmtId="49" fontId="0" fillId="${2+k}" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/>`
   const styles=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="${fillsXml.length}">${fillsXml.join('')}</fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="${2+nFills+1}">${xfs}</cellXfs></styleSheet>`
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="${fillsXml.length}">${fillsXml.join('')}</fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="${2+nFills+2}">${xfs}</cellXfs></styleSheet>`
   // anchos de columna cómodos (decorativo)
   const w={A:14,B:14,C:32,D:16,E:16,F:14,G:12,H:9,I:10,J:16,K:4,L:10,M:4,N:22,O:14,P:14,Q:24,R:20,S:80}
   let colsXml='<cols>'
@@ -30096,8 +30363,10 @@ function hbBuildXlsx(cfg,filas){
     const rN=idx+2
     sheet+=`<row r="${rN}">`
     cfg.columnas.forEach((c,i)=>{
-      const banded=i<=BAND_MAX&&fila.bandStyle!=null
-      const s=banded?fila.bandStyle:1
+      // FASE 2 (5jul26): estilo por SEGMENTO — A..O (sAO) y P..R (sPR). En filas normales ambos son
+      // iguales; en OFERTA+CORREGIDA la fila sale MIXTA: A–O rosa (ajuste de precio) y P–R ámbar (lo corregido).
+      const banded=i<=BAND_MAX&&fila.sAO!=null
+      const s=banded?(i<=14?fila.sAO:fila.sPR):1
       if(c.fuente==='formula'){
         let ftxt=String(fila.formulaTxt||'').replace(/\{r\}/g,String(rN));if(ftxt.startsWith('='))ftxt=ftxt.slice(1)
         sheet+=`<c r="${hbColL(i)}${rN}" s="${s}"><f>${hbEsc(ftxt)}</f></c>`
@@ -30141,17 +30410,24 @@ function hbArmarFilas(listos,cfg){
   const refs=[...String(cfg.formula||'').matchAll(/([A-Z]{1,2})\{r\}/g)].map(m=>m[1])
   bloques.forEach((b,bi)=>{
     const bandStyle=2+(bi%HB_PALETA.length)
+    const AMB=2+HB_PALETA.length,ROSA=AMB+1 // FASE 2: ids de estilo ámbar (corrección) y rosa (oferta)
     for(const{f,r}of b.items){
       const vals={}
       for(const c of cfg.columnas){
         if(c.fuente&&c.fuente.startsWith('sellerchat:')){
           const h=c.fuente.slice(11)
-          vals[c.col]=(h==='first_message_created')?r.mdy:String(r.sc[h]==null?'':r.sc[h])
-        }else if(c.fuente==='auto:dropi_id')vals[c.col]=f.producto.dropi_id
-        else if(c.fuente==='auto:agente')vals[c.col]=f.agente
-        else if(c.fuente==='auto:producto_nombre')vals[c.col]=f.producto.nombre
+          vals[c.col]=hbSanear((h==='first_message_created')?r.mdy:String(r.sc[h]==null?'':r.sc[h])) // FASE 2: saneo de corchetes desbalanceados
+        }else if(c.fuente==='auto:dropi_id')vals[c.col]=hbSanear(f.producto.dropi_id)
+        else if(c.fuente==='auto:agente')vals[c.col]=hbSanear(f.agente)
+        else if(c.fuente==='auto:producto_nombre')vals[c.col]=hbSanear(f.producto.nombre)
       }
-      filas.push({vals,formulaTxt:cfg.formula,bandStyle:r.corr?(2+HB_PALETA.length):bandStyle,corr:!!r.corr})
+      // FASE 2: color por fila — normal=banda producto · oferta=rosa · corregida=ámbar · oferta+corregida=MIXTA (A–O rosa / P–R ámbar)
+      let sAO,sPR
+      if(r.corr&&f.oferta){sAO=ROSA;sPR=AMB}
+      else if(r.corr){sAO=AMB;sPR=AMB}
+      else if(f.oferta){sAO=ROSA;sPR=ROSA}
+      else{sAO=bandStyle;sPR=bandStyle}
+      filas.push({vals,formulaTxt:cfg.formula,sAO,sPR,corr:!!r.corr})
       sRefs.push(refs.map(L=>vals[L]==null?'':vals[L]).join(', ')) // vista rápida de la columna S
     }
   })
@@ -30193,8 +30469,8 @@ window.hbGenerar=async()=>{
       }catch(e){err.push(`respaldo de ${f.name}: ${e&&e.message||e}`);path=null}
       regs.push({lote_id:loteId,fecha_lote:st.hoy,tipo:'export',archivo_nombre:f.name,storage_path:path,hash_sha256:hash||null,
         agente:f.agente,producto_id:f.producto.id,producto_nombre:f.producto.nombre,fecha_declarada:f.fechaDecl,filas:f.rows.length,
-        resultado:hbCorregidas(f).length?'corregido':'ok',
-        detalle:{oferta:f.oferta,correcciones:hbCorregidas(f).map(r=>r.corr)},usuario_id:currentMe().id})
+        resultado:(hbCorregidas(f).length||(f.corrPrecios&&f.corrPrecios.length))?'corregido':'ok',
+        detalle:{oferta:f.oferta,correcciones:hbCorregidas(f).map(r=>r.corr),correcciones_precio:f.corrPrecios||[]},usuario_id:currentMe().id})
     }
     let hojaPath=`${carpeta}/${hojaNombre}`,hojaHash=''
     try{hojaHash=await hbSha256(xbytes.buffer)}catch(_){}
@@ -30239,7 +30515,8 @@ window.hbGenerar=async()=>{
       ${err.length?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:12px;margin-top:8px">⚠️ Detalles no críticos:<br>${err.map(hbEsc).join('<br>')}</div>`:''}
       <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
         <button class="btn-sm btn-primary" onclick="hbDescargarUltima()">⬇️ Descargar ${hbEsc(hojaNombre)}</button>
-        <button class="btn-sm btn-blue" onclick="hbCopiarS(this)">📋 Copiar columna S (vista rápida)</button>
+        <!-- FASE 2 (5jul26): vista rápida OCULTA por decisión de ADS (el flujo es Excel→Drive→Asignador). Revertir = quitar display:none -->
+        <button class="btn-sm btn-blue" style="display:none" onclick="hbCopiarS(this)">📋 Copiar columna S (vista rápida)</button>
       </div>
       <textarea id="hb-sprev" style="position:absolute;left:-9999px">${hbEsc(sPreview)}</textarea>
     </div>`
@@ -30358,6 +30635,15 @@ async function hbRenderCfg(){
   </div>
   <div class="fld" style="margin-top:10px"><label>Fórmula (usa {r} donde va el número de fila)</label>
     <textarea id="hb-cfg-formula" rows="3" style="width:100%;font-family:monospace;font-size:12px;box-sizing:border-box">${hbEsc(cfg.formula)}</textarea></div>
+  <div class="fld" style="margin-top:10px"><label>Orden de campos que el ASIGNADOR lee (formato corchetes · separados por coma · debe ir de la mano con la fórmula)</label>
+    <input type="text" id="hb-cfg-orden" value="${hbEscA((cfg.orden_linea||HB_ORDEN_LINEA).join(', '))}" style="width:100%;font-family:monospace;font-size:12px;box-sizing:border-box;padding:8px"></div>
+  <div class="divider"></div>
+  <div class="section-title">📦 Encabezados del Masivo Dropi (fila 1 del copiado — 18 columnas exactas)</div>
+  <div style="font-size:12px;color:var(--muted);margin-bottom:8px">El botón "📦 Copiar para Dropi masivo" del Asignador usa EXACTAMENTE estos textos como fila 1. Cámbialos solo si Dropi cambia su plantilla.</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px">
+    ${(cfg.masivo_headers||HB_MASIVO_HEADERS).map((h,i)=>`<div class="fld" style="margin:0"><label>Columna ${hbColL(i)}</label><input type="text" id="hb-cfg-m-${i}" value="${hbEscA(h)}" style="width:100%;font-size:12px;box-sizing:border-box;padding:7px 9px"></div>`).join('')}
+  </div>
+  <div style="margin-top:8px"><button class="btn-sm btn-outline" onclick="hbCfgMasivoReset()">↩️ Restaurar encabezados de fábrica (solo llena — recuerda Guardar)</button></div>
   <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
     <button class="btn-sm btn-primary" id="hb-cfg-save" onclick="hbCfgGuardar()">💾 Guardar configuración</button>
     <button class="btn-sm btn-outline" onclick="hbCfgReset()">↩️ Restaurar la de fábrica</button>
@@ -30366,13 +30652,21 @@ async function hbRenderCfg(){
 }
 window.hbCfgGuardar=async()=>{
   const msg=document.getElementById('hb-cfg-msg'),btn=document.getElementById('hb-cfg-save')
+  const prev=await hbLoadConfig() // FASE 2: preservar llaves que no estén en pantalla
   const cols=[]
   for(let i=0;i<27;i++){
     const h=document.getElementById('hb-cfg-h-'+i),f=document.getElementById('hb-cfg-f-'+i)
     if(!h||!f)break
     cols.push({col:hbColL(i),header:h.value.trim(),fuente:f.value})
   }
-  const cfg={columnas:cols,formula_col:document.getElementById('hb-cfg-fcol')?.value||'S',formula:(document.getElementById('hb-cfg-formula')?.value||'').trim()||hbDefaultConfig().formula}
+  // FASE 2: orden_linea (Asignador) + encabezados del masivo — mismos defaults si vienen vacíos
+  const _ordenRaw=(document.getElementById('hb-cfg-orden')?.value||'').split(',').map(s=>s.trim()).filter(Boolean)
+  const _mh=[]
+  for(let i=0;i<18;i++){const el=document.getElementById('hb-cfg-m-'+i);if(!el){_mh.length=0;break}_mh.push(el.value)}
+  const cfg={version:2,columnas:cols,formula_col:document.getElementById('hb-cfg-fcol')?.value||'S',
+    formula:(document.getElementById('hb-cfg-formula')?.value||'').trim()||HB_FORMULA_V2,
+    orden_linea:_ordenRaw.length>=15?_ordenRaw:(prev.orden_linea||HB_ORDEN_LINEA.slice()),
+    masivo_headers:_mh.length===18?_mh:(prev.masivo_headers||HB_MASIVO_HEADERS.slice())}
   // coherencia: la columna elegida para la fórmula queda con fuente 'formula'; ninguna otra la duplica
   for(const c of cfg.columnas){if(c.col===cfg.formula_col)c.fuente='formula';else if(c.fuente==='formula')c.fuente='vacia'}
   const e=await hbSaveConfig(cfg)
@@ -30381,6 +30675,9 @@ window.hbCfgGuardar=async()=>{
   if(btn){btn.textContent='✅ Guardado';btn.style.background='var(--green)';setTimeout(()=>{btn.textContent='💾 Guardar configuración';btn.style.background=''},2200)}
   if(msg)msg.innerHTML='<div class="alert alert-green">✅ Configuración guardada. El Constructor la usa desde la próxima hoja.</div>'
   logAction('constructor_config_editada',{formula_col:cfg.formula_col}).catch(()=>{})
+}
+window.hbCfgMasivoReset=()=>{
+  HB_MASIVO_HEADERS.forEach((h,i)=>{const el=document.getElementById('hb-cfg-m-'+i);if(el)el.value=h})
 }
 window.hbCfgReset=async()=>{
   if(!confirm('¿Volver a la configuración de fábrica (la hoja base actual)?'))return

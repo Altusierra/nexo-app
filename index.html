@@ -1589,8 +1589,9 @@ window._gsaToggle=async()=>{
 //    del rango del Dashboard. Día único manda: llena desde=hasta con ese día.
 //  • (2jul26) CPA BE REAL (mix confirmadas): BE ponderado orden por orden con las
 //    confirmadas REALES del rango usando la plata de Dropi (precio_dropi = TOTAL DE
-//    LA ORDEN, costo_proveedor_dropi, flete_snapshot, flete_dev_snapshot). Fallback:
-//    config del producto según oferta (1u/2u/3u/4u). Convive con el BE teórico 2u.
+//    LA ORDEN, flete_snapshot, flete_dev_snapshot). ⭐ COSTO (4jul26): APP vigente
+//    por fecha de venta vía _nexoCostoVenta — NUNCA costo_proveedor_dropi del xlsx.
+//    Fallback: config del producto según oferta (1u/2u/3u/4u). Convive con el BE teórico 2u.
 // Todos los IDs van con prefijo sim2- para NO chocar con el simulador viejo (sim-*).
 function _sim2Fila(id,label,val,step,sub){
   return `<div class="fld"><label>${label}</label><input type="number" step="${step||1}" id="${id}" value="${val}" oninput="_sim2Recalc()">${sub?`<div style="font-size:10px;color:var(--muted);margin-top:2px" id="${id}-sub">${sub}</div>`:''}</div>`
@@ -1652,6 +1653,7 @@ async function _sim2Datos(){
   const key=desde+'|'+hasta
   if(window._sim2Cache&&window._sim2Cache.key===key)return window._sim2Cache
   const{data:mps}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('fecha,producto,cantidad,estado_final,precio_dropi,costo_proveedor_dropi,flete_snapshot,flete_dev_snapshot').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+  await window._nexoLoadPrecioHist() // ⭐ Regla única de costo: vigencia por fecha de venta
   const{data:ins}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('spend,meta_id').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
   const gastoByCamp={}
   for(const i of (ins||[])){if(i.meta_id)gastoByCamp[i.meta_id]=(gastoByCamp[i.meta_id]||0)+(i.spend||0)}
@@ -1701,7 +1703,7 @@ window._sim2Seed=async()=>{
         const _q=q>=4?4:q
         cr.n++;cr.q[_q]++
         cr.sp+=(m.precio_dropi>0?m.precio_dropi:(prod['precio_'+_q+'u']||0))
-        cr.sc+=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:(prod['costo_'+_q+'u']||0))
+        cr.sc+=window._nexoCostoVenta(prod,q,m.fecha,0) // ⭐ costo APP vigente por fecha (nunca costo_proveedor_dropi)
         const _sfI=(m.flete_snapshot>0?m.flete_snapshot:(prod.flete_outbound||21000))
         cr.sf+=_sfI
         // FIX (2jul26): sf ya trae la ida de TODAS — aquí solo la VUELTA (snapshot real = ida+vuelta → se le resta su ida)
@@ -1943,6 +1945,8 @@ async function loadDash(){
 
   // 2. Órdenes desde mapeos (ahora también trae precio_dropi para Ventas Netas reales)
   const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('cantidad,producto,producto_id,estado_final,fecha,ad_id,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+  // ⭐ Regla única de costo: precargar historial de precios (cada venta usa el costo vigente en SU fecha)
+  await window._nexoLoadPrecioHist()
   let tot1=0,tot2=0,tot3=0,tot4=0,conf=0,canc=0,pend=0,conAd=0,ent=0,dev=0
   let cConf1=0,cConf2=0,cConf3=0,cConf4=0
   const prodStats={}
@@ -2006,9 +2010,9 @@ async function loadDash(){
           const _pp=productos.find(p=>p.nombre===pn)||productos[0]||{}
           _pvS.venta+=q===1?(_pp.precio_1u||0):q===2?(_pp.precio_2u||0):q===3?(_pp.precio_3u||0):(_pp.precio_4u||0)
         }
-        // F7 (2jul26): costo y flete REALES de la confirmada — alimentan las columnas −COSTO y −FLETE ENV de la tabla 📦
+        // F7 (4jul26): costo APP vigente por fecha + flete REAL de la confirmada — columnas −COSTO y −FLETE ENV de la tabla 📦
         const _ppC=productos.find(p=>p.nombre===pn)||productos[0]||{}
-        _pvS.costoR=(_pvS.costoR||0)+((m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||(q===1?(_ppC.costo_1u||0):q===2?(_ppC.costo_2u||0):q===3?(_ppC.costo_3u||0):(_ppC.costo_4u||0)))
+        _pvS.costoR=(_pvS.costoR||0)+window._nexoCostoVenta(_ppC,q,m.fecha,m.costo_snapshot)
         _pvS.fleteR=(_pvS.fleteR||0)+((m.flete_snapshot>0?m.flete_snapshot:(_ppC.flete_outbound||21000)))
       }
       if(_catO==='entregado'||_catO==='novedad_ok'){
@@ -2018,7 +2022,7 @@ async function loadDash(){
         else{
           const _pp=productos.find(p=>p.nombre===pn)||productos[0]||{}
           const _pr=m.precio_dropi||[0,_pp.precio_1u||0,_pp.precio_2u||0,_pp.precio_3u||0,_pp.precio_4u||0][q]||(_pp.precio_2u||0)
-          const _co=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||[0,_pp.costo_1u||0,_pp.costo_2u||0,_pp.costo_3u||0,_pp.costo_4u||0][q]||(_pp.costo_2u||0)
+          const _co=window._nexoCostoVenta(_pp,q,m.fecha,m.costo_snapshot)||(_pp.costo_2u||0)
           const _f=m.flete_snapshot||_pp.flete_outbound||21000
           const _al=(_pp.tipo_producto==='marca_propia')?(_pp.almacenamiento||0):0
           _pvS.ganEnt+=(_pr-_co-_f-_al)
@@ -2039,10 +2043,10 @@ async function loadDash(){
   let mapeosDropi=null
   {
     const _qD=cols=>_sbFetchAll((_f,_t)=>sb.from('mapeos').select(cols).gte('fecha_dropi',desde).lte('fecha_dropi',hasta).not('fecha_dropi','is',null).order('id',{ascending:true}).range(_f,_t))
-    let _rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi,producto_id_dropi,ad_id,numero_guia,fecha_dropi')
-    if(_rD.error)_rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi,producto_id_dropi,ad_id,fecha_dropi')
-    if(_rD.error)_rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi,producto_id_dropi')
-    if(_rD.error)_rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi')
+    let _rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi,producto_id_dropi,ad_id,numero_guia,fecha_dropi,fecha')
+    if(_rD.error)_rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi,producto_id_dropi,ad_id,fecha_dropi,fecha')
+    if(_rD.error)_rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi,producto_id_dropi,fecha')
+    if(_rD.error)_rD=await _qD('cantidad,estado_final,producto,telefono,precio_dropi,costo_snapshot,flete_snapshot,flete_dev_snapshot,ganancia_dropi,fecha')
     mapeosDropi=_rD.data
   }
   // 🪟 DETALLE POR ORDEN (guías+teléfonos) + 📣 desglose campaña/anuncio: stash global para modal/acordeón.
@@ -2079,7 +2083,7 @@ async function loadDash(){
         const _pn=_prodCanonMapeo(m)
         const _prod=productos.find(p=>p.nombre===_pn)||productos[0]||{}
         const _precio=m.precio_dropi||[0,_prod.precio_1u||0,_prod.precio_2u||0,_prod.precio_3u||0,_prod.precio_4u||0][q]||(_prod.precio_2u||0)
-        const _costo=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||[0,_prod.costo_1u||0,_prod.costo_2u||0,_prod.costo_3u||0,_prod.costo_4u||0][q]||(_prod.costo_2u||0)
+        const _costo=window._nexoCostoVenta(_prod,q,m.fecha,m.costo_snapshot)||(_prod.costo_2u||0)
         const _fo=m.flete_snapshot||_prod.flete_outbound||21000
         const _alm=(_prod.tipo_producto==='marca_propia')?(_prod.almacenamiento||0):0
         _grdGanD+=(_precio-_costo-_fo-_alm)
@@ -2109,9 +2113,9 @@ async function loadDash(){
           const _pp=productos.find(p=>p.nombre===_pnV)||productos[0]||{}
           _pvS.venta+=q===1?(_pp.precio_1u||0):q===2?(_pp.precio_2u||0):q===3?(_pp.precio_3u||0):(_pp.precio_4u||0)
         }
-        // F7 (2jul26): costo y flete REALES de la confirmada
+        // F7 (4jul26): costo APP vigente por fecha + flete REAL de la confirmada
         const _ppC=productos.find(p=>p.nombre===_pnV)||productos[0]||{}
-        _pvS.costoR=(_pvS.costoR||0)+((m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||(q===1?(_ppC.costo_1u||0):q===2?(_ppC.costo_2u||0):q===3?(_ppC.costo_3u||0):(_ppC.costo_4u||0)))
+        _pvS.costoR=(_pvS.costoR||0)+window._nexoCostoVenta(_ppC,q,m.fecha,m.costo_snapshot)
         _pvS.fleteR=(_pvS.fleteR||0)+((m.flete_snapshot>0?m.flete_snapshot:(_ppC.flete_outbound||21000)))
       }
       if(_stD==='entregado'||_stD==='novedad_ok'){
@@ -2120,7 +2124,7 @@ async function loadDash(){
         else{
           const _pp=productos.find(p=>p.nombre===_pnV)||productos[0]||{}
           const _pr=m.precio_dropi||[0,_pp.precio_1u||0,_pp.precio_2u||0,_pp.precio_3u||0,_pp.precio_4u||0][q]||(_pp.precio_2u||0)
-          const _co=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||[0,_pp.costo_1u||0,_pp.costo_2u||0,_pp.costo_3u||0,_pp.costo_4u||0][q]||(_pp.costo_2u||0)
+          const _co=window._nexoCostoVenta(_pp,q,m.fecha,m.costo_snapshot)||(_pp.costo_2u||0)
           const _f=m.flete_snapshot||_pp.flete_outbound||21000
           const _al=(_pp.tipo_producto==='marca_propia')?(_pp.almacenamiento||0):0
           _pvS.ganEnt+=(_pr-_co-_f-_al)
@@ -2206,7 +2210,7 @@ async function loadDash(){
     const _prod=productos.find(p=>p.nombre===_pn)||productos[0]||{}
     const _q=m.cantidad||2
     const _precio=m.precio_dropi||[0,_prod.precio_1u||0,_prod.precio_2u||0,_prod.precio_3u||0,_prod.precio_4u||0][_q]||(_prod.precio_2u||0)
-    const _costo=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||[0,_prod.costo_1u||0,_prod.costo_2u||0,_prod.costo_3u||0,_prod.costo_4u||0][_q]||(_prod.costo_2u||0)
+    const _costo=window._nexoCostoVenta(_prod,_q,m.fecha,m.costo_snapshot)||(_prod.costo_2u||0)
     const _fo=m.flete_snapshot||_prod.flete_outbound||21000
     // FIX (2jul26): la ida de la devuelta YA está en _grFOut; aquí solo la VUELTA (snapshot real trae ida+vuelta → se le resta la ida)
     const _fd=m.flete_dev_snapshot>0?Math.max(0,m.flete_dev_snapshot-_fo):(_prod.flete_devolucion||18000)
@@ -2231,7 +2235,7 @@ async function loadDash(){
         const _prod=productos.find(p=>p.nombre===_pn)||productos[0]||{}
         const _q=m.cantidad||2
         const _precio=m.precio_dropi||[0,_prod.precio_1u||0,_prod.precio_2u||0,_prod.precio_3u||0,_prod.precio_4u||0][_q]||(_prod.precio_2u||0)
-        const _costo=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||[0,_prod.costo_1u||0,_prod.costo_2u||0,_prod.costo_3u||0,_prod.costo_4u||0][_q]||(_prod.costo_2u||0)
+        const _costo=window._nexoCostoVenta(_prod,_q,m.fecha,m.costo_snapshot)||(_prod.costo_2u||0)
         const _fo=m.flete_snapshot||_prod.flete_outbound||21000
         const _alm=(_prod.tipo_producto==='marca_propia')?(_prod.almacenamiento||0):0
         _grdGan+=(_precio-_costo-_fo-_alm)
@@ -2280,7 +2284,7 @@ async function loadDash(){
       // Cada producto muestra su ganancia real de operación; los fijos se restan UNA vez al negocio (franja).
       const utilReal=Math.round(s.ganEnt-s.fdev-gastoP-convP)
       // F7 (2jul26) · 🔻 Componentes con DATOS REALES del xlsx (fallback lista/config solo si falta el dato):
-      //   −COSTO = costo real de proveedor de las confirmadas · −FLETE ENV = flete real cobrado
+      //   −COSTO = costo APP vigente por fecha de venta (nunca xlsx) · −FLETE ENV = flete real cobrado
       //   −FLETE DEV = devueltas REALES (ida+vuelta) + proyección ida+vuelta de las que siguen en camino
       //   −DEV. PROY = SOLO devoluciones: la venta que se proyecta perder (%dev del producto) — ya no absorbe descuadres.
       // La fila sigue sumando EXACTO: Vendido − devProy − costo − fleteEnv − fleteDev − ads − conv = PROYECTADA.
@@ -2347,10 +2351,12 @@ async function loadDash(){
     const _ccCell=(pn,conf,bg,bold)=>{const v=_ccMap[pn];if(v==null)return _td('—','var(--subtle)',false,bg);const ar=conf>v?' ↗':conf<v?' ↘':'';const c=conf>v?'--green':conf<v?'--red':'--muted';return _td(fmt(v)+ar,'var('+c+')',bold,bg)}
     const _body=rows.map(r=>{
       const _warn=(r.gastoP===0&&r.conf>0)?' <span title="Este producto no tiene campañas vinculadas: no se le descontó gasto de ads. Vincúlalo en Productos para cuentas exactas." style="cursor:help">⚠️</span>':''
-      return `<tr style="border-bottom:1px solid var(--border)"><td style="text-align:left;padding:7px 10px;white-space:nowrap;color:var(--text)">${r.pn}${_warn}${_iCu(rows.indexOf(r),r.conf,r.pend,r.rech)}</td>`
+      // ⭐ Regla única de costo: si tiene confirmadas pero costo=0, la utilidad sale FALSA → avisar en rojo
+      const _warnCosto=(r.conf>0&&(!r.costo||r.costo===0))?' <span title="⚠️ SIN COSTO: este producto no tiene costo configurado en la APP (ni en el Historial de precios). La utilidad mostrada es FALSA (costo $0). Configúralo en Productos." style="cursor:help;color:var(--red);font-weight:800">⚠️$0</span>':''
+      return `<tr style="border-bottom:1px solid var(--border)"><td style="text-align:left;padding:7px 10px;white-space:nowrap;color:var(--text)">${r.pn}${_warn}${_warnCosto}${_iCu(rows.indexOf(r),r.conf,r.pend,r.rech)}</td>`
         +_td(fmt(r.ords))+_td(fmt(r.unids),'var(--blue)',true)+_ccCell(r.pn,r.conf)+_td(fmt(r.conf),'var(--green)')+_td(fmt(r.ent),'var(--green)')+_pctEnt(r.ent,r.conf)
         +_td('$'+fmt(r.venta),'var(--text)',true,_BGini)
-        +_neg(r.devProy,_BGdes,_tipDevP+' ('+((r.dp||0)*100).toFixed(0)+'% cfg)')+_neg(r.costo,_BGdes,'Costo REAL de proveedor (xlsx Dropi) de las confirmadas · si alguna aún no tiene dato, usa precio de lista')+_neg(r.fleteEnv,_BGdes,'Flete de envío REAL cobrado por Dropi a las '+fmt(r.conf)+' confirmadas')+_neg(r.fleteDev,_BGdes,'VUELTA de las devoluciones: reales del xlsx + proyectada de las que siguen en camino ('+((r.dp||0)*100).toFixed(0)+'% cfg). La IDA de todas ya está en −FLETE ENV')+_neg(r.ads,_BGdes,'Gasto Meta Ads de las campañas vinculadas a este producto')+_neg(r.convC,_BGdes,'Costo de conversaciones del producto en el rango')
+        +_neg(r.devProy,_BGdes,_tipDevP+' ('+((r.dp||0)*100).toFixed(0)+'% cfg)')+_neg(r.costo,_BGdes,'Costo del producto configurado en la APP, vigente en la fecha de cada venta (Historial de precios) · NUNCA el costo del xlsx de Dropi (viene mal en muchos productos)')+_neg(r.fleteEnv,_BGdes,'Flete de envío REAL cobrado por Dropi a las '+fmt(r.conf)+' confirmadas')+_neg(r.fleteDev,_BGdes,'VUELTA de las devoluciones: reales del xlsx + proyectada de las que siguen en camino ('+((r.dp||0)*100).toFixed(0)+'% cfg). La IDA de todas ya está en −FLETE ENV')+_neg(r.ads,_BGdes,'Gasto Meta Ads de las campañas vinculadas a este producto')+_neg(r.convC,_BGdes,'Costo de conversaciones del producto en el rango')
         +_tdm(r.utilProy,_BGpro)+_pctMrg(r.utilProy,r.venta,_BGpro)
         +_td((r.gEnt>=0?'$':'-$')+fmt(Math.abs(r.gEnt)),'var('+(r.gEnt>=0?'--green':'--red')+')',false,_BGrea)+_neg(r.fdevR,_BGrea,'Flete pagado por las '+fmt(r.dev||0)+' devoluciones REALES del rango')+_tdm(r.utilReal,_BGrea,_tipReal)+_perEnt(r.gEnt,r.ent,_BGrea)+_perEnt(r.utilReal,r.ent,_BGrea)
         +`</tr>`
@@ -3297,8 +3303,9 @@ async function pageAdminReportes(c){
     el.innerHTML='<div class="loading">Cargando...</div>'
 
     // Mapeos por fecha — NUEVO (2jul26): + plata REAL de Dropi por orden (precio_dropi = total orden,
-    // costo_proveedor_dropi, flete_snapshot, flete_dev_snapshot) para Venta/ROAS/BE reales
+    // flete_snapshot, flete_dev_snapshot) para Venta/ROAS/BE reales. ⭐ COSTO (4jul26): APP vigente por fecha — nunca del xlsx
     const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('fecha,cantidad,producto,estado_final,ad_id,precio_dropi,costo_proveedor_dropi,flete_snapshot,flete_dev_snapshot').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+    await window._nexoLoadPrecioHist() // ⭐ Regla única de costo: vigencia por fecha de venta
     // Gasto Meta por fecha (con meta_id para atribuir por producto)
     const{data:insData}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('fecha,spend,meta_id').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
     // Conversaciones desde reportes (con producto_id para desglose por producto)
@@ -3363,7 +3370,7 @@ async function pageAdminReportes(c){
         // ⚠️ flete_dev_snapshot YA incluye ida+vuelta (regla dura) → aquí se guarda SOLO la vuelta porque cfl ya trae la ida completa (FIX 2jul26: antes duplicaba la ida en la fracción dev)
         r.cN++
         r.cvr+=_pr
-        r.cco+=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:(_prodC['costo_'+_qk+'u']||_prodC.costo_2u||0))
+        r.cco+=window._nexoCostoVenta(_prodC,q,m.fecha,0)||(_prodC.costo_2u||0) // ⭐ costo APP vigente por fecha
         const _cflI=(m.flete_snapshot>0?m.flete_snapshot:(_prodC.flete_outbound||21000))
         r.cfl+=_cflI
         r.cfd+=(m.flete_dev_snapshot>0?Math.max(0,m.flete_dev_snapshot-_cflI):(_prodC.flete_devolucion||18000))
@@ -3576,6 +3583,7 @@ async function cargarResumenSemanal(){
   // variantes de texto y producto_id). Las órdenes sin estado_final NO se descartan:
   // se cuentan como pendientes, igual que en el Dashboard.
   const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('*').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+  await window._nexoLoadPrecioHist() // ⭐ Regla única de costo: vigencia por fecha de venta
 
   // Producto seleccionado (para filtrar gasto y conversaciones por producto)
   const prodSel=filtroProd?productos.find(p=>p.nombre===filtroProd):null
@@ -3641,7 +3649,7 @@ async function cargarResumenSemanal(){
     const prod=prodByKey[pk]||productos[0]||{}
     const q=m.cantidad||2
     const precio=m.precio_dropi||[0,prod.precio_1u||0,prod.precio_2u||0,prod.precio_3u||0,prod.precio_4u||0][q]||(prod.precio_2u||0)
-    const costo=(m.costo_proveedor_dropi>0?m.costo_proveedor_dropi:m.costo_snapshot)||[0,prod.costo_1u||0,prod.costo_2u||0,prod.costo_3u||0,prod.costo_4u||0][q]||(prod.costo_2u||0)
+    const costo=window._nexoCostoVenta(prod,q,m.fecha||m.fecha_dropi,m.costo_snapshot)||(prod.costo_2u||0) // ⭐ costo APP vigente por fecha
     const fo=m.flete_snapshot||prod.flete_outbound||21000
     // FIX (2jul26): fdIV = ida+vuelta SIEMPRE (snapshot real ya la trae; sin dato = ida pagada + vuelta config). fdVuelta = solo la vuelta (para teóricos donde la ida ya va en fleteOutTot)
     const fdIV=m.flete_dev_snapshot>0?m.flete_dev_snapshot:(fo+(prod.flete_devolucion||18000))
@@ -4796,6 +4804,7 @@ async function pageAdminProductos(c){
       }
     }catch(e){console.warn('historial dropi_id fail:',e)}
 
+    window._precioHistCache=null // ⭐ Regla única de costo: invalidar cache (los precios pudieron cambiar)
     const msg=document.getElementById('pmsg-'+id)
     msg.innerHTML='<div class="alert alert-green">✅ Guardado</div>'
     await loadProductos()
@@ -6209,6 +6218,7 @@ window.guardarOferta=async(prodId)=>{
         motivo:'Oferta agregada'
       })
     }catch(e){console.warn('historial oferta nueva fail:',e)}
+    window._precioHistCache=null // ⭐ Regla única de costo: invalidar cache
     msg.innerHTML='<div class="alert alert-green">✅ Oferta agregada</div>'
     setTimeout(()=>{closeModal();refreshProdBody(prodId)},800)
   }catch(e){msg.innerHTML=`<div class="alert alert-red">${e.message}</div>`}
@@ -6238,6 +6248,7 @@ window.quitarOferta=async(prodId,ofId,cantidad)=>{
         .eq('cantidad',cantidad)
         .is('vigente_hasta',null)
     }catch(e){console.warn('historial oferta eliminada fail:',e)}
+    window._precioHistCache=null // ⭐ Regla única de costo: invalidar cache
     refreshProdBody(prodId)
   }catch(e){alert(e.message)}
 }
@@ -13404,6 +13415,60 @@ window._nexoClasifVenta=function(estadoFinal){
   return 'venta'
 }
 
+// ⭐ REGLA ÚNICA DE COSTO DE VENTA (auditoría 4jul26 · ley del owner):
+// El costo del XLSX de Dropi (PRECIO PROVEEDOR X CANTIDAD → costo_proveedor_dropi)
+// viene MAL en muchos productos → NUNCA se usa en cálculos. Se sigue GUARDANDO en
+// mapeos como referencia, pero la fuente autoritativa del costo de una venta es:
+//   1º producto_precios_historial VIGENTE en la FECHA de la venta (cache abajo)
+//   2º costo_snapshot del mapeo (foto del costo de la APP al nacer la venta)
+//   3º costo actual del producto (costo_Nu)
+// La usan Dashboard, Reporte del día, Reporte semana, Metas y ADS (portafolio).
+window._precioHistCache=window._precioHistCache||null
+window._nexoLoadPrecioHist=async function(){
+  if(window._precioHistCache)return window._precioHistCache
+  try{
+    const _ids=(productos||[]).map(p=>p.id).filter(Boolean)
+    if(!_ids.length){window._precioHistCache={};return window._precioHistCache}
+    const{data:_rows}=await sb.from('producto_precios_historial')
+      .select('producto_id,cantidad,precio,costo,vigente_desde,vigente_hasta')
+      .in('producto_id',_ids)
+    const _map={}
+    for(const r of (_rows||[])){
+      if(r.producto_id==null||r.cantidad==null)continue
+      if(!_map[r.producto_id])_map[r.producto_id]={}
+      if(!_map[r.producto_id][r.cantidad])_map[r.producto_id][r.cantidad]=[]
+      _map[r.producto_id][r.cantidad].push(r)
+    }
+    window._precioHistCache=_map
+  }catch(e){console.warn('[_nexoLoadPrecioHist]',e);window._precioHistCache=window._precioHistCache||{}}
+  return window._precioHistCache
+}
+// Lookup sincrónico contra el cache: {precio,costo} vigente en esa fecha, o null.
+window._nexoPrecioVigente=function(prodId,cantidad,fechaISO){
+  const _h=window._precioHistCache
+  if(!_h||!prodId||!fechaISO)return null
+  const _arr=_h[prodId]&&_h[prodId][cantidad]
+  if(!_arr||!_arr.length)return null
+  const _d=String(fechaISO).slice(0,10)
+  let _best=null,_bestVD=''
+  for(const r of _arr){
+    const _vd=r.vigente_desde?String(r.vigente_desde).slice(0,10):''
+    const _vh=r.vigente_hasta?String(r.vigente_hasta).slice(0,10):''
+    if(_vd&&_vd>_d)continue
+    if(_vh&&_vh<=_d)continue
+    if(!_best||_vd>_bestVD){_best=r;_bestVD=_vd}
+  }
+  return _best?{precio:Number(_best.precio)||0,costo:Number(_best.costo)||0}:null
+}
+// Costo autoritativo de UNA venta (número; 0 = producto sin costo configurado → mostrar ⚠️).
+window._nexoCostoVenta=function(prod,cantidad,fechaISO,costoSnapshot){
+  const _q=Math.max(1,Math.min(4,cantidad||2))
+  const _pv=(prod&&prod.id)?window._nexoPrecioVigente(prod.id,_q,fechaISO):null
+  if(_pv&&_pv.costo>0)return _pv.costo
+  if(costoSnapshot>0)return costoSnapshot
+  return (prod&&prod['costo_'+_q+'u'])||0
+}
+
 // ℹ️ MEJORA 2 (2jul26 · ley del owner): TOOLTIP ESTÁNDAR DE 3 PARTES para TODO número calculado
 // en NEXO — 1) explicación en cristiano (qué es y qué asume) · 2) FÓRMULA genérica · 3) CON TUS
 // DATOS (los números reales de ese momento y el resultado). Mismo formato del CPA BREAK-EVEN.
@@ -14947,7 +15012,8 @@ async function loadPuntoEquilibrio(){
 
     // 4. Órdenes confirmadas por producto (mismo criterio que el Dashboard)
     // F7 (2jul26): trae la plata REAL del xlsx por orden — el Equilibrio deja de vivir 100% en catálogo
-    const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('cantidad,producto,estado_final,precio_dropi,costo_proveedor_dropi,flete_snapshot').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+    const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('cantidad,producto,estado_final,fecha,precio_dropi,flete_snapshot').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+    await window._nexoLoadPrecioHist() // ⭐ Regla única de costo: vigencia por fecha de venta
     const prodStatsConf={}
     let totalOrdsConf=0
     for(const m of (mapeos||[])){
@@ -14957,9 +15023,11 @@ async function loadPuntoEquilibrio(){
       const pn=resolveProdName(m.producto).nombre||'Sin producto'
       if(!prodStatsConf[pn])prodStatsConf[pn]={o1:0,o2:0,o3:0,o4:0,vReal:0,vRealN:0,cReal:0,cRealN:0,fReal:0,fRealN:0}
       if(q===1)prodStatsConf[pn].o1++;else if(q===2)prodStatsConf[pn].o2++;else if(q===3)prodStatsConf[pn].o3++;else prodStatsConf[pn].o4++
-      // F7: acumular dato REAL por confirmada (venta, costo proveedor, flete cobrado)
+      // F7 (4jul26): venta y flete REALES del xlsx; el COSTO viene de la APP vigente por fecha (nunca del xlsx)
       if(m.precio_dropi>0){prodStatsConf[pn].vReal+=m.precio_dropi;prodStatsConf[pn].vRealN++}
-      if(m.costo_proveedor_dropi>0){prodStatsConf[pn].cReal+=m.costo_proveedor_dropi;prodStatsConf[pn].cRealN++}
+      const _prodM=productos.find(p=>p.nombre===pn)
+      const _cApp=_prodM?window._nexoCostoVenta(_prodM,q,m.fecha,0):0
+      if(_cApp>0){prodStatsConf[pn].cReal+=_cApp;prodStatsConf[pn].cRealN++}
       if(m.flete_snapshot>0){prodStatsConf[pn].fReal+=m.flete_snapshot;prodStatsConf[pn].fRealN++}
       totalOrdsConf++
     }
@@ -17239,6 +17307,19 @@ window._nexoSyncDiaTodas=async function(offset,btn){
     if(!token){_fin('⚠️ Sin token',3500);return}
     const{data:cuentas}=await sb.from('meta_cuentas').select('account_id,nombre').order('nombre')
     if(!cuentas||!cuentas.length){_fin('⚠️ Sin cuentas',3500);return}
+    // ── NUEVO (4jul26): SOLO cuentas ACTIVAS — con gasto en los últimos 3 días según la BD ──
+    // Las muertas/bloqueadas no gastan → se saltan y el sync vuela (menos llamadas a Meta, menos espera).
+    // Blindaje: si la consulta falla o el filtro deja 0, se usan TODAS como antes (el botón nunca queda inútil).
+    try{
+      const _d3A=new Date(_hoyBg+'T12:00:00Z');_d3A.setDate(_d3A.getDate()-2)
+      const{data:_conG}=await sb.from('meta_insights').select('account_id').eq('nivel','campaign').gte('fecha',_isoDate(_d3A)).lte('fecha',_hoyBg).gt('spend',0)
+      const _setAct=new Set();for(const r of (_conG||[]))if(r.account_id)_setAct.add(String(r.account_id))
+      if(_setAct.size){
+        const _antes=cuentas.length
+        const _soloAct=cuentas.filter(c=>_setAct.has(String(c.account_id)))
+        if(_soloAct.length){cuentas.length=0;for(const c of _soloAct)cuentas.push(c);console.log(`[sync-dia] cuentas ACTIVAS: ${cuentas.length}/${_antes} (con gasto en los últimos 3 días)`)}
+      }
+    }catch(_eAct){console.warn('[sync-dia] filtro de activas falló, se usan TODAS:',_eAct&&_eAct.message)}
     const totalPasos=cuentas.length+1 // +1 = pasada de huérfanos
     let ok=0,fail=0
     const tr=JSON.stringify({since:dia,until:dia})
@@ -17691,6 +17772,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
       }
     }
   }catch(_){}
+  window._precioHistCache=precioHistByProd // ⭐ Regla única de costo: sincronizar cache global (mismos datos, sin doble fetch)
   const _extrasDias={mapeosAntierByProd,gastoAntierByCampId,reportesAntierByProd,conversacionesAntierByProd,mapeosTrasByProd,gastoTrasByCampId,reportesTrasByProd,conversacionesTrasByProd,reportesPrevAdIdsListByProd,reportesAntierAdIdsListByProd,reportesTrasAdIdsListByProd,precioHist:precioHistByProd,fechasDias:_fechasDiasG}
 
   // 6.8 NUEVO: Mapa ad_id → cuenta (para el "cuadre de ventas por origen" y el strip de cuenta).
@@ -18173,8 +18255,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
       ${_resumenPillCount('precaucion',conteo.precaucion,'🟡','en CUIDADO','var(--amber)','var(--amber-bg)','CUIDADO — Click para filtrar productos al límite (CPA entre 70-100% del break-even).')}
       ${_resumenPillCount('stop',conteo.stop,'🔴','en APAGAR','var(--red)','var(--red-bg)','APAGAR — Click para filtrar productos perdiendo plata (CPA > break-even).')}
       ${conteo.sin_ventas>0?_resumenPillCount('sin_ventas',conteo.sin_ventas,'⏳','en ESPERAR','var(--muted)','var(--card2)','ESPERAR — Sin ventas todavía.'):''}
-      <button class="btn-sm btn-outline" onclick="event.stopPropagation();window._nexoSyncDiaTodas(0,this)" title="Sync total de HOY: trae de Meta el gasto de hoy de TODAS las cuentas de una sola (sin ir cuenta por cuenta) y de paso arregla los IDs huérfanos de hoy (anuncios de ventas cuya campaña aún no estaba en la base). Muestra el avance aquí mismo y pone ✅ al terminar." style="margin-left:auto;border-color:var(--green);color:var(--green)">🔃 HOY</button>
-      <button class="btn-sm btn-outline" onclick="event.stopPropagation();window._nexoSyncDiaTodas(1,this)" title="Sync total de AYER: trae de Meta el gasto de ayer de TODAS las cuentas de una sola y arregla los IDs huérfanos de ayer. Muestra el avance aquí mismo y pone ✅ al terminar." style="border-color:var(--purple);color:var(--purple)">🔃 AYER</button>
+      <button class="btn-sm btn-outline" onclick="event.stopPropagation();window._nexoSyncDiaTodas(0,this)" title="Sync total de HOY: trae de Meta el gasto de hoy SOLO de las cuentas ACTIVAS (con gasto en los últimos 3 días) de una sola pasada — las muertas se saltan y va mucho más rápido. De paso arregla los IDs huérfanos de hoy (anuncios de ventas cuya campaña aún no estaba en la base). Muestra el avance aquí mismo y pone ✅ al terminar." style="margin-left:auto;border-color:var(--green);color:var(--green)">🔃 HOY</button>
+      <button class="btn-sm btn-outline" onclick="event.stopPropagation();window._nexoSyncDiaTodas(1,this)" title="Sync total de AYER: trae de Meta el gasto de ayer SOLO de las cuentas ACTIVAS (con gasto en los últimos 3 días) de una sola pasada — las muertas se saltan y va mucho más rápido. También arregla los IDs huérfanos de ayer. Muestra el avance aquí mismo y pone ✅ al terminar." style="border-color:var(--purple);color:var(--purple)">🔃 AYER</button>
       <button class="btn-sm btn-outline" onclick="abrirMetaUnDia('hoy')" title="Abre 1 pestaña de Meta Ads (Nexo) solo con HOY, sin esperar a que cargue el portafolio">Ver Hoy</button>
       <button onclick="resumenProductosFilter('',this)" title="Mostrar todos los productos sin filtro" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:10px;cursor:pointer">Ver todos</button>
     </div>
@@ -18210,9 +18292,10 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
       pConf++
       // Solo cuenta la oferta cuando esta CONFIRMADA (no inflar venta/costos con cancelados ni pendientes)
       if(q===1)o1++;else if(q===2)o2++;else if(q===3)o3++;else o4++
-      // F6 (2jul26): plata y costo REALES del xlsx por orden confirmada
+      // F6 (4jul26): venta REAL del xlsx por confirmada; COSTO = APP vigente por fecha (nunca costo_proveedor_dropi)
       if(m.precio_dropi>0){_vRealSum+=m.precio_dropi;_vRealN++}
-      if(m.costo_proveedor_dropi>0){_cRealSum+=m.costo_proveedor_dropi;_cRealN++}
+      const _cAppP=window._nexoCostoVenta(prod,q,m.fecha,0)
+      if(_cAppP>0){_cRealSum+=_cAppP;_cRealN++}
     }
   }
   const totalMapeos=mps.length
@@ -18259,7 +18342,7 @@ function _calcResumenProducto(prod,mapeosByProd,gastoByCampId,reportesByProd,esS
 
   // Venta por oferta (solo confirmados; cada día con el precio vigente de ese día)
   const _vcH=_vcDia(_fechasD.p,[o1,o2,o3,o4])
-  // F6 (2jul26): días cerrados con la PLATA REAL del xlsx (precio_dropi/costo real por orden).
+  // F6 (4jul26): días cerrados con VENTA real del xlsx (precio_dropi) + COSTO de la APP vigente por fecha.
   // Las pocas confirmadas sin dato (hoy/pre-cruce) se prorratean con el teórico vigente.
   const _sinDatoV=Math.max(0,pConf-_vRealN),_sinDatoC=Math.max(0,pConf-_cRealN)
   const venta=(_vRealN>0)?Math.round(_vRealSum+(_vcH.venta*_sinDatoV/Math.max(pConf,1))):_vcH.venta
@@ -18654,6 +18737,8 @@ function _renderProductoCardResumen(data,ranking){
     'venta×(1−dev) − costo producto − flete envío − flete dev×dev − gasto ads − (costo conv × conversaciones)',
     `$${fmt(data.desgloseGanancia.ventaEfectiva)} − $${fmt(data.desgloseGanancia.costoProv)} − $${fmt(data.desgloseGanancia.costoFlete)} − $${fmt(data.desgloseGanancia.costoDev)} − $${fmt(data.desgloseGanancia.gasto)} − $${fmt(data.desgloseGanancia.costoConvProd)}&#10;= ${plataSign}$${fmt(plataAbs)}`
   ):''
+  // ⭐ Regla única de costo: confirmadas > 0 pero costo $0 → la ganancia mostrada es FALSA. Badge rojo imposible de ignorar.
+  const _warnSinCosto=((data.pedidosConfirmados||0)>0&&(!data.costoProv||data.costoProv===0))?`<span title="⚠️ SIN COSTO: este producto no tiene costo configurado en la APP (ni en el Historial de precios). La ganancia mostrada es FALSA (costo $0). Ve a Productos y configura el costo." style="cursor:help;color:#fff;background:var(--red);border-radius:5px;padding:1px 6px;font-size:10px;font-weight:800;margin-left:6px;vertical-align:middle">⚠️ SIN COSTO</span>`:''
   // Filas previas (Ayer / Antier / Trasantier) con color encadenado + borde semáforo en CPA.
   // Cada fila colorea su número comparándose con la fila de ABAJO (más antigua); la última es neutra.
   const _cmpRP=(a,b,dir)=>window._nexoCmpColor(a,b,dir)
@@ -18729,7 +18814,7 @@ function _renderProductoCardResumen(data,ranking){
         <span style="width:6px;height:6px;border-radius:50%;background:${c.color}"></span>
         <span>${_hoyLabel}</span>
         <span onclick="event.stopPropagation();(function(b){var d=document.getElementById('${_foldIdRP}');if(!d)return;var h=d.style.display==='none';d.style.display=h?'':'none';b.textContent=h?'▾':'▸';try{localStorage.setItem('${_foldIdRP}',h?'0':'1')}catch(e){}})(this)" style="cursor:pointer;color:var(--muted);font-size:11px;padding:0 4px;user-select:none" title="Plegar/desplegar las filas de Ayer · Antier · Trasantier · Prom (HOY queda siempre visible)">${_foldOffRP?'▸':'▾'}</span>
-        ${_tooltipGan?`<span style="cursor:help;color:var(--muted);font-size:11px;opacity:.7" title="${_tooltipGan}">ℹ</span>`:''}
+        ${_tooltipGan?`<span style="cursor:help;color:var(--muted);font-size:11px;opacity:.7" title="${_tooltipGan}">ℹ</span>`:''}${_warnSinCosto}
       </div>
       <div style="text-align:right">
         <div style="font-size:18px;font-weight:600;color:${plataColor};line-height:1.1">${plataSign}$${fmt(plataAbs)}</div>
@@ -19315,7 +19400,7 @@ function _renderProductoCardResumen(data,ranking){
       const nP=(F.dias['p']&&F.dias['p'].count)||0
       if(gP>0&&nP>0){const c=_cpaSemHoyF(gP,nP);return c>_BE?'stop':(c>_BE*0.7?'precaucion':(c>_BE*0.45?'escalar':'fuego'))}
       if(gP>0){const p=gP/_BE;return p>=1?'stop':(p>=0.5?'precaucion':'sin_ventas')}
-      return'sin_ventas'
+      return'' // NUEVO (4jul26): SIN gasto HOY ya NO es ⏳ ESPERAR — no está esperando nada, no corre. Queda solo con su badge (🔕 NO ENTREGA / ⏸ APAGADA).
     }
     // Mapa campId → código de semáforo de la fusión (PRENDER YA manda sobre el resto, igual que en el expand)
     const _fsemBy={}
@@ -19678,7 +19763,7 @@ function _renderProductoCardResumen(data,ranking){
         ${_urgPillF('precaucion',_contaF.precaucion,'🟡 CUIDADO','var(--amber)','var(--amber-bg)','CUIDADO: CPA Real Efectivas de hoy al límite del break-even (misma lógica del desglose de la cuenta). Click para filtrar.')}
         ${_urgPillF('fuego',_contaF.fuego,'🟣 DOBLAR','var(--purple)','var(--purple-bg)','FUEGO: CPA Real Efectivas de hoy brutal (≤45% del BE). Click para filtrar y doblar.')}
         ${_urgPillF('escalar',_contaF.escalar,'🟢 ESCALAR','var(--green)','var(--green-bg)','ESCALAR: CPA Real Efectivas de hoy sano (45–70% del BE). Click para filtrar y subir +30%.')}
-        ${_urgPillF('sin_ventas',_contaF.sin_ventas,'⏳ ESPERAR','var(--muted)','var(--card)','ESPERAR: hoy sin ventas todavía y gasto bajo. Click para filtrar y dejar correr.')}
+        ${_urgPillF('sin_ventas',_contaF.sin_ventas,'⏳ ESPERAR','var(--muted)','var(--card)','ESPERAR: gastó HOY y aún sin ventas (gasto bajo) — está esperando resultados DE VERDAD. Las que NO gastaron hoy ya no entran aquí: quedan solo con su badge (🔕 NO ENTREGA / ⏸ APAGADA). Click para filtrar y dejar correr.')}
         <button id="${_cidF}-btnclr" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','reset','',this)" title="Quitar TODOS los filtros de una (urgencia + activas/inactivas + día + con/sin ventas + buscador por ID) y mostrar todas las campañas" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:4px 9px;font-size:10px;cursor:pointer">Ver todas</button>
         <input type="text" id="${_cidF}-buscarid" placeholder="🆔 Buscar por ID de campaña o anuncio..." onclick="event.stopPropagation()" oninput="window._rpFusionFiltro('${_cidF}','id',this.value)" style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:5px 10px;color:var(--text);font-size:11px;flex:1;min-width:170px;outline:none" title="Pega el ID de una campaña O de un anuncio: te deja la campaña donde está metido ese ID.">
         <button onclick="event.stopPropagation();const i=document.getElementById('${_cidF}-buscarid');if(i){i.value='';window._rpFusionFiltro('${_cidF}','id','')}" title="Limpiar búsqueda por ID" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:4px 9px;font-size:10px;cursor:pointer">✖</button>
@@ -20929,7 +21014,7 @@ window._rpLifeClasif=function(ids,gYes,BE,pctConf){
     return cpaEf>BE?'stop':(cpaEf>BE*0.7?'precaucion':(cpaEf>BE*0.45?'escalar':'fuego'))
   }
   if(gYes>0){const p=gYes/BE;return p>=1?'stop':(p>=0.5?'precaucion':'sin_ventas')}
-  return'sin_ventas'
+  return'' // NUEVO (4jul26): sin gasto NO es ⏳ ESPERAR (misma regla nueva de la vista de HOY)
 }
 
 // P1 (29jun26): en modo LIFETIME, sobreescribe los totales 🆔 ID TOT y 🛒 VTS de la fila Σ con datos
@@ -22157,6 +22242,9 @@ window._rpFusionRango=async function(slug,cidF){
     if(cont){cont.innerHTML=html;cont.style.display='block';cont.dataset.rngOn='1'}
     // NUEVO (4jul26 · IDs RANGO): llenar 📦 adset y 📄 publicación de cada anuncio (async, con caché — 0 llamadas repetidas)
     try{window._rpRangoIdsLoad(cidF)}catch(_){}
+    // NUEVO (4jul26 · BARRA H): barras de scroll flotantes del rango (tabla completa + desgloses al expandir)
+    try{window._nexoStickyHBarAll(cont)}catch(_){}
+    try{setTimeout(()=>{try{window._nexoStickyHBarAll(cont)}catch(_){}},800)}catch(_){}
     // NUEVO (2jul26 · Mejora 7): el resumen 🗓 + tira de días con 💰 se pinta DESPUÉS de ⚡ ACCIONES
     // (entre la Σ TOTALES y nada más) en su contenedor propio. "Volver a 4 días" lo esconde.
     try{const _rr=document.getElementById(cidF+'-resumenrng');if(_rr){_rr.innerHTML=_resumenRangoHtml;_rr.style.display='block'}}catch(_){}
@@ -23207,6 +23295,93 @@ window._rpRangoIdsLoad=async function(cidF){
       }
     }
   }catch(e){console.warn('[rango IDs] no se pudieron cargar adset/publicación:',e&&e.message)}
+}
+// ── NUEVO (4jul26 · BARRA H FLOTANTE): scroll horizontal SIEMPRE a la mano ─────────────
+// Cada zona con desborde horizontal (tabla del rango, desglose de cada campaña al expandir,
+// sub de la fusión de 4 días) recibe DOS barras espejo pegajosas: bajando 👇 se ve la de
+// ARRIBA, subiendo 👆 la de ABAJO — solo UNA a la vez, sincronizadas con la tabla en ambos
+// sentidos. Se instalan solas al expandir/filtrar (escaneo con debounce tras cada click) y se
+// esconden si la zona se oculta o deja de desbordar. 100% aditivo: no toca contenido existente.
+window._nexoHBarReg=window._nexoHBarReg||[]
+window._nexoStickyHBar=function(el){
+  try{
+    if(!el||el.dataset.hbarOn==='1')return
+    if(el.offsetParent===null)return               // oculto ahora: se reintenta en el próximo escaneo
+    if(el.scrollWidth<=el.clientWidth+8)return     // no desborda: no hace falta barra
+    el.dataset.hbarOn='1'
+    if(!document.getElementById('nexo-hbar-css')){
+      const st=document.createElement('style');st.id='nexo-hbar-css'
+      st.textContent='.nexo-hbar{overflow-x:auto;overflow-y:hidden;height:13px;border-radius:7px;background:rgba(20,16,28,.92);border:1px solid var(--border,#333);scrollbar-width:thin;scrollbar-color:var(--purple,#a78bfa) transparent}.nexo-hbar::-webkit-scrollbar{height:9px}.nexo-hbar::-webkit-scrollbar-thumb{background:var(--purple,#a78bfa);border-radius:5px}.nexo-hbar::-webkit-scrollbar-track{background:transparent}.nexo-hbar>div{height:1px}'
+      document.head.appendChild(st)
+    }
+    const selfV=(()=>{try{const cs=getComputedStyle(el);return /auto|scroll/.test(cs.overflowY)&&el.scrollHeight>el.clientHeight+10}catch(_){return false}})()
+    const mk=()=>{const b=document.createElement('div');b.className='nexo-hbar';const i=document.createElement('div');b.appendChild(i);return b}
+    const top=mk(),bot=mk()
+    if(selfV){
+      // El propio elemento scrollea vertical (ej. sub de la fusión 4 días): barras ADENTRO,
+      // pegadas a sus bordes visibles. La de arriba se acomoda DEBAJO del encabezado pegado si existe.
+      let off=0;try{const f=el.firstElementChild;if(f&&/sticky/.test(f.getAttribute('style')||''))off=f.offsetHeight}catch(_){}
+      top.style.cssText+=`;position:sticky;top:${off}px;left:0;z-index:31;margin:0 0 3px`
+      bot.style.cssText+=';position:sticky;bottom:0;left:0;z-index:31;margin:3px 0 0'
+      const _fc=el.firstChild
+      el.insertBefore(top,_fc?_fc.nextSibling:null)
+      el.appendChild(bot)
+    }else{
+      // El scroll vertical lo maneja la ventana (ej. tabla del rango): barras HERMANAS
+      // (una antes y una después), pegadas al borde del viewport.
+      top.style.cssText+=';position:sticky;top:4px;z-index:31;margin:0 0 3px'
+      bot.style.cssText+=';position:sticky;bottom:4px;z-index:31;margin:3px 0 0'
+      el.parentNode.insertBefore(top,el)
+      el.parentNode.insertBefore(bot,el.nextSibling)
+    }
+    bot.style.display='none' // arranque en modo "bajando": se ve la de arriba
+    const reg={el,top,bot,selfV}
+    const syncW=()=>{try{
+      const sw=el.scrollWidth+'px'
+      if(top.firstChild.style.width!==sw)top.firstChild.style.width=sw
+      if(bot.firstChild.style.width!==sw)bot.firstChild.style.width=sw
+      if(selfV){const cw=el.clientWidth+'px';if(top.style.width!==cw)top.style.width=cw;if(bot.style.width!==cw)bot.style.width=cw}
+    }catch(_){}}
+    reg.syncW=syncW
+    syncW()
+    let lock=false
+    const go=(from)=>{if(lock)return;lock=true;try{const x=from.scrollLeft;if(el!==from&&el.scrollLeft!==x)el.scrollLeft=x;if(top!==from&&top.scrollLeft!==x)top.scrollLeft=x;if(bot!==from&&bot.scrollLeft!==x)bot.scrollLeft=x}finally{lock=false}}
+    top.addEventListener('scroll',()=>{go(top)},{passive:true})
+    bot.addEventListener('scroll',()=>{go(bot)},{passive:true})
+    el.addEventListener('scroll',()=>{go(el);syncW()},{passive:true})
+    if(selfV){
+      let ly=el.scrollTop
+      el.addEventListener('scroll',()=>{const y=el.scrollTop;if(y===ly)return;const down=y>ly;ly=y;top.style.display=down?'':'none';bot.style.display=down?'none':''},{passive:true})
+    }
+    window._nexoHBarReg.push(reg)
+  }catch(_){}
+}
+window._nexoStickyHBarAll=function(root){
+  try{
+    const els=(root||document).querySelectorAll('[style*="overflow-x:auto"],[style*="overflow-x: auto"]')
+    els.forEach(e=>{try{window._nexoStickyHBar(e)}catch(_){}})
+    // Refresco de las ya instaladas: anchos al día + esconder pares de zonas ocultas o sin desborde
+    for(const r of window._nexoHBarReg){try{
+      const vis=r.el.offsetParent!==null&&r.el.scrollWidth>r.el.clientWidth+8
+      if(!vis){r.top.style.display='none';r.bot.style.display='none';continue}
+      if(r.syncW)r.syncW()
+      if(!r.selfV){const down=(window._nexoHDir||'down')==='down';r.top.style.display=down?'':'none';r.bot.style.display=down?'none':''}
+      else if(r.top.style.display==='none'&&r.bot.style.display==='none'){r.top.style.display=''}
+    }catch(_){}}
+  }catch(_){}
+}
+if(!window._nexoHDirInit){
+  window._nexoHDirInit=true
+  window._nexoHDir='down'
+  let _lyW=window.scrollY
+  window.addEventListener('scroll',()=>{
+    const y=window.scrollY;if(y===_lyW)return
+    window._nexoHDir=y>_lyW?'down':'up';_lyW=y
+    for(const r of window._nexoHBarReg){if(r.selfV)continue;const down=window._nexoHDir==='down';r.top.style.display=down?'':'none';r.bot.style.display=down?'none':''}
+  },{passive:true})
+  window.addEventListener('resize',()=>{try{window._nexoStickyHBarAll(document)}catch(_){}},{passive:true})
+  // Al expandir campañas o filtrar aparecen zonas nuevas con desborde: escaneo con debounce tras cada click
+  document.addEventListener('click',()=>{clearTimeout(window._nexoHBarT);window._nexoHBarT=setTimeout(()=>{try{window._nexoStickyHBarAll(document)}catch(_){}},450)},true)
 }
 window._rpFillBudBtns=async function(){
   window._budFillT=null

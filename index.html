@@ -711,6 +711,7 @@ const NAV={
   ],
   auxiliar:[
     {id:'aux-hoy',icon:'🏠',label:'¿Qué hago hoy?'},
+    {id:'aux-hojabase',icon:'📗',label:'Hoja Base (Seller Chat)'}, // NUEVO (4jul26): Constructor de Hoja Base — va ANTES del Asignador
     {id:'aux-asignador',icon:'📍',label:'Asignador'},
     {id:'aux-dropi',icon:'📊',label:'Cruce Dropi'},
     {id:'aux-reservado',icon:'🔍',label:'Confirmar y recuperar pedidos'},
@@ -812,6 +813,7 @@ function render(page){
     'admin-actividad':pageAdminActividad,
     'admin-textos':pageAdminTextos,
     'aux-hoy':pageAuxHoy,
+    'aux-hojabase':pageAuxHojaBase, // NUEVO (4jul26): Constructor de Hoja Base
     'aux-asignador':pageAuxAsignador,
     'aux-reporte':pageAuxReporte,
     'aux-reservado':pageAuxReservado,
@@ -1481,6 +1483,7 @@ function _dashCajonesHTML(){
     \${_dashCajonHTML1('trk','💰','Tracker','¿Cómo va la plata día por día?')} -->
     ${_dashCajonHTML1('res','📈','Resumen Semanal','¿Cómo va semana por semana?')}
     ${_dashCajonHTML1('rep','📋','Reportes','El detalle fino por fecha')}
+    ${_dashCajonHTML1('hb','📗','Hoja Base — Constructor','Archivos por día (exports + hojas) y configuración de columnas')}
     <!-- NUEVO (3jul26 · Mejora 3): Novedades ID vive ahora AQUÍ, de última (debajo de Reportes). -->
     <div id="novedadesIdBox" style="margin-top:12px"></div>
   </div>`
@@ -1501,6 +1504,7 @@ window._dashCajonToggle=async(k)=>{
       else if(k==='trk')await pageAdminGasto(body)
       else if(k==='res')await pageAdminResumen(body)
       else if(k==='rep')await pageAdminReportes(body)
+      else if(k==='hb')await hbRenderDashboard(body) // NUEVO (4jul26): Constructor de Hoja Base
     }catch(e){
       body.dataset.loaded='' // permite reintentar al volver a abrir
       body.innerHTML='<div class="alert alert-blue">Error cargando la sección: '+(e.message||e)+'</div>'
@@ -29603,6 +29607,755 @@ async function initApp(){
   }
 }
 initApp()
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 📗 CONSTRUCTOR DE HOJA BASE (NUEVO 4jul26) — módulo completo autocontenido.
+// Convierte exports de Seller Chat en la "hoja base", autollena ID Dropi/agente/
+// producto cruzando el AGENTE del nombre del archivo, valida candado de filas y
+// candado de fechas (por brecha), permite revisar/corregir filas anómalas,
+// guarda constancia (Storage + constructor_subidas) y escribe en reportes_diarios.
+// SOLO AGREGA: no toca Asignador, Cruce Dropi, Productos ni Reporte del día.
+// Prefijo hb* en todo para no chocar con nada existente.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── 1. CONFIGURACIÓN (se guarda en la tabla `config`, clave única) ──────────
+const HB_CFG_KEY='constructor_hoja_base'
+const HB_SC_HEADERS=['client_name','client_country','client_phone','client_tag','ad_id','first_message_created','last_message_created','ciudad','estado','llegar','nombre','precio','apellido','cantidad','producto','direccion','departamento']
+const HB_BUCKET='exports-sellerchat'
+// Letras A..AA (27 columnas)
+function hbColL(i){return i<26?String.fromCharCode(65+i):'A'+String.fromCharCode(65+i-26)}
+function hbDefaultConfig(){
+  const cols=[
+    {col:'A',header:'nombre',fuente:'sellerchat:nombre'},
+    {col:'B',header:'apellido',fuente:'sellerchat:apellido'},
+    {col:'C',header:'direccion',fuente:'sellerchat:direccion'},
+    {col:'D',header:'departamento',fuente:'sellerchat:departamento'},
+    {col:'E',header:'ciudad',fuente:'sellerchat:ciudad'},
+    {col:'F',header:'client_phone',fuente:'sellerchat:client_phone'},
+    {col:'G',header:'',fuente:'auto:dropi_id'},
+    {col:'H',header:'cantidad',fuente:'sellerchat:cantidad'},
+    {col:'I',header:'precio',fuente:'sellerchat:precio'},
+    {col:'J',header:'estado',fuente:'sellerchat:estado'},
+    {col:'K',header:'',fuente:'vacia'},
+    {col:'L',header:'llegar',fuente:'sellerchat:llegar'},
+    {col:'M',header:'',fuente:'vacia'},
+    {col:'N',header:'',fuente:'auto:agente'},
+    {col:'O',header:'',fuente:'vacia'},
+    {col:'P',header:'first_message_created',fuente:'sellerchat:first_message_created'},
+    {col:'Q',header:'producto',fuente:'auto:producto_nombre'},
+    {col:'R',header:'ad_id',fuente:'sellerchat:ad_id'},
+    {col:'S',header:'',fuente:'formula'}
+  ]
+  for(let i=19;i<27;i++)cols.push({col:hbColL(i),header:'',fuente:'vacia'})
+  return{
+    columnas:cols,
+    formula_col:'S',
+    formula:'=E{r} & ", " & H{r} & ", " & D{r}& ", " & F{r}& ", " & P{r}& ", " & Q{r}& ", " & N{r}& ", " & G{r}& ", " & R{r}& ", " & O{r}'
+  }
+}
+async function hbLoadConfig(){
+  try{
+    const raw=await getConfig(HB_CFG_KEY)
+    if(raw){
+      const cfg=JSON.parse(raw)
+      if(cfg&&Array.isArray(cfg.columnas)&&cfg.columnas.length>=19&&cfg.formula){
+        // Completar hasta 27 columnas si faltan (tolerante a configs viejas)
+        const byCol={};for(const c of cfg.columnas)byCol[c.col]=c
+        const full=[];for(let i=0;i<27;i++){const L=hbColL(i);full.push(byCol[L]||{col:L,header:'',fuente:'vacia'})}
+        cfg.columnas=full
+        if(!cfg.formula_col)cfg.formula_col='S'
+        return cfg
+      }
+    }
+  }catch(e){console.warn('[HB] config inválida, uso defaults:',e&&e.message)}
+  return hbDefaultConfig()
+}
+async function hbSaveConfig(cfg){
+  const{error}=await sb.from('config').upsert({clave:HB_CFG_KEY,valor:JSON.stringify(cfg),updated_at:new Date().toISOString()},{onConflict:'clave'})
+  return error?error.message:null
+}
+
+// ── 2. HELPERS DE FECHA (todo en hora Colombia, TEXTO siempre) ──────────────
+function hbAddDays(iso,n){const d=new Date(iso+'T12:00:00');d.setDate(d.getDate()+n);return d.toLocaleDateString('en-CA')}
+function hbHoraBogota(){return new Intl.DateTimeFormat('en-GB',{timeZone:'America/Bogota',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date())}
+// first_message_created puede venir como serial de Excel (número), Date o string.
+// Devuelve {y,m,d} con la HORA DE PARED tal cual está en el archivo (sin drift de zona).
+function hbPartsFM(v){
+  if(v==null||v==='')return null
+  if(typeof v==='number'&&isFinite(v)){
+    const ms=Math.round((v-25569)*86400*1000),d=new Date(ms)
+    return{y:d.getUTCFullYear(),m:d.getUTCMonth()+1,d:d.getUTCDate()}
+  }
+  if(v instanceof Date&&!isNaN(v))return{y:v.getFullYear(),m:v.getMonth()+1,d:v.getDate()}
+  const s=String(v).trim()
+  let m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);if(m)return{y:+m[1],m:+m[2],d:+m[3]}
+  m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);if(m)return{y:+m[3],m:+m[1],d:+m[2]}
+  return null
+}
+const hbISO=p=>`${p.y}-${String(p.m).padStart(2,'0')}-${String(p.d).padStart(2,'0')}`
+const hbMDY=p=>`${p.m}/${p.d}/${p.y}` // M/D/YYYY sin ceros a la izquierda (formato de la hoja base)
+const hbISOaMDY=iso=>{const m=iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);return m?`${+m[2]}/${+m[3]}/${m[1]}`:iso}
+function hbFechaValida(s){
+  const m=String(s||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);if(!m)return false
+  const d=new Date(Date.UTC(+m[1],+m[2]-1,+m[3]))
+  return d.getUTCFullYear()===+m[1]&&d.getUTCMonth()===+m[2]-1&&d.getUTCDate()===+m[3]
+}
+const hbEsc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+const hbEscA=s=>hbEsc(s).replace(/"/g,'&quot;')
+
+// ── 3. VALIDACIÓN DEL NOMBRE DEL ARCHIVO (filas__AGENTE__fecha__oferta) ─────
+function hbValidarNombre(rawName){
+  const name=String(rawName||'').replace(/\.(xlsx|xls|csv)$/i,'').trim()
+  if(!name.includes('__'))return{ok:false,error:'Faltan los "__" separadores. Usa doble guion bajo entre cada parte. Ejemplo: 38__Neocell_A6_A2__2026-07-01'}
+  const parts=name.split('__').map(p=>p.trim())
+  if(parts.length<3)return{ok:false,error:'Falta un "__". Debe ir: filas__AGENTE__fecha. Ejemplo: 38__Neocell_A6_A2__2026-07-01'}
+  if(parts.length>4)return{ok:false,error:'Sobran partes en el nombre. Formato: filas__AGENTE__fecha__oferta'}
+  if(!/^\d+$/.test(parts[0]))return{ok:false,error:'Falta el número de filas al inicio. Ejemplo: 38__Neocell_A6_A2__2026-07-01'}
+  if(!parts[1])return{ok:false,error:'Falta el AGENTE en la 2ª parte. Ejemplo: 38__Neocell_A6_A2__2026-07-01'}
+  if(!hbFechaValida(parts[2]))return{ok:false,error:'Fecha inválida. Debe ser AAAA-MM-DD. Ejemplo: 2026-07-01'}
+  let oferta=false
+  if(parts.length===4){
+    if(parts[3].toLowerCase()!=='oferta')return{ok:false,error:'La 4ª parte solo puede ser "oferta" o ir vacía.'}
+    oferta=true
+  }
+  return{ok:true,filas:parseInt(parts[0],10),agenteStr:parts[1],fecha:parts[2],oferta}
+}
+
+// ── 4. CADENA AGENTE → PRODUCTO (lee las MISMAS tablas del Asignador) ───────
+async function hbCargarCadena(){
+  const[{data:ags},{data:rels}]=await Promise.all([
+    sb.from('agentes').select('id,nombre,activo'),
+    sb.from('producto_agentes').select('producto_id,agente_id')
+  ])
+  const byLower={};for(const a of(ags||[]))byLower[String(a.nombre||'').toLowerCase()]=a
+  const prodByAg={};for(const r of(rels||[]))if(!(r.agente_id in prodByAg))prodByAg[r.agente_id]=r.producto_id
+  return{byLower,prodByAg}
+}
+function hbResolverAgente(agStr,cad){
+  const a=cad.byLower[String(agStr||'').toLowerCase()]
+  if(!a)return{ok:false,error:`El agente "${agStr}" no está registrado en NEXO. Créalo en Productos → tarjeta del producto → Agentes autorizados.`}
+  if(a.activo===false)return{ok:false,error:`El agente "${a.nombre}" está desactivado.`}
+  const pid=cad.prodByAg[a.id]
+  if(pid==null)return{ok:false,error:`El agente "${a.nombre}" no está asignado a ningún producto. Asígnalo en Productos → tarjeta del producto.`}
+  const p=(productos||[]).find(x=>String(x.id)===String(pid))
+  if(!p)return{ok:false,error:`El producto del agente "${a.nombre}" no está en el catálogo activo de NEXO.`}
+  return{ok:true,agente:a.nombre,agenteId:a.id,producto:{id:p.id,nombre:p.nombre,dropi_id:String(p.dropi_id||'')}}
+}
+
+// ── 5. CANDADO DE FECHAS POR BRECHA (sin calendario de festivos) ────────────
+async function hbUltimaFechaProcesada(){
+  try{
+    const{data}=await sb.from('constructor_subidas').select('fecha_declarada')
+      .eq('tipo','export').in('resultado',['ok','corregido','sin_ventas'])
+      .not('fecha_declarada','is',null)
+      .order('fecha_declarada',{ascending:false}).limit(1)
+    return(data&&data[0])?data[0].fecha_declarada:null
+  }catch(e){return null}
+}
+// Fechas que el módulo ESPERA hoy: desde (última+1) hasta AYER. Sin historia → solo AYER.
+function hbFechasEsperadas(ultima,hoy){
+  const ayer=hbAddDays(hoy,-1)
+  let desde=ultima?hbAddDays(ultima,1):ayer
+  if(desde>ayer)return[]
+  const out=[];let d=desde,guard=0
+  while(d<=ayer&&guard<60){out.push(d);d=hbAddDays(d,1);guard++}
+  return out
+}
+
+// ── 6. LECTURA DEL EXPORT DE SELLER CHAT ────────────────────────────────────
+async function hbLeerExcel(file){
+  const buf=await file.arrayBuffer()
+  const wb=XLSX.read(buf,{type:'array',cellDates:false})
+  const ws=wb.Sheets['Sheet1']||wb.Sheets[wb.SheetNames[0]]
+  if(!ws)return{error:'El Excel no tiene ninguna pestaña legible.'}
+  const raw=XLSX.utils.sheet_to_json(ws,{defval:'',raw:true})
+  const rows=[]
+  for(const r of raw){
+    const tel=String(r.client_phone==null?'':r.client_phone).trim()
+    const nom=String(r.nombre==null?'':r.nombre).trim()
+    const adv=String(r.ad_id==null?'':r.ad_id).trim()
+    if(!tel&&!nom&&!adv)continue // fila totalmente vacía → no cuenta
+    const fm=hbPartsFM(r.first_message_created)
+    const sc={}
+    for(const h of HB_SC_HEADERS){
+      const v=r[h]
+      sc[h]=(v==null)?'':(typeof v==='number'&&h!=='first_message_created'?String(v):v)
+    }
+    rows.push({sc,tel,adId:adv,fm,fecha:fm?hbISO(fm):'',mdy:fm?hbMDY(fm):'',corr:null,confirmada:false})
+  }
+  return{rows,buf}
+}
+
+// ── 7. PROCESAR UN ARCHIVO (independiente: uno malo NO bloquea a los buenos) ─
+async function hbProcesarArchivo(file,ctx){
+  const f={name:file.name,size:file.size,estado:'error',error:'',notas:[],rows:[],buf:null,
+           filasDecl:0,agenteStr:'',fechaDecl:'',oferta:false,agente:'',agenteId:null,producto:null}
+  // a) nombre
+  const vn=hbValidarNombre(file.name)
+  if(!vn.ok){f.error=vn.error;return f}
+  f.filasDecl=vn.filas;f.agenteStr=vn.agenteStr;f.fechaDecl=vn.fecha;f.oferta=vn.oferta
+  // b) fecha del archivo contra la ventana
+  if(f.fechaDecl>ctx.hoy){f.error=`La fecha ${f.fechaDecl} es FUTURA. Revisa el nombre del archivo.`;return f}
+  if(f.fechaDecl===ctx.hoy&&!ctx.incluirHoy){f.error='La fecha es HOY (día en curso, parcial). Marca la casilla "Incluir HOY" arriba si de verdad quieres subir el día de hoy.';return f}
+  if(ctx.ultima&&f.fechaDecl<=ctx.ultima)f.notas.push(`🔁 El ${f.fechaDecl} ya se había subido antes — esto genera una NUEVA VERSIÓN de ese día.`)
+  // c) leer Excel
+  let lec
+  try{lec=await hbLeerExcel(file)}catch(e){f.error='No se pudo leer el Excel: '+(e&&e.message||e);return f}
+  if(lec.error){f.error=lec.error;return f}
+  f.rows=lec.rows;f.buf=lec.buf
+  // d) CANDADO de filas (doble verificación)
+  if(f.rows.length!==f.filasDecl){f.error=`Dice ${f.filasDecl} filas pero el Excel trae ${f.rows.length}. Revisá lo que bajaste de Seller Chat y vuelve a subir este archivo.`;return f}
+  // e) resolver AGENTE → producto → ID Dropi (el corazón)
+  const res=hbResolverAgente(f.agenteStr,ctx.cadena)
+  if(!res.ok){f.error=res.error;return f}
+  f.agente=res.agente;f.agenteId=res.agenteId;f.producto=res.producto
+  // f) CANDADO de fechas por fila: cada fila debe calzar con la fecha de SU archivo
+  let anomalas=0
+  for(const r of f.rows){
+    if(!r.fm){r.fecha=f.fechaDecl;r.mdy=hbISOaMDY(f.fechaDecl);r.confirmada=true;f.notas.push('⚠️ Una fila venía SIN fecha — se le puso la fecha del archivo.');continue}
+    if(r.fecha!==f.fechaDecl)anomalas++
+    else r.confirmada=true
+  }
+  f.estado=anomalas>0?'revision':'listo'
+  return f
+}
+const hbPendientes=f=>f.rows.filter(r=>!r.confirmada)
+const hbCorregidas=f=>f.rows.filter(r=>r.corr)
+
+// ── 8. ESTADO GLOBAL + PÁGINA DEL AUXILIAR ──────────────────────────────────
+window._hb=null
+async function pageAuxHojaBase(c){
+  c.innerHTML=`
+  <div class="page-title">📗 Hoja Base (Seller Chat)</div>
+  <div class="page-sub">Sube los Excel de Seller Chat y NEXO arma la hoja base sola: ordena columnas, llena ID Dropi, agente y producto, valida y envía los IDs a Reportes Diarios.</div>
+  <div class="card" style="margin-top:12px">
+    <div class="section-title">📛 Cómo nombrar cada archivo (obligatorio)</div>
+    <div style="font-size:14px;line-height:1.8">
+      Formato: <b style="font-family:monospace">filas__AGENTE__fecha__oferta</b> (separador = <b>doble</b> guion bajo "__")<br>
+      ✅ <span style="font-family:monospace">38__Neocell_A6_A2__2026-07-01__oferta</span> &nbsp;·&nbsp; ✅ <span style="font-family:monospace">2__Nad_Pro_Max_F4__2026-07-01</span><br>
+      <span style="color:var(--muted);font-size:12px">1) filas = cuántas ventas trae (candado) · 2) AGENTE tal como está en NEXO · 3) fecha AAAA-MM-DD · 4) "oferta" solo si aplica</span>
+    </div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <div id="hb-ventana" style="margin-bottom:10px"><div class="loading">Cargando ventana de fechas...</div></div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px;cursor:pointer">
+      <input type="checkbox" id="hb-hoy"> Incluir HOY (día en curso, parcial) — solo para el caso del sábado
+    </label>
+    <label class="btn-full btn-primary" style="display:block;text-align:center;cursor:pointer">
+      📂 Elegir los Excel de Seller Chat (varios a la vez)
+      <input type="file" id="hb-files" multiple accept=".xlsx,.xls" style="display:none" onchange="hbOnFiles(this)">
+    </label>
+  </div>
+  <div id="hb-gap"></div>
+  <div id="hb-lista"></div>
+  <div id="hb-acciones"></div>
+  <div id="hb-result"></div>
+  <div class="card" style="margin-top:12px">
+    <div class="section-title">⬇️ Hojas base generadas HOY (puedes volver a descargarlas)</div>
+    <div id="hb-hoyhojas"><div class="loading">Cargando...</div></div>
+  </div>`
+  try{
+    if(!Array.isArray(productos)||!productos.length){try{await loadProductos()}catch(_){}}
+    const hoy=today()
+    const[config,cadena,ultima]=await Promise.all([hbLoadConfig(),hbCargarCadena(),hbUltimaFechaProcesada()])
+    window._hb={hoy,config,cadena,ultima,files:[],lastBlob:null,lastNombre:''}
+    hbPintarVentana()
+    hbListarHojasHoy()
+  }catch(e){
+    const v=document.getElementById('hb-ventana')
+    if(v)v.innerHTML=`<div class="alert alert-red">Error inicializando el módulo: ${hbEsc(e&&e.message||e)}. Si es un 403, falta correr el SQL de constructor_subidas en Supabase.</div>`
+  }
+}
+function hbPintarVentana(){
+  const el=document.getElementById('hb-ventana');if(!el||!window._hb)return
+  const{hoy,ultima}=window._hb
+  const esperadas=hbFechasEsperadas(ultima,hoy)
+  window._hb.esperadas=esperadas
+  el.innerHTML=`<div style="font-size:13px;line-height:1.7">
+    📆 Hoy: <b>${hoy}</b> · Última fecha ya procesada: <b>${ultima||'— ninguna (primera vez)'}</b><br>
+    ${esperadas.length?`🎯 Fechas que se esperan en esta subida: <b>${esperadas.join(' · ')}</b>`:'✅ Estás al día — no hay fechas pendientes (solo re-subidas o HOY con la casilla).'}
+  </div>`
+}
+
+// Entrada de archivos: cada uno se procesa INDEPENDIENTE
+window.hbOnFiles=async(inp)=>{
+  if(!window._hb)return
+  const files=[...(inp.files||[])];inp.value=''
+  if(!files.length)return
+  const lista=document.getElementById('hb-lista')
+  if(lista&&!window._hb.files.length)lista.innerHTML='<div class="loading">Procesando archivos...</div>'
+  const ctx={hoy:window._hb.hoy,ultima:window._hb.ultima,cadena:window._hb.cadena,incluirHoy:!!document.getElementById('hb-hoy')?.checked}
+  for(const file of files){
+    const f=await hbProcesarArchivo(file,ctx)
+    window._hb.files.push(f)
+  }
+  hbRender()
+}
+
+// ── 9. RENDER DE LA LISTA + PANEL DE REVISIÓN ───────────────────────────────
+function hbRender(){
+  const st=window._hb;if(!st)return
+  const lista=document.getElementById('hb-lista'),acc=document.getElementById('hb-acciones'),gap=document.getElementById('hb-gap')
+  if(!lista)return
+  if(!st.files.length){lista.innerHTML='';if(acc)acc.innerHTML='';if(gap)gap.innerHTML='';return}
+  let html=''
+  st.files.forEach((f,fi)=>{
+    let badge='',body=''
+    if(f.estado==='error'){
+      badge=`<span style="color:var(--red);font-weight:800">❌ NO se procesa</span>`
+      body=`<div class="alert alert-red" style="margin-top:8px">${hbEsc(f.error)}</div>`
+    }else if(f.estado==='revision'){
+      const pend=hbPendientes(f)
+      badge=`<span style="color:var(--amber);font-weight:800">⚠️ EN REVISIÓN (${pend.length} fila${pend.length===1?'':'s'})</span>`
+      body=`<div class="alert" style="margin-top:8px;background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:13px">
+        Estas ventas traen una fecha DISTINTA a la del archivo (<b>${f.fechaDecl}</b>). Verifica cada una en Seller Chat con el teléfono: o está bien así, o corrige la fecha y/o el ID del anuncio. <b>Ninguna venta se pierde.</b></div>`
+      f.rows.forEach((r,ri)=>{
+        if(r.confirmada)return
+        body+=`<div class="card" style="background:var(--card2);margin-top:8px;border-left:3px solid var(--amber);padding:12px">
+          <div style="font-size:13px;line-height:1.8">
+            📞 <b style="font-size:15px">${hbEsc(r.tel)}</b> · ${hbEsc(String(r.sc.nombre||''))} ${hbEsc(String(r.sc.apellido||''))} · ${hbEsc(String(r.sc.ciudad||''))}<br>
+            🆔 ad_id: <span style="font-family:monospace">${hbEsc(r.adId)||'(vacío)'}</span> · 📅 trae: <b style="color:var(--amber)">${r.fecha}</b> (el archivo es del ${f.fechaDecl})
+          </div>
+          <div id="hb-edit-${fi}-${ri}" style="display:none;margin-top:8px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+              <div class="fld" style="margin:0"><label>Nueva fecha de la venta</label><input type="date" id="hb-nf-${fi}-${ri}" value="${r.fecha}"></div>
+              <div class="fld" style="margin:0;flex:1;min-width:220px"><label>ID del anuncio correcto</label><input type="text" id="hb-na-${fi}-${ri}" value="${hbEscA(r.adId)}" style="font-family:monospace"></div>
+              <button class="btn-sm btn-primary" onclick="hbRowAplicar(${fi},${ri})">💾 Aplicar corrección</button>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+            <button class="btn-sm btn-green" onclick="hbRowOk(${fi},${ri})">✓ Está bien así</button>
+            <button class="btn-sm btn-amber" onclick="hbRowEditar(${fi},${ri})">✏️ Corregir fecha / ID</button>
+          </div>
+        </div>`
+      })
+    }else{
+      const nc=hbCorregidas(f).length
+      badge=`<span style="color:var(--green);font-weight:800">✓ ${hbEsc(f.agente)} → ${hbEsc(f.producto?.nombre||'')} · ${f.rows.length}/${f.filasDecl} filas${f.oferta?' · 🏷️ oferta':''}${nc?` · ✏️ ${nc} corregida${nc===1?'':'s'}`:''}</span>`
+    }
+    const notas=f.notas.length?`<div style="font-size:12px;color:var(--amber);margin-top:6px">${f.notas.map(hbEsc).join('<br>')}</div>`:''
+    html+=`<div class="card" style="margin-top:10px">
+      <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center">
+        <div style="font-family:monospace;font-size:13px;word-break:break-all">📄 ${hbEsc(f.name)}</div>
+        <button class="btn-sm btn-red" onclick="hbQuitar(${fi})">✕ Quitar</button>
+      </div>
+      <div style="margin-top:6px;font-size:13px">${badge}</div>${notas}${body}
+    </div>`
+  })
+  lista.innerHTML=html
+  // Candado de días completos: fechas esperadas SIN archivo en esta subida
+  if(gap){
+    const declaradas=new Set(st.files.filter(x=>x.fechaDecl).map(x=>x.fechaDecl))
+    const faltan=(st.esperadas||[]).filter(d=>!declaradas.has(d))
+    gap.innerHTML=faltan.length?`<div class="card" style="margin-top:10px;border:2px dashed var(--amber)">
+      <div class="section-title" style="color:var(--amber)">⚠️ Días esperados sin archivo</div>
+      <div style="font-size:13px;margin-bottom:8px">Para no perder ventas: sube el archivo de ese día, o confirma que ese día NO hubo ventas.</div>
+      ${faltan.map(d=>`<div style="display:flex;gap:10px;align-items:center;margin-top:6px;flex-wrap:wrap"><b>${d}</b><button class="btn-sm btn-amber" id="hb-sv-${d}" onclick="hbConfirmarSinVentas('${d}')">✔️ Confirmar: el ${d} NO hubo ventas</button></div>`).join('')}
+    </div>`:''
+  }
+  // Acciones
+  if(acc){
+    const listos=st.files.filter(x=>x.estado==='listo')
+    const enRev=st.files.filter(x=>x.estado==='revision').length
+    acc.innerHTML=listos.length?`<div class="card" style="margin-top:10px">
+      ${enRev?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:13px;margin-bottom:10px">⚠️ Hay ${enRev} archivo(s) EN REVISIÓN — no entran hasta resolver sus filas. Los ${listos.length} listos sí se procesan.</div>`:''}
+      <button class="btn-full btn-primary" id="hb-btn-gen" onclick="hbGenerar()">🧮 Generar hoja base + guardar constancia + enviar a Reportes Diarios (${listos.length} archivo${listos.length===1?'':'s'})</button>
+    </div>`:''
+  }
+}
+window.hbQuitar=(fi)=>{if(!window._hb)return;window._hb.files.splice(fi,1);hbRender()}
+window.hbRowOk=(fi,ri)=>{
+  const f=window._hb?.files[fi];if(!f)return
+  f.rows[ri].confirmada=true
+  if(!hbPendientes(f).length)f.estado='listo'
+  hbRender()
+}
+window.hbRowEditar=(fi,ri)=>{
+  const el=document.getElementById(`hb-edit-${fi}-${ri}`)
+  if(el)el.style.display=el.style.display==='none'?'block':'none'
+}
+window.hbRowAplicar=(fi,ri)=>{
+  const f=window._hb?.files[fi];if(!f)return
+  const r=f.rows[ri]
+  const nf=(document.getElementById(`hb-nf-${fi}-${ri}`)?.value||'').trim()
+  const na=(document.getElementById(`hb-na-${fi}-${ri}`)?.value||'').trim()
+  if(!hbFechaValida(nf)){alert('Fecha inválida. Debe ser AAAA-MM-DD.');return}
+  if(!na){alert('El ID del anuncio no puede quedar vacío.');return}
+  r.corr={fecha_antes:r.fecha,fecha_despues:nf,ad_id_antes:r.adId,ad_id_despues:na,tel:r.tel}
+  r.fecha=nf;r.mdy=hbISOaMDY(nf);r.adId=na;r.sc.ad_id=na;r.confirmada=true
+  if(!hbPendientes(f).length)f.estado='listo'
+  hbRender()
+}
+window.hbConfirmarSinVentas=async(fecha)=>{
+  const st=window._hb;if(!st)return
+  const btn=document.getElementById('hb-sv-'+fecha)
+  if(btn){btn.disabled=true;btn.textContent='Guardando...'}
+  const{error}=await sb.from('constructor_subidas').insert({
+    lote_id:`${st.hoy}_${hbHoraBogota().replace(/:/g,'-')}`,fecha_lote:st.hoy,tipo:'export',
+    archivo_nombre:'(día sin ventas — confirmado por el auxiliar)',fecha_declarada:fecha,
+    filas:0,resultado:'sin_ventas',usuario_id:currentMe().id
+  })
+  if(error){if(btn){btn.disabled=false;btn.textContent='Error: '+error.message}return}
+  st.ultima=await hbUltimaFechaProcesada()
+  hbPintarVentana();hbRender()
+  logAction('constructor_dia_sin_ventas',{fecha}).catch(()=>{})
+}
+
+// ── 10. GENERADOR DE XLSX PROPIO (con colores por bloque — autocontenido) ────
+// SheetJS gratis no escribe colores; este mini-escritor OOXML sí (ZIP sin compresión).
+const HB_PALETA=['FFE2EFDA','FFDDEBF7','FFFFF2CC','FFFCE4D6','FFE4DFEC','FFD9E1F2'] // suaves, ciclan
+const HB_AMBAR='FFFFC000' // fila CORREGIDA (distinto a los colores de bloque)
+function hbCrc32(bytes){
+  if(!hbCrc32.T){const T=new Int32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);T[n]=c}hbCrc32.T=T}
+  let c=0^(-1)
+  for(let i=0;i<bytes.length;i++)c=(c>>>8)^hbCrc32.T[(c^bytes[i])&0xFF]
+  return(c^(-1))>>>0
+}
+function hbZip(entries){ // entries: [{name, text}] → Uint8Array (método STORED)
+  const enc=new TextEncoder()
+  const now=new Date()
+  const dTime=((now.getHours()<<11)|(now.getMinutes()<<5)|(Math.floor(now.getSeconds()/2)))&0xFFFF
+  const dDate=(((now.getFullYear()-1980)<<9)|((now.getMonth()+1)<<5)|now.getDate())&0xFFFF
+  const parts=[],central=[];let offset=0
+  const u16=v=>new Uint8Array([v&255,(v>>>8)&255])
+  const u32=v=>new Uint8Array([v&255,(v>>>8)&255,(v>>>16)&255,(v>>>24)&255])
+  for(const e of entries){
+    const name=enc.encode(e.name),data=enc.encode(e.text),crc=hbCrc32(data)
+    const head=[u32(0x04034b50),u16(20),u16(0x0800),u16(0),u16(dTime),u16(dDate),u32(crc),u32(data.length),u32(data.length),u16(name.length),u16(0)]
+    for(const h of head)parts.push(h)
+    parts.push(name,data)
+    const cen=[u32(0x02014b50),u16(20),u16(20),u16(0x0800),u16(0),u16(dTime),u16(dDate),u32(crc),u32(data.length),u32(data.length),u16(name.length),u16(0),u16(0),u16(0),u16(0),u32(0),u32(offset)]
+    for(const h of cen)central.push(h)
+    central.push(name)
+    offset+=30+name.length+data.length
+  }
+  let cdSize=0;for(const c of central)cdSize+=c.length
+  const eocd=[u32(0x06054b50),u16(0),u16(0),u16(entries.length),u16(entries.length),u32(cdSize),u32(offset),u16(0)]
+  const all=[...parts,...central,...eocd]
+  let total=0;for(const a of all)total+=a.length
+  const out=new Uint8Array(total);let p=0
+  for(const a of all){out.set(a,p);p+=a.length}
+  return out
+}
+// Construye el .xlsx de la hoja base. filas = [{vals:{A:'..',...}, formulaTxt, bandStyle}]
+function hbBuildXlsx(cfg,filas){
+  const nFills=HB_PALETA.length
+  // estilos: 0=default · 1=texto(@) sin relleno · 2..(2+n-1)=texto+paleta · último=texto+ámbar
+  const fillsXml=['<fill><patternFill patternType="none"/></fill>','<fill><patternFill patternType="gray125"/></fill>']
+  for(const c of HB_PALETA)fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${c}"/><bgColor indexed="64"/></patternFill></fill>`)
+  fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${HB_AMBAR}"/><bgColor indexed="64"/></patternFill></fill>`)
+  let xfs='<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
+  for(let k=0;k<nFills+1;k++)xfs+=`<xf numFmtId="49" fontId="0" fillId="${2+k}" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/>`
+  const styles=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="${fillsXml.length}">${fillsXml.join('')}</fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="${2+nFills+1}">${xfs}</cellXfs></styleSheet>`
+  // anchos de columna cómodos (decorativo)
+  const w={A:14,B:14,C:32,D:16,E:16,F:14,G:12,H:9,I:10,J:16,K:4,L:10,M:4,N:22,O:14,P:14,Q:24,R:20,S:80}
+  let colsXml='<cols>'
+  cfg.columnas.forEach((c,i)=>{colsXml+=`<col min="${i+1}" max="${i+1}" width="${w[c.col]||10}" customWidth="1"/>`})
+  colsXml+='</cols>'
+  // fila 1: encabezados (celda vacía en fila 1 donde el header sea '')
+  let sheet='<row r="1">'
+  cfg.columnas.forEach((c,i)=>{if(c.header)sheet+=`<c r="${hbColL(i)}1" s="1" t="inlineStr"><is><t xml:space="preserve">${hbEsc(c.header)}</t></is></c>`})
+  sheet+='</row>'
+  const BAND_MAX=17 // banda de color en A..R (índices 0..17), como la arma el auxiliar
+  filas.forEach((fila,idx)=>{
+    const rN=idx+2
+    sheet+=`<row r="${rN}">`
+    cfg.columnas.forEach((c,i)=>{
+      const banded=i<=BAND_MAX&&fila.bandStyle!=null
+      const s=banded?fila.bandStyle:1
+      if(c.fuente==='formula'){
+        let ftxt=String(fila.formulaTxt||'').replace(/\{r\}/g,String(rN));if(ftxt.startsWith('='))ftxt=ftxt.slice(1)
+        sheet+=`<c r="${hbColL(i)}${rN}" s="${s}"><f>${hbEsc(ftxt)}</f></c>`
+      }else{
+        const v=fila.vals[c.col]
+        if(v!=null&&v!=='')sheet+=`<c r="${hbColL(i)}${rN}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${hbEsc(v)}</t></is></c>`
+        else if(banded)sheet+=`<c r="${hbColL(i)}${rN}" s="${s}"/>` // vacía pero con banda de color
+      }
+    })
+    sheet+='</row>'
+  })
+  const sheetXml=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${colsXml}<sheetData>${sheet}</sheetData></worksheet>`
+  const wbXml=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Hoja 1" sheetId="1" r:id="rId1"/></sheets></workbook>`
+  const wbRels=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`
+  const rootRels=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`
+  const ctypes=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`
+  return hbZip([
+    {name:'[Content_Types].xml',text:ctypes},
+    {name:'_rels/.rels',text:rootRels},
+    {name:'xl/workbook.xml',text:wbXml},
+    {name:'xl/_rels/workbook.xml.rels',text:wbRels},
+    {name:'xl/styles.xml',text:styles},
+    {name:'xl/worksheets/sheet1.xml',text:sheetXml}
+  ])
+}
+// Arma las filas de salida a partir de los archivos LISTOS (agrupado por producto, corrido, con color)
+function hbArmarFilas(listos,cfg){
+  // agrupar por producto (orden = primera aparición); archivos del MISMO producto se fusionan
+  const bloques=[],byProd={}
+  for(const f of listos){
+    const k=String(f.producto.id)
+    if(!byProd[k]){byProd[k]={producto:f.producto,items:[]};bloques.push(byProd[k])}
+    for(const r of f.rows)byProd[k].items.push({f,r})
+  }
+  const filas=[],sRefs=[]
+  const refs=[...String(cfg.formula||'').matchAll(/([A-Z]{1,2})\{r\}/g)].map(m=>m[1])
+  bloques.forEach((b,bi)=>{
+    const bandStyle=2+(bi%HB_PALETA.length)
+    for(const{f,r}of b.items){
+      const vals={}
+      for(const c of cfg.columnas){
+        if(c.fuente&&c.fuente.startsWith('sellerchat:')){
+          const h=c.fuente.slice(11)
+          vals[c.col]=(h==='first_message_created')?r.mdy:String(r.sc[h]==null?'':r.sc[h])
+        }else if(c.fuente==='auto:dropi_id')vals[c.col]=f.producto.dropi_id
+        else if(c.fuente==='auto:agente')vals[c.col]=f.agente
+        else if(c.fuente==='auto:producto_nombre')vals[c.col]=f.producto.nombre
+      }
+      filas.push({vals,formulaTxt:cfg.formula,bandStyle:r.corr?(2+HB_PALETA.length):bandStyle,corr:!!r.corr})
+      sRefs.push(refs.map(L=>vals[L]==null?'':vals[L]).join(', ')) // vista rápida de la columna S
+    }
+  })
+  return{filas,bloques,sPreview:sRefs.join('\n')}
+}
+
+// ── 11. GENERAR TODO: hoja + constancia (Storage+tabla) + Reportes Diarios ──
+async function hbSha256(buf){
+  const h=await crypto.subtle.digest('SHA-256',buf)
+  return[...new Uint8Array(h)].map(b=>b.toString(16).padStart(2,'0')).join('')
+}
+window.hbGenerar=async()=>{
+  const st=window._hb;if(!st)return
+  const listos=st.files.filter(x=>x.estado==='listo')
+  if(!listos.length)return
+  const btn=document.getElementById('hb-btn-gen'),out=document.getElementById('hb-result')
+  if(btn){btn.disabled=true;btn.textContent='⏳ Generando y guardando...'}
+  const err=[]
+  try{
+    const hora=hbHoraBogota().replace(/:/g,'-')
+    const loteId=`${st.hoy}_${hora}`
+    // 1) armar filas y el xlsx
+    const{filas,bloques,sPreview}=hbArmarFilas(listos,st.config)
+    const xbytes=hbBuildXlsx(st.config,filas)
+    const hojaNombre=`HOJA_BASE_${st.hoy}_${hora}.xlsx`
+    const blob=new Blob([xbytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})
+    st.lastBlob=blob;st.lastNombre=hojaNombre
+    // 2) constancia: subir originales + hoja al bucket y registrar en constructor_subidas
+    const MIME='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    const carpeta=`${st.hoy}/lote_${hora}`
+    const regs=[]
+    for(const f of listos){
+      const safe=f.name.replace(/[^\w.\-]/g,'_')
+      let path=`${carpeta}/${safe}`,hash=''
+      try{hash=await hbSha256(f.buf)}catch(_){}
+      try{
+        const{error:eU}=await sb.storage.from(HB_BUCKET).upload(path,new Blob([f.buf],{type:MIME}),{upsert:true,contentType:MIME})
+        if(eU){err.push(`respaldo de ${f.name}: ${eU.message}`);path=null}
+      }catch(e){err.push(`respaldo de ${f.name}: ${e&&e.message||e}`);path=null}
+      regs.push({lote_id:loteId,fecha_lote:st.hoy,tipo:'export',archivo_nombre:f.name,storage_path:path,hash_sha256:hash||null,
+        agente:f.agente,producto_id:f.producto.id,producto_nombre:f.producto.nombre,fecha_declarada:f.fechaDecl,filas:f.rows.length,
+        resultado:hbCorregidas(f).length?'corregido':'ok',
+        detalle:{oferta:f.oferta,correcciones:hbCorregidas(f).map(r=>r.corr)},usuario_id:currentMe().id})
+    }
+    let hojaPath=`${carpeta}/${hojaNombre}`,hojaHash=''
+    try{hojaHash=await hbSha256(xbytes.buffer)}catch(_){}
+    try{
+      const{error:eH}=await sb.storage.from(HB_BUCKET).upload(hojaPath,blob,{upsert:true,contentType:MIME})
+      if(eH){err.push(`respaldo de la hoja: ${eH.message}`);hojaPath=null}
+    }catch(e){err.push(`respaldo de la hoja: ${e&&e.message||e}`);hojaPath=null}
+    const totCorr=listos.reduce((a,f)=>a+hbCorregidas(f).length,0)
+    regs.push({lote_id:loteId,fecha_lote:st.hoy,tipo:'hoja_base',archivo_nombre:hojaNombre,storage_path:hojaPath,hash_sha256:hojaHash||null,
+      agente:null,producto_id:null,producto_nombre:bloques.map(b=>b.producto.nombre).join(' · '),fecha_declarada:null,filas:filas.length,
+      resultado:'ok',detalle:{productos:bloques.map(b=>({nombre:b.producto.nombre,filas:b.items.length})),correcciones:totCorr,archivos:listos.length},usuario_id:currentMe().id})
+    const{error:eR}=await sb.from('constructor_subidas').insert(regs)
+    if(eR)err.push('constancia en tabla: '+eR.message)
+    // 3) Reportes Diarios (MODO REEMPLAZO): agrupar ad_ids por fecha REAL (corregida) + producto
+    const grupos={}
+    for(const f of listos)for(const r of f.rows){
+      const k=r.fecha+'|'+f.producto.id
+      if(!grupos[k])grupos[k]={fecha:r.fecha,producto:f.producto,ids:[],n:0}
+      grupos[k].n++
+      if(r.adId)grupos[k].ids.push(r.adId) // NO deduplicar: cada ID repetido = 1 venta
+    }
+    const repLineas=[]
+    for(const g of Object.values(grupos)){
+      const pay={fecha:g.fecha,producto_id:g.producto.id,producto_nombre:g.producto.nombre,
+        ad_ids:g.ids.join('\n'),conversaciones_aprox:g.n,conversaciones:g.n,
+        usuario_id:currentMe().id,updated_at:new Date().toISOString()}
+      let{error:e1}=await sb.from('reportes_diarios').upsert(pay,{onConflict:'fecha,producto_id,usuario_id'})
+      if(e1&&/conversaciones_aprox/i.test(e1.message||'')){
+        delete pay.conversaciones_aprox
+        ;({error:e1}=await sb.from('reportes_diarios').upsert(pay,{onConflict:'fecha,producto_id,usuario_id'}))
+      }
+      if(e1)err.push(`reporte ${g.producto.nombre} ${g.fecha}: ${e1.message}`)
+      else repLineas.push(`📤 <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${g.ids.length} IDs · ${g.n} conversaciones`)
+    }
+    // 4) refrescar "última fecha" y resumen final (SIN recargar la página)
+    st.ultima=await hbUltimaFechaProcesada()
+    hbPintarVentana();hbListarHojasHoy()
+    if(out)out.innerHTML=`<div class="card" style="margin-top:10px;border:2px solid var(--green)">
+      <div class="section-title" style="color:var(--green)">✅ Hoja base lista — ${filas.length} filas · ${bloques.length} producto(s)${totCorr?` · ✏️ ${totCorr} corregida(s)`:''}</div>
+      <div style="font-size:13px;line-height:1.9">${bloques.map((b,i)=>`<span style="display:inline-block;padding:2px 10px;border-radius:8px;margin:2px;background:#${HB_PALETA[i%HB_PALETA.length].slice(2)};color:#1a1a1a;font-weight:700">${hbEsc(b.producto.nombre)} · ${b.items.length}</span>`).join('')}</div>
+      <div style="font-size:13px;line-height:1.9;margin-top:8px">${repLineas.join('<br>')||'—'}</div>
+      ${err.length?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:12px;margin-top:8px">⚠️ Detalles no críticos:<br>${err.map(hbEsc).join('<br>')}</div>`:''}
+      <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
+        <button class="btn-sm btn-primary" onclick="hbDescargarUltima()">⬇️ Descargar ${hbEsc(hojaNombre)}</button>
+        <button class="btn-sm btn-blue" onclick="hbCopiarS(this)">📋 Copiar columna S (vista rápida)</button>
+      </div>
+      <textarea id="hb-sprev" style="position:absolute;left:-9999px">${hbEsc(sPreview)}</textarea>
+    </div>`
+    if(btn){btn.textContent='✅ Generado y guardado';btn.style.background='var(--green)'}
+    logAction('constructor_hoja_generada',{lote:loteId,archivos:listos.length,filas:filas.length,correcciones:totCorr}).catch(()=>{})
+  }catch(e){
+    if(out)out.innerHTML=`<div class="alert alert-red">Error generando: ${hbEsc(e&&e.message||e)}</div>`
+    if(btn){btn.disabled=false;btn.textContent='🧮 Reintentar'}
+  }
+}
+window.hbDescargarUltima=()=>{
+  const st=window._hb;if(!st||!st.lastBlob)return
+  const a=document.createElement('a');a.href=URL.createObjectURL(st.lastBlob);a.download=st.lastNombre||'HOJA_BASE.xlsx'
+  document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},2000)
+}
+window.hbCopiarS=(btn)=>{
+  const ta=document.getElementById('hb-sprev');if(!ta)return
+  ta.style.position='fixed';ta.style.left='0';ta.select()
+  try{document.execCommand('copy')}catch(_){}
+  if(navigator.clipboard)navigator.clipboard.writeText(ta.value).catch(()=>{})
+  ta.style.position='absolute';ta.style.left='-9999px'
+  if(btn){btn.textContent='✅ Copiado';setTimeout(()=>{btn.textContent='📋 Copiar columna S (vista rápida)'},1800)}
+}
+// Hojas generadas HOY (el auxiliar puede re-descargarlas las veces que necesite; días viejos solo ADS en el Dashboard)
+async function hbListarHojasHoy(){
+  const el=document.getElementById('hb-hoyhojas');if(!el||!window._hb)return
+  try{
+    const{data,error}=await sb.from('constructor_subidas').select('archivo_nombre,storage_path,hora_lote,filas')
+      .eq('tipo','hoja_base').eq('fecha_lote',window._hb.hoy).order('hora_lote',{ascending:false}).limit(20)
+    if(error){el.innerHTML=`<div style="font-size:12px;color:var(--muted)">${hbEsc(error.message)}</div>`;return}
+    if(!data||!data.length){el.innerHTML='<div style="font-size:13px;color:var(--muted)">Todavía no has generado ninguna hoy.</div>';return}
+    el.innerHTML=data.map(h=>`<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:13px">
+      <span style="font-family:monospace">${hbEsc(h.archivo_nombre)}</span><span style="color:var(--muted)">${h.filas||0} filas</span>
+      ${h.storage_path?`<button class="btn-sm btn-primary" onclick="hbDescargarPath('${hbEscA(h.storage_path)}','${hbEscA(h.archivo_nombre)}')">⬇️ Descargar</button>`:'<span style="color:var(--amber);font-size:11px">sin respaldo</span>'}
+    </div>`).join('')
+  }catch(e){el.innerHTML=`<div style="font-size:12px;color:var(--muted)">${hbEsc(e&&e.message||e)}</div>`}
+}
+window.hbDescargarPath=async(path,nombre)=>{
+  try{
+    const{data,error}=await sb.storage.from(HB_BUCKET).download(path)
+    if(error||!data){alert('No se pudo descargar: '+(error?.message||'sin datos'));return}
+    const a=document.createElement('a');a.href=URL.createObjectURL(data);a.download=nombre||'archivo.xlsx'
+    document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},2000)
+  }catch(e){alert('No se pudo descargar: '+(e&&e.message||e))}
+}
+
+// ── 12. CAJÓN DEL DASHBOARD: explorador por fecha/rango + configuración ─────
+async function hbRenderDashboard(body){
+  body.innerHTML=`
+  <div class="section-title" style="margin-top:8px">📁 Archivos por día (exports + hojas base)</div>
+  <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px">
+    <div class="fld" style="margin:0"><label>Desde</label><input type="date" id="hb-exp-desde" value="${today()}"></div>
+    <div class="fld" style="margin:0"><label>Hasta</label><input type="date" id="hb-exp-hasta" value="${today()}"></div>
+    <button class="btn-sm btn-primary" onclick="hbExpBuscar()">🔎 Buscar</button>
+  </div>
+  <div id="hb-exp-out"><div style="font-size:13px;color:var(--muted)">Elige el rango y dale Buscar.</div></div>
+  <div class="divider"></div>
+  <div class="section-title">⚙️ Configuración de la hoja base (columnas + fórmula)</div>
+  <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Esto define cómo el Constructor arma cada hoja. Arranca EXACTO como la hoja base actual. Guardar no recarga nada.</div>
+  <div id="hb-cfg-out"><div class="loading">Cargando configuración...</div></div>`
+  hbExpBuscar()
+  hbRenderCfg()
+}
+window.hbExpBuscar=async()=>{
+  const out=document.getElementById('hb-exp-out');if(!out)return
+  const desde=document.getElementById('hb-exp-desde')?.value||today()
+  const hasta=document.getElementById('hb-exp-hasta')?.value||today()
+  out.innerHTML='<div class="loading">Buscando...</div>'
+  try{
+    const{data,error}=await sb.from('constructor_subidas').select('*')
+      .gte('fecha_lote',desde).lte('fecha_lote',hasta)
+      .order('hora_lote',{ascending:false}).limit(500)
+    if(error){out.innerHTML=`<div class="alert alert-red">${hbEsc(error.message)}</div>`;return}
+    if(!data||!data.length){out.innerHTML='<div style="font-size:13px;color:var(--muted)">No hay subidas en ese rango.</div>';return}
+    const lotes={},orden=[]
+    for(const r of data){if(!lotes[r.lote_id]){lotes[r.lote_id]=[];orden.push(r.lote_id)}lotes[r.lote_id].push(r)}
+    const badge=res=>res==='ok'?'<span style="color:var(--green);font-weight:700">✓ ok</span>'
+      :res==='corregido'?'<span style="color:var(--amber);font-weight:700">✏️ corregido</span>'
+      :res==='sin_ventas'?'<span style="color:var(--muted)">∅ sin ventas</span>'
+      :`<span style="color:var(--red);font-weight:700">${hbEsc(res||'—')}</span>`
+    out.innerHTML=orden.map(lid=>{
+      const rows=lotes[lid],h0=rows[0]
+      const hora=h0.hora_lote?new Date(h0.hora_lote).toLocaleTimeString('es-CO',{timeZone:'America/Bogota',hour:'2-digit',minute:'2-digit'}):''
+      return`<div class="card" style="background:var(--card2);margin-top:8px;padding:12px">
+        <div style="font-weight:800;font-size:13px;margin-bottom:6px">📦 Lote ${hbEsc(h0.fecha_lote)} · ${hora} · ${rows.length} registro(s)</div>
+        ${rows.map(r=>`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;margin-top:5px;border-top:1px dashed var(--border);padding-top:5px">
+          <span>${r.tipo==='hoja_base'?'📗':'📄'}</span>
+          <span style="font-family:monospace;word-break:break-all;flex:1;min-width:180px">${hbEsc(r.archivo_nombre)}</span>
+          ${r.producto_nombre?`<span style="color:var(--muted)">${hbEsc(r.agente?r.agente+' → ':'')}${hbEsc(r.producto_nombre)}</span>`:''}
+          <span style="color:var(--muted)">${r.filas!=null?r.filas+' filas':''}</span>
+          ${badge(r.resultado)}
+          ${r.hash_sha256?`<span title="${hbEscA(r.hash_sha256)}" style="color:var(--muted);font-family:monospace">#${hbEsc(String(r.hash_sha256).slice(0,10))}</span>`:''}
+          ${r.storage_path?`<button class="btn-sm btn-primary" onclick="hbDescargarPath('${hbEscA(r.storage_path)}','${hbEscA(r.archivo_nombre)}')">⬇️</button>`:''}
+        </div>`).join('')}
+      </div>`
+    }).join('')
+  }catch(e){out.innerHTML=`<div class="alert alert-red">${hbEsc(e&&e.message||e)}</div>`}
+}
+async function hbRenderCfg(){
+  const out=document.getElementById('hb-cfg-out');if(!out)return
+  const cfg=await hbLoadConfig()
+  const fuentes=[['vacia','— Vacía —'],['formula','ƒ Fórmula'],['auto:dropi_id','AUTO: ID Dropi'],['auto:agente','AUTO: Agente'],['auto:producto_nombre','AUTO: Nombre de producto'],...HB_SC_HEADERS.map(h=>['sellerchat:'+h,'Seller Chat: '+h])]
+  out.innerHTML=`
+  <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+    <tr style="color:var(--muted);text-align:left"><th style="padding:4px 6px">Col</th><th style="padding:4px 6px">Encabezado (fila 1)</th><th style="padding:4px 6px">De dónde sale</th></tr>
+    ${cfg.columnas.map((c,i)=>`<tr>
+      <td style="padding:3px 6px;font-weight:800">${c.col}</td>
+      <td style="padding:3px 6px"><input type="text" id="hb-cfg-h-${i}" value="${hbEscA(c.header||'')}" placeholder="(sin encabezado)" style="width:100%;min-width:130px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text)"></td>
+      <td style="padding:3px 6px"><select id="hb-cfg-f-${i}" style="width:100%;min-width:190px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text)">
+        ${fuentes.map(([v,l])=>`<option value="${v}"${c.fuente===v?' selected':''}>${l}</option>`).join('')}
+      </select></td>
+    </tr>`).join('')}
+  </table></div>
+  <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-top:12px">
+    <div class="fld" style="margin:0"><label>Columna de la fórmula</label><select id="hb-cfg-fcol" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text)">${cfg.columnas.map(c=>`<option value="${c.col}"${cfg.formula_col===c.col?' selected':''}>${c.col}</option>`).join('')}</select></div>
+  </div>
+  <div class="fld" style="margin-top:10px"><label>Fórmula (usa {r} donde va el número de fila)</label>
+    <textarea id="hb-cfg-formula" rows="3" style="width:100%;font-family:monospace;font-size:12px;box-sizing:border-box">${hbEsc(cfg.formula)}</textarea></div>
+  <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
+    <button class="btn-sm btn-primary" id="hb-cfg-save" onclick="hbCfgGuardar()">💾 Guardar configuración</button>
+    <button class="btn-sm btn-outline" onclick="hbCfgReset()">↩️ Restaurar la de fábrica</button>
+  </div>
+  <div id="hb-cfg-msg" style="margin-top:8px"></div>`
+}
+window.hbCfgGuardar=async()=>{
+  const msg=document.getElementById('hb-cfg-msg'),btn=document.getElementById('hb-cfg-save')
+  const cols=[]
+  for(let i=0;i<27;i++){
+    const h=document.getElementById('hb-cfg-h-'+i),f=document.getElementById('hb-cfg-f-'+i)
+    if(!h||!f)break
+    cols.push({col:hbColL(i),header:h.value.trim(),fuente:f.value})
+  }
+  const cfg={columnas:cols,formula_col:document.getElementById('hb-cfg-fcol')?.value||'S',formula:(document.getElementById('hb-cfg-formula')?.value||'').trim()||hbDefaultConfig().formula}
+  // coherencia: la columna elegida para la fórmula queda con fuente 'formula'; ninguna otra la duplica
+  for(const c of cfg.columnas){if(c.col===cfg.formula_col)c.fuente='formula';else if(c.fuente==='formula')c.fuente='vacia'}
+  const e=await hbSaveConfig(cfg)
+  if(e){if(msg)msg.innerHTML=`<div class="alert alert-red">${hbEsc(e)}</div>`;return}
+  if(window._hb)window._hb.config=cfg
+  if(btn){btn.textContent='✅ Guardado';btn.style.background='var(--green)';setTimeout(()=>{btn.textContent='💾 Guardar configuración';btn.style.background=''},2200)}
+  if(msg)msg.innerHTML='<div class="alert alert-green">✅ Configuración guardada. El Constructor la usa desde la próxima hoja.</div>'
+  logAction('constructor_config_editada',{formula_col:cfg.formula_col}).catch(()=>{})
+}
+window.hbCfgReset=async()=>{
+  if(!confirm('¿Volver a la configuración de fábrica (la hoja base actual)?'))return
+  const e=await hbSaveConfig(hbDefaultConfig())
+  if(window._hb)window._hb.config=hbDefaultConfig()
+  if(!e)hbRenderCfg()
+}
+// ═══ FIN CONSTRUCTOR DE HOJA BASE ═══
+
 </script>
 </body>
 </html>

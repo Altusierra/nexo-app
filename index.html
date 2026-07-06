@@ -7268,6 +7268,7 @@ function _parseLineaCorchetes(linea){
   return{tipo:'nuevo',formato:'corchetes',ciudad:v.ciudad,qty:qty>=1?qty:1,dept:v.departamento,tel,fecha:fechaIso,fechaRaw:v.fecha,
     producto:v.producto,agente:v.agente,idDropi:String(v.id_dropi||'').trim(),adId,isI:carrier.toUpperCase().includes('INTERRAP'),carrier,
     direccion:v.direccion,tiempoEntrega:v.tiempo_entrega||'',nombre:v.nombre||'',apellido:v.apellido||'',precio,
+    estado:v.estado||'', // FASE 5 (6jul26) · Mejora 11: estado del pedido (NO obligatorio — Dropi no lo exige)
     errores:faltan,avisos,raw:linea}
 }
 // ══ FIN PARSER DE CORCHETES ══════════════════════════════════════════════════
@@ -7328,6 +7329,7 @@ const _ASIG_META={
   nombre:{lbl:'Nombre',ej:'Cristina',ej2:'Camilo'},
   precio:{lbl:'Precio',ej:'129700',ej2:'164500'},
   apellido:{lbl:'Apellido',ej:'Rodriguez',ej2:'Mora'},
+  estado:{lbl:'Estado',ej:'confirmado',ej2:'confirmado'}, // FASE 5 (6jul26) · Mejora 11
   ad_id:{lbl:'ID del anuncio',ej:'120243626234290122',ej2:''},
   transportadora:{lbl:'Transportadora (opcional)',ej:'',ej2:'Interrapidisimo'}
 }
@@ -8031,11 +8033,18 @@ window.descargarMasivoDropiXlsx=async()=>{
     byProdM[k].items.push(f)
   }
   const filasM=[]
+  // FASE 5 (6jul26) · Mejora 12: detección TOLERANTE del estado (sin tildes/mayúsculas)
+  const _nrmEst=s=>String(s==null?'':s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()
+  const _ROJOS=['cancelado','cancelada','anulado'],_NARANJAS=['reservado','reservada']
+  let _nRojas=0,_nNaranjas=0
   gruposM.forEach((g,bi)=>{
     for(const f of g.items){
       const r=f.raw||{}
       const emoji=_stateEmoji(f.estado,f.match)
-      filasM.push({vals:_cols.map(c=>_cl(hbMasivoValor(c.campo,f,r,emoji))),band:bi})
+      const _est=_nrmEst(r.estado)
+      const alerta=_ROJOS.includes(_est)?'rojo':(_NARANJAS.includes(_est)?'naranja':null)
+      if(alerta==='rojo')_nRojas++;else if(alerta==='naranja')_nNaranjas++
+      filasM.push({vals:_cols.map(c=>_cl(hbMasivoValor(c.campo,f,r,emoji))),band:bi,alerta})
     }
   })
   const anchos=_cols.map(c=>c.campo==='direccion_emoji'?42:(c.campo==='nombre'||c.campo==='apellido'||c.campo==='ciudad'||c.campo==='departamento'?18:14))
@@ -8046,7 +8055,7 @@ window.descargarMasivoDropiXlsx=async()=>{
   document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},2000)
   const _huerf=_cols.filter(c=>c.campo==='sin_asignar').map(c=>c.header||'(sin nombre)')
   const msg=document.getElementById('asign-msg')
-  if(msg)msg.innerHTML='<div class="alert alert-green">📥 Masivo Dropi descargado como Excel ('+filasM.length+' pedidos · '+gruposM.length+' producto(s) con su color) — súbelo directo a Dropi</div>'+(_huerf.length?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);margin-top:6px;font-size:12.5px">⚠️ La plantilla tiene ${_huerf.length} columna(s) <strong>SIN ASIGNAR</strong> (${_huerf.map(h=>String(h).replace(/</g,'&lt;')).join(', ')}) — salieron <strong>VACÍAS</strong>. Por favor informa al administrador para que les asigne un dato en el Dashboard.</div>`:'')
+  if(msg)msg.innerHTML='<div class="alert alert-green">📥 Masivo Dropi descargado como Excel ('+filasM.length+' pedidos · '+gruposM.length+' producto(s) con su color'+((_nRojas||_nNaranjas)?' · 🔴 '+_nRojas+' cancelado(s) · 🟠 '+_nNaranjas+' reservado(s) resaltados':'')+') — súbelo directo a Dropi</div>'+(_huerf.length?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);margin-top:6px;font-size:12.5px">⚠️ La plantilla tiene ${_huerf.length} columna(s) <strong>SIN ASIGNAR</strong> (${_huerf.map(h=>String(h).replace(/</g,'&lt;')).join(', ')}) — salieron <strong>VACÍAS</strong>. Por favor informa al administrador para que les asigne un dato en el Dashboard.</div>`:'')
   logAction('masivo_dropi_xlsx',{pedidos:filasM.length,productos:gruposM.length}).catch(()=>{})
 }
 
@@ -30187,9 +30196,9 @@ const HB_SC_HEADERS=['client_name','client_country','client_phone','client_tag',
 const HB_BUCKET='exports-sellerchat'
 // ══ FASE 2 (5jul26): la fórmula de CORCHETES es LA DEFAULT OFICIAL (reemplaza a la vieja).
 // 15 campos, orden CONGELADO (si algún día se agrega uno, va AL FINAL — nunca en el medio).
-const HB_FORMULA_V2='="["& E{r} &"]"& ", " & "["& H{r} &"]" &  ", " & "["& D{r} &"]" &  ", " & "["& F{r} &"]" &  ", " & "["& P{r} &"]" & ", " & "["& Q{r} &"]" & ", " & "["& C{r} &"]" & ", " & "["& N{r} &"]" & ", "& "["&L{r}&"]" &", " & "["& G{r} &"]" & ", " & "["& A{r} &"]" &", " & "["& I{r} &"]" & ", " & "["& B{r} &"]" &", "& "["& R{r} &"]" &  ", " & "["& O{r} &"]"'
+const HB_FORMULA_V2='="["& E{r} &"]"& ", " & "["& H{r} &"]" &  ", " & "["& D{r} &"]" &  ", " & "["& F{r} &"]" &  ", " & "["& P{r} &"]" & ", " & "["& Q{r} &"]" & ", " & "["& C{r} &"]" & ", " & "["& N{r} &"]" & ", "& "["&L{r}&"]" &", " & "["& G{r} &"]" & ", " & "["& A{r} &"]" &", " & "["& I{r} &"]" & ", " & "["& B{r} &"]" & ", " & "["& J{r} &"]" &", "& "["& R{r} &"]" &  ", " & "["& O{r} &"]"' // FASE 5 (6jul26) · Mejora 11: +[J{r}]=ESTADO en posición 14 (16 campos)
 // Orden en que el ASIGNADOR lee los campos de cada línea (misma config = única fuente de verdad)
-const HB_ORDEN_LINEA=['ciudad','cantidad','departamento','telefono','fecha','producto','direccion','agente','tiempo_entrega','id_dropi','nombre','precio','apellido','ad_id','transportadora']
+const HB_ORDEN_LINEA=['ciudad','cantidad','departamento','telefono','fecha','producto','direccion','agente','tiempo_entrega','id_dropi','nombre','precio','apellido','estado','ad_id','transportadora'] // FASE 5 (6jul26) · Mejora 11: +estado (índice 13)
 // Encabezados EXACTOS de la plantilla del masivo de Dropi (los pasó ADS verbatim — editables en Dashboard)
 const HB_MASIVO_HEADERS=['NOMBRES','APELLIDOS','DIRECCIÓN Y BARRIO','DEPARTAMENTO','CIUDAD','TELÉFONO','ID DE PRODUCTO','CANTIDAD','PRECIO TOTAL (SIN PUNTOS NI COMAS)','CON RECAUDO','NOTA','EMAIL (OPCIONAL)','ID DE VARIABLE (OPCIONAL)','CODIGO POSTAL (OPCIONAL)','TRANSPORTADORA (OPCIONAL)','CEDULA (OPCIONAL)','COLONIA (OBLIGATORIO SOLO PARA QUIKEN)','SEGURO (SOLO APLICA PARA ENVIA)']
 // ══ MEJORA (5jul26-b): PLANTILLA DE DROPI FLEXIBLE — cada columna lleva header + campo (de dónde sale el dato).
@@ -30199,6 +30208,7 @@ const HB_MASIVO_CAMPOS=[
   ['departamento','🗺️ Departamento (normalizado)'],['ciudad','🏙️ Ciudad (normalizada)'],['telefono','📞 Teléfono'],
   ['id_dropi','🆔 ID de Dropi'],['cantidad','🔢 Cantidad'],['precio','💵 Precio'],
   ['con_recaudo','💰 Texto fijo: CON RECAUDO'],['tiempo_entrega','⏱ Tiempo de entrega'],['transportadora','🚚 Transportadora'],
+  ['estado','🏷️ Estado del pedido'], // FASE 5 (6jul26) · Mejora 11
   ['vacia','⚪ Vacía (a propósito)'],['sin_asignar','🔴 SIN ASIGNAR']
 ]
 // Empareja un encabezado de Dropi con su campo por NOMBRE (tolerante a tildes/mayúsculas).
@@ -30218,7 +30228,8 @@ function hbMasivoAutoMap(h){
   if(n.includes('RECAUDO'))return'con_recaudo'
   if(n.includes('EMAIL'))return'tiempo_entrega' // regla ADS: EMAIL lleva el tiempo de entrega, A PROPÓSITO
   if(n.includes('TRANSPORTADORA'))return'transportadora'
-  if(n.includes('NOTA')||n.includes('VARIABLE')||n.includes('POSTAL')||n.includes('CEDULA')||n.includes('COLONIA')||n.includes('SEGURO'))return'vacia'
+  if(n.includes('NOTA'))return'estado' // FASE 5 (6jul26) · Mejora 11: la columna K "NOTA" lleva el ESTADO
+  if(n.includes('VARIABLE')||n.includes('POSTAL')||n.includes('CEDULA')||n.includes('COLONIA')||n.includes('SEGURO'))return'vacia'
   return'sin_asignar'
 }
 const hbMasivoColsDefault=()=>HB_MASIVO_HEADERS.map(h=>({header:h,campo:hbMasivoAutoMap(h)}))
@@ -30237,6 +30248,7 @@ function hbMasivoValor(campo,f,r,emoji){
     case'con_recaudo':return'CON RECAUDO'
     case'tiempo_entrega':return r.tiempoEntrega||''
     case'transportadora':return f.carrier==='—'?'':f.carrier
+    case'estado':return r.estado||'' // FASE 5 (6jul26) · Mejora 11: estado del pedido (columna K "NOTA")
     default:return'' // 'vacia' y 'sin_asignar' salen vacías
   }
 }
@@ -30266,7 +30278,7 @@ function hbDefaultConfig(){
   ]
   for(let i=19;i<27;i++)cols.push({col:hbColL(i),header:'',fuente:'vacia'})
   return{
-    version:3, // MEJORA (5jul26-b): masivo_cols flexible (v2 = fórmula de corchetes como default)
+    version:4, // FASE 5 (6jul26) · Mejora 11: v4 = estado en fórmula/orden/masivo (v3 = masivo_cols flexible; v2 = fórmula de corchetes)
     columnas:cols,
     formula_col:'S',
     formula:HB_FORMULA_V2,
@@ -30299,6 +30311,18 @@ async function hbLoadConfig(){
         }
         cfg.masivo_cols=cfg.masivo_cols.map(c=>({header:String(c&&c.header!=null?c.header:''),campo:(c&&c.campo)||'sin_asignar'}))
         if(!cfg.version||cfg.version<3)cfg.version=3
+        // FASE 5 (6jul26) · Mejora 11: migración ONE-SHOT v3→v4 — entra el ESTADO (posición 14 de 16).
+        // Configs guardadas se suben solas: fórmula con [J{r}], orden_linea con 'estado', y la columna
+        // "NOTA" del masivo pasa de 'vacia' a 'estado' (sin que el usuario re-suba la plantilla).
+        if(cfg.version<4){
+          cfg.formula=HB_FORMULA_V2
+          cfg.orden_linea=HB_ORDEN_LINEA.slice()
+          cfg.masivo_cols=cfg.masivo_cols.map(c=>{
+            const _n=String(c.header||'').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+            return(_n.includes('NOTA')&&c.campo==='vacia')?{header:c.header,campo:'estado'}:c
+          })
+          cfg.version=4
+        }
         return cfg
       }
     }
@@ -30415,6 +30439,28 @@ async function hbLeerExcel(file){
   const ws=wb.Sheets['Sheet1']||wb.Sheets[wb.SheetNames[0]]
   if(!ws)return{error:'El Excel no tiene ninguna pestaña legible.'}
   const raw=XLSX.utils.sheet_to_json(ws,{defval:'',raw:true})
+  // ══ FASE 5 (6jul26) · Mejora 11: verificación inteligente de la columna `estado` ══
+  // Si Seller Chat la renombró/quitó, buscar una columna cuyos VALORES parezcan estados
+  // (>=50% de sus celdas no vacías son tokens típicos) y usarla POR ESTA VEZ, avisando.
+  // Sin candidata → el estado sale vacío + aviso. NUNCA bloquea el procesamiento.
+  let estadoAlt=null,notaEstado=''
+  const keys0=raw.length?Object.keys(raw[0]||{}):[]
+  if(raw.length&&!keys0.includes('estado')){
+    const _nrm=s=>String(s==null?'':s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()
+    let best=null
+    for(const k of keys0){
+      if(HB_SC_HEADERS.includes(k))continue // columnas oficiales con otro propósito no son candidatas
+      let noVacias=0,hits=0
+      for(const rr of raw){const vv=_nrm(rr[k]);if(!vv)continue;noVacias++;if(HB_ESTADO_TOKENS.includes(vv))hits++}
+      if(noVacias&&hits/noVacias>=0.5&&(!best||hits>best.hits))best={k,hits}
+    }
+    if(best){
+      estadoAlt=best.k
+      notaEstado=`⚠️ No encontré la columna "estado" en este Excel. La columna "${best.k}" parece tenerla (trae confirmado/cancelado/reservado…). La usé por esta vez — por favor informa al administrador para que ajuste el nombre de la columna a "estado".`
+    }else{
+      notaEstado='⚠️ No encontré la columna "estado" ni ninguna parecida en este Excel — el estado saldrá VACÍO. Informa al administrador.'
+    }
+  }
   const rows=[]
   for(const r of raw){
     const tel=String(r.client_phone==null?'':r.client_phone).trim()
@@ -30428,9 +30474,12 @@ async function hbLeerExcel(file){
       sc[h]=(v==null)?'':(typeof v==='number'&&h!=='first_message_created'?String(v):v)
     }
     rows.push({sc,tel,adId:adv,fm,fecha:fm?hbISO(fm):'',mdy:fm?hbMDY(fm):'',corr:null,confirmada:false})
+    if(estadoAlt!=null)sc.estado=String(r[estadoAlt]==null?'':r[estadoAlt]) // FASE 5 (6jul26) · Mejora 11: columna alternativa → estado
   }
-  return{rows,buf}
+  return{rows,buf,notaEstado}
 }
+// FASE 5 (6jul26) · Mejora 11: tokens típicos de estado (detector de columna renombrada)
+const HB_ESTADO_TOKENS=['confirmado','cancelado','reservado','pendiente','devuelto','entregado','rechazado','anulado']
 
 // ── 7. PROCESAR UN ARCHIVO (independiente: uno malo NO bloquea a los buenos) ─
 async function hbProcesarArchivo(file,ctx){
@@ -30452,6 +30501,7 @@ async function hbProcesarArchivo(file,ctx){
   try{lec=await hbLeerExcel(file)}catch(e){f.error='No se pudo leer el Excel: '+(e&&e.message||e);return f}
   if(lec.error){f.error=lec.error;return f}
   f.rows=lec.rows;f.buf=lec.buf
+  if(lec.notaEstado)f.notas.push(lec.notaEstado) // FASE 5 (6jul26) · Mejora 11: aviso de columna estado ausente/alternativa
   // d) CANDADO de filas (doble verificación)
   if(f.rows.length!==f.filasDecl){f.error=`Dice ${f.filasDecl} filas pero el Excel trae ${f.rows.length}. Revisá lo que bajaste de Seller Chat y vuelve a subir este archivo.`;return f}
   // e) resolver AGENTE → producto → ID Dropi (el corazón)
@@ -31052,15 +31102,21 @@ function hbBuildXlsx(cfg,filas){
 }
 // ══ FASE 3 (6jul26) · Mejora 7: XLSX del MASIVO DROPI con bandas de color por producto ══
 // Variante chica del escritor (mismo hbZip + mismo patrón de estilos/fills que hbBuildXlsx),
-// separada a propósito para NO arriesgar la hoja base. filasM=[{vals:[..], band}] band=0..n-1
+// separada a propósito para NO arriesgar la hoja base. filasM=[{vals:[..], band, alerta}] band=0..n-1
+// FASE 5 (6jul26) · Mejora 12: alerta='rojo' (cancelado) o 'naranja' (reservado) pinta TODA la fila
+// con ese color y tiene PRIORIDAD sobre la banda del producto. Tonos confirmados por el usuario.
+const HB_MASIVO_ROJO='FFFF6B6B'    // cancelado/cancelada/anulado
+const HB_MASIVO_NARANJA='FFFFC000' // reservado/reservada
 function hbBuildMasivoXlsx(headers,filasM,anchos){
   const nFills=HB_PALETA.length
   const fillsXml=['<fill><patternFill patternType="none"/></fill>','<fill><patternFill patternType="gray125"/></fill>']
   for(const c of HB_PALETA)fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${c}"/><bgColor indexed="64"/></patternFill></fill>`)
+  fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${HB_MASIVO_ROJO}"/><bgColor indexed="64"/></patternFill></fill>`)    // FASE 5 · M12: id 2+n
+  fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${HB_MASIVO_NARANJA}"/><bgColor indexed="64"/></patternFill></fill>`) // FASE 5 · M12: id 2+n+1
   let xfs='<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
-  for(let k=0;k<nFills;k++)xfs+=`<xf numFmtId="49" fontId="0" fillId="${2+k}" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/>`
+  for(let k=0;k<nFills+2;k++)xfs+=`<xf numFmtId="49" fontId="0" fillId="${2+k}" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/>`
   const styles=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="${fillsXml.length}">${fillsXml.join('')}</fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="${2+nFills}">${xfs}</cellXfs></styleSheet>`
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="${fillsXml.length}">${fillsXml.join('')}</fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="${2+nFills+2}">${xfs}</cellXfs></styleSheet>`
   let colsXml='<cols>'
   headers.forEach((h,i)=>{colsXml+=`<col min="${i+1}" max="${i+1}" width="${(anchos&&anchos[i])||16}" customWidth="1"/>`})
   colsXml+='</cols>'
@@ -31068,7 +31124,9 @@ function hbBuildMasivoXlsx(headers,filasM,anchos){
   headers.forEach((h,i)=>{if(h!=null&&h!=='')sheet+=`<c r="${hbColL(i)}1" s="1" t="inlineStr"><is><t xml:space="preserve">${hbEsc(h)}</t></is></c>`})
   sheet+='</row>'
   filasM.forEach((fm,idx)=>{
-    const rN=idx+2,s=2+((fm.band||0)%nFills)
+    const rN=idx+2
+    // FASE 5 (6jul26) · Mejora 12: cancelado→rojo · reservado→naranja · resto→banda del producto
+    const s=fm.alerta==='rojo'?(2+nFills):(fm.alerta==='naranja'?(2+nFills+1):(2+((fm.band||0)%nFills)))
     sheet+=`<row r="${rN}">`
     fm.vals.forEach((v,i)=>{
       if(v!=null&&v!=='')sheet+=`<c r="${hbColL(i)}${rN}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${hbEsc(v)}</t></is></c>`
@@ -31127,7 +31185,7 @@ function hbArmarFilas(listos,cfg){
       else if(f.oferta){sAO=ROSA;sPR=ROSA}
       else{sAO=bandStyle;sPR=bandStyle}
       filas.push({vals,formulaTxt:cfg.formula,sAO,sPR,corr:!!r.corr})
-      sRefs.push(refs.map(L=>vals[L]==null?'':vals[L]).join(', ')) // vista rápida de la columna S
+      sRefs.push('['+refs.map(L=>vals[L]==null?'':vals[L]).join('], [')+']') // FASE 5 (6jul26) · Mejora 14: formato CORCHETES idéntico a la fórmula S — pegar directo al Asignador
     }
   })
   return{filas,bloques,sPreview:sRefs.join('\n')}
@@ -31209,30 +31267,72 @@ window.hbVent1Continuar=()=>{
 // (1ª validación de la doble validación; la 2ª es el Cruce Dropi). Las conversaciones son UN
 // TOTAL por cada día de la brecha, con un color distinto por día para no confundirse.
 const HB_V2_DIA_COLORES=['#f59e0b','#fb923c','#ef4444','#a78bfa','#22d3ee','#34d399']
-function hbVent2Show(){
+// ══ FASE 5 (6jul26) · CORRECCIÓN 9-BIS + Mejora 13 (D.3): Ventana 2 corregida e inteligente ══
+// · CONVERSACIONES: POR PRODUCTO Y POR DÍA de la brecha (ya NO un total del día). Bajo cada día,
+//   solo los productos que TUVIERON VENTAS ese día (según r.fecha de las filas). HOY nunca se pide.
+//   100% manuales (el usuario no quiere conteo automático).
+// · INTELIGENTE: omite (producto,día) con conversaciones YA puestas y productos con stock YA puesto
+//   HOY (caso 2ª hoja del mismo periodo). Si no falta NADA → pasa directo a generar (acumulando IDs).
+async function hbVent2Show(){
   const st=window._hb;if(!st)return
   const listos=st.files.filter(x=>x.estado==='listo')
-  // Productos únicos (dedupe por id) — prefill con productos.stock_actual como referencia
+  // Productos únicos (dedupe por id) — candidatos a stock de HOY
   const prods=[],seen={}
   for(const f of listos){const k=String(f.producto.id);if(!seen[k]){seen[k]=1;prods.push(f.producto)}}
-  // Días de la brecha: esperadas; si está vacía → fechas declaradas (< hoy) de los archivos; si no → ayer
-  let dias=(st.esperadas||[]).slice()
-  if(!dias.length){const dset=[...new Set(listos.map(f=>f.fechaDecl).filter(d=>d&&d<st.hoy))];dias=dset.length?dset.sort():[hbAddDays(st.hoy,-1)]}
-  window._hbV2={prods,dias}
+  // Días de la brecha (SOLO la brecha — HOY jamás; días consolidados jamás)
+  const dias=(st.esperadas||[]).slice()
+  // (producto, día-de-brecha) con ventas: según la fecha REAL de cada fila
+  const ventasDia={} // fecha → {pid: producto}
+  for(const f of listos)for(const r of f.rows){
+    if(!dias.includes(r.fecha))continue
+    ;(ventasDia[r.fecha]=ventasDia[r.fecha]||{})[String(f.producto.id)]=f.producto
+  }
+  // D.3 — INTELIGENCIA: consultar qué ya está puesto en reportes_diarios para omitirlo
+  let prevConv={},prevStock={}
+  try{
+    if(dias.length){
+      const{data}=await sb.from('reportes_diarios').select('fecha,producto_id,conversaciones')
+        .in('fecha',dias).eq('usuario_id',currentMe().id)
+      for(const r of(data||[]))if(r.conversaciones!=null)prevConv[r.fecha+'|'+String(r.producto_id)]=r.conversaciones
+    }
+    const{data:dS}=await sb.from('reportes_diarios').select('producto_id,stock_cierre')
+      .eq('fecha',st.hoy).eq('usuario_id',currentMe().id).in('producto_id',prods.map(p=>p.id))
+    for(const r of(dS||[]))if(r.stock_cierre!=null)prevStock[String(r.producto_id)]=r.stock_cierre
+  }catch(_e){console.warn('[hbVent2] preconsulta:',_e?.message)} // si falla, se pide todo (más seguro)
+  const stockPend=prods.filter(p=>prevStock[String(p.id)]==null)
+  const convPend=[] // [{fecha,p,di}] — un input por (producto,día) que FALTE
+  dias.forEach((d,di)=>{
+    for(const pid of Object.keys(ventasDia[d]||{})){
+      if(prevConv[d+'|'+pid]!=null)continue // ya ingresado en una hoja anterior del periodo
+      convPend.push({fecha:d,p:ventasDia[d][pid],di})
+    }
+  })
+  // Nada pendiente → pasar DIRECTO a generar (2ª hoja sin productos nuevos): solo acumula IDs
+  if(!stockPend.length&&!convPend.length){st._convManual=[];return _hbGenerarFinal()}
+  window._hbV2={stockPend,convPend}
   const nomDia=iso=>{try{const d=new Date(iso+'T12:00:00');const n=d.toLocaleDateString('es-CO',{weekday:'long'});return n.charAt(0).toUpperCase()+n.slice(1)}catch(_){return''}}
-  const stockHtml=prods.map((p,i)=>{
+  const stockHtml=stockPend.length?stockPend.map((p,i)=>{
     const pm=(productos||[]).find(x=>String(x.id)===String(p.id))
     const pre=pm&&pm.stock_actual!=null?pm.stock_actual:''
     return`<div style="display:grid;grid-template-columns:1fr 130px;gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border)">
       <div style="font-weight:700;font-size:13px">📦 ${hbEsc(p.nombre)}</div>
       <input type="number" id="hb-v2-stock-${i}" min="0" value="${pre}" placeholder="unidades" style="width:100%">
-    </div>`}).join('')
-  const convHtml=dias.map((d,i)=>{
-    const col=HB_V2_DIA_COLORES[i%HB_V2_DIA_COLORES.length]
-    return`<div style="display:grid;grid-template-columns:1fr 130px;gap:10px;align-items:center;padding:7px 8px;border-left:5px solid ${col};border-bottom:1px solid var(--border);background:${col}14;border-radius:6px;margin-top:4px">
-      <div style="font-weight:700;font-size:13px"><span style="color:${col}">●</span> ${hbEsc(nomDia(d))} <span style="font-family:monospace">${d}</span></div>
-      <input type="number" id="hb-v2-conv-${i}" min="0" value="" placeholder="total del día" style="width:100%">
-    </div>`}).join('')
+    </div>`}).join(''):`<div style="font-size:12px;color:var(--muted);padding:4px 0">✓ El stock de hoy ya quedó registrado en una hoja anterior — no hay que repetirlo.</div>`
+  // CONVERSACIONES: un BLOQUE por día (color propio) y adentro una fila por producto pendiente
+  let convHtml=''
+  dias.forEach((d,di)=>{
+    const items=convPend.filter(c=>c.fecha===d)
+    if(!items.length)return
+    const col=HB_V2_DIA_COLORES[di%HB_V2_DIA_COLORES.length]
+    convHtml+=`<div style="border-left:5px solid ${col};background:${col}14;border-radius:6px;padding:6px 8px;margin-top:6px">
+      <div style="font-weight:800;font-size:13px"><span style="color:${col}">●</span> ${hbEsc(nomDia(d))} <span style="font-family:monospace">${d}</span></div>
+      ${items.map(c=>`<div style="display:grid;grid-template-columns:1fr 130px;gap:10px;align-items:center;padding:5px 0 5px 14px">
+        <div style="font-size:13px">• ${hbEsc(c.p.nombre)}</div>
+        <input type="number" id="hb-v2-conv-${convPend.indexOf(c)}" min="0" value="" placeholder="conversaciones" style="width:100%">
+      </div>`).join('')}
+    </div>`
+  })
+  if(!convHtml)convHtml=`<div style="font-size:12px;color:var(--muted);padding:4px 0">✓ No hay días de brecha pendientes de conversaciones.</div>`
   const ov=document.createElement('div')
   ov.id='hb-v2-modal'
   ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px'
@@ -31244,7 +31344,7 @@ function hbVent2Show(){
       ${stockHtml}
     </div>
     <div style="margin-top:12px">
-      <div style="font-weight:800;font-size:13px;margin-bottom:2px">💬 CONVERSACIONES — un TOTAL por cada día de la brecha</div>
+      <div style="font-weight:800;font-size:13px;margin-bottom:2px">💬 CONVERSACIONES (solo días anteriores — todas manuales, por producto)</div>
       ${convHtml}
     </div>
     <div id="hb-v2-msg" style="margin-top:10px"></div>
@@ -31259,16 +31359,17 @@ window.hbVent2Cancel=()=>{document.getElementById('hb-v2-modal')?.remove();windo
 window.hbVent2Guardar=async()=>{
   const st=window._hb,v2=window._hbV2;if(!st||!v2)return
   const msg=document.getElementById('hb-v2-msg')
-  const faltas=[],stocks=[],convs={}
-  v2.prods.forEach((p,i)=>{
+  const faltas=[],stocks=[],convs=[]
+  ;(v2.stockPend||[]).forEach((p,i)=>{
     const v=document.getElementById(`hb-v2-stock-${i}`)?.value
     if(v===''||v==null||isNaN(parseInt(v))||parseInt(v)<0)faltas.push(`📦 Stock de <b>${hbEsc(p.nombre)}</b>`)
     else stocks.push({p,stock:parseInt(v)})
   })
-  v2.dias.forEach((d,i)=>{
+  // FASE 5 (6jul26) · 9-BIS: un valor OBLIGATORIO por cada (producto, día de brecha) con ventas
+  ;(v2.convPend||[]).forEach((c,i)=>{
     const v=document.getElementById(`hb-v2-conv-${i}`)?.value
-    if(v===''||v==null||isNaN(parseInt(v))||parseInt(v)<0)faltas.push(`💬 Conversaciones del <b>${d}</b>`)
-    else convs[d]=parseInt(v)
+    if(v===''||v==null||isNaN(parseInt(v))||parseInt(v)<0)faltas.push(`💬 Conversaciones de <b>${hbEsc(c.p.nombre)}</b> el <b>${c.fecha}</b>`)
+    else convs.push({fecha:c.fecha,producto:c.p,val:parseInt(v)})
   })
   if(faltas.length){if(msg)msg.innerHTML=`<div class="alert alert-red" style="line-height:1.7">🔒 <b>Falta llenar:</b><br>${faltas.join('<br>')}</div>`;return}
   if(msg)msg.innerHTML='<div class="alert alert-blue">Guardando stock...</div>'
@@ -31289,10 +31390,10 @@ window.hbVent2Guardar=async()=>{
       if(pMem){pMem.stock_actual=v.stock;pMem.stock_updated_at=new Date().toISOString()}
     }catch(_e){console.warn('[hb stock sync]',v.p.nombre,_e?.message)}
   }
-  // B) CONVERSACIONES manuales por día → se escriben DENTRO de _hbGenerarFinal, DESPUÉS del conteo
-  //    automático, para que el número del auxiliar MANDE (es el consolidado real del día).
+  // B) CONVERSACIONES manuales POR (producto, día de brecha) → se aplican DENTRO de _hbGenerarFinal
+  //    en el MISMO upsert de ad_ids de cada grupo (FASE 5 · 9-BIS: 100% manuales, sin conteo automático).
   st._convManual=convs
-  logAction('constructor_stock_conv_pregeneracion',{stocks:stocks.map(s=>({nombre:s.p.nombre,stock:s.stock})),conversaciones:convs}).catch(()=>{})
+  logAction('constructor_stock_conv_pregeneracion',{stocks:stocks.map(s=>({nombre:s.p.nombre,stock:s.stock})),conversaciones:convs.map(c=>({producto:c.producto.nombre,fecha:c.fecha,valor:c.val}))}).catch(()=>{})
   document.getElementById('hb-v2-modal')?.remove();window._hbV2=null
   _hbGenerarFinal()
 }
@@ -31342,7 +31443,13 @@ async function _hbGenerarFinal(){
       resultado:'ok',detalle:{productos:bloques.map(b=>({nombre:b.producto.nombre,filas:b.items.length})),correcciones:totCorr,archivos:listos.length},usuario_id:currentMe().id})
     const{error:eR}=await sb.from('constructor_subidas').insert(regs)
     if(eR)err.push('constancia en tabla: '+eR.message)
-    // 3) Reportes Diarios (MODO REEMPLAZO): agrupar ad_ids por fecha REAL (corregida) + producto
+    // 3) Reportes Diarios — FASE 5 (6jul26) · Mejora 13 + 9-BIS: "LA BRECHA REEMPLAZA, EL RESTO ACUMULA"
+    //    · fecha EN la brecha  → ad_ids REEMPLAZA (día en consolidación — comportamiento de siempre).
+    //    · fecha = HOY o ANTERIOR a la brecha (consolidada) → ad_ids ACUMULA (leer existentes + append,
+    //      SIN deduplicar: cada ID repetido = 1 venta). Corrige la pérdida de IDs (2ª hoja / venta tardía).
+    //    · conversaciones: 100% MANUALES (9-BIS) — solo para (producto, día de brecha), desde la Ventana 2.
+    //      HOY y días consolidados NO tocan conversaciones. (Se retiró el conteo automático g.n por pedido
+    //      del usuario; g.n queda solo informativo en memoria.)
     const grupos={}
     for(const f of listos)for(const r of f.rows){
       const k=r.fecha+'|'+f.producto.id
@@ -31350,39 +31457,39 @@ async function _hbGenerarFinal(){
       grupos[k].n++
       if(r.adId)grupos[k].ids.push(r.adId) // NO deduplicar: cada ID repetido = 1 venta
     }
+    const _mapConv={} // 'fecha|pid' → valor manual (solo días de brecha, desde la Ventana 2)
+    for(const c of(st._convManual||[]))_mapConv[c.fecha+'|'+String(c.producto.id)]=c.val
+    const _brecha=new Set(st.esperadas||[])
     const repLineas=[]
     for(const g of Object.values(grupos)){
+      const enBrecha=_brecha.has(g.fecha)
       const pay={fecha:g.fecha,producto_id:g.producto.id,producto_nombre:g.producto.nombre,
-        ad_ids:g.ids.join('\n'),conversaciones_aprox:g.n,conversaciones:g.n,
         usuario_id:currentMe().id,updated_at:new Date().toISOString()}
+      if(enBrecha){
+        pay.ad_ids=g.ids.join('\n') // REEMPLAZO (día en consolidación)
+      }else{
+        let viejos=[]
+        try{
+          const{data:prev}=await sb.from('reportes_diarios').select('ad_ids')
+            .eq('fecha',g.fecha).eq('producto_id',g.producto.id).eq('usuario_id',currentMe().id).maybeSingle()
+          viejos=String(prev?.ad_ids||'').split('\n').filter(Boolean)
+        }catch(_e){err.push(`lectura previa ${g.producto.nombre} ${g.fecha}: ${_e?.message||_e} — se escriben solo los nuevos`)}
+        pay.ad_ids=[...viejos,...g.ids].filter(Boolean).join('\n') // ACUMULA (hoy / consolidado)
+      }
+      const cm=_mapConv[g.fecha+'|'+String(g.producto.id)]
+      if(enBrecha&&cm!=null){pay.conversaciones=cm;pay.conversaciones_aprox=cm}
       let{error:e1}=await sb.from('reportes_diarios').upsert(pay,{onConflict:'fecha,producto_id,usuario_id'})
       if(e1&&/conversaciones_aprox/i.test(e1.message||'')){
         delete pay.conversaciones_aprox
         ;({error:e1}=await sb.from('reportes_diarios').upsert(pay,{onConflict:'fecha,producto_id,usuario_id'}))
       }
       if(e1)err.push(`reporte ${g.producto.nombre} ${g.fecha}: ${e1.message}`)
-      else repLineas.push(`📤 <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${g.ids.length} IDs · ${g.n} conversaciones`)
-    }
-    // ══ FASE 4 (6jul26) · Mejora 9: CONVERSACIONES MANUALES del auxiliar (total por día de la brecha).
-    // Se escriben DESPUÉS del conteo automático para que el número manual MANDE (consolidado real).
-    // HOY se queda con el conteo automático. El total del día va al producto DOMINANTE de esa fecha
-    // (el de más filas); si la fecha no tiene archivo, al dominante global del lote.
-    if(st._convManual){
-      for(const[fch,tot]of Object.entries(st._convManual)){
-        if(fch===st.hoy)continue
-        const cand={}
-        for(const f of listos)for(const r of f.rows)if(r.fecha===fch){const k=String(f.producto.id);(cand[k]=cand[k]||{p:f.producto,n:0}).n++}
-        let dom=null;for(const v of Object.values(cand))if(!dom||v.n>dom.n)dom=v
-        if(!dom){const glob={};for(const f of listos)for(const r of f.rows){const k=String(f.producto.id);(glob[k]=glob[k]||{p:f.producto,n:0}).n++};for(const v of Object.values(glob))if(!dom||v.n>dom.n)dom=v}
-        if(!dom)continue
-        const payM={fecha:fch,producto_id:dom.p.id,producto_nombre:dom.p.nombre,conversaciones:tot,conversaciones_aprox:tot,usuario_id:currentMe().id,updated_at:new Date().toISOString()}
-        let{error:eM}=await sb.from('reportes_diarios').upsert(payM,{onConflict:'fecha,producto_id,usuario_id'})
-        if(eM&&/conversaciones_aprox/i.test(eM.message||'')){delete payM.conversaciones_aprox;({error:eM}=await sb.from('reportes_diarios').upsert(payM,{onConflict:'fecha,producto_id,usuario_id'}))}
-        if(eM)err.push(`conversaciones ${fch}: ${eM.message}`)
-        else repLineas.push(`💬 <b>${fch}</b>: ${tot} conversaciones (total del día — ingresado por el auxiliar)`)
+      else{
+        const tot=pay.ad_ids.split('\n').filter(Boolean).length
+        repLineas.push(`📤 <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${tot} IDs${enBrecha?'':` (acumulados: +${g.ids.length} nuevos)`}${(enBrecha&&cm!=null)?` · 💬 ${cm} conversaciones (manual)`:''}`)
       }
-      st._convManual=null // no re-escribir si el auxiliar vuelve a generar en la misma sesión
     }
+    st._convManual=null // no re-escribir si el auxiliar vuelve a generar en la misma sesión
     // 4) refrescar "última fecha" y resumen final (SIN recargar la página)
     st.ultima=await hbUltimaFechaProcesada()
     hbPintarVentana();hbListarHojasHoy()
@@ -31393,8 +31500,8 @@ async function _hbGenerarFinal(){
       ${err.length?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:12px;margin-top:8px">⚠️ Detalles no críticos:<br>${err.map(hbEsc).join('<br>')}</div>`:''}
       <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
         <button class="btn-sm btn-primary" onclick="hbDescargarUltima()">⬇️ Descargar ${hbEsc(hojaNombre)}</button>
-        <!-- FASE 2 (5jul26): vista rápida OCULTA por decisión de ADS (el flujo es Excel→Drive→Asignador). Revertir = quitar display:none -->
-        <button class="btn-sm btn-blue" style="display:none" onclick="hbCopiarS(this)">📋 Copiar columna S (vista rápida)</button>
+        <!-- FASE 5 (6jul26) · Mejora 14: vista rápida REACTIVADA en formato corchetes (decisión de ADS) — se pega directo al Asignador. Revertir = agregar display:none -->
+        <button class="btn-sm btn-blue" onclick="hbCopiarS(this)">📋 Copiar líneas para el Asignador (columna S)</button>
       </div>
       <textarea id="hb-sprev" style="position:absolute;left:-9999px">${hbEsc(sPreview)}</textarea>
     </div>`
@@ -31416,7 +31523,7 @@ window.hbCopiarS=(btn)=>{
   try{document.execCommand('copy')}catch(_){}
   if(navigator.clipboard)navigator.clipboard.writeText(ta.value).catch(()=>{})
   ta.style.position='absolute';ta.style.left='-9999px'
-  if(btn){btn.textContent='✅ Copiado';setTimeout(()=>{btn.textContent='📋 Copiar columna S (vista rápida)'},1800)}
+  if(btn){btn.textContent='✅ Copiado — pégalo en el Asignador';setTimeout(()=>{btn.textContent='📋 Copiar líneas para el Asignador (columna S)'},1800)} // FASE 5 (6jul26) · Mejora 14
 }
 // Hojas generadas HOY (el auxiliar puede re-descargarlas las veces que necesite; días viejos solo ADS en el Dashboard)
 async function hbListarHojasHoy(){

@@ -17658,7 +17658,12 @@ async function _renderResumenProductos(desde,hasta,hoy){
   }else try{
     let token=await getConfig('meta_access_token')
     if(!token)throw new Error('Sin token')
-    const{data:cuentasAll}=await sb.from('meta_cuentas').select('account_id')
+    const{data:cuentasAll}=await sb.from('meta_cuentas').select('account_id,nombre')
+    // MEJORA (6jul26): mapas de NOMBRE para el bloque ⚠️ SIN PRODUCTO — así las campañas que solo
+    // gastaron (no están en meta_campanas) muestran su nombre real de Meta en vez del ID duplicado.
+    window._nexoAccNombreByAcc=window._nexoAccNombreByAcc||{}
+    window._nexoNombreLiveByCampId=window._nexoNombreLiveByCampId||{}
+    for(const _cta of (cuentasAll||[])){if(_cta&&_cta.account_id)window._nexoAccNombreByAcc[String(_cta.account_id)]=_cta.nombre||String(_cta.account_id)}
     const timeRange=JSON.stringify({since:desde,until:hasta})
     // NUEVO FIX gasto a nivel ID: traer también el gasto EN VIVO por ANUNCIO (ad_id,spend — liviano).
     // Antes solo se traía en vivo el de campaña → la campaña marcaba el gasto fresco (ej: $93.040)
@@ -17666,10 +17671,14 @@ async function _renderResumenProductos(desde,hasta,hoy){
     const _gastoLiveAdByAdId={}
     for(const cuenta of (cuentasAll||[])){
       try{
-        const ins=await metaGet(`/act_${cuenta.account_id}/insights`,token,{fields:'campaign_id,spend',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
+        const ins=await metaGet(`/act_${cuenta.account_id}/insights`,token,{fields:'campaign_id,campaign_name,spend',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
         for(const i of (ins||[])){
           if(!i.campaign_id)continue
           gastoByCampId[String(i.campaign_id)]=(gastoByCampId[String(i.campaign_id)]||0)+(parseFloat(i.spend)||0)
+          // MEJORA (6jul26): nombre real + cuenta de cada campaña con gasto (viene gratis en la
+          // misma llamada) — lo usa el bloque ⚠️ SIN PRODUCTO para no mostrar el ID duplicado.
+          if(i.campaign_name)window._nexoNombreLiveByCampId[String(i.campaign_id)]=i.campaign_name
+          ;(window._nexoAccByCampIdLive=window._nexoAccByCampIdLive||{})[String(i.campaign_id)]=String(cuenta.account_id)
         }
         // Gasto en vivo por anuncio de esta cuenta (si falla, sus ads quedan con el dato de BD)
         // MEJORA LAZY (3jul26): DIFERIDO — esta pasada (1 llamada más por cuenta) ya NO corre al
@@ -18335,6 +18344,16 @@ async function _renderResumenProductos(desde,hasta,hoy){
         _yaSp.add(_id2)
       }
     }catch(_){}
+    // MEJORA (6jul26): resolver NOMBRE REAL y cuenta — si una campaña quedó con el ID como nombre
+    // (entró por gasto o por estado live sin estar en la BD), se completa con lo que Meta reportó
+    // en la pasada de gasto (campaign_name + cuenta). Así se acaba el ID duplicado en la fila.
+    try{
+      const _nomsL=window._nexoNombreLiveByCampId||{},_accsL=window._nexoAccByCampIdLive||{}
+      for(const _it of _listaSp){
+        if((!_it.nombre||_it.nombre===_it.id)&&_nomsL[_it.id])_it.nombre=_nomsL[_it.id]
+        if(!_it.accId&&_accsL[_it.id])_it.accId=_accsL[_it.id]
+      }
+    }catch(_){}
     _listaSp.sort((a,b)=>(b.gasto-a.gasto)||String(a.nombre).localeCompare(String(b.nombre)))
     _sinProdCount=_listaSp.length
     if(_listaSp.length){
@@ -18345,14 +18364,15 @@ async function _renderResumenProductos(desde,hasta,hoy){
         const _dotSp=c._soloGasto
           ?`<span style="display:inline-block;width:9px;height:9px;border-radius:50%;flex:none;background:#f59e0b;border:1.5px solid #d97706;box-shadow:0 0 5px rgba(245,158,11,.7)" title="💸 Entró por GASTO: gastó plata en el período SIN producto, aunque Meta no la reporta activa/entregando ahora mismo (pudo pausarse después de gastar). Ese gasto YA cayó al cajón 'sin asignar' — asígnale producto igual."></span>`
           :`<span style="display:inline-block;width:9px;height:9px;border-radius:50%;flex:none;background:#22c55e;border:1.5px solid #16a34a;box-shadow:0 0 5px rgba(34,197,94,.7)" title="🟢 Activa DE VERDAD: botón prendido en Meta y entregando (misma regla del expand de cuenta)"></span>`
-        return`<div class="rp-sp-row" data-spbusca="${_escSp(String((c.nombre||'')+' '+c.id+' '+(c.accId||'')).toLowerCase())}" style="display:${i<_spIni?'flex':'none'};align-items:center;gap:8px;flex-wrap:wrap;padding:6px 8px;border-radius:6px;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-bottom:1px solid rgba(255,255,255,.04);font-size:12px;color:var(--text)">
+        const _accNom=c.accId?String((window._nexoAccNombreByAcc||{})[String(c.accId)]||c.accId):'—'
+        return`<div class="rp-sp-row" data-spbusca="${_escSp(String((c.nombre||'')+' '+c.id+' '+(c.accId||'')+' '+_accNom).toLowerCase())}" style="display:${i<_spIni?'flex':'none'};align-items:center;gap:8px;padding:6px 8px;border-radius:6px;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-bottom:1px solid rgba(255,255,255,.04);font-size:12px;color:var(--text)">
           ${_dotSp}
-          <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:340px" title="${_escSp(c.nombre)}">📣 ${_escSp(c.nombre)}</span>
-          ${c.accId?`<span style="font-size:10px;color:var(--subtle);white-space:nowrap" title="Cuenta publicitaria">🏢 ${_escSp(c.accId)}</span>`:''}
-          <span style="font-family:monospace;font-size:10.5px;color:var(--muted);white-space:nowrap">${_escSp(c.id)}</span>
+          <span style="flex:0 0 150px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--subtle)" title="🏢 Cuenta publicitaria: ${_escSp(_accNom)}${c.accId?' · '+_escSp(c.accId):''}">🏢 ${_escSp(_accNom)}</span>
+          <span style="flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${_escSp(c.nombre)}">📣 ${_escSp(c.nombre)}</span>
+          <span style="flex:0 0 auto;font-family:monospace;font-size:10.5px;color:var(--muted);white-space:nowrap">${_escSp(c.id)}</span>
           <button data-copyid="${_escSp(c.id)}" onclick="event.stopPropagation();window._rpCopiarId('${_escSp(c.id)}',this)" title="Copiar ID de la campaña" style="background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:5px;color:var(--muted);font-size:10px;padding:1px 7px;cursor:pointer;flex-shrink:0">📋</button>
-          ${c.gasto>0?`<span style="font-size:10px;color:var(--amber);white-space:nowrap" title="Gasto del período que está cayendo al cajón 'sin asignar' por no tener producto">💸 $${fmt(c.gasto)}</span>`:''}
-          <button onclick="event.stopPropagation();modalAsignarProductoCamp('${_escSp(c.id)}','${_nomEscSp}','${_escSp(c.accId)}')" style="margin-left:auto;background:var(--amber-bg);border:1px solid var(--amber);border-radius:6px;color:var(--amber);font-size:10.5px;font-weight:700;padding:3px 10px;cursor:pointer;flex-shrink:0" title="⚠️ Sin producto · clic para asignarle uno (mismo modal de las cards)">⚠️ Asignar producto</button>
+          <span style="flex:0 0 92px;text-align:right;font-size:10.5px;color:var(--amber);white-space:nowrap" title="Gasto del período que está cayendo al cajón 'sin asignar' por no tener producto">${c.gasto>0?('💸 $'+fmt(c.gasto)):''}</span>
+          <button onclick="event.stopPropagation();modalAsignarProductoCamp('${_escSp(c.id)}','${_nomEscSp}','${_escSp(c.accId)}')" style="flex:0 0 auto;background:var(--amber-bg);border:1px solid var(--amber);border-radius:6px;color:var(--amber);font-size:10.5px;font-weight:700;padding:3px 10px;cursor:pointer;flex-shrink:0" title="⚠️ Sin producto · clic para asignarle uno (mismo modal de las cards)">⚠️ Asignar producto</button>
         </div>`
       }).join('')
       _sinProdBlock=`<div id="rp-sinprod-block" style="margin:0 0 12px;padding:10px 12px;background:rgba(245,158,11,.05);border:1px solid rgba(245,158,11,.4);border-radius:10px">
@@ -18366,6 +18386,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
           <div id="rp-sp-lista">${_filasSp}</div>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px">
             <button id="rp-sp-mas" onclick="event.stopPropagation();window._rpSpMas()" style="display:${_listaSp.length>_spIni?'inline-flex':'none'};align-items:center;gap:6px;background:rgba(34,197,94,.12);border:1px solid var(--green);border-radius:8px;color:var(--green);font-size:11.5px;font-weight:800;padding:5px 14px;cursor:pointer" title="Muestra las siguientes 10 campañas de la lista (ordenadas de mayor a menor gasto)">➕ 10 más</button>
+            <button id="rp-sp-menos" onclick="event.stopPropagation();window._rpSpMenos()" style="display:${_spIni>10?'inline-flex':'none'};align-items:center;gap:6px;background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:8px;color:var(--muted);font-size:11.5px;font-weight:800;padding:5px 14px;cursor:pointer" title="Oculta las últimas 10 campañas mostradas (nunca baja de 10)">➖ 10 menos</button>
             <span id="rp-sp-cont" style="font-size:10.5px;color:var(--muted)">mostrando ${Math.min(_spIni,_listaSp.length)} de ${_listaSp.length}</span>
           </div>
         </div>
@@ -20957,9 +20978,12 @@ window._rpSpAplicar=function(){
     if(cont)cont.textContent=q?('🔍 '+vis+' coincidencia'+(vis===1?'':'s')+' de '+rows.length):('mostrando '+vis+' de '+rows.length)
     const mas=document.getElementById('rp-sp-mas')
     if(mas)mas.style.display=(q||vis>=match)?'none':'inline-flex'
+    const menos=document.getElementById('rp-sp-menos')
+    if(menos)menos.style.display=(q||(window._spShow||10)<=10)?'none':'inline-flex'
   }catch(_){}
 }
 window._rpSpMas=function(){window._spShow=(window._spShow||10)+10;window._rpSpAplicar()}
+window._rpSpMenos=function(){window._spShow=Math.max(10,(window._spShow||10)-10);window._rpSpAplicar()}
 window._rpFusGrpToggle=function(slug,forceOpen){
   const bd=document.getElementById('fusgrp-bd-'+slug),ch=document.getElementById('fusgrp-ch-'+slug)
   if(!bd)return

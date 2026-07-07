@@ -546,6 +546,11 @@ async function loadMe(uid){
       const{data:phData}=await sb.from('usuarios').select('permite_hoy').eq('id',data.id).maybeSingle()
       me.permite_hoy=phData?.permite_hoy||false
     }catch(_){me.permite_hoy=false}
+    // NUEVO (7jul26 · Mejora 6): permiso "editar IDs de días anteriores" (solo auxiliar). Mismo patrón tolerante.
+    try{
+      const{data:ppData}=await sb.from('usuarios').select('permite_ids_pasados').eq('id',data.id).maybeSingle()
+      me.permite_ids_pasados=ppData?.permite_ids_pasados||false
+    }catch(_){me.permite_ids_pasados=false}
     // Credenciales Dropi/SellerChat (solo auxiliar/admin las usan). Tolerante si las columnas aún no existen.
     try{
       const{data:dData}=await sb.from('usuarios').select('dropi_email,dropi_password,dropi_cuentas,sellerchat_cuentas,dropi_url,sellerchat_url').eq('id',data.id).maybeSingle()
@@ -568,6 +573,70 @@ async function loadProductos(){
   }catch(e){console.error('loadProductos exception:',e);productos=[]}
   try{await cargarDropiIdsArchivados()}catch(_){}
   await cargarMensajesDinamicos()
+}
+
+// ═══ NUEVO (7jul26 · URLs rápidas): helpers de botones 🔗 Dropi/SellerChat ═══════════════════
+// · Cada URL vive amarrada a su ID ÚNICO: productos.dropi_url (una por producto) y
+//   agentes.sellerchat_url (una por agente). Así SIEMPRE se recoge la vigente y correcta.
+// · Los botones solo se pintan si la URL existe. Selects TOLERANTES: si las columnas nuevas
+//   aún no están en la BD, todo sigue funcionando (los botones simplemente no salen).
+window._nxBtnUrl=(url,titulo,label)=>{
+  const u=String(url||'').trim()
+  if(!u)return ''
+  const _h=/^https?:\/\//i.test(u)?u:('https://'+u)
+  const _e=_h.replace(/"/g,'&quot;')
+  return `<a href="${_e}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="${String(titulo||'Abrir en otra pestaña').replace(/"/g,'&quot;')}" style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:10px;border:1px solid var(--blue,#3b82f6);background:rgba(59,130,246,.12);color:var(--blue,#3b82f6);font-size:10.5px;font-weight:700;text-decoration:none;margin:2px 3px 2px 0;vertical-align:middle;white-space:nowrap">🔗${label?' '+label:''}</a>`
+}
+window._nxProdDropiUrl=(idONombre)=>{
+  try{
+    const p=(productos||[]).find(x=>String(x.id)===String(idONombre)||x.nombre===idONombre)
+    return (p&&p.dropi_url)?String(p.dropi_url).trim():''
+  }catch(_){return ''}
+}
+// Caché de agentes por producto (id, nombre, sellerchat_url, vigente) — solo activos. TTL 60s.
+window._nxAgCache=null
+window._nxCargarAgentesUrl=async(force)=>{
+  try{
+    const _now=Date.now()
+    if(!force&&window._nxAgCache&&(_now-window._nxAgCache.t)<60000)return window._nxAgCache
+    const{data:rels}=await sb.from('producto_agentes').select('producto_id,agente_id')
+    let ags=null
+    try{
+      const r1=await sb.from('agentes').select('id,nombre,activo,sellerchat_url,vigente').eq('activo',true)
+      if(r1.error)throw r1.error
+      ags=r1.data
+    }catch(_e){ // columnas nuevas aún no existen → select clásico (todos cuentan como vigentes, sin URL)
+      const r2=await sb.from('agentes').select('id,nombre,activo').eq('activo',true)
+      ags=r2.data
+    }
+    const byId={}
+    for(const a of (ags||[]))byId[String(a.id)]={id:String(a.id),nombre:a.nombre||'',url:(a.sellerchat_url||'').trim(),vigente:a.vigente!==false}
+    const byProd={}
+    for(const r of (rels||[])){
+      const a=byId[String(r.agente_id)]
+      if(!a)continue
+      ;(byProd[String(r.producto_id)]=byProd[String(r.producto_id)]||[]).push(a)
+    }
+    for(const k of Object.keys(byProd))byProd[k].sort((x,y)=>(x.nombre||'').localeCompare(y.nombre||''))
+    window._nxAgCache={t:_now,byId,byProd}
+    return window._nxAgCache
+  }catch(e){console.warn('[nxAgCache]',e?.message);return window._nxAgCache||{t:0,byId:{},byProd:{}}}
+}
+// Botones 🔗 de los agentes VIGENTES (con URL) de un producto — distinguidos por el nombre corto
+// del agente (lo que va después del último "_", ej: Nad_Pro_Max_F4 → F4). El nombre completo va
+// en el tooltip. El "principal" es el primero de la lista (orden alfabético).
+window._nxAgBtnsProd=(prodId,soloPrimero)=>{
+  try{
+    const c=window._nxAgCache
+    if(!c)return ''
+    const lista=(c.byProd[String(prodId)]||[]).filter(a=>a.vigente&&a.url)
+    const usar=soloPrimero?lista.slice(0,1):lista
+    return usar.map(a=>{
+      const _p=(a.nombre||'').split('_')
+      const corto=_p.length>1?_p[_p.length-1]:(a.nombre||'').slice(0,6)
+      return window._nxBtnUrl(a.url,'Abrir el agente '+a.nombre+' en SellerChat','🤖'+corto)
+    }).join('')
+  }catch(_){return ''}
 }
 
 // Carga las plantillas de mensajes + cuotas desde Supabase (tablas app_mensajes / app_mensajes_config).
@@ -4656,6 +4725,11 @@ async function pageAdminProductos(c){
     // #7: ID de Dropi (solo si el campo está presente en el editor → no pisa con vacío en otras vistas)
     const _dropiEl=document.getElementById('pdropi-'+id)
     if(_dropiEl)updateData.dropi_id=(_dropiEl.value||'').trim()||null
+    // NUEVO (7jul26 · Mejora 1): URL de Dropi del producto (única por producto, amarrada a su id).
+    // Solo si el campo está presente. Si la columna dropi_url no existe aún, el fallback de
+    // columnas faltantes de abajo la quita solo y avisa con el SQL pendiente.
+    const _durlEl=document.getElementById('purl-'+id)
+    if(_durlEl)updateData.dropi_url=(_durlEl.value||'').trim()||null
 
     // Intentar guardar incluyendo todos los campos nuevos; si una columna no existe, ir quitándola
     const fullPayload={...updateData,aliases,aliases_visibles,tipo_producto,almacenamiento}
@@ -5171,8 +5245,16 @@ async function renderAgentesProd(id){
   const ids=(rels||[]).map(r=>r.agente_id)
   let agentes=[]
   if(ids.length){
-    const{data,error}=await sb.from('agentes')
-      .select('id,nombre,activo').in('id',ids).eq('activo',true).order('nombre')
+    // NUEVO (7jul26 · Mejoras 1+4): select TOLERANTE — trae también sellerchat_url y vigente.
+    // Si esas columnas aún no existen en la BD, cae al select clásico y todo sigue andando.
+    let data=null,error=null
+    try{
+      const r1=await sb.from('agentes').select('id,nombre,activo,sellerchat_url,vigente').in('id',ids).eq('activo',true).order('nombre')
+      if(r1.error)throw r1.error
+      data=r1.data
+    }catch(_e){
+      ;({data,error}=await sb.from('agentes').select('id,nombre,activo').in('id',ids).eq('activo',true).order('nombre'))
+    }
     if(error){
       cont.innerHTML=`<div class="alert alert-red">Error cargando agentes: ${error.message}</div>`;return
     }
@@ -5189,16 +5271,78 @@ async function renderAgentesProd(id){
       <div style="font-size:12px;color:var(--muted)">${agentes.length} agente${agentes.length===1?'':'s'} asignado${agentes.length===1?'':'s'} a este producto</div>
       <button class="btn-sm btn-primary" onclick="modalCrearAgente('${id}')" style="margin-left:auto">➕ Crear nuevo agente</button>
     </div>
-    <div id="agentes-chips-${id}" style="display:flex;flex-wrap:wrap;gap:8px">
-      ${agentes.map(a=>`
-        <div class="card" style="padding:6px 10px;display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border)">
-          <span style="font-family:monospace;font-size:12px;color:var(--text)">🤖 ${a.nombre}</span>
-          <button class="btn-sm btn-outline" onclick="renombrarAgente('${a.id}','${id}',this)" title="Renombrar" style="padding:2px 6px;font-size:11px;border-color:var(--blue);color:var(--blue)">✏️</button>
-          <button class="btn-sm btn-outline" onclick="desactivarAgente('${a.id}','${id}','${a.nombre.replace(/'/g,"\\'")}')" title="Desactivar (queda en histórico pero no aparece)" style="padding:2px 6px;font-size:11px;border-color:var(--red);color:var(--red)">🗑️</button>
-        </div>
-      `).join('')}
+    <div id="agentes-chips-${id}" style="display:flex;flex-direction:column;gap:8px">
+      ${agentes.map(a=>{
+        const _vig=a.vigente!==false
+        const _urlA=(a.sellerchat_url||'').replace(/"/g,'&quot;')
+        return `
+        <div class="card" style="padding:8px 10px;border:1px solid ${_vig?'var(--border)':'rgba(239,68,68,.45)'};${_vig?'':'opacity:.75'}">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span style="font-family:monospace;font-size:12px;color:var(--text)">🤖 ${a.nombre}</span>
+            <span style="font-size:9.5px;font-weight:800;padding:1px 8px;border-radius:999px;${_vig?'background:rgba(34,197,94,.15);color:var(--green);border:1px solid var(--green)':'background:rgba(239,68,68,.12);color:var(--red,#ef4444);border:1px solid var(--red,#ef4444)'}" title="${_vig?'VIGENTE: el auxiliar lo ve en el Asignador y sus botones 🔗 aparecen en Reporte del día y Cruce':'NO VIGENTE: oculto para el auxiliar en el Asignador (sigue en el histórico)'}">${_vig?'✅ VIGENTE':'⛔ NO VIGENTE'}</span>
+            <button class="btn-sm btn-outline" onclick="window._agToggleVigente('${a.id}','${id}',${_vig?1:0})" title="${_vig?'Apagar: dejará de verse en el Asignador':'Prender: vuelve a verse en el Asignador'}" style="padding:2px 8px;font-size:11px;border-color:${_vig?'var(--amber)':'var(--green)'};color:${_vig?'var(--amber)':'var(--green)'}">${_vig?'⏸ Apagar':'▶ Prender'}</button>
+            <button class="btn-sm btn-outline" onclick="renombrarAgente('${a.id}','${id}',this)" title="Renombrar" style="padding:2px 6px;font-size:11px;border-color:var(--blue);color:var(--blue)">✏️</button>
+            <button class="btn-sm btn-outline" onclick="desactivarAgente('${a.id}','${id}','${a.nombre.replace(/'/g,"\\'")}')" title="Desactivar (queda en histórico pero no aparece)" style="padding:2px 6px;font-size:11px;border-color:var(--red);color:var(--red)">🗑️</button>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:6px">
+            <span style="font-size:10px;color:var(--muted);white-space:nowrap">🔗 URL SellerChat:</span>
+            <input type="text" id="agurl-${a.id}" value="${_urlA}" placeholder="https://app.sellerchat.ai/... (enlace directo de ESTE agente)" autocapitalize="off" style="flex:1;font-family:monospace;font-size:10.5px;padding:4px 8px">
+            <button class="btn-sm btn-outline" onclick="window._agGuardarUrl('${a.id}','${id}',this)" title="Guardar la URL de este agente (queda amarrada a su ID único)" style="padding:3px 8px;font-size:11px;border-color:var(--green);color:var(--green)">💾</button>
+            <button class="btn-sm btn-outline" onclick="(()=>{const v=(document.getElementById('agurl-${a.id}')?.value||'').trim();if(!v){alert('Pega primero la URL de SellerChat de este agente');return}window.open(/^https?:\\/\\//i.test(v)?v:('https://'+v),'_blank','noopener')})()" title="Abrir la URL de este agente en otra pestaña" style="padding:3px 8px;font-size:11px;border-color:var(--blue,#3b82f6);color:var(--blue,#3b82f6)">🔗</button>
+          </div>
+        </div>`}).join('')}
     </div>
     <div id="agentes-msg-${id}" style="margin-top:8px"></div>`
+}
+
+// NUEVO (7jul26 · Mejora 4): prender/apagar la VIGENCIA de un agente. Vigente = el auxiliar lo ve
+// en el Asignador y sus botones 🔗 salen en Reporte del día / Cruce. NO vigente = oculto para el
+// auxiliar (pero sigue activo en el histórico — distinto de "desactivar"). Tolerante: si la
+// columna vigente no existe aún, avisa con el SQL pendiente y no rompe nada.
+window._agToggleVigente=async(agenteId,prodId,estaVigente)=>{
+  const msg=document.getElementById('agentes-msg-'+prodId)
+  if(msg)msg.innerHTML=''
+  try{
+    const{error}=await sb.from('agentes').update({vigente:!estaVigente}).eq('id',agenteId)
+    if(error){
+      if(error.code==='42703'||/column/i.test(error.message||'')){
+        if(msg)msg.innerHTML=`<div class="alert alert-amber">⚠️ Falta la columna <code>vigente</code> en la tabla <code>agentes</code>. Ejecuta en Supabase:<br><code>ALTER TABLE agentes ADD COLUMN IF NOT EXISTS vigente boolean DEFAULT true;</code></div>`
+        return
+      }
+      throw error
+    }
+    logAction('agente_vigencia',{agente_id:agenteId,producto_id:prodId,vigente:!estaVigente}).catch(()=>{})
+    try{window._nxAgCache=null}catch(_){}
+    await renderAgentesProd(prodId)
+  }catch(e){
+    if(msg)msg.innerHTML=`<div class="alert alert-red">${e.message||e}</div>`
+  }
+}
+
+// NUEVO (7jul26 · Mejora 1): guardar la URL de SellerChat de UN agente, amarrada a su ID único.
+window._agGuardarUrl=async(agenteId,prodId,btn)=>{
+  const msg=document.getElementById('agentes-msg-'+prodId)
+  if(msg)msg.innerHTML=''
+  const v=(document.getElementById('agurl-'+agenteId)?.value||'').trim()||null
+  const _txtO=btn?btn.textContent:''
+  if(btn){btn.disabled=true;btn.textContent='⏳'}
+  try{
+    const{error}=await sb.from('agentes').update({sellerchat_url:v}).eq('id',agenteId)
+    if(error){
+      if(error.code==='42703'||/column/i.test(error.message||'')){
+        if(msg)msg.innerHTML=`<div class="alert alert-amber">⚠️ Falta la columna <code>sellerchat_url</code> en la tabla <code>agentes</code>. Ejecuta en Supabase:<br><code>ALTER TABLE agentes ADD COLUMN IF NOT EXISTS sellerchat_url text;</code></div>`
+        if(btn){btn.disabled=false;btn.textContent=_txtO}
+        return
+      }
+      throw error
+    }
+    logAction('agente_url_guardada',{agente_id:agenteId,producto_id:prodId,url:v}).catch(()=>{})
+    try{window._nxAgCache=null}catch(_){}
+    if(btn){btn.disabled=false;btn.textContent='✅';setTimeout(()=>{btn.textContent='💾'},1800)}
+  }catch(e){
+    if(btn){btn.disabled=false;btn.textContent=_txtO}
+    if(msg)msg.innerHTML=`<div class="alert alert-red">${e.message||e}</div>`
+  }
 }
 
 window.desactivarAgente=async(agenteId,prodId,nombre)=>{
@@ -5761,6 +5905,11 @@ async function renderProdBody(id,maestrosList){
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
           <span style="font-size:10px;color:var(--muted)">${_dropiVigDesde?`✅ Vigente desde ${_dropiVigDesde.split('-').reverse().join('/')}`:'ℹ️ Sin historial de IDs todavía'}</span>
           <button type="button" class="btn-sm" onclick="verHistorialDropiIds('${id}')" style="background:rgba(167,139,250,.12);border:1px solid var(--purple);color:var(--purple);font-size:11px;padding:3px 8px">📜 Historial de IDs</button>
+        </div>
+        <label style="margin-top:10px;display:block">🔗 URL de Dropi del producto <span style="color:var(--muted);font-size:10px">(única por producto — enlace directo a su ficha en Dropi)</span></label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input type="text" id="purl-${id}" value="${(prod.dropi_url||'').replace(/"/g,'&quot;')}" placeholder="https://app.dropi.co/..." autocapitalize="off" style="flex:1;font-family:monospace;font-size:11px">
+          <button type="button" class="btn-sm" onclick="(()=>{const v=(document.getElementById('purl-${id}')?.value||'').trim();if(!v){alert('Pega primero la URL de Dropi de este producto');return}window.open(/^https?:\\/\\//i.test(v)?v:('https://'+v),'_blank','noopener')})()" title="Abrir la URL de Dropi de este producto en otra pestaña" style="background:rgba(59,130,246,.12);border:1px solid var(--blue,#3b82f6);color:var(--blue,#3b82f6);font-size:11px;padding:4px 10px;white-space:nowrap">🔗 Abrir</button>
         </div></div>
     </div>
     <div style="font-size:10px;color:var(--muted);margin-top:6px;display:flex;gap:14px;flex-wrap:wrap">
@@ -6807,6 +6956,13 @@ window.modalUserEdit=(u)=>{
         </label>
         <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-left:24px">Útil para despachar el mismo día (ej. sábado). NUNCA permite fechas futuras. Desactiva al terminar.</div>
       </div>
+      <div class="fld" id="eu-ids-pasados-wrap" style="${u.rol==='auxiliar'?'':'display:none'}">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="eu-ids-pasados" ${u.permite_ids_pasados?'checked':''}>
+          <span><strong>🗓️ Editar IDs de días anteriores</strong> — deja que el auxiliar modifique/agregue IDs de días PASADOS en Reporte del día (HOY siempre puede, sin este permiso)</span>
+        </label>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-left:24px">Ahora la Hoja Base rellena los IDs en automático: la aux solo necesita HOY. Prende esto únicamente cuando haya que corregir un día viejo y apágalo al terminar.</div>
+      </div>
       <div id="eu-dropi-wrap" style="${u.rol==='auxiliar'?'':'display:none'}">
         <div style="font-size:13px;font-weight:800;color:var(--text);margin:10px 0 6px">🔑 Acceso Dropi (para el botón rápido)</div>
         <div class="fld"><label>URL de Dropi (la pones tú · editable)</label><input type="text" id="eu-dropi-url" value="${(u.dropi_url||'').replace(/"/g,'&quot;')}" placeholder="https://app.dropi.co/auth/login" autocapitalize="off"></div>
@@ -6835,6 +6991,8 @@ window.modalUserEdit=(u)=>{
     if(w)w.style.display=rolSel.value==='auxiliar'?'':'none'
     const wph=document.getElementById('eu-permite-hoy-wrap')
     if(wph)wph.style.display=rolSel.value==='auxiliar'?'':'none'
+    const wip=document.getElementById('eu-ids-pasados-wrap')
+    if(wip)wip.style.display=rolSel.value==='auxiliar'?'':'none'
     const wd=document.getElementById('eu-dropi-wrap')
     if(wd)wd.style.display=rolSel.value==='auxiliar'?'':'none'
   })
@@ -6845,6 +7003,7 @@ window.doEditUser=async(user_id)=>{
   const usernameVal=get('eu-username').toLowerCase()
   const modoHistorico=document.getElementById('eu-modo-historico')?.checked||false
   const permiteHoy=document.getElementById('eu-permite-hoy')?.checked||false
+  const permiteIdsPasados=document.getElementById('eu-ids-pasados')?.checked||false
   // Campos que SÍ van a la Edge Function (sin modo_historico, que no está en su schema)
   const fields={
     nombre:get('eu-nombre'),
@@ -6871,6 +7030,11 @@ window.doEditUser=async(user_id)=>{
       const{error:phErr}=await sb.from('usuarios').update({permite_hoy:permiteHoy}).eq('id',user_id)
       if(phErr)console.warn('No se guardó permite_hoy (¿falta la columna en usuarios?):',phErr.message)
     }catch(e){console.warn('permite_hoy update excepción:',e)}
+    // 1c. NUEVO (7jul26 · Mejora 6): permite_ids_pasados — mismo patrón tolerante que permite_hoy.
+    try{
+      const{error:ppErr}=await sb.from('usuarios').update({permite_ids_pasados:permiteIdsPasados}).eq('id',user_id)
+      if(ppErr)console.warn('No se guardó permite_ids_pasados (¿falta la columna en usuarios?):',ppErr.message)
+    }catch(e){console.warn('permite_ids_pasados update excepción:',e)}
     // 2. Resto de campos vía Edge Function (toca Supabase Auth)
     const res=await callEdge('update_user',{user_id,fields})
     if(!res.ok){
@@ -6892,7 +7056,7 @@ window.doEditUser=async(user_id)=>{
       }).eq('id',user_id)
       if(dErr)console.warn('No se guardaron cuentas Dropi/SellerChat (¿faltan columnas?):',dErr.message)
     }catch(e){console.warn('Cuentas update excepción:',e)}
-    logAction('usuario_editado',{user_id,modo_historico:modoHistorico,permite_hoy:permiteHoy}).catch(()=>{})
+    logAction('usuario_editado',{user_id,modo_historico:modoHistorico,permite_hoy:permiteHoy,permite_ids_pasados:permiteIdsPasados}).catch(()=>{})
     closeModal();loadUsuarios()
   }catch(e){
     msg.innerHTML=`<div class="alert alert-red">Error inesperado: ${e.message}</div>`
@@ -7392,7 +7556,8 @@ async function pageAuxAsignador(c){
     const kwArray=[...allKw].sort()
     const kwArrayFull=[...allKwFull].sort()
     // Cargar agentes ACTIVOS por producto (para mostrarlos al lado de cada palabra reconocida)
-    const _prodAgentes={} // producto_id → [nombre, ...] (solo activos)
+    const _prodAgentes={} // producto_id → [nombre, ...] (solo activos Y VIGENTES — Mejora 4)
+    const _agUrlByNom={}  // NUEVO (7jul26 · Mejora 5): nombre de agente → URL SellerChat (para el botón 🔗)
     try{
       const _prodIds=(productos||[]).map(p=>p.id).filter(Boolean)
       if(_prodIds.length){
@@ -7400,12 +7565,26 @@ async function pageAuxAsignador(c){
         const _agIds=[...new Set((_relAg||[]).map(r=>r.agente_id))]
         const _agNombre={}
         if(_agIds.length){
-          const{data:_agData}=await sb.from('agentes').select('id,nombre,activo').in('id',_agIds).eq('activo',true)
-          for(const a of (_agData||[]))_agNombre[a.id]=a.nombre
+          // Select TOLERANTE: con sellerchat_url y vigente si existen; si no, el clásico.
+          let _agData=null
+          try{
+            const _r1=await sb.from('agentes').select('id,nombre,activo,sellerchat_url,vigente').in('id',_agIds).eq('activo',true)
+            if(_r1.error)throw _r1.error
+            _agData=_r1.data
+          }catch(_e){
+            const _r2=await sb.from('agentes').select('id,nombre,activo').in('id',_agIds).eq('activo',true)
+            _agData=_r2.data
+          }
+          for(const a of (_agData||[])){
+            if(a.vigente===false)continue // Mejora 4: NO vigente → el auxiliar no lo ve en el Asignador
+            _agNombre[a.id]=a.nombre
+            const _uA=(a.sellerchat_url||'').trim()
+            if(_uA)_agUrlByNom[a.nombre]=_uA
+          }
         }
         for(const r of (_relAg||[])){
           const nom=_agNombre[r.agente_id]
-          if(!nom)continue // inactivo o inexistente → no se muestra
+          if(!nom)continue // inactivo, no vigente o inexistente → no se muestra
           if(!_prodAgentes[r.producto_id])_prodAgentes[r.producto_id]=[]
           _prodAgentes[r.producto_id].push(nom)
         }
@@ -7451,11 +7630,14 @@ async function pageAuxAsignador(c){
     const _esc=s=>String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'")
     const _chip=w=>`<span onclick="_copiarChip(this,'${_esc(w)}')" title="Toca para copiar" style="cursor:pointer;display:inline-block;padding:3px 9px;background:rgba(34,197,94,0.1);border:1px solid var(--green);color:var(--green);border-radius:14px;font-family:monospace;font-size:12px;margin:2px 4px 2px 0">🟢 ${w}</span>`
     const _agChips=ags=>ags.length
-      ? ags.map(a=>`<span onclick="_copiarChip(this,'${_esc(a)}')" title="Toca para copiar" style="cursor:pointer;display:inline-block;padding:2px 8px;background:rgba(167,139,250,0.12);border:1px solid var(--purple,#A78BFA);color:var(--purple,#A78BFA);border-radius:12px;font-family:monospace;font-size:11.5px;margin:2px 3px 2px 0">🤖 ${a}</span>`).join('')
+      ? ags.map(a=>`<span onclick="_copiarChip(this,'${_esc(a)}')" title="Toca para copiar" style="cursor:pointer;display:inline-block;padding:2px 8px;background:rgba(167,139,250,0.12);border:1px solid var(--purple,#A78BFA);color:var(--purple,#A78BFA);border-radius:12px;font-family:monospace;font-size:11.5px;margin:2px 3px 2px 0">🤖 ${a}</span>${window._nxBtnUrl(_agUrlByNom[a]||'','Abrir el agente '+a+' en SellerChat')}`).join('')
       : '<span style="font-size:11px;color:var(--amber)">⚠️ sin agentes</span>'
-    const _idChip=id=>id
-      ? `<span onclick="_copiarChip(this,'${_esc(id)}')" title="Toca para copiar el ID de Dropi" style="cursor:pointer;display:inline-block;padding:2px 8px;background:rgba(239,68,68,0.12);border:1px solid #EF4444;color:#EF4444;border-radius:12px;font-family:monospace;font-size:11.5px;margin:2px 3px 2px 0">📦 ${id}</span>`
-      : '<span style="font-size:11px;color:var(--muted)">📦 sin ID</span>'
+    const _idChip=(id,pp)=>{
+      const _uD=pp?window._nxProdDropiUrl(pp.id):''
+      return id
+        ? `<span onclick="_copiarChip(this,'${_esc(id)}')" title="Toca para copiar el ID de Dropi" style="cursor:pointer;display:inline-block;padding:2px 8px;background:rgba(239,68,68,0.12);border:1px solid #EF4444;color:#EF4444;border-radius:12px;font-family:monospace;font-size:11.5px;margin:2px 3px 2px 0">📦 ${id}</span>${window._nxBtnUrl(_uD,'Abrir '+(pp?pp.nombre:'el producto')+' en Dropi')}`
+        : `<span style="font-size:11px;color:var(--muted)">📦 sin ID</span>${window._nxBtnUrl(_uD,'Abrir '+(pp?pp.nombre:'el producto')+' en Dropi')}`
+    }
     // Hora "HH:MM" (24h) → "3:00 p.m." / "9:40 a.m."
     const _hora12=(hhmm)=>{const _p=String(hhmm||'').split(':');let h=parseInt(_p[0]);const m=parseInt(_p[1]||'0');if(isNaN(h))return hhmm;const _ap=h>=12?'p.m.':'a.m.';let h12=h%12;if(h12===0)h12=12;return h12+':'+String(isNaN(m)?0:m).padStart(2,'0')+' '+_ap}
     // Línea del proveedor de un producto, con la hora límite de HOY (día automático) y color por estado
@@ -7469,7 +7651,7 @@ async function pageAuxAsignador(c){
       return `<div style="display:inline-flex;align-items:center;gap:5px;margin-top:7px;padding:4px 10px;border-radius:8px;background:rgba(239,68,68,0.12);color:#EF4444;font-size:12px;font-weight:600">🚚 ${_esc(pv.nombre)} · ⏰ hoy${_lbl} cerrado</div>`
     }
     const kwHtml=(_prodPalabras.length||_huerfanas.length)
-      ? `${_prodPalabras.map(pp=>`<div style="padding:8px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="display:inline-flex;flex-wrap:wrap;align-items:center">${pp.palabras.map(_chip).join('')}</span><span style="color:var(--muted);font-size:12px">→</span><span style="display:inline-flex;flex-wrap:wrap;align-items:center">${_agChips(pp.agentes)}</span><span style="color:var(--muted);font-size:12px">→</span><span style="display:inline-flex;flex-wrap:wrap;align-items:center">${_idChip(pp.dropi)}</span></div>${_lineaProvHoy(pp)}</div>`).join('')}${_huerfanas.length?`<div style="padding:6px 0"><span style="font-size:11px;color:var(--muted)">Otras palabras reconocidas:</span> ${_huerfanas.map(_chip).join('')}</div>`:''}`
+      ? `${_prodPalabras.map(pp=>`<div style="padding:8px 0;border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="display:inline-flex;flex-wrap:wrap;align-items:center">${pp.palabras.map(_chip).join('')}</span><span style="color:var(--muted);font-size:12px">→</span><span style="display:inline-flex;flex-wrap:wrap;align-items:center">${_agChips(pp.agentes)}</span><span style="color:var(--muted);font-size:12px">→</span><span style="display:inline-flex;flex-wrap:wrap;align-items:center">${_idChip(pp.dropi,pp)}</span></div>${_lineaProvHoy(pp)}</div>`).join('')}${_huerfanas.length?`<div style="padding:6px 0"><span style="font-size:11px;color:var(--muted)">Otras palabras reconocidas:</span> ${_huerfanas.map(_chip).join('')}</div>`:''}`
       : '<span style="color:var(--muted)">⚠️ No hay productos configurados. Configura productos con keywords en la sección Productos.</span>'
 
     // #7: los IDs de Dropi ahora se muestran inline junto a cada producto (chip rojo arriba)
@@ -8200,8 +8382,13 @@ async function cargarReporteData(){
   const esHoy=fecha===today()&&tipo==='compra'
   const esAyer=fecha===_daysAgo(1)&&tipo==='compra'
   // R3 (2jul26): el selector único deja meter IDs de CUALQUIER fecha pasada (ya no depende de modo_historico)
-  const esHistManual=tipo==='compra'&&!!fecha&&fecha<=today()&&!esHoy&&!esAyer
-  const permiteVentas=esHoy||esAyer||esHistManual
+  // NUEVO (7jul26 · Mejora 6): CANDADO del AUXILIAR — la Hoja Base ya rellena los IDs en automático,
+  // así que por defecto la aux SOLO puede tocar HOY. Días anteriores (incluido AYER) quedan
+  // bloqueados hasta que el admin prenda "🗓️ Editar IDs de días anteriores" en Equipo.
+  // Admin y demás roles siguen EXACTAMENTE igual que antes.
+  const _candadoAuxRep=(me?.rol==='auxiliar')&&me?.permite_ids_pasados!==true
+  const esHistManual=tipo==='compra'&&!!fecha&&fecha<=today()&&!esHoy&&!esAyer&&!_candadoAuxRep
+  const permiteVentas=esHoy||((esAyer||esHistManual)&&!_candadoAuxRep)
   const usandoDropi=tipo==='dropi'
   const campo=usandoDropi?'fecha_dropi':'fecha'
   // Resaltar el botón del día activo
@@ -8308,6 +8495,11 @@ async function cargarReporteData(){
   // Motivo for historical edit
   let motivoHtml=''
   if(!permiteVentas&&prods.length>0&&!usandoDropi){
+    // NUEVO (7jul26 · Mejora 6): si el bloqueo es por el CANDADO del auxiliar, se explica clarito
+    // y SIN el botón de habilitar edición (eso es solo para admin/roles con permiso).
+    if(_candadoAuxRep&&fecha<today()){
+      motivoHtml=`<div class="alert alert-amber" style="margin-bottom:14px">🔒 <strong>Días anteriores bloqueados.</strong> Solo puedes agregar/modificar los IDs de <b>HOY</b> (la Hoja Base ya rellena los IDs en automático). Si necesitas corregir este día, pídele al administrador que prenda <b>"🗓️ Editar IDs de días anteriores"</b> en Equipo → Editar usuario.</div>`
+    }else{
     motivoHtml=`<div class="alert alert-blue" style="margin-bottom:14px">📅 Fecha anterior — solo lectura. Para modificar conversaciones, activa edición.</div>
     <div style="margin-bottom:14px">
       <button class="btn-sm btn-amber" onclick="habilitarEdicionHist()">🔓 Habilitar edición</button>
@@ -8316,6 +8508,7 @@ async function cargarReporteData(){
         <input type="text" id="rep-motivo" placeholder="Ej: Corrección de conversaciones reales"></div>
       </div>
     </div>`
+    }
   }
 
   // Ventas / IDs (hoy o ayer)
@@ -8407,8 +8600,8 @@ window.addVentaRow=(prodNom,adIds,convAp,stockAct)=>{
       <label style="margin-top:8px;font-size:11px;color:var(--muted);display:block">📦 Stock al cierre (unidades)</label>
       <input type="number" id="vs-${idx}" value="${stockInicial}" min="0" placeholder="Stock actual" oninput="this.dataset.touched='1'" title="Stock disponible al cierre del día. Al guardar se sincroniza con la ficha del producto.">`
   div.innerHTML=`<div class="form-grid g3" style="align-items:start">
-    <div class="fld"><label>Producto</label>
-      <select id="vp-${idx}" onchange="(()=>{const s=document.getElementById('vs-${idx}');const p=productos.find(x=>x.nombre===this.value);if(s&&p&&p.stock_actual!=null&&!s.dataset.touched)s.value=p.stock_actual}).call(this)">
+    <div class="fld"><label>Producto <span id="vurl-${idx}" style="display:inline-flex;align-items:center;flex-wrap:wrap;vertical-align:middle"></span></label>
+      <select id="vp-${idx}" onchange="(()=>{const s=document.getElementById('vs-${idx}');const p=productos.find(x=>x.nombre===this.value);if(s&&p&&p.stock_actual!=null&&!s.dataset.touched)s.value=p.stock_actual;try{window._nxVentaRowBtns(${idx})}catch(_){}}).call(this)">
         <option value="">Seleccionar...</option>
         ${productos.map(p=>`<option value="${p.nombre}" ${p.nombre===prodNom?'selected':''}>${p.nombre}</option>`).join('')}
       </select></div>
@@ -8418,6 +8611,26 @@ window.addVentaRow=(prodNom,adIds,convAp,stockAct)=>{
       <button class="btn-sm btn-red" onclick="document.getElementById('vrow-${idx}').remove()" style="margin-top:6px;font-size:11px">✕ Quitar</button></div>
   </div>`
   container.appendChild(div)
+  // NUEVO (7jul26 · Mejora 3): si la fila nace con producto precargado, pintar sus botones 🔗 de una
+  if(prodNom){setTimeout(()=>{try{window._nxVentaRowBtns(idx)}catch(_){}},0)}
+}
+
+// NUEVO (7jul26 · Mejora 3): botones 🔗 automáticos del producto elegido en "Ventas de HOY (manual)":
+// 📦 Dropi (URL única del producto) + 🤖 un botón por cada agente VIGENTE con URL (distinguidos por
+// el nombre corto del agente). Solo se pintan los que tienen URL. Cambias de producto → cambian solos.
+window._nxVentaRowBtns=async(idx)=>{
+  try{
+    const cont=document.getElementById('vurl-'+idx)
+    if(!cont)return
+    const nom=document.getElementById('vp-'+idx)?.value||''
+    if(!nom){cont.innerHTML='';return}
+    const p=(productos||[]).find(x=>x.nombre===nom)
+    if(!p){cont.innerHTML='';return}
+    let html=window._nxBtnUrl(p.dropi_url||'','Abrir '+p.nombre+' en Dropi','📦Dropi')
+    await window._nxCargarAgentesUrl()
+    html+=window._nxAgBtnsProd(p.id,false)
+    cont.innerHTML=html?('&nbsp;'+html):''
+  }catch(_){}
 }
 
 window.habilitarEdicionHist=()=>{
@@ -8473,6 +8686,12 @@ window.saveReporteV2=async(fecha)=>{
   // R3 (2jul26): el selector único permite guardar IDs de CUALQUIER día pasado por la vía normal
   const permiteVentas=fecha<=today()
   const msg=document.getElementById('rep-msg')
+  // NUEVO (7jul26 · Mejora 6): DOBLE SEGURO del candado — aunque algo pinte el formulario, el
+  // auxiliar sin el permiso NO guarda nada de días distintos a HOY. Admin y demás roles, igual.
+  if((me?.rol==='auxiliar')&&me?.permite_ids_pasados!==true&&fecha!==today()){
+    if(msg)msg.innerHTML='<div class="alert alert-red">🔒 Solo puedes guardar los IDs de <b>HOY</b>. Para días anteriores pídele al administrador que prenda "🗓️ Editar IDs de días anteriores" en Equipo.</div>'
+    return
+  }
 
   if(!permiteVentas){
     const motivo=document.getElementById('rep-motivo')?.value?.trim()
@@ -14989,9 +15208,12 @@ window._cruceStockModalShow=async(cruzados)=>{
     for(const r of (data||[]))_prev[r.producto_id]={conv:r.conversaciones_aprox,stock:r.stock_cierre}
   }catch(_e){}
   window._cruceStockProds=_prods
+  // NUEVO (7jul26 · Mejora 2): botones 🔗 — Dropi junto al producto (verificar stock directo) y
+  // el agente vigente junto a las conversaciones (contar directo en SellerChat). Solo si hay URL.
+  try{await window._nxCargarAgentesUrl()}catch(_){}
   const _filas=_prods.map((p,i)=>{const pv=_prev[p.id]||{};return `<div style="display:grid;grid-template-columns:1fr 110px 110px;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--border)">
-      <div style="font-weight:700;font-size:13px">📦 ${p.nombre}</div>
-      <div><label style="font-size:10px;color:var(--muted);display:block;margin-bottom:3px">💬 Conv. HOY</label><input type="number" id="csm-conv-${i}" min="0" value="${pv.conv!=null?pv.conv:''}" placeholder="0" style="width:100%"></div>
+      <div style="font-weight:700;font-size:13px">📦 ${p.nombre} ${window._nxBtnUrl(p.dropi_url||'','Abrir '+p.nombre+' en Dropi para verificar el stock','Dropi')}</div>
+      <div><label style="font-size:10px;color:var(--muted);display:block;margin-bottom:3px">💬 Conv. HOY ${window._nxAgBtnsProd(p.id,false)}</label><input type="number" id="csm-conv-${i}" min="0" value="${pv.conv!=null?pv.conv:''}" placeholder="0" style="width:100%"></div>
       <div><label style="font-size:10px;color:var(--muted);display:block;margin-bottom:3px">📦 Stock DESPUÉS ⚠️</label><input type="number" id="csm-stock-${i}" min="0" value="${pv.stock!=null?pv.stock:(p.stock_actual!=null?p.stock_actual:'')}" placeholder="unidades" style="width:100%" oninput="this.dataset.touched='1'"></div>
     </div>`}).join('')
   const _ov=document.createElement('div')
@@ -30973,10 +31195,40 @@ async function hbProcesarArchivo(file,ctx){
   const res=hbResolverAgente(f.agenteStr,ctx.cadena)
   if(!res.ok){f.error=res.error;return f}
   f.agente=res.agente;f.agenteId=res.agenteId;f.producto=res.producto
+  // ══ FASE 7 (7jul26) · Punto 4: VALIDACIÓN DE SECUENCIA DEL DÍA (tandas __1 → __2 → __3) ══
+  // Para la fecha del archivo, la tanda declarada debe ser LA SIGUIENTE a la mayor ya subida
+  // (BD: detalle.secuencia de exports de esa fecha — los viejos sin secuencia cuentan como __1 —
+  // más los archivos de ESTA sesión con la misma fecha). Repetir tanda o saltarse una se explica.
+  // Respeta el switch "secuencia" del Centro de Control (misma regla 5 del formato del nombre).
+  if(hbReglaActiva('secuencia')){
+    let _maxSec=0
+    try{
+      const{data:_pSec}=await sb.from('constructor_subidas').select('detalle,resultado')
+        .eq('tipo','export').eq('fecha_declarada',f.fechaDecl)
+      for(const g of(_pSec||[])){
+        if(g&&g.resultado==='sin_ventas')continue // un "día sin ventas" confirmado NO es una tanda de pedidos
+        const s=g&&g.detalle&&isFinite(parseInt(g.detalle.secuencia))?parseInt(g.detalle.secuencia):1 // sin secuencia (pre-Fase 6) = tanda 1
+        if(s>_maxSec)_maxSec=s
+      }
+    }catch(_e){console.warn('[hb secuencia] lectura BD:',_e?.message)}
+    for(const o of(ctx.archivosSesion||[])){ // tandas ya cargadas en esta sesión (aún sin generar)
+      if(o===f||['error','duplicado','nombre_mal'].includes(o.estado))continue
+      if(o.fechaDecl===f.fechaDecl){const s=parseInt(o.secuencia)||1;if(s>_maxSec)_maxSec=s}
+    }
+    const _esperada=_maxSec+1
+    if((parseInt(f.secuencia)||1)!==_esperada){
+      const _mia=parseInt(f.secuencia)||1
+      if(_mia<=_maxSec)f.secProblema=`🔢 La tanda __${_mia} del ${f.fechaDecl} YA se subió. Si estos son pedidos NUEVOS de ese día, renombra el archivo con __${_esperada} y vuelve a subirlo.`
+      else f.secProblema=`🔢 Te saltaste una tanda: ${_maxSec?`la última del ${f.fechaDecl} fue __${_maxSec}`:`el ${f.fechaDecl} aún no tiene ninguna subida`}, así que esta debe ser __${_esperada} (no __${_mia}). Renombra el archivo y vuelve a subirlo.`
+    }
+  }
   // ══ FASE 6 (6jul26) · M15.B: ANTI-DUPLICADO POR TELÉFONO (regla 3, [CRÍTICA]) ══
   // Compara los teléfonos del Excel (filas cuya fecha ∈ brecha o HOY) contra los YA procesados:
   // BD (detalle.telefonos de exports de esos días) + archivos ya cargados en esta sesión.
   // >umbral% repetidos = MISMO Excel re-subido → bloquea. ≤umbral → verificación puntual (15.C).
+  // FASE 7 (7jul26) · Punto 3: al detectar duplicado YA NO se retorna de inmediato — se marca y se
+  // sigue evaluando el nombre (mayoría de fechas) para poder mostrar AMBOS mensajes al auxiliar.
+  let _esDuplicado=false
   if(hbReglaActiva('anti_duplicado')){
     const _dnorm=t=>String(t==null?'':t).replace(/\D/g,'')
     const _rango=new Set([...(ctx.esperadas||[]),ctx.hoy]) // brecha + HOY (cubre la re-subida del día)
@@ -30999,11 +31251,10 @@ async function hbProcesarArchivo(file,ctx){
       const _pct=_reps.length/_mios.length*100
       const _uDup=parseFloat(hbCfgVal('dupPct'));const _umbralDup=isFinite(_uDup)?_uDup:50
       if(_pct>_umbralDup){
-        f.estado='duplicado'
+        _esDuplicado=true // FASE 7 (7jul26) · Punto 3: marcar y SEGUIR (para evaluar también el nombre)
         f.dupInfo={n:_reps.length,total:_mios.length,pct:Math.round(_pct)}
-        return f
       }
-      if(_reps.length&&hbReglaActiva('verif_repetidos')){ // regla 4: verificación de repetidos ≤umbral
+      if(!_esDuplicado&&_reps.length&&hbReglaActiva('verif_repetidos')){ // regla 4: verificación de repetidos ≤umbral
         f.repetidos=_reps.map(x=>({ri:x.ri,tel:f.rows[x.ri].tel,antes:_vistos[x.tel],resuelto:null}))
       }
     }
@@ -31031,12 +31282,16 @@ async function hbProcesarArchivo(file,ctx){
       if(_disc/_tot>_umb){
         const _fr={};for(const r of f.rows)if(r.fecha)_fr[r.fecha]=(_fr[r.fecha]||0)+1
         let _fm=null;for(const[d,n]of Object.entries(_fr))if(!_fm||n>_fm.n)_fm={d,n}
-        f.estado='nombre_mal'
         f.nombreMal={fechaMayoritaria:_fm?_fm.d:'',discordantes:_disc,total:_tot,pct:Math.round(_disc/_tot*100)}
-        return f
+        if(!_esDuplicado){f.estado='nombre_mal';return f} // FASE 7 · Punto 3: si además es duplicado, decide abajo (ambos mensajes)
       }
     }
   }
+  // ══ FASE 7 (7jul26) · Puntos 3 y 4: decisión final cuando hubo detecciones ══
+  // Prioridad: DUPLICADO (bloquea, mostrando también nombre_mal y secuencia si aplican) →
+  // luego SECUENCIA sola (bloquea como error pedagógico). El render pinta todo lo detectado.
+  if(_esDuplicado){f.estado='duplicado';return f}
+  if(f.secProblema){f.error=f.secProblema;return f}
   // FASE 3 (6jul26) · Mejora 6: normalizar precios a X900 ANTES de cualquier verificación de precio.
   // Así la mayoría (Mejora 5) y los grupos de oferta ven los precios YA limpios. Ilógicos (<1000) → r._precioIlogico.
   // FASE 6 · M16 regla 10: respeta su switch (OFF → precios tal cual, sin marcas de ilógico).
@@ -31252,9 +31507,13 @@ function hbRender(){
     }else if(f.estado==='nombre_mal'){ // ══ FASE 6 (6jul26) · M14-F6: Excel mal nombrado por MAYORÍA ══
       badge=`<span style="color:var(--red);font-weight:800">🚫 NOMBRE MAL (fecha equivocada)</span>`
       body=`<div class="alert alert-red" style="margin-top:8px;line-height:1.7">❌ Este archivo dice <b>${hbEsc(f.fechaDecl)}</b> pero la mayoría de sus pedidos son del <b>${hbEsc(f.nombreMal?.fechaMayoritaria||'')}</b> (${f.nombreMal?.discordantes||0} de ${f.nombreMal?.total||0} filas con otra fecha · ${f.nombreMal?.pct||0}%).<br>El <b>NOMBRE está mal</b> — aquí no se corrigen los pedidos. <b>Renombra el Excel</b> con la fecha correcta (sugerida: <b>${hbEsc(f.nombreMal?.fechaMayoritaria||'')}</b>) y vuelve a subirlo.</div>`
+      if(f.secProblema)body+=`<div class="alert" style="margin-top:6px;background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:13px;line-height:1.7">Además: ${hbEsc(f.secProblema)}</div>` // FASE 7 (7jul26) · Punto 3
     }else if(f.estado==='duplicado'){ // ══ FASE 6 (6jul26) · M15.B: mismo Excel re-subido ══
       badge=`<span style="color:var(--red);font-weight:800">🚫 DUPLICADO (ya lo subiste)</span>`
       body=`<div class="alert alert-red" style="margin-top:8px;line-height:1.7">❌ Este Excel <b>ya lo subiste</b>: ${f.dupInfo?.n||0} de ${f.dupInfo?.total||0} pedidos (${f.dupInfo?.pct||0}%) ya están procesados en los días de la brecha. Es el mismo archivo — <b>no se procesa</b> (así no se duplican ventas ni IDs).<br>Si es una <b>2ª tanda legítima</b> (pedidos NUEVOS), su Excel trae teléfonos distintos y el nombre lleva la secuencia siguiente (__2).</div>`
+      // FASE 7 (7jul26) · Punto 3: si ADEMÁS el nombre está mal o la tanda no corresponde, se muestra TODO
+      if(f.nombreMal)body+=`<div class="alert alert-red" style="margin-top:6px;line-height:1.7">🚫 Y además el <b>NOMBRE está mal</b>: dice <b>${hbEsc(f.fechaDecl)}</b> pero la mayoría de sus pedidos son del <b>${hbEsc(f.nombreMal.fechaMayoritaria||'')}</b> (${f.nombreMal.discordantes} de ${f.nombreMal.total} · ${f.nombreMal.pct}%). Si de verdad fuera una subida nueva, iría renombrado con esa fecha.</div>`
+      if(f.secProblema)body+=`<div class="alert" style="margin-top:6px;background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:13px;line-height:1.7">Además: ${hbEsc(f.secProblema)}</div>`
     }else if(f.estado==='revision'){
       const pend=hbPendientes(f)
       badge=`<span style="color:var(--amber);font-weight:800">⚠️ EN REVISIÓN (${pend.length} fila${pend.length===1?'':'s'})</span>`
@@ -31910,12 +32169,16 @@ async function hbVent2Show(){
   // Nada pendiente → pasar DIRECTO a generar (2ª hoja sin productos nuevos): solo acumula IDs
   if(!stockPend.length&&!convPend.length){st._convManual=[];return _hbGenerarFinal()}
   window._hbV2={stockPend,convPend}
+  // NUEVO (7jul26 · Mejora 2): botones 🔗 en este modal — Dropi junto a cada producto del stock
+  // y el agente vigente junto a cada producto de conversaciones. Solo si la URL existe.
+  try{await window._nxCargarAgentesUrl()}catch(_){}
   const nomDia=iso=>{try{const d=new Date(iso+'T12:00:00');const n=d.toLocaleDateString('es-CO',{weekday:'long'});return n.charAt(0).toUpperCase()+n.slice(1)}catch(_){return''}}
   const stockHtml=stockPend.length?stockPend.map((p,i)=>{
     const pm=(productos||[]).find(x=>String(x.id)===String(p.id))
     const pre=pm&&pm.stock_actual!=null?pm.stock_actual:''
+    const _uDrp=(pm&&pm.dropi_url)||p.dropi_url||''
     return`<div style="display:grid;grid-template-columns:1fr 130px;gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border)">
-      <div style="font-weight:700;font-size:13px">📦 ${hbEsc(p.nombre)}</div>
+      <div style="font-weight:700;font-size:13px">📦 ${hbEsc(p.nombre)} ${window._nxBtnUrl(_uDrp,'Abrir '+p.nombre+' en Dropi para verificar el stock','Dropi')}</div>
       <input type="number" id="hb-v2-stock-${i}" min="0" value="${pre}" placeholder="unidades" style="width:100%">
     </div>`}).join(''):`<div style="font-size:12px;color:var(--muted);padding:4px 0">✓ El stock de hoy ya quedó registrado en una hoja anterior — no hay que repetirlo.</div>`
   // CONVERSACIONES: un BLOQUE por día (color propio) y adentro una fila por producto pendiente
@@ -31927,7 +32190,7 @@ async function hbVent2Show(){
     convHtml+=`<div style="border-left:5px solid ${col};background:${col}14;border-radius:6px;padding:6px 8px;margin-top:6px">
       <div style="font-weight:800;font-size:13px"><span style="color:${col}">●</span> ${hbEsc(nomDia(d))} <span style="font-family:monospace">${d}</span></div>
       ${items.map(c=>`<div style="display:grid;grid-template-columns:1fr 130px;gap:10px;align-items:center;padding:5px 0 5px 14px">
-        <div style="font-size:13px">• ${hbEsc(c.p.nombre)}</div>
+        <div style="font-size:13px">• ${hbEsc(c.p.nombre)} ${window._nxAgBtnsProd(c.p.id,false)}</div>
         <input type="number" id="hb-v2-conv-${convPend.indexOf(c)}" min="0" value="" placeholder="conversaciones" style="width:100%">
       </div>`).join('')}
     </div>`
@@ -32305,9 +32568,9 @@ const HB_CC_REGLAS=[
    pasa:'Cliente que recompró: "✓ Es recompra" → entra normal.',bloquea:'Pedido que ya estaba: "🗑️ Quitar duplicado" → no entra a la hoja ni a reportes.',
    siApagas:'Los repetidos entran sin verificación: posibles duplicados sin revisar.'},
   {k:'secuencia',label:'🔢 Secuencia obligatoria en el nombre (__1, __2…)',critica:false,
-   explica:'El nombre del Excel declara la tanda del día: __1 la primera subida (SIEMPRE), __2 la segunda con pedidos nuevos, etc. "oferta" va al final.',
-   pasa:'38__Neocell_A6_A2__2026-07-05__1 → válido.',bloquea:'38__Neocell_A6_A2__2026-07-05 (sin secuencia) → se rechaza con la explicación del formato.',
-   siApagas:'Se aceptan nombres con el formato viejo (sin secuencia, tanda=1); se pierde una señal para distinguir tandas legítimas de re-subidas.'},
+   explica:'El nombre del Excel declara la tanda del día: __1 la primera subida (SIEMPRE), __2 la segunda con pedidos nuevos, etc. "oferta" va al final. Además, NEXO valida que la tanda sea LA SIGUIENTE: si ya subiste __1 de un día, la próxima de ese día debe ser __2 (ni repetida ni salteada).',
+   pasa:'38__Neocell_A6_A2__2026-07-05__1 → válido. Y si __1 ya existe, la siguiente con __2 → válido.',bloquea:'Sin secuencia → se rechaza con el formato. Repetir __1 el mismo día → "esa tanda YA se subió, usa __2". Saltar a __3 sin __2 → "te saltaste una tanda".',
+   siApagas:'Se aceptan nombres con el formato viejo (sin secuencia, tanda=1) y NO se valida el orden de las tandas; se pierde una señal para distinguir tandas legítimas de re-subidas.'},
   {k:'obligatorios',label:'📋 Campos obligatorios del pedido',critica:true,
    explica:'Una línea sin ciudad, departamento, dirección, teléfono, cantidad, fecha, producto, agente, ID Dropi, precio o nombre/apellido NO procesa (las demás siguen).',
    pasa:'Línea completa → procesa.',bloquea:'Línea sin teléfono → "FALTAN DATOS: TELÉFONO" y no entra.',

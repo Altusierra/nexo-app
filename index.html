@@ -7245,7 +7245,9 @@ function _parseLineaCorchetes(linea){
   const carrier=String(v.transportadora||'').trim()
   const precio=String(v.precio||'').trim()
   // ── OBLIGATORIOS (regla de ADS): si falta alguno, la línea NO procesa (las demás siguen) ──
+  // FASE 6 (6jul26) · M16 regla 6 [CRÍTICA]: respeta su switch del Centro de Control.
   const faltan=[]
+  if(hbReglaActiva('obligatorios')){
   if(!v.ciudad)faltan.push('CIUDAD')
   if(!v.departamento)faltan.push('DEPARTAMENTO')
   if(!v.direccion)faltan.push('DIRECCIÓN')
@@ -7257,6 +7259,7 @@ function _parseLineaCorchetes(linea){
   if(!String(v.id_dropi||'').trim())faltan.push('ID_DROPI')
   if(!precio)faltan.push('PRECIO')
   if(!String(v.nombre||'').trim()&&!String(v.apellido||'').trim())faltan.push('NOMBRE o APELLIDO (al menos uno de los dos)')
+  }
   // ── AVISOS SUAVES (forma): informan, el auxiliar decide continuar ──
   if(tel&&tel.length!==10)avisos.push(`el teléfono "${v.telefono}" no parece un celular de 10 dígitos`)
   if(adId&&!/^\d{18}$/.test(adId))avisos.push(`el ad_id "${adId}" no tiene 18 dígitos`)
@@ -8042,7 +8045,7 @@ window.descargarMasivoDropiXlsx=async()=>{
       const r=f.raw||{}
       const emoji=_stateEmoji(f.estado,f.match)
       const _est=_nrmEst(r.estado)
-      const alerta=_ROJOS.includes(_est)?'rojo':(_NARANJAS.includes(_est)?'naranja':null)
+      const alerta=hbReglaActiva('resaltado_masivo')?(_ROJOS.includes(_est)?'rojo':(_NARANJAS.includes(_est)?'naranja':null)):null // FASE 6 · M16 regla 14: switch
       if(alerta==='rojo')_nRojas++;else if(alerta==='naranja')_nNaranjas++
       filasM.push({vals:_cols.map(c=>_cl(hbMasivoValor(c.campo,f,r,emoji))),band:bi,alerta})
     }
@@ -18552,7 +18555,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
         ${_pillsProd}
         ${_pillSinProd}
       </div>
-      <div id="rp-fusion-groups">${_grupos}${_filaTotalM}${_grupoSinProd}</div>
+      <div id="rp-fusion-groups">${_grupos}${_filaTotalM}<div id="rp-rango-global" style="margin:2px 0 7px;padding:7px 10px;background:rgba(252,211,77,.04);border:1px dashed rgba(252,211,77,.4);border-radius:9px"><div style="font-size:10.5px;color:var(--subtle);padding:2px">⏳ Rango global día por día — se arma solo en unos segundos…</div></div>${_grupoSinProd}</div>
     </div>`
   }catch(_){}
 
@@ -19319,6 +19322,17 @@ function _renderProductoCardResumen(data,ranking){
   // pero con sufijos *2 (IDs de DOM propios → los toggles no chocan con los originales). Se guarda
   // por producto en window._rpCuadrePorProd y el resumen del RANGO (_rpFusionRango) la pinta debajo
   // de las píldoras de días. Los bloques originales de aquí abajo quedan INTACTOS en su lugar.
+  // FIX (6jul26 · Mejora 6): las herramientas del cuadre se exponen PRIMERO y en try PROPIO.
+  // Antes iban DESPUÉS de armar la copia *2 dentro del MISMO try: si un bloque de la copia
+  // tronaba, el catch silencioso se tragaba TAMBIÉN la exposición de _rpCuadreTools → el rango
+  // se quedaba esperando 22s y moría en la vista clásica de 4 días (por eso salían solo 4
+  // tarjetas aunque el rango fuera de 8). Ahora las tools SIEMPRE quedan expuestas.
+  try{
+    // NUEVO (3jul26 · cuadre por día del RANGO): se exponen las herramientas del cuadre de ESTE
+    // producto (los closures conservan su alcance) pa' que _rpFusionRango arme UN bloque compacto
+    // por CADA día del rango con los mismos desgloses. La copia *2 de abajo queda como respaldo.
+    ;(window._rpCuadreTools=window._rpCuadreTools||{})[_slugProd]={mk:_mkCuadre,blk:_mkCuadreBlock,gAdsHoy:(_gAdsBloques&&_gAdsBloques.p)||{},atc:_atcCuadre}
+  }catch(_){}
   try{
     let _cuadreHtmlRg=''
     _cuadreHtmlRg+=_mkCuadreBlock(data.cuadre,(data.esSoloHoy?'hoy':'el período'),'p2','var(--amber)')
@@ -19326,10 +19340,6 @@ function _renderProductoCardResumen(data,ranking){
     _cuadreHtmlRg+=_mkCuadreBlock(data.prevData2&&data.prevData2.cuadre,(data.esSoloHoy?'antier':'el 2º período'),'b2','var(--subtle)')
     _cuadreHtmlRg+=_mkCuadreBlock(data.prevData3&&data.prevData3.cuadre,(data.esSoloHoy?'trasantier':'el 3º período'),'c2','var(--subtle)')
     ;(window._rpCuadrePorProd=window._rpCuadrePorProd||{})[_slugProd]=_cuadreHtmlRg
-    // NUEVO (3jul26 · cuadre por día del RANGO): se exponen las herramientas del cuadre de ESTE
-    // producto (los closures conservan su alcance) pa' que _rpFusionRango arme UN bloque compacto
-    // por CADA día del rango con los mismos desgloses. La copia *2 de arriba queda como respaldo.
-    ;(window._rpCuadreTools=window._rpCuadreTools||{})[_slugProd]={mk:_mkCuadre,blk:_mkCuadreBlock,gAdsHoy:(_gAdsBloques&&_gAdsBloques.p)||{},atc:_atcCuadre}
     // MEJORA 1 (5jul26 · PUSH): si un rango quedó esperando estas herramientas (carrera de
     // arranque), se re-dispara AHORA MISMO desde aquí — sin depender del polling de respaldo.
     try{
@@ -21816,6 +21826,234 @@ window._rpFusionStickyRow=function(rowEl,ccid){
   }catch(_){}
 }
 
+// ═══ NUEVO (6jul26 · Mejora 1): CAMPAÑA PEGADA en el MODO RANGO ═══════════════════════════
+// Al navegar DENTRO del desglose de una campaña del rango, su barra (ID · gasto · CPA ·
+// presupuesto · Duplicar · nombre) se queda PEGADA entre las dos barritas moradas de scroll:
+// urgencia → barra grande del rango → CAMPAÑA → barrita del desglose. Es un CLON VIVO de la
+// fila real (los botones 💰/🔁/⏯ funcionan igual; clic en la fila = cerrar su desglose) que se
+// REEMPLAZA solo según el desglose por el que vayas pasando — varias campañas abiertas a la vez
+// no se pisan. Sincronizado con el scroll horizontal de la tabla. 100% aditivo: si no hay
+// desglose abierto no existe, y la barrita del desglose (_topPx) cede el espacio sola.
+window._nxRngStickyH=0
+window._nxRngStickyCampInit=function(){
+  try{
+    if(window._nxRngStickyOn)return
+    const _vsc=document.querySelector('.content')
+    if(!_vsc)return
+    window._nxRngStickyOn=true
+    let _wrap=null,_inner=null,_curKey=''
+    const _mkW=()=>{
+      if(_wrap)return
+      _wrap=document.createElement('div')
+      _wrap.id='nx-rng-stickycamp'
+      _wrap.style.cssText='position:fixed;z-index:35;display:none;overflow:hidden;background:rgba(22,17,28,.97);border:1px solid var(--purple);border-top:none;border-radius:0 0 8px 8px;box-shadow:0 4px 12px rgba(0,0,0,.5)'
+      _wrap.title='📌 Barra pegada de la campaña cuyo desglose estás viendo — clic en la fila la cierra; los botones funcionan igual que en la tabla'
+      _inner=document.createElement('div')
+      _inner.style.cssText='min-width:max-content;will-change:transform'
+      _wrap.appendChild(_inner)
+      document.body.appendChild(_wrap)
+    }
+    const _avisaHbars=()=>{try{for(const rg of (window._nexoHBarReg||[])){if(rg&&rg.syncTop)try{rg.syncTop()}catch(_){}}}catch(_){}}
+    const _hide=()=>{
+      if(_wrap)_wrap.style.display='none'
+      _curKey=''
+      if(window._nxRngStickyH!==0){window._nxRngStickyH=0;_avisaHbars()}
+    }
+    const _scan=()=>{try{
+      const boxes=document.querySelectorAll('.rp-rng-box')
+      if(!boxes.length){_hide();return}
+      const _cRect=_vsc.getBoundingClientRect()
+      // Línea de anclaje: debajo de la fila URGENCIA pegada + la barra morada grande del rango
+      let anchor=_cRect.top+4+16
+      const _urgS=document.querySelector('[data-nx-urg="1"]')
+      if(_urgS&&_urgS.offsetParent!==null)anchor=_urgS.getBoundingClientRect().bottom+6+16
+      // ¿Cuál desglose abierto cruza la línea? (la fila ya subió y su caja aún cubre la zona)
+      let act=null
+      const _hEst=(_wrap&&_wrap.style.display!=='none')?(_wrap.offsetHeight||32):32
+      for(const box of boxes){
+        if(box.offsetParent===null)continue
+        const sub=box.querySelector('[id$="-sub"]')
+        if(!sub||sub.style.display==='none')continue
+        const row=box.querySelector('.rp-rng-row')
+        if(!row)continue
+        const rr=row.getBoundingClientRect()
+        const br=box.getBoundingClientRect()
+        if(rr.bottom<anchor+2&&br.bottom>anchor+_hEst+6){act={box,row};break}
+      }
+      if(!act){_hide();return}
+      _mkW()
+      const key=(act.row.getAttribute('data-fcampid')||'')+'·'+(act.box.id||'')
+      if(key!==_curKey){
+        _curKey=key
+        const cl=act.row.cloneNode(true)
+        cl.querySelectorAll('[id]').forEach(x=>x.removeAttribute('id'))
+        cl.removeAttribute('id')
+        _inner.innerHTML=''
+        _inner.appendChild(cl)
+      }
+      // Geometría: alineada con el contenedor de scroll horizontal de la tabla del rango
+      let _outerX=null
+      {let p=act.box.parentElement;while(p&&p!==document.body){const cs=getComputedStyle(p);if(/(auto|scroll)/.test(cs.overflowX||'')){_outerX=p;break}p=p.parentElement}}
+      if(_outerX&&!_outerX.dataset.nxScSync){_outerX.dataset.nxScSync='1';_outerX.addEventListener('scroll',_req,{passive:true})}
+      const ref=(_outerX||act.box).getBoundingClientRect()
+      _wrap.style.display=''
+      _wrap.style.top=Math.round(anchor)+'px'
+      _wrap.style.left=Math.max(0,Math.round(ref.left))+'px'
+      _wrap.style.width=Math.max(60,Math.min(Math.round(ref.width),window.innerWidth-Math.max(0,Math.round(ref.left))-8))+'px'
+      _inner.style.transform='translateX(-'+Math.round(_outerX?_outerX.scrollLeft:0)+'px)'
+      const _hNow=(_wrap.offsetHeight||32)+4
+      if(window._nxRngStickyH!==_hNow){window._nxRngStickyH=_hNow;_avisaHbars()}
+    }catch(_){}}
+    let _pend=false
+    const _req=()=>{if(_pend)return;_pend=true;requestAnimationFrame(()=>{_pend=false;_scan()})}
+    _vsc.addEventListener('scroll',_req,{passive:true})
+    window.addEventListener('resize',_req,{passive:true})
+    document.addEventListener('click',()=>setTimeout(_req,140)) // abrir/cerrar desgloses re-evalúa solo
+    setTimeout(_req,180)
+  }catch(_){}
+}
+
+// ═══ NUEVO (6jul26 · Mejora 3): RANGO GLOBAL día por día en la VISTA PRINCIPAL ══════════════
+// La misma sección "🗓 Rango: X → Y" de cada producto, pero PEGADA DEBAJO de la Σ TOTAL de
+// "TODAS LAS CAMPAÑAS JUNTAS" y con los números CONSOLIDADOS de TODOS los productos: por cada
+// día del rango (últimos 8, HOY primero) salen 🛒 ventas totales, 🆔 IDs totales, 💬 conversa-
+// ciones totales, 💬/🆔, 💸 gasto total, 🎯 CPA total y 💰 ganancia total (misma fórmula del
+// Dashboard, sumada producto por producto con la economía de cada uno). SIN 📦 stock (a nivel
+// de todos los productos no aplica). Fuentes canónicas de siempre: mapeos (confirmadas) +
+// reportes_diarios (último por fecha+producto) + meta_insights (campañas CON producto) + gasto
+// VIVO de HOY vía Meta batch ?ids= (fallback BD). Se arma solo cuando las cards ya expusieron
+// sus campañas (window._rpFusionCtx) y NO toca nada de lo existente.
+window._rpRangoGlobalLoad=async function(force){
+  const cont=document.getElementById('rp-rango-global')
+  if(!cont)return
+  if(cont.dataset.loading==='1')return
+  if(!force&&cont.dataset.loaded==='1')return
+  try{
+    const _ctxAll=window._rpFusionCtx||{}
+    const _slugsG=Object.keys(_ctxAll)
+    if(!_slugsG.length)return // las cards aún no exponen sus campañas; el vigilante reintenta
+    cont.dataset.loading='1'
+    cont.innerHTML='<div style="font-size:10.5px;color:var(--purple);padding:2px">⏳ Armando el rango global (últimos 8 días · todos los productos)…</div>'
+    // Rango: últimos 8 días (mismo atajo de las cards) — HOY primero
+    const _isoG=(d)=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+    const _dH=new Date(),_dD=new Date();_dD.setDate(_dD.getDate()-7)
+    const desde=_isoG(_dD),hasta=_isoG(_dH),_hoyG=hasta
+    const _fechasG=[];{let it=new Date(desde+'T12:00:00');const fin=new Date(hasta+'T12:00:00');while(it<=fin){_fechasG.push(_isoG(it));it.setDate(it.getDate()+1)}}
+    _fechasG.reverse()
+    // Campañas de TODOS los productos + economía por nombre canónico
+    const _campSetG={},_ecoPorNom={}
+    for(const s of _slugsG){
+      const cx=_ctxAll[s]||{}
+      for(const ck of (cx.campIds||[]))_campSetG[String(ck)]=1
+      if(cx.nombre)_ecoPorNom[cx.nombre]={eco:cx.eco||null}
+    }
+    const _campsG=Object.keys(_campSetG)
+    // 1) Ventas confirmadas del rango (filtros canónicos) — global por día y por producto/día
+    const{data:mpG}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('cantidad,producto,estado_final,fecha').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+    const _vDiaG={},_vProdDiaG={}
+    for(const m of (mpG||[])){
+      if(!m.estado_final||m.estado_final==='CANCELADO'||m.estado_final==='RECHAZADO'||m.estado_final==='PENDIENTE CONFIRMACION')continue
+      const pn=(window.resolveProdName?window.resolveProdName(m.producto).nombre:(m.producto||''))||(m.producto||'')
+      _vDiaG[m.fecha]=(_vDiaG[m.fecha]||0)+1
+      const K=pn+'|'+m.fecha
+      const D=_vProdDiaG[K]||(_vProdDiaG[K]={nom:pn,f:m.fecha,n:0,o1:0,o2:0,o3:0,o4:0})
+      D.n++
+      const q=parseInt(m.cantidad)||1
+      if(q<=1)D.o1++;else if(q===2)D.o2++;else if(q===3)D.o3++;else D.o4++
+    }
+    // 2) Conversaciones 💬 e IDs 🆔 por día (último reporte por fecha+producto manda) — TODOS los productos
+    const _cvDiaG={},_idsDiaG={},_cvProdDiaG={}
+    try{
+      const{data:repsG}=await sb.from('reportes_diarios').select('fecha,conversaciones,conversaciones_aprox,ad_ids,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
+      const _seenG=new Set()
+      for(const r of (repsG||[])){
+        const kG=(r.fecha||'')+'|'+(r.producto_id||r.producto_nombre||'')
+        if(_seenG.has(kG))continue
+        _seenG.add(kG)
+        const cvR=(r.conversaciones||r.conversaciones_aprox)||0
+        _cvDiaG[r.fecha]=(_cvDiaG[r.fecha]||0)+cvR
+        const pnR=(window.resolveProdName?window.resolveProdName(r.producto_nombre||'').nombre:(r.producto_nombre||''))||(r.producto_nombre||'')
+        const kP=pnR+'|'+r.fecha
+        _cvProdDiaG[kP]=(_cvProdDiaG[kP]||0)+cvR
+        for(const idA of (r.ad_ids||'').split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5))_idsDiaG[r.fecha]=(_idsDiaG[r.fecha]||0)+1
+      }
+    }catch(_){}
+    // 3) Gasto por día — meta_insights de las campañas CON producto (lotes de 300)
+    const _gDiaG={}
+    for(let i=0;i<_campsG.length;i+=300){
+      const{data:insG}=await sb.from('meta_insights').select('fecha,spend').eq('nivel','campaign').in('meta_id',_campsG.slice(i,i+300)).gte('fecha',desde).lte('fecha',hasta)
+      for(const r of (insG||[]))_gDiaG[r.fecha]=(_gDiaG[r.fecha]||0)+(r.spend||0)
+    }
+    // 4) Gasto de HOY en VIVO (batch ?ids= — objeto plano, fetch directo). Fallback: BD.
+    let _vivoOkG=false
+    try{
+      const tk=await getConfig('meta_access_token')
+      if(tk){
+        let gV=0
+        const tr=encodeURIComponent(JSON.stringify({since:_hoyG,until:_hoyG}))
+        for(let i=0;i<_campsG.length;i+=50){
+          const lote=_campsG.slice(i,i+50)
+          const u=`${META_BASE}/?ids=${encodeURIComponent(lote.join(','))}&fields=insights.time_range(${tr}){spend}&access_token=${tk}`
+          const rp=await fetch(u)
+          if(!rp.ok)continue
+          const o=await rp.json()
+          if(o&&typeof o==='object')for(const ck of lote){const d=o[ck]&&o[ck].insights&&o[ck].insights.data;if(d&&d.length){_vivoOkG=true;for(const x of d)gV+=parseFloat(x.spend)||0}}
+        }
+        if(_vivoOkG)_gDiaG[_hoyG]=Math.max(_gDiaG[_hoyG]||0,gV)
+      }
+    }catch(_eG){console.warn('[rango global] gasto vivo HOY falló, se usa BD:',_eG&&_eG.message)}
+    // 5) 💰 Ganancia por día = Σ productos (misma fórmula del Dashboard con la economía de cada uno) − gasto global del día
+    const _ganDiaG={},_ganOkDiaG={}
+    for(const K of Object.keys(_vProdDiaG)){
+      const D=_vProdDiaG[K]
+      const ecoX=(_ecoPorNom[D.nom]||{}).eco
+      if(!(ecoX&&((ecoX.p1||0)>0||(ecoX.p2||0)>0)))continue
+      const dev=ecoX.devPct!=null?ecoX.devPct:0.19
+      const venta=(D.o1*ecoX.p1)+(D.o2*ecoX.p2)+(D.o3*ecoX.p3)+(D.o4*ecoX.p4)
+      const prov=(D.o1*ecoX.c1)+(D.o2*ecoX.c2)+(D.o3*ecoX.c3)+(D.o4*ecoX.c4)
+      const flete=D.n*(ecoX.fleteOut||21000)
+      const devC=Math.round(D.n*dev*(ecoX.fleteDev||18000))
+      const convC=(_cvProdDiaG[K]||0)*(ecoX.costoConv||100)
+      _ganDiaG[D.f]=(_ganDiaG[D.f]||0)+(Math.round(venta*(1-dev))-prov-flete-devC-convC)
+      _ganOkDiaG[D.f]=1
+    }
+    for(const f of _fechasG){if(_ganOkDiaG[f])_ganDiaG[f]=(_ganDiaG[f]||0)-Math.round(_gDiaG[f]||0)}
+    // 6) Render — mismo lenguaje visual de la sección del rango, SIN 📦 stock
+    const _MESG=['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic']
+    const _fLabG=f=>{const p=String(f).split('-');return p.length===3?(p[2]+' '+(_MESG[parseInt(p[1],10)-1]||p[1])):f}
+    const _celG=(h,t)=>`<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0"${t?` title="${t}"`:''}>${h}</span>`
+    let tN=0,tI=0,tC=0,tG=0,tGan=0,tGanOk=false
+    const _pildG=_fechasG.map(f=>{
+      const nT=_vDiaG[f]||0,idsT=_idsDiaG[f]||0,cvT=_cvDiaG[f]||0,gT=Math.round(_gDiaG[f]||0)
+      const ganT=_ganOkDiaG[f]?_ganDiaG[f]:null
+      tN+=nT;tI+=idsT;tC+=cvT;tG+=gT;if(ganT!=null){tGan+=ganT;tGanOk=true}
+      const vivo=(nT>0||idsT>0||cvT>0||gT>0)
+      const _nCpa=nT>0?nT:idsT
+      const cpaT=(gT>0&&_nCpa>0)?Math.round(gT/_nCpa):0
+      const cvx=idsT>0?(cvT/idsT).toFixed(1):'—'
+      const esHoy=f===_hoyG
+      const colGan=ganT==null?'var(--muted)':(ganT>=0?'var(--green)':'var(--red)')
+      const tip=`📅 ${_fLabG(f)} · TODOS los productos: ${nT} venta${nT===1?'':'s'} confirmada${nT===1?'':'s'} Dropi · ${idsT} IDs del aux · ${cvT} conversaciones · gasto $${fmt(gT)}${esHoy&&_vivoOkG?' (HOY en VIVO de Meta ⚡)':''} · 🎯 CPA = gasto ÷ ventas 🛒 (HOY sin cruce: ÷ 🆔 IDs) — sin semáforo porque cada producto tiene su propio break-even · 💰 = Σ ganancia por producto (misma fórmula del Dashboard) − gasto ads. SIN gastos fijos ni 📦 stock (no aplican a nivel global).`
+      return`<span style="display:grid;grid-template-columns:8fr 5fr 6fr 6fr 8fr 10fr 9fr 10fr;gap:3px;align-items:center;font-size:9.5px;font-weight:700;padding:2px 8px;border-radius:999px;background:${vivo?'rgba(255,255,255,.05)':'rgba(255,255,255,.02)'};color:${vivo?'var(--text)':'var(--subtle)'};border:1px solid ${vivo?'var(--border)':'rgba(255,255,255,.06)'}" title="${tip}">${_celG(`📅 ${esHoy?'HOY ':''}${_fLabG(f)}`)}${_celG(`${nT}🛒`)}${_celG(`${idsT}🆔`)}${_celG(`${cvT}💬`)}${_celG(`💬/🆔 ${cvx}`)}${_celG(`💸$${fmt(gT)}${esHoy&&_vivoOkG?'⚡':''}`)}${_celG(cpaT>0?`🎯$${fmt(cpaT)}`:'<span style="opacity:.35">🎯—</span>')}${_celG(`<span style="color:${colGan}">💰${ganT!=null?((ganT>=0?'+':'−')+'$'+fmt(Math.abs(ganT))):'—'}</span>`)}</span>`
+    }).join('')
+    const _cvxT=tI>0?(tC/tI).toFixed(1):'—'
+    const _nCpaT=tN>0?tN:tI
+    const _cpaTot=(tG>0&&_nCpaT>0)?Math.round(tG/_nCpaT):0
+    const _pildTot=`<span style="display:grid;grid-template-columns:8fr 5fr 6fr 6fr 8fr 10fr 9fr 10fr;gap:3px;align-items:center;font-size:9.5px;font-weight:800;padding:3px 8px;border-radius:999px;background:rgba(252,211,77,.08);color:#fcd34d;border:1.5px solid #fcd34d" title="Σ TOTAL del rango global (${_fechasG.length} días · todos los productos): ventas, IDs, conversaciones, gasto, CPA y ganancia SUMADOS.">${_celG('Σ TOTAL')}${_celG(`${tN}🛒`)}${_celG(`${tI}🆔`)}${_celG(`${tC}💬`)}${_celG(`💬/🆔 ${_cvxT}`)}${_celG(`💸$${fmt(tG)}`)}${_celG(_cpaTot>0?`🎯$${fmt(_cpaTot)}`:'🎯—')}${_celG(`<span style="color:${tGanOk?(tGan>=0?'var(--green)':'var(--red)'):'var(--muted)'}">💰${tGanOk?((tGan>=0?'+':'−')+'$'+fmt(Math.abs(tGan))):'—'}</span>`)}</span>`
+    cont.innerHTML=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:#fcd34d;font-weight:700;padding:1px 0 5px">🗓 Rango GLOBAL: ${_fLabG(desde)} → ${_fLabG(hasta)} (${_fechasG.length} días) · todos los productos · ${_campsG.length} campaña${_campsG.length===1?'':'s'} · ${tN} venta${tN===1?'':'s'}<button onclick="window._rpRangoGlobalLoad(true)" title="Recargar el rango global con los datos de ahora mismo" style="margin-left:auto;background:transparent;border:1px solid rgba(252,211,77,.5);border-radius:5px;color:#fcd34d;font-size:10px;font-weight:700;padding:1px 8px;cursor:pointer">🔄</button></div><div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px">${_pildG}</div><div style="padding:5px 0 1px">${_pildTot}</div>`
+    cont.dataset.loaded='1'
+  }catch(eG){
+    console.warn('[rango global] error:',eG&&eG.message)
+    cont.innerHTML=`<div style="font-size:10.5px;color:var(--red);padding:2px">❌ Rango global: ${String((eG&&eG.message)||'error').replace(/</g,'&lt;')} <button onclick="window._rpRangoGlobalLoad(true)" style="margin-left:6px;background:var(--red-bg);border:1px solid var(--red);border-radius:5px;color:var(--red);font-size:10px;font-weight:700;padding:1px 8px;cursor:pointer">🔄 Reintentar</button></div>`
+  }finally{delete cont.dataset.loading}
+}
+// Vigilante liviano: apenas exista el contenedor Y las cards hayan expuesto sus campañas, se
+// arma solo (cubre también los re-render del resumen: el div nuevo nace sin data-loaded).
+if(!window._rpRgGlbTimer)window._rpRgGlbTimer=setInterval(()=>{try{
+  const c=document.getElementById('rp-rango-global')
+  if(c&&c.dataset.loaded!=='1'&&c.dataset.loading!=='1'&&Object.keys(window._rpFusionCtx||{}).length)window._rpRangoGlobalLoad()
+}catch(_){}},1500)
+
 // ── NUEVO: MODO RANGO de la fusión de campañas ──────────────────────────────// Por defecto la fusión usa los 4 días ya cargados (CERO queries). Estas funciones
 // solo corren cuando el usuario toca "Aplicar": consultan Supabase (mapeos +
 // meta_campanas + meta_insights) para el rango/campaña elegidos, con los MISMOS
@@ -21974,6 +22212,47 @@ window._rpFusionRango=async function(slug,cidF){
     const _convDiaR={},_idsDiaR={},_idsCampDiaRg={},_idsAdDiaRg={}
     try{
       const{data:_repsR}=await sb.from('reportes_diarios').select('fecha,conversaciones,conversaciones_aprox,ad_ids,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
+      // FIX (6jul26 · Mejora 5): IDs del aux HUÉRFANOS resueltos EN VIVO. Cuando la campaña de
+      // testeo se asigna en la mañana y los IDs se suben a mediodía, esos anuncios muchas veces
+      // AÚN no están en meta_campanas (el sync de estructura no ha corrido) → _adDeCamp no los
+      // conoce → la tabla del rango los deja por fuera (arriba salen 15 y abajo solo 10). Aquí
+      // se toman los IDs del aux del producto que NO calzan en _adDeCamp y se le pregunta a Meta
+      // (batch ?ids=&fields=campaign_id con fetch directo — la respuesta es objeto plano, no
+      // array) de qué campaña cuelgan; si la campaña pertenece a este rango, se agregan a
+      // _adDeCamp EN MEMORIA (las ventas _conf y los mapas 🆔 por día los recogen solitos).
+      // Fallback silencioso: si Meta no responde, todo sigue exactamente como antes.
+      try{
+        const _seenPre=new Set(),_pendHf={}
+        for(const r of (_repsR||[])){
+          const pnP=(window.resolveProdName?window.resolveProdName(r.producto_nombre||'').nombre:(r.producto_nombre||''))||(r.producto_nombre||'')
+          if(pnP!==ctx.nombre)continue
+          const kP=(r.fecha||'')+'|'+(r.producto_id||r.producto_nombre||'')
+          if(_seenPre.has(kP))continue
+          _seenPre.add(kP)
+          for(const idP of (r.ad_ids||'').split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)){if(!_adDeCamp[idP])_pendHf[idP]=1}
+        }
+        const _hfIds=Object.keys(_pendHf)
+        if(_hfIds.length){
+          const _tkHf=await getConfig('meta_access_token')
+          if(_tkHf){
+            let _nHf=0
+            for(let iH=0;iH<_hfIds.length;iH+=50){
+              const _loteH=_hfIds.slice(iH,iH+50)
+              const _uH=`${META_BASE}/?ids=${encodeURIComponent(_loteH.join(','))}&fields=campaign_id&access_token=${_tkHf}`
+              const _rH=await fetch(_uH)
+              if(!_rH.ok){console.warn('[rango] resolución de IDs huérfanos respondió',_rH.status);continue}
+              const _oH=await _rH.json()
+              if(_oH&&typeof _oH==='object'){
+                for(const idH of _loteH){
+                  const ckH=(_oH[idH]&&_oH[idH].campaign_id)?String(_oH[idH].campaign_id):''
+                  if(ckH&&camps.indexOf(ckH)>=0){_adDeCamp[idH]=ckH;_nHf++}
+                }
+              }
+            }
+            if(_nHf)console.log('[rango] IDs huérfanos del aux resueltos en vivo:',_nHf)
+          }
+        }
+      }catch(_eHf){console.warn('[rango] resolución de IDs huérfanos falló (sigue normal):',_eHf&&_eHf.message)}
       const _seenR=new Set()
       for(const r of (_repsR||[])){
         const pnR=(window.resolveProdName?window.resolveProdName(r.producto_nombre||'').nombre:(r.producto_nombre||''))||(r.producto_nombre||'')
@@ -22099,6 +22378,86 @@ window._rpFusionRango=async function(slug,cidF){
         F.ads[aid].dias[f].g+=g;F.ads[aid].gasto+=g
       }
     }
+    // FIX (6jul26 · Mejora 2): huecos de gasto del rango rellenados EN VIVO desde Meta. Las
+    // campañas de testeo recién creadas gastan ANTES de que el sync baje sus insights a la BD →
+    // sus días salían "— no corrió ese día —" aunque sí gastaron (en las campañas viejas sí se
+    // veía el 🚨 gastó-y-0-ventas porque la BD ya tenía ese spend). Una llamada batch ?ids= por
+    // lote de 50 campañas (fetch directo — la respuesta es objeto plano, no array) trae el spend
+    // POR DÍA de TODO el rango (time_increment=1). Solo se RELLENAN los días donde la BD está en
+    // 0 (días ya sincronizados NO se tocan: BD manda); en HOY gana el MAYOR porque el gasto vivo
+    // siempre va adelante del sync. Corre ANTES del CPA y de _listaR para que las campañas de
+    // testeo entren a la tabla con sus CPAs bien calculados. Fallback silencioso si Meta falla.
+    try{
+      const _tkRv=await getConfig('meta_access_token')
+      if(_tkRv){
+        const _dHoyRv=new Date()
+        const _hoyIsoRv=`${_dHoyRv.getFullYear()}-${String(_dHoyRv.getMonth()+1).padStart(2,'0')}-${String(_dHoyRv.getDate()).padStart(2,'0')}`
+        const _trRv=encodeURIComponent(JSON.stringify({since:desde,until:hasta}))
+        let _nRell=0
+        const _campsRell=new Set() // campañas con huecos rellenados → sus ads también se traen en vivo
+        for(let iRv=0;iRv<camps.length;iRv+=50){
+          const _loteRv=camps.slice(iRv,iRv+50)
+          const _uRv=`${META_BASE}/?ids=${encodeURIComponent(_loteRv.join(','))}&fields=insights.time_range(${_trRv}).time_increment(1){spend,date_start}&access_token=${_tkRv}`
+          const _rRv=await fetch(_uRv)
+          if(!_rRv.ok){console.warn('[rango] relleno de gasto vivo respondió',_rRv.status);continue}
+          const _oRv=await _rRv.json()
+          if(!_oRv||typeof _oRv!=='object')continue
+          for(const ckRv of _loteRv){
+            const _dRv=_oRv[ckRv]&&_oRv[ckRv].insights&&_oRv[ckRv].insights.data
+            if(!_dRv||!_dRv.length)continue
+            for(const rIRv of _dRv){
+              const fRv=rIRv.date_start,gVv=parseFloat(rIRv.spend)||0
+              if(!fRv||gVv<=0||fRv<desde||fRv>hasta)continue
+              const _bdG=((_gCampDia[ckRv]||{})[fRv])||0
+              const _usaVivo=(fRv===_hoyIsoRv)?(gVv>_bdG):(_bdG<=0)
+              if(!_usaVivo)continue
+              const _deltaRv=gVv-_bdG
+              if(!_gCampDia[ckRv])_gCampDia[ckRv]={}
+              _gCampDia[ckRv][fRv]=gVv
+              const Fv=_mkF(ckRv)
+              if(!Fv.dias[fRv])Fv.dias[fRv]={count:0,gasto:0,cpa:0}
+              Fv.dias[fRv].gasto+=_deltaRv
+              Fv.gasto+=_deltaRv
+              _nRell++
+              _campsRell.add(ckRv)
+            }
+          }
+        }
+        if(_nRell)console.log('[rango] días de gasto rellenados en vivo desde Meta:',_nRell)
+        // FIX (6jul26 · Mejora 2b): el bloque 2️⃣ "Sus anuncios" también. Las campañas donde se
+        // rellenó gasto (las de testeo sin insights en BD) traen ADEMÁS el spend por día de SUS
+        // anuncios ({camp}/insights?level=ad) — así los ads de testeo salen listados con su
+        // gasto (grupo 🚨 solo-gastó) en vez de no aparecer o salir "— no corrió ese día —".
+        // Mismo criterio de relleno: solo huecos de BD; en HOY gana el mayor. Máximo 20 campañas
+        // por pasada (las de testeo del día son poquitas). Fallback silencioso.
+        try{
+          const _cksAd=[...(_campsRell||new Set())].slice(0,20)
+          for(const ckAd of _cksAd){
+            const _uAd=`${META_BASE}/${ckAd}/insights?level=ad&fields=spend,date_start,ad_id&time_range=${_trRv}&time_increment=1&limit=500&access_token=${_tkRv}`
+            const _rAd=await fetch(_uAd)
+            if(!_rAd.ok){console.warn('[rango] relleno ads vivo respondió',_rAd.status,'en',ckAd);continue}
+            const _oAd=await _rAd.json()
+            for(const rA of ((_oAd&&_oAd.data)||[])){
+              const aidV=rA.ad_id?String(rA.ad_id):'',fA=rA.date_start,gA=parseFloat(rA.spend)||0
+              if(!aidV||!fA||gA<=0||fA<desde||fA>hasta)continue
+              if(!_adDeCamp[aidV])_adDeCamp[aidV]=ckAd
+              const _bdA=((_gAdDia[aidV]||{})[fA])||0
+              const _usaA=(fA===_hoyIsoRv)?(gA>_bdA):(_bdA<=0)
+              if(!_usaA)continue
+              const _dA=gA-_bdA
+              if(!_gAdDia[aidV])_gAdDia[aidV]={}
+              _gAdDia[aidV][fA]=gA
+              const Fa=_fusR[ckAd]
+              if(!Fa)continue
+              if(!Fa.ads[aidV])Fa.ads[aidV]={count:0,ent:0,gasto:0,dias:{}}
+              if(!Fa.ads[aidV].dias[fA])Fa.ads[aidV].dias[fA]={n:0,g:0,cpa:0}
+              Fa.ads[aidV].dias[fA].g+=_dA
+              Fa.ads[aidV].gasto=(Fa.ads[aidV].gasto||0)+_dA
+            }
+          }
+        }catch(_eAd){console.warn('[rango] relleno de ads vivo falló (sigue normal):',_eAd&&_eAd.message)}
+      }
+    }catch(_eRv){console.warn('[rango] relleno de gasto vivo falló (se queda la BD):',_eRv&&_eRv.message)}
     for(const F of Object.values(_fusR)){
       F.cpa=(F.count>0&&F.gasto>0)?F.gasto/F.count:0
       for(const f of Object.keys(F.dias)){const d=F.dias[f];d.cpa=(d.count>0&&d.gasto>0)?d.gasto/d.count:0}
@@ -22693,7 +23052,15 @@ window._rpFusionRango=async function(slug,cidF){
           ${_cR(_cwR.tog,_btnEstR,false,'',true)}
           ${_cR(_cwR.bud,_btnBudR,false,'',true)}
           ${_paresDiaR}
-          ${_cR(_cwR.iTot,`<span class="rp-life-itot" style="display:inline-block;text-align:right"><span style="display:block;color:${_descTotR?'var(--amber)':(_iTotR>0?'#fcd34d':'var(--subtle)')};font-weight:700;line-height:1.15">${_iTotR>0?'🆔 '+_iTotR:'—'}</span>${(F.gasto>0&&_iTotR>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round(F.gasto/_iTotR))}">🆔$${fmt(Math.round(F.gasto/_iTotR))}</span>`:''}</span>`,true,window._nexoTip3('🆔 TOT: total de ventas por IDs del aux en el rango'+(_descTotR?' — NO cuadra con las 🛒 VTS ('+F.count+'), revisa cruce o IDs':' — cuadra con las 🛒 VTS')+'.','CPA IDS = gasto del rango ÷ IDs',(F.gasto>0&&_iTotR>0)?`$${fmt(Math.round(F.gasto))} ÷ ${_iTotR} = $${fmt(Math.round(F.gasto/_iTotR))}`:`IDs: ${_iTotR}`))}
+          ${_cR(_cwR.iTot,(()=>{
+            // FIX (6jul26 · Mejora 4): la celda 🆔 TOT ahora trae las MISMAS mini-líneas de las
+            // celdas por día y de la Σ TOTALES (antes solo salían 🆔 N y 🆔$; faltaban el gasto
+            // gris, el 🔮$ CPA R. EFECTIVAS y el 🔮 de ventas proyectadas post-cruce).
+            const _pctConfIT=(ctx.pctConf!=null&&!isNaN(ctx.pctConf))?Number(ctx.pctConf):0.62
+            const _cpaEfIT=(F.gasto>0&&_iTotR>0)?Math.round(F.gasto/(_iTotR*_pctConfIT)):0
+            const _vProyIT=_iTotR>0?(Math.floor(_iTotR*_pctConfIT*10)/10):0
+            return`<span class="rp-life-itot" style="display:inline-block;text-align:right"><span style="display:block;color:${_descTotR?'var(--amber)':(_iTotR>0?'#fcd34d':'var(--subtle)')};font-weight:700;line-height:1.15">${_iTotR>0?'🆔 '+_iTotR:'—'}</span>${(F.gasto>0&&_iTotR>0)?`<span style="display:block;font-size:8.5px;line-height:1.1;color:var(--subtle);font-weight:600">${_gAbrR(F.gasto)}</span>`:''}${(F.gasto>0&&_iTotR>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round(F.gasto/_iTotR))}">🆔$${fmt(Math.round(F.gasto/_iTotR))}</span>`:''}${_cpaEfIT>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(_cpaEfIT)}">🔮$${fmt(_cpaEfIT)}</span>`:''}${_vProyIT>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:var(--purple)">🔮 ${_vProyIT.toFixed(1)}</span>`:''}</span>`
+          })(),true,window._nexoTip3('🆔 TOT: total de ventas por IDs del aux en el rango'+(_descTotR?' — NO cuadra con las 🛒 VTS ('+F.count+'), revisa cruce o IDs':' — cuadra con las 🛒 VTS')+'. Debajo: gasto del rango · 🆔 CPA = gasto÷IDs · 🔮$ = gasto÷(IDs×%conf) · 🔮 proyectadas post-cruce.','CPA IDS = gasto del rango ÷ IDs',(F.gasto>0&&_iTotR>0)?`$${fmt(Math.round(F.gasto))} ÷ ${_iTotR} = $${fmt(Math.round(F.gasto/_iTotR))}`:`IDs: ${_iTotR}`))}
           ${_cR(_cwR.vts,`<span class="rp-life-vts" style="display:inline-block;text-align:right"><span style="display:block;color:var(--text);font-weight:700;line-height:1.15">${F.count}</span>${((F.gasto-_gHoyR)>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round((F.gasto-_gHoyR)/F.count))}">🎯$${fmt(Math.round((F.gasto-_gHoyR)/F.count))}</span>`:''}${((F.gasto-_gHoyR)>0&&F.count>0)?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:700;color:${_semColR(Math.round((F.gasto-_gHoyR)/(F.count*(1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19)))))}" title="📦 CPA V. ENTREGADAS = gasto (sin HOY) ÷ (ventas × (1−devol))">📦$${fmt(Math.round((F.gasto-_gHoyR)/(F.count*(1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19)))))}</span>`:''}${F.ent>0?`<span style="display:block;font-size:8px;line-height:1.15;font-weight:800;color:#86efac" title="📦 ENTREGADAS: órdenes que YA llegaron al cliente (subconjunto de las confirmadas)">📦 ${F.ent}</span>`:''}</span>`,true,window._nexoTip3('🛒 VTS: ventas confirmadas Dropi del rango. Las 🆔 de HOY no entran hasta que el cruce confirme. Como HOY no tiene cruce, sus CPAs se calculan SIN el gasto de hoy.','🎯 CPA = gasto (sin HOY) ÷ ventas · 📦 CPA entregadas = gasto (sin HOY) ÷ (ventas × (1−dev))',((F.gasto-_gHoyR)>0&&F.count>0)?`🎯 $${fmt(Math.round(F.gasto-_gHoyR))} ÷ ${F.count} = $${fmt(Math.round((F.gasto-_gHoyR)/F.count))}&#10;📦 $${fmt(Math.round(F.gasto-_gHoyR))} ÷ (${F.count} × ${Math.round((1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19))*100)}%) = $${fmt(Math.round((F.gasto-_gHoyR)/(F.count*(1-((_ecoR&&_ecoR.devPct!=null)?_ecoR.devPct:0.19)))))}`:`Ventas: ${F.count}`))}
           ${_cR(_cwR.bud,_btnBudR,false,'',true)}
           ${_cR(_cwR.id,`<span style="display:inline-flex;align-items:center;margin-left:-6px">${_btnC(F.campId,'ID de la campaña')}<span style="font-family:monospace;font-size:10.5px;color:var(--muted);margin-left:5px">${_esc(F.campId)}</span></span>`,false,'ID de la campaña: '+_esc(F.campId),true)}
@@ -22765,6 +23132,8 @@ window._rpFusionRango=async function(slug,cidF){
       }
     }catch(_){}
     try{if(cont)cont.scrollIntoView({behavior:'smooth',block:'start'})}catch(_){}
+    // NUEVO (6jul26 · Mejora 1): se enciende el sticky de la campaña activa (idempotente)
+    try{window._nxRngStickyCampInit()}catch(_){}
     _setSt(`✅ Listo: ${_listaR.length} campaña${_listaR.length===1?'':'s'}, ${_totVR} venta${_totVR===1?'':'s'}`,'var(--green)')
   }catch(e){
     console.warn('[fusión rango] error:',e&&e.message)
@@ -23839,7 +24208,10 @@ window._nexoStickyHBar=function(el){
         const _wrapU=el.closest('.rp-fus-main')
         const _urg=_wrapU&&_wrapU.querySelector('[data-nx-urg="1"]')
         if(_urg&&_urg.offsetParent!==null)t=_urg.offsetHeight+6
-        if(top.classList.contains('nexo-hbar-sm'))t+=17
+        // NUEVO (6jul26 · Mejora 1): si la BARRA DE LA CAMPAÑA está pegada (modo rango), la
+        // barrita del desglose baja ese alto extra → secuencia: urgencia → barra grande →
+        // campaña pegada → barrita del desglose. Si no hay campaña pegada, todo como antes.
+        if(top.classList.contains('nexo-hbar-sm'))t+=17+((window._nxRngStickyH||0))
         return t
       }catch(_){return 4}}
       // MEJORA 4 (5jul26 · CASO ANIDADO): si hay un ancestro con overflow-x (la tabla del rango)
@@ -30254,6 +30626,57 @@ function hbMasivoValor(campo,f,r,emoji){
 }
 // Letras A..AA (27 columnas)
 function hbColL(i){return i<26?String.fromCharCode(65+i):'A'+String.fromCharCode(65+i-26)}
+// ══ FASE 6 (6jul26) · Mejora 16: CENTRO DE CONTROL — ORIGINALES DEL SISTEMA (inmutables) ══
+// HB_ORIG vive en el CÓDIGO (no en la config): "🔄 Volver a original" siempre funciona aunque
+// la config guardada esté corrupta. Todos los valores internos de las Fases 3-6 salen de aquí.
+const HB_ORIG={
+  valores:{
+    nombreMalPiso:5,            // M14-F6: mínimo de pedidos para evaluar "nombre mal"
+    nombreMalPct:40,            // M14-F6: % de fechas discordantes que se debe SUPERAR
+    dupPct:50,                  // M15.B: % de teléfonos repetidos que se debe SUPERAR = mismo Excel
+    precioTerminacion:900,      // M6: últimos 3 dígitos del precio
+    interrapPalabras:['interrapidisimo','interapidisimo','inter','oficina'], // M8
+    estadoTokens:['confirmado','cancelado','reservado','pendiente','devuelto','entregado','rechazado','anulado'], // M11
+    estadoUmbralPct:50,         // M11: % de celdas con token para sugerir la columna
+    colorCancelado:'FFFF6B6B',  // M12: fila cancelada del masivo
+    colorReservado:'FFFFC000',  // M12: fila reservada del masivo
+    paletaProducto:['FFE2EFDA','FFDDEBF7','FFFFF2CC','FFFCE4D6','FFE4DFEC','FFD9E1F2'], // banda por producto (hoja + masivo, UNA sola paleta)
+    colorCorreccion:'FFFFC000', // fila corregida (hoja)
+    colorOferta:'FFF4CCCC'      // fila de oferta (hoja)
+  },
+  reglas:{ // las 14 reglas con switch — todas nacen ACTIVAS
+    candado_fechas:true,nombre_mal:true,anti_duplicado:true,verif_repetidos:true,secuencia:true,
+    obligatorios:true,candado_filas:true,precios_oferta:true,precio_mayoria:true,redondeo900:true,
+    stock_conv:true,deteccion_interrap:true,deteccion_estado:true,resaltado_masivo:true
+  }
+}
+// Estructura por valor en la config: {actual, fabrica}. hbValoresDefault crea todo desde HB_ORIG.
+const _hbClone=v=>Array.isArray(v)?v.slice():v
+function hbValoresDefault(){
+  const out={}
+  for(const[k,v]of Object.entries(HB_ORIG.valores))out[k]={actual:_hbClone(v),fabrica:_hbClone(v)}
+  return out
+}
+// GETTER de valor vigente: config.valores[k].actual → si falta/corrupto → ORIGINAL del sistema.
+function hbCfgVal(k){
+  try{
+    const v=window._hbCfgFull?.valores?.[k]
+    if(v&&v.actual!=null&&v.actual!==''&&!(Array.isArray(v.actual)&&!v.actual.length))return v.actual
+  }catch(_){}
+  return _hbClone(HB_ORIG.valores[k])
+}
+// GETTER de switch de regla: config.reglas[k] → si falta → ON (original).
+function hbReglaActiva(k){
+  try{const r=window._hbCfgFull?.reglas?.[k];if(typeof r==='boolean')return r}catch(_){}
+  return HB_ORIG.reglas[k]!==false
+}
+// Paleta/colores con validación de formato ARGB (8 hex). Si algo no es color válido → original.
+const _hbColorOk=c=>/^[0-9A-Fa-f]{8}$/.test(String(c||''))
+function hbCfgColor(k){const c=hbCfgVal(k);return _hbColorOk(c)?String(c).toUpperCase():HB_ORIG.valores[k]}
+function hbCfgPaleta(){
+  const p=hbCfgVal('paletaProducto')
+  return(Array.isArray(p)&&p.length&&p.every(_hbColorOk))?p.map(c=>String(c).toUpperCase()):HB_ORIG.valores.paletaProducto.slice()
+}
 function hbDefaultConfig(){
   const cols=[
     {col:'A',header:'nombre',fuente:'sellerchat:nombre'},
@@ -30278,14 +30701,16 @@ function hbDefaultConfig(){
   ]
   for(let i=19;i<27;i++)cols.push({col:hbColL(i),header:'',fuente:'vacia'})
   return{
-    version:4, // FASE 5 (6jul26) · Mejora 11: v4 = estado en fórmula/orden/masivo (v3 = masivo_cols flexible; v2 = fórmula de corchetes)
+    version:5, // FASE 6 (6jul26) · Mejora 16: v5 = Centro de Control (valores+reglas). v4 = estado; v3 = masivo flexible; v2 = corchetes
     columnas:cols,
     formula_col:'S',
     formula:HB_FORMULA_V2,
     // Fórmula VIEJA (pre-Fase 2, referencia): '=E{r} & ", " & H{r} & ", " & D{r}& ", " & F{r}& ", " & P{r}& ", " & Q{r}& ", " & N{r}& ", " & G{r}& ", " & R{r}& ", " & O{r}'
     orden_linea:HB_ORDEN_LINEA.slice(),
     masivo_headers:HB_MASIVO_HEADERS.slice(),
-    masivo_cols:hbMasivoColsDefault() // MEJORA (5jul26-b): header + campo por columna, cantidad flexible
+    masivo_cols:hbMasivoColsDefault(), // MEJORA (5jul26-b): header + campo por columna, cantidad flexible
+    valores:hbValoresDefault(),        // FASE 6 (6jul26) · Mejora 16: {actual,fabrica} por valor
+    reglas:{...HB_ORIG.reglas}         // FASE 6 (6jul26) · Mejora 16: switches ON/OFF (nacen todas ON)
   }
 }
 async function hbLoadConfig(){
@@ -30323,14 +30748,30 @@ async function hbLoadConfig(){
           })
           cfg.version=4
         }
+        // FASE 6 (6jul26) · Mejora 16: migración v4→v5 + BACKFILL DEFENSIVO SIEMPRE — Centro de Control.
+        // Cada valor que falte se puebla con {actual:ORIGINAL, fabrica:ORIGINAL}; cada switch que falte
+        // nace ON. Nunca se pierde fórmula/columnas/masivo. Corre en toda carga (tolera configs corruptas).
+        if(!cfg.valores||typeof cfg.valores!=='object')cfg.valores={}
+        for(const[k,v]of Object.entries(HB_ORIG.valores)){
+          const e=cfg.valores[k]
+          if(!e||typeof e!=='object'||e.actual==null)cfg.valores[k]={actual:_hbClone(v),fabrica:_hbClone(v)}
+          else if(e.fabrica==null)e.fabrica=_hbClone(v)
+        }
+        if(!cfg.reglas||typeof cfg.reglas!=='object')cfg.reglas={}
+        for(const k of Object.keys(HB_ORIG.reglas))if(typeof cfg.reglas[k]!=='boolean')cfg.reglas[k]=true
+        if(cfg.version<5)cfg.version=5
+        window._hbCfgFull=cfg // caché para los getters síncronos (hbCfgVal / hbReglaActiva)
         return cfg
       }
     }
   }catch(e){console.warn('[HB] config inválida, uso defaults:',e&&e.message)}
-  return hbDefaultConfig()
+  const _def=hbDefaultConfig()
+  window._hbCfgFull=_def // caché también con defaults
+  return _def
 }
 async function hbSaveConfig(cfg){
   const{error}=await sb.from('config').upsert({clave:HB_CFG_KEY,valor:JSON.stringify(cfg),updated_at:new Date().toISOString()},{onConflict:'clave'})
+  if(!error)window._hbCfgFull=cfg // FASE 6 (6jul26) · Mejora 16: refrescar el caché al guardar
   return error?error.message:null
 }
 
@@ -30375,19 +30816,36 @@ function hbSanear(v){
 // ── 3. VALIDACIÓN DEL NOMBRE DEL ARCHIVO (filas__AGENTE__fecha__oferta) ─────
 function hbValidarNombre(rawName){
   const name=String(rawName||'').replace(/\.(xlsx|xls|csv)$/i,'').trim()
-  if(!name.includes('__'))return{ok:false,error:'Faltan los "__" separadores. Usa doble guion bajo entre cada parte. Ejemplo: 38__Neocell_A6_A2__2026-07-01'}
+  // FASE 6 (6jul26) · M15.A: NUEVO FORMATO con SECUENCIA obligatoria (tanda del día):
+  //   filas__AGENTE__fecha__secuencia            → 38__Neocell_A6_A2__2026-07-05__1
+  //   filas__AGENTE__fecha__secuencia__oferta    → 38__Neocell_A6_A2__2026-07-05__1__oferta
+  // La 1ª subida del día SIEMPRE lleva __1. Regla 5 del Centro de Control: si el switch
+  // "secuencia" está OFF, se acepta también el formato viejo (sin secuencia, tanda=1).
+  const exigirSec=hbReglaActiva('secuencia')
+  const EJ='38__Neocell_A6_A2__2026-07-05__1'
+  if(!name.includes('__'))return{ok:false,error:`Faltan los "__" separadores. Usa doble guion bajo entre cada parte. Ejemplo: ${EJ}`}
   const parts=name.split('__').map(p=>p.trim())
-  if(parts.length<3)return{ok:false,error:'Falta un "__". Debe ir: filas__AGENTE__fecha. Ejemplo: 38__Neocell_A6_A2__2026-07-01'}
-  if(parts.length>4)return{ok:false,error:'Sobran partes en el nombre. Formato: filas__AGENTE__fecha__oferta'}
-  if(!/^\d+$/.test(parts[0]))return{ok:false,error:'Falta el número de filas al inicio. Ejemplo: 38__Neocell_A6_A2__2026-07-01'}
-  if(!parts[1])return{ok:false,error:'Falta el AGENTE en la 2ª parte. Ejemplo: 38__Neocell_A6_A2__2026-07-01'}
-  if(!hbFechaValida(parts[2]))return{ok:false,error:'Fecha inválida. Debe ser AAAA-MM-DD. Ejemplo: 2026-07-01'}
-  let oferta=false
-  if(parts.length===4){
-    if(parts[3].toLowerCase()!=='oferta')return{ok:false,error:'La 4ª parte solo puede ser "oferta" o ir vacía.'}
-    oferta=true
+  if(!/^\d+$/.test(parts[0]))return{ok:false,error:`Falta el número de filas al inicio. Ejemplo: ${EJ}`}
+  if(!parts[1])return{ok:false,error:`Falta el AGENTE en la 2ª parte. Ejemplo: ${EJ}`}
+  if(!hbFechaValida(parts[2]||''))return{ok:false,error:'Fecha inválida. Debe ser AAAA-MM-DD. Ejemplo: 2026-07-05'}
+  let oferta=false,secuencia=1
+  if(parts.length===3||(parts.length===4&&parts[3].toLowerCase()==='oferta')){
+    // FORMATO VIEJO (sin secuencia)
+    if(exigirSec)return{ok:false,error:`Al nombre le falta la SECUENCIA de tanda (nuevo formato). Después de la fecha va __1 para la 1ª subida del día, __2 para la 2ª, etc. — y "oferta" (si aplica) va AL FINAL. Ejemplo: ${EJ} · con oferta: ${EJ}__oferta. Renombra el archivo y vuelve a subirlo.`}
+    oferta=parts.length===4
+  }else if(parts.length===4||parts.length===5){
+    // FORMATO NUEVO: parts[3]=secuencia, parts[4] opcional='oferta'
+    if(!/^\d+$/.test(parts[3]))return{ok:false,error:`La 4ª parte debe ser la SECUENCIA de tanda (solo números: __1, __2, …). "${parts[3]}" no es válida. Ejemplo: ${EJ}${parts[3].toLowerCase()==='oferta'?' — y si es oferta, "oferta" va DESPUÉS de la secuencia: '+EJ+'__oferta':''}`}
+    secuencia=parseInt(parts[3],10)
+    if(secuencia<1)return{ok:false,error:'La secuencia empieza en __1 (1ª subida del día).'}
+    if(parts.length===5){
+      if(parts[4].toLowerCase()!=='oferta')return{ok:false,error:`La 5ª parte solo puede ser "oferta". Ejemplo: ${EJ}__oferta`}
+      oferta=true
+    }
+  }else{
+    return{ok:false,error:`Sobran partes en el nombre. Formato: filas__AGENTE__fecha__secuencia (y "__oferta" al final si aplica). Ejemplo: ${EJ}`}
   }
-  return{ok:true,filas:parseInt(parts[0],10),agenteStr:parts[1],fecha:parts[2],oferta}
+  return{ok:true,filas:parseInt(parts[0],10),agenteStr:parts[1],fecha:parts[2],oferta,secuencia}
 }
 
 // ── 4. CADENA AGENTE → PRODUCTO (lee las MISMAS tablas del Asignador) ───────
@@ -30445,14 +30903,16 @@ async function hbLeerExcel(file){
   // Sin candidata → el estado sale vacío + aviso. NUNCA bloquea el procesamiento.
   let estadoAlt=null,notaEstado=''
   const keys0=raw.length?Object.keys(raw[0]||{}):[]
-  if(raw.length&&!keys0.includes('estado')){
+  if(raw.length&&!keys0.includes('estado')&&hbReglaActiva('deteccion_estado')){ // FASE 6 · M16 regla 13: switch
     const _nrm=s=>String(s==null?'':s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()
+    const _tk=(hbCfgVal('estadoTokens')||[]).map(_nrm).filter(Boolean) // FASE 6 · M16: tokens configurables
+    const _uE=parseFloat(hbCfgVal('estadoUmbralPct'));const _umbE=((isFinite(_uE)?_uE:50)/100) // umbral configurable
     let best=null
     for(const k of keys0){
       if(HB_SC_HEADERS.includes(k))continue // columnas oficiales con otro propósito no son candidatas
       let noVacias=0,hits=0
-      for(const rr of raw){const vv=_nrm(rr[k]);if(!vv)continue;noVacias++;if(HB_ESTADO_TOKENS.includes(vv))hits++}
-      if(noVacias&&hits/noVacias>=0.5&&(!best||hits>best.hits))best={k,hits}
+      for(const rr of raw){const vv=_nrm(rr[k]);if(!vv)continue;noVacias++;if(_tk.includes(vv))hits++}
+      if(noVacias&&hits/noVacias>=_umbE&&(!best||hits>best.hits))best={k,hits}
     }
     if(best){
       estadoAlt=best.k
@@ -30460,6 +30920,8 @@ async function hbLeerExcel(file){
     }else{
       notaEstado='⚠️ No encontré la columna "estado" ni ninguna parecida en este Excel — el estado saldrá VACÍO. Informa al administrador.'
     }
+  }else if(raw.length&&!keys0.includes('estado')){ // regla 13 APAGADA: sin búsqueda, solo aviso
+    notaEstado='⚠️ Este Excel no trae la columna "estado" — saldrá VACÍO (la búsqueda de columna parecida está APAGADA en el Centro de Control).'
   }
   const rows=[]
   for(const r of raw){
@@ -30490,6 +30952,7 @@ async function hbProcesarArchivo(file,ctx){
   const vn=hbValidarNombre(file.name)
   if(!vn.ok){f.error=vn.error;return f}
   f.filasDecl=vn.filas;f.agenteStr=vn.agenteStr;f.fechaDecl=vn.fecha;f.oferta=vn.oferta
+  f.secuencia=vn.secuencia||1 // FASE 6 (6jul26) · M15.A: tanda del día declarada en el nombre
   // b) fecha del archivo contra la ventana
   if(f.fechaDecl>ctx.hoy){f.error=`La fecha ${f.fechaDecl} es FUTURA. Revisa el nombre del archivo.`;return f}
   // FASE 3 (6jul26) · Mejora 1: los archivos de OFERTA (__oferta) SÍ pueden procesar con fecha HOY sin casilla.
@@ -30502,33 +30965,96 @@ async function hbProcesarArchivo(file,ctx){
   if(lec.error){f.error=lec.error;return f}
   f.rows=lec.rows;f.buf=lec.buf
   if(lec.notaEstado)f.notas.push(lec.notaEstado) // FASE 5 (6jul26) · Mejora 11: aviso de columna estado ausente/alternativa
-  // d) CANDADO de filas (doble verificación)
-  if(f.rows.length!==f.filasDecl){f.error=`Dice ${f.filasDecl} filas pero el Excel trae ${f.rows.length}. Revisá lo que bajaste de Seller Chat y vuelve a subir este archivo.`;return f}
+  // d) CANDADO de filas (doble verificación) — FASE 6 · M16 regla 7: respeta su switch
+  if(hbReglaActiva('candado_filas')){
+    if(f.rows.length!==f.filasDecl){f.error=`Dice ${f.filasDecl} filas pero el Excel trae ${f.rows.length}. Revisá lo que bajaste de Seller Chat y vuelve a subir este archivo.`;return f}
+  }
   // e) resolver AGENTE → producto → ID Dropi (el corazón)
   const res=hbResolverAgente(f.agenteStr,ctx.cadena)
   if(!res.ok){f.error=res.error;return f}
   f.agente=res.agente;f.agenteId=res.agenteId;f.producto=res.producto
-  // f) CANDADO de fechas por fila: cada fila debe calzar con la fecha de SU archivo
+  // ══ FASE 6 (6jul26) · M15.B: ANTI-DUPLICADO POR TELÉFONO (regla 3, [CRÍTICA]) ══
+  // Compara los teléfonos del Excel (filas cuya fecha ∈ brecha o HOY) contra los YA procesados:
+  // BD (detalle.telefonos de exports de esos días) + archivos ya cargados en esta sesión.
+  // >umbral% repetidos = MISMO Excel re-subido → bloquea. ≤umbral → verificación puntual (15.C).
+  if(hbReglaActiva('anti_duplicado')){
+    const _dnorm=t=>String(t==null?'':t).replace(/\D/g,'')
+    const _rango=new Set([...(ctx.esperadas||[]),ctx.hoy]) // brecha + HOY (cubre la re-subida del día)
+    const _mios=[];f.rows.forEach((r,ri)=>{const t=_dnorm(r.tel);if(t&&_rango.has(r.fecha))_mios.push({ri,tel:t})})
+    if(_mios.length){
+      const _vistos={} // tel → 'dónde antes'
+      try{
+        const{data:_prev}=await sb.from('constructor_subidas').select('detalle,fecha_declarada,archivo_nombre')
+          .eq('tipo','export').in('fecha_declarada',[..._rango])
+        for(const g of(_prev||[])){
+          const ts=g&&g.detalle&&Array.isArray(g.detalle.telefonos)?g.detalle.telefonos:[]
+          for(const t of ts){const n=_dnorm(t);if(n&&!(n in _vistos))_vistos[n]=`ya procesado el ${g.fecha_declarada} (${g.archivo_nombre||'Excel anterior'})`}
+        }
+      }catch(_e){console.warn('[hb dup] lectura BD:',_e?.message)} // sin lectura → compara solo sesión
+      for(const o of(ctx.archivosSesion||[])){ // otros archivos cargados en ESTA sesión (aún sin generar)
+        if(o===f||o.estado==='error')continue
+        for(const r2 of(o.rows||[])){const n=_dnorm(r2.tel);if(n&&_rango.has(r2.fecha)&&!(n in _vistos))_vistos[n]=`en el archivo ${o.name} de esta misma sesión`}
+      }
+      const _reps=_mios.filter(x=>x.tel in _vistos)
+      const _pct=_reps.length/_mios.length*100
+      const _uDup=parseFloat(hbCfgVal('dupPct'));const _umbralDup=isFinite(_uDup)?_uDup:50
+      if(_pct>_umbralDup){
+        f.estado='duplicado'
+        f.dupInfo={n:_reps.length,total:_mios.length,pct:Math.round(_pct)}
+        return f
+      }
+      if(_reps.length&&hbReglaActiva('verif_repetidos')){ // regla 4: verificación de repetidos ≤umbral
+        f.repetidos=_reps.map(x=>({ri:x.ri,tel:f.rows[x.ri].tel,antes:_vistos[x.tel],resuelto:null}))
+      }
+    }
+  }
+  // f) CANDADO de fechas por fila (regla 1, [CRÍTICA]) — cada fila debe calzar con la fecha de SU archivo
   let anomalas=0
-  for(const r of f.rows){
-    if(!r.fm){r.fecha=f.fechaDecl;r.mdy=hbISOaMDY(f.fechaDecl);r.confirmada=true;f.notas.push('⚠️ Una fila venía SIN fecha — se le puso la fecha del archivo.');continue}
-    if(r.fecha!==f.fechaDecl)anomalas++
-    else r.confirmada=true
+  if(hbReglaActiva('candado_fechas')){
+    for(const r of f.rows){
+      if(!r.fm){r.fecha=f.fechaDecl;r.mdy=hbISOaMDY(f.fechaDecl);r.confirmada=true;f.notas.push('⚠️ Una fila venía SIN fecha — se le puso la fecha del archivo.');continue}
+      if(r.fecha!==f.fechaDecl)anomalas++
+      else r.confirmada=true
+    }
+  }else{ // regla APAGADA desde el Centro de Control: todas las filas entran con su fecha (o la del archivo)
+    for(const r of f.rows){if(!r.fm){r.fecha=f.fechaDecl;r.mdy=hbISOaMDY(f.fechaDecl)}r.confirmada=true}
+  }
+  // ══ FASE 6 (6jul26) · M14-F6: EXCEL MAL NOMBRADO por MAYORÍA de fechas (regla 2) ══
+  // SOLO archivos normales. Se declara "NOMBRE MAL" si se cumplen LAS DOS: filas ≥ PISO y
+  // discordantes > UMBRAL% (estricto). Si no, la revisión individual actual sigue igual.
+  if(!f.oferta&&hbReglaActiva('nombre_mal')){
+    const _tot=f.rows.length
+    const _piso=parseInt(hbCfgVal('nombreMalPiso'));const _p=isFinite(_piso)?_piso:5
+    const _u=parseFloat(hbCfgVal('nombreMalPct'));const _umb=(isFinite(_u)?_u:40)/100
+    if(_tot>=_p&&_tot>0){
+      const _disc=f.rows.filter(r=>r.fecha&&r.fecha!==f.fechaDecl).length
+      if(_disc/_tot>_umb){
+        const _fr={};for(const r of f.rows)if(r.fecha)_fr[r.fecha]=(_fr[r.fecha]||0)+1
+        let _fm=null;for(const[d,n]of Object.entries(_fr))if(!_fm||n>_fm.n)_fm={d,n}
+        f.estado='nombre_mal'
+        f.nombreMal={fechaMayoritaria:_fm?_fm.d:'',discordantes:_disc,total:_tot,pct:Math.round(_disc/_tot*100)}
+        return f
+      }
+    }
   }
   // FASE 3 (6jul26) · Mejora 6: normalizar precios a X900 ANTES de cualquier verificación de precio.
   // Así la mayoría (Mejora 5) y los grupos de oferta ven los precios YA limpios. Ilógicos (<1000) → r._precioIlogico.
-  let redondeados=0
-  for(const r of f.rows){
-    const rr=hbRound900(r.sc.precio)
-    if(rr.ilogico){r._precioIlogico=true}
-    else{
-      r._precioIlogico=false
-      if(String(rr.val)!==String(r.sc.precio==null?'':r.sc.precio).trim())redondeados++
-      r.sc.precio=String(rr.val)
+  // FASE 6 · M16 regla 10: respeta su switch (OFF → precios tal cual, sin marcas de ilógico).
+  if(hbReglaActiva('redondeo900')){
+    let redondeados=0
+    const _term=parseInt(hbCfgVal('precioTerminacion'));const _t900=isFinite(_term)?_term:900
+    for(const r of f.rows){
+      const rr=hbRound900(r.sc.precio)
+      if(rr.ilogico){r._precioIlogico=true}
+      else{
+        r._precioIlogico=false
+        if(String(rr.val)!==String(r.sc.precio==null?'':r.sc.precio).trim())redondeados++
+        r.sc.precio=String(rr.val)
+      }
     }
-  }
-  if(redondeados)f.notas.push(`💲 ${redondeados} precio(s) normalizados a terminación 900 (regla X900).`)
-  f.estado=anomalas>0?'revision':(f.oferta?'oferta':'listo') // FASE 2: oferta → verificar precios antes de listo
+    if(redondeados)f.notas.push(`💲 ${redondeados} precio(s) normalizados a terminación ${_t900} (regla X${_t900}).`)
+  }else{for(const r of f.rows)r._precioIlogico=false}
+  f.estado=anomalas>0?'revision':((f.oferta&&hbReglaActiva('precios_oferta'))?'oferta':'listo') // FASE 2 + FASE 6 regla 8
   if(f.estado==='listo')hbPrecioRecalc(f) // FASE 3 (6jul26) · Mejora 5: archivos normales pasan por revisión de mayoría
   return f
 }
@@ -30541,7 +31067,9 @@ function hbRound900(p){
   const n=parseInt(String(p==null?'':p).replace(/[^\d]/g,''),10)
   if(!isFinite(n)||isNaN(n))return{val:p,ilogico:true}
   if(n<1000)return{val:n,ilogico:true}
-  return{val:Math.floor(n/1000)*1000+900,ilogico:false}
+  const _t=parseInt(hbCfgVal('precioTerminacion')) // FASE 6 (6jul26) · M16: terminación configurable (fábrica 900)
+  const term=(isFinite(_t)&&_t>=0&&_t<=999)?_t:900
+  return{val:Math.floor(n/1000)*1000+term,ilogico:false}
 }
 // ══ FASE 2 (5jul26): VERIFICACIÓN DE PRECIOS DE OFERTA (por grupos cantidad+precio) ══
 // Agrupa por cantidad y, dentro, por precio. Todo precio distinto se muestra por separado
@@ -30573,7 +31101,7 @@ function hbGruposOferta(f){
 const hbOfertaTodoOk=f=>hbGruposOferta(f).every(g=>g.conf)
 function hbOfertaRecalc(f){
   if(f.estado==='revision'||f.estado==='error')return
-  f.estado=(f.oferta&&!hbOfertaTodoOk(f))?'oferta':'listo'
+  f.estado=(f.oferta&&hbReglaActiva('precios_oferta')&&!hbOfertaTodoOk(f))?'oferta':'listo' // FASE 6 · M16 regla 8: switch
   if(f.estado==='listo')hbPrecioRecalc(f) // FASE 3 (6jul26) · Mejora 5: al salir de oferta/revisión, verificar mayoría en normales
 }
 // ══ FASE 3 (6jul26) · Mejora 5: REVISIÓN DE PRECIO POR MAYORÍA (solo archivos NORMALES) ══
@@ -30633,6 +31161,7 @@ function hbGruposMayoria(f){
 // Recalcula el sub-estado 'precio' de un archivo NORMAL (paralelo a 'oferta')
 function hbPrecioRecalc(f){
   if(f.oferta||f.estado==='revision'||f.estado==='error')return
+  if(!hbReglaActiva('precio_mayoria')){f.estado='listo';return} // FASE 6 · M16 regla 9: switch (OFF = sin revisión)
   const{disidentes}=hbPreciosMayoria(f)
   f.estado=disidentes.length?'precio':'listo'
 }
@@ -30645,10 +31174,10 @@ async function pageAuxHojaBase(c){
   <div class="page-sub">Sube los Excel de Seller Chat y NEXO arma la hoja base sola: ordena columnas, llena ID Dropi, agente y producto, valida y envía los IDs a Reportes Diarios.</div>
   <div class="card" style="margin-top:12px">
     <div class="section-title">📛 Cómo nombrar cada archivo (obligatorio)</div>
-    <div style="font-size:14px;line-height:1.8">
-      Formato: <b style="font-family:monospace">filas__AGENTE__fecha__oferta</b> (separador = <b>doble</b> guion bajo "__")<br>
-      ✅ <span style="font-family:monospace">38__Neocell_A6_A2__2026-07-01__oferta</span> &nbsp;·&nbsp; ✅ <span style="font-family:monospace">2__Nad_Pro_Max_F4__2026-07-01</span><br>
-      <span style="color:var(--muted);font-size:12px">1) filas = cuántas ventas trae (candado) · 2) AGENTE tal como está en NEXO · 3) fecha AAAA-MM-DD · 4) "oferta" solo si aplica</span>
+    <div style="font-size:14px;line-height:1.8"><!-- FASE 6 (6jul26) · M15.A: formato con SECUENCIA de tanda -->
+      Formato: <b style="font-family:monospace">filas__AGENTE__fecha__secuencia</b> (separador = <b>doble</b> guion bajo "__") · si es oferta: <b style="font-family:monospace">...__secuencia__oferta</b><br>
+      ✅ <span style="font-family:monospace">38__Neocell_A6_A2__2026-07-05__1</span> &nbsp;·&nbsp; ✅ <span style="font-family:monospace">10__Neocell_A6_A2__2026-07-05__2</span> &nbsp;·&nbsp; ✅ <span style="font-family:monospace">20__Neocell_A6_A2__2026-07-05__1__oferta</span><br>
+      <span style="color:var(--muted);font-size:12px">1) filas = cuántas ventas trae (candado) · 2) AGENTE tal como está en NEXO · 3) fecha AAAA-MM-DD · 4) secuencia de tanda: <b>__1</b> la primera subida del día (SIEMPRE, aunque sea la única), __2 la segunda tanda con pedidos nuevos, etc. · 5) "oferta" AL FINAL solo si aplica</span>
     </div>
   </div>
   <div class="card" style="margin-top:12px">
@@ -30699,7 +31228,8 @@ window.hbOnFiles=async(inp)=>{
   if(!files.length)return
   const lista=document.getElementById('hb-lista')
   if(lista&&!window._hb.files.length)lista.innerHTML='<div class="loading">Procesando archivos...</div>'
-  const ctx={hoy:window._hb.hoy,ultima:window._hb.ultima,cadena:window._hb.cadena,incluirHoy:!!document.getElementById('hb-hoy')?.checked}
+  const ctx={hoy:window._hb.hoy,ultima:window._hb.ultima,cadena:window._hb.cadena,incluirHoy:!!document.getElementById('hb-hoy')?.checked,
+    esperadas:(window._hb.esperadas||[]).slice(),archivosSesion:window._hb.files} // FASE 6 (6jul26) · M15.B: brecha + archivos de esta sesión para el anti-duplicado
   for(const file of files){
     const f=await hbProcesarArchivo(file,ctx)
     window._hb.files.push(f)
@@ -30719,6 +31249,12 @@ function hbRender(){
     if(f.estado==='error'){
       badge=`<span style="color:var(--red);font-weight:800">❌ NO se procesa</span>`
       body=`<div class="alert alert-red" style="margin-top:8px">${hbEsc(f.error)}</div>`
+    }else if(f.estado==='nombre_mal'){ // ══ FASE 6 (6jul26) · M14-F6: Excel mal nombrado por MAYORÍA ══
+      badge=`<span style="color:var(--red);font-weight:800">🚫 NOMBRE MAL (fecha equivocada)</span>`
+      body=`<div class="alert alert-red" style="margin-top:8px;line-height:1.7">❌ Este archivo dice <b>${hbEsc(f.fechaDecl)}</b> pero la mayoría de sus pedidos son del <b>${hbEsc(f.nombreMal?.fechaMayoritaria||'')}</b> (${f.nombreMal?.discordantes||0} de ${f.nombreMal?.total||0} filas con otra fecha · ${f.nombreMal?.pct||0}%).<br>El <b>NOMBRE está mal</b> — aquí no se corrigen los pedidos. <b>Renombra el Excel</b> con la fecha correcta (sugerida: <b>${hbEsc(f.nombreMal?.fechaMayoritaria||'')}</b>) y vuelve a subirlo.</div>`
+    }else if(f.estado==='duplicado'){ // ══ FASE 6 (6jul26) · M15.B: mismo Excel re-subido ══
+      badge=`<span style="color:var(--red);font-weight:800">🚫 DUPLICADO (ya lo subiste)</span>`
+      body=`<div class="alert alert-red" style="margin-top:8px;line-height:1.7">❌ Este Excel <b>ya lo subiste</b>: ${f.dupInfo?.n||0} de ${f.dupInfo?.total||0} pedidos (${f.dupInfo?.pct||0}%) ya están procesados en los días de la brecha. Es el mismo archivo — <b>no se procesa</b> (así no se duplican ventas ni IDs).<br>Si es una <b>2ª tanda legítima</b> (pedidos NUEVOS), su Excel trae teléfonos distintos y el nombre lleva la secuencia siguiente (__2).</div>`
     }else if(f.estado==='revision'){
       const pend=hbPendientes(f)
       badge=`<span style="color:var(--amber);font-weight:800">⚠️ EN REVISIÓN (${pend.length} fila${pend.length===1?'':'s'})</span>`
@@ -30803,6 +31339,29 @@ function hbRender(){
       const np=(f.corrPrecios||[]).reduce((a,x)=>a+(x.ventas||0),0) // FASE 2: ventas con precio/cantidad ajustados
       badge=`<span style="color:var(--green);font-weight:800">✓ ${hbEsc(f.agente)} → ${hbEsc(f.producto?.nombre||'')} · ${f.rows.length}/${f.filasDecl} filas${f.oferta?' · 🏷️ oferta verificada':''}${nc?` · ✏️ ${nc} corregida${nc===1?'':'s'}`:''}${np?` · 💲 ${np} precio(s)/cant. ajustado(s)`:''}</span>`
     }
+    // ══ FASE 6 (6jul26) · M15.C: VERIFICACIÓN DE TELÉFONOS REPETIDOS (≤ umbral) ══
+    // Cada número repetido se resuelve: ✓ recompra (entra) o 🗑️ quitar (no entra a hoja ni reportes).
+    if(!['error','nombre_mal','duplicado'].includes(f.estado)&&(f.repetidos||[]).length){
+      const pendR=f.repetidos.filter(x=>!x.resuelto).length
+      body+=`<div style="margin-top:8px;border:1px solid ${pendR?'var(--red)':'var(--green)'};border-radius:10px;padding:10px">
+        <div style="font-weight:800;font-size:13px;color:${pendR?'var(--red)':'var(--green)'}">${pendR?`📞 TELÉFONOS REPETIDOS — resuelve ${pendR} pendiente${pendR===1?'':'s'} antes de generar`:'✓ Teléfonos repetidos: todos resueltos'}</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px">Estos números ya aparecieron en la brecha. Verifica en Seller Chat: ¿es una <b>recompra real</b> o se coló un <b>duplicado</b>?</div>
+        ${f.repetidos.map((x,xi)=>{
+          const r=f.rows[x.ri]||{sc:{}}
+          const res=x.resuelto
+          return`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px;padding:7px;border:1px solid var(--border);border-left:4px solid ${res==='recompra'?'var(--green)':(res==='quitar'?'var(--red)':'var(--amber)')};border-radius:8px;font-size:12.5px;${res==='quitar'?'opacity:.65':''}">
+            <div style="flex:1;min-width:220px;line-height:1.5">📞 <b style="font-size:14px">${hbEsc(x.tel)}</b> ${hbTelBtn(x.tel)} · ${hbEsc(String(r.sc.nombre||''))} ${hbEsc(String(r.sc.apellido||''))} · ${hbEsc(f.producto?.nombre||'')}<br>
+            <span style="color:var(--muted)">🔎 ${hbEsc(x.antes||'ya visto en la brecha')}</span>
+            ${res==='recompra'?'<br><b style="color:var(--green)">✓ Confirmado como RECOMPRA — entra normal</b>':''}
+            ${res==='quitar'?'<br><b style="color:var(--red)">🗑️ QUITADO — no entra a la hoja ni a reportes</b>':''}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              ${res?`<button class="btn-sm" onclick="hbRepUndo(${fi},${xi})">↩️ Deshacer</button>`
+                :`<button class="btn-sm btn-green" onclick="hbRepOk(${fi},${xi})">✓ Es recompra, está bien</button>
+                  <button class="btn-sm btn-red" onclick="hbRepQuitar(${fi},${xi})">🗑️ Quitar duplicado</button>`}
+            </div>
+          </div>`}).join('')}
+      </div>`
+    }
     // ══ FASE 3 (6jul26) · Mejora 3: acciones aplicadas con su botón DESHACER (filas de fecha + grupos de precio) ══
     if(f.estado!=='error'){
       let undoHtml=''
@@ -30853,14 +31412,38 @@ function hbRender(){
     const listos=st.files.filter(x=>x.estado==='listo')
     const enRev=st.files.filter(x=>x.estado==='revision').length
     const enPre=st.files.filter(x=>x.estado==='precio'||x.estado==='oferta').length // FASE 3 (6jul26) · Mejora 5
+    // ══ FASE 6 (6jul26) · M14-F6 + M15: gate reforzado — mal nombrados, duplicados y repetidos pendientes bloquean GENERAR ══
+    const nMal=st.files.filter(x=>x.estado==='nombre_mal').length
+    const nDup=st.files.filter(x=>x.estado==='duplicado').length
+    const nRep=st.files.reduce((a,x)=>a+((x.repetidos||[]).filter(y=>!y.resuelto).length),0)
+    const genBloqueado=nMal>0||nRep>0
     acc.innerHTML=listos.length?`<div class="card" style="margin-top:10px">
+      ${nMal?`<div class="alert alert-red" style="font-size:13px;margin-bottom:10px">🚫 Hay ${nMal} archivo(s) con el <b>NOMBRE MAL</b> (fecha equivocada). Renómbralos con su fecha correcta y vuelve a subirlos — <b>no se puede generar</b> mientras estén aquí (o quítalos con ✕).</div>`:''}
+      ${nDup?`<div class="alert alert-red" style="font-size:13px;margin-bottom:10px">🚫 ${nDup} archivo(s) <b>DUPLICADO(S)</b> no entran (ya estaban procesados). Los demás sí pueden generar.</div>`:''}
+      ${nRep?`<div class="alert alert-red" style="font-size:13px;margin-bottom:10px">📞 Hay <b>${nRep} teléfono(s) repetido(s) sin resolver</b>. Confirma si son recompra o quítalos — <b>no se puede generar</b> hasta resolverlos todos.</div>`:''}
       ${enRev?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:13px;margin-bottom:10px">⚠️ Hay ${enRev} archivo(s) EN REVISIÓN — no entran hasta resolver sus filas. Los ${listos.length} listos sí se procesan.</div>`:''}
       ${enPre?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:13px;margin-bottom:10px">💲 Hay ${enPre} archivo(s) verificando PRECIOS (oferta/mayoría) — no entran hasta resolverlos.</div>`:''}
-      <button class="btn-full btn-primary" id="hb-btn-gen" onclick="hbGenerar()">🧮 Generar hoja base + guardar constancia + enviar a Reportes Diarios (${listos.length} archivo${listos.length===1?'':'s'})</button>
+      <button class="btn-full btn-primary" id="hb-btn-gen" onclick="hbGenerar()"${genBloqueado?' disabled style="opacity:.5;cursor:not-allowed"':''}>${genBloqueado?'🔒 Generar bloqueado — corrige lo de arriba':'🧮 Generar hoja base + guardar constancia + enviar a Reportes Diarios ('+listos.length+' archivo'+(listos.length===1?'':'s')+')'}</button>
     </div>`:''
   }
 }
 window.hbQuitar=(fi)=>{if(!window._hb)return;window._hb.files.splice(fi,1);hbRender()}
+// ══ FASE 6 (6jul26) · M15.C: resolver teléfonos repetidos (recompra / quitar / deshacer) ══
+window.hbRepOk=(fi,xi)=>{
+  const f=window._hb?.files[fi];const x=f&&(f.repetidos||[])[xi];if(!x)return
+  x.resuelto='recompra';const r=f.rows[x.ri];if(r)r._excluida=false
+  hbRender()
+}
+window.hbRepQuitar=(fi,xi)=>{
+  const f=window._hb?.files[fi];const x=f&&(f.repetidos||[])[xi];if(!x)return
+  x.resuelto='quitar';const r=f.rows[x.ri];if(r)r._excluida=true // no entra a hoja ni a reportes
+  hbRender()
+}
+window.hbRepUndo=(fi,xi)=>{ // Mejora 3 aplicada aquí: revertir la decisión
+  const f=window._hb?.files[fi];const x=f&&(f.repetidos||[])[xi];if(!x)return
+  x.resuelto=null;const r=f.rows[x.ri];if(r)r._excluida=false
+  hbRender()
+}
 // ══ FASE 3 (6jul26) · Mejora 2: copiar TELÉFONO al portapapeles (para pegarlo en Seller Chat) ══
 window.hbCopyTel=(tel,btn)=>{
   const done=()=>{if(btn){const t=btn.textContent;btn.textContent='✅';setTimeout(()=>{btn.textContent=t},1200)}}
@@ -31042,12 +31625,13 @@ function hbZip(entries){ // entries: [{name, text}] → Uint8Array (método STOR
 }
 // Construye el .xlsx de la hoja base. filas = [{vals:{A:'..',...}, formulaTxt, bandStyle}]
 function hbBuildXlsx(cfg,filas){
-  const nFills=HB_PALETA.length
+  const PAL=hbCfgPaleta() // FASE 6 (6jul26) · M16: paleta ÚNICA configurable (misma en hoja y masivo)
+  const nFills=PAL.length
   // estilos: 0=default · 1=texto(@) sin relleno · 2..(2+n-1)=texto+paleta · último=texto+ámbar
   const fillsXml=['<fill><patternFill patternType="none"/></fill>','<fill><patternFill patternType="gray125"/></fill>']
-  for(const c of HB_PALETA)fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${c}"/><bgColor indexed="64"/></patternFill></fill>`)
-  fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${HB_AMBAR}"/><bgColor indexed="64"/></patternFill></fill>`)
-  fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${HB_ROSA}"/><bgColor indexed="64"/></patternFill></fill>`) // FASE 2: rosa oferta
+  for(const c of PAL)fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${c}"/><bgColor indexed="64"/></patternFill></fill>`)
+  fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${hbCfgColor('colorCorreccion')}"/><bgColor indexed="64"/></patternFill></fill>`) // FASE 6 · M16: ámbar configurable
+  fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${hbCfgColor('colorOferta')}"/><bgColor indexed="64"/></patternFill></fill>`) // FASE 2 + M16: rosa oferta configurable
   let xfs='<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
   for(let k=0;k<nFills+2;k++)xfs+=`<xf numFmtId="49" fontId="0" fillId="${2+k}" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/>`
   const styles=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -31108,11 +31692,12 @@ function hbBuildXlsx(cfg,filas){
 const HB_MASIVO_ROJO='FFFF6B6B'    // cancelado/cancelada/anulado
 const HB_MASIVO_NARANJA='FFFFC000' // reservado/reservada
 function hbBuildMasivoXlsx(headers,filasM,anchos){
-  const nFills=HB_PALETA.length
+  const PAL=hbCfgPaleta() // FASE 6 (6jul26) · M16: la MISMA paleta de la hoja (una sola, configurable)
+  const nFills=PAL.length
   const fillsXml=['<fill><patternFill patternType="none"/></fill>','<fill><patternFill patternType="gray125"/></fill>']
-  for(const c of HB_PALETA)fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${c}"/><bgColor indexed="64"/></patternFill></fill>`)
-  fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${HB_MASIVO_ROJO}"/><bgColor indexed="64"/></patternFill></fill>`)    // FASE 5 · M12: id 2+n
-  fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${HB_MASIVO_NARANJA}"/><bgColor indexed="64"/></patternFill></fill>`) // FASE 5 · M12: id 2+n+1
+  for(const c of PAL)fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${c}"/><bgColor indexed="64"/></patternFill></fill>`)
+  fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${hbCfgColor('colorCancelado')}"/><bgColor indexed="64"/></patternFill></fill>`)    // FASE 5 · M12 + M16: rojo configurable
+  fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${hbCfgColor('colorReservado')}"/><bgColor indexed="64"/></patternFill></fill>`) // FASE 5 · M12 + M16: naranja configurable
   let xfs='<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
   for(let k=0;k<nFills+2;k++)xfs+=`<xf numFmtId="49" fontId="0" fillId="${2+k}" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/>`
   const styles=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -31165,9 +31750,11 @@ function hbArmarFilas(listos,cfg){
   const filas=[],sRefs=[]
   const refs=[...String(cfg.formula||'').matchAll(/([A-Z]{1,2})\{r\}/g)].map(m=>m[1])
   bloques.forEach((b,bi)=>{
-    const bandStyle=2+(bi%HB_PALETA.length)
-    const AMB=2+HB_PALETA.length,ROSA=AMB+1 // FASE 2: ids de estilo ámbar (corrección) y rosa (oferta)
+    const _nPal=hbCfgPaleta().length // FASE 6 · M16: mismo largo que los fills de arriba
+    const bandStyle=2+(bi%_nPal)
+    const AMB=2+_nPal,ROSA=AMB+1 // FASE 2: ids de estilo ámbar (corrección) y rosa (oferta)
     for(const{f,r}of b.items){
+      if(r._excluida)continue // FASE 6 (6jul26) · M15.C: pedido quitado como duplicado — NO entra a la hoja
       const vals={}
       for(const c of cfg.columnas){
         if(c.fuente&&c.fuente.startsWith('sellerchat:')){
@@ -31202,6 +31789,9 @@ async function hbSha256(buf){
 // Si el auxiliar CANCELA en cualquier punto, NO se genera y NO se escribe nada.
 window.hbGenerar=async()=>{
   const st=window._hb;if(!st)return
+  // FASE 6 (6jul26) · M14-F6 + M15.C: doble seguro del gate (además del botón deshabilitado)
+  if(st.files.some(x=>x.estado==='nombre_mal')){alert('Hay archivos con el NOMBRE MAL (fecha equivocada). Renómbralos y vuelve a subirlos antes de generar.');return}
+  if(st.files.some(x=>(x.repetidos||[]).some(y=>!y.resuelto))){alert('Hay teléfonos repetidos sin resolver. Confirma si son recompra o quítalos antes de generar.');return}
   const listos=st.files.filter(x=>x.estado==='listo')
   if(!listos.length)return
   hbVent1Show(listos)
@@ -31212,8 +31802,11 @@ window.hbGenerar=async()=>{
 // no es automático). Lo marcado escribe "Interrapidisimo" en la columna O de la hoja base.
 const HB_INTER_VARIANTES=['interrapidisimo','interapidisimo','inter','oficina']
 function hbEsInterCandidata(dir){
+  if(!hbReglaActiva('deteccion_interrap'))return false // FASE 6 · M16 regla 12: switch (OFF = sin resaltado)
   const t=String(dir==null?'':dir).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase()
-  return HB_INTER_VARIANTES.some(v=>t.includes(v))
+  const _pal=hbCfgVal('interrapPalabras') // FASE 6 · M16: palabras configurables (fábrica: las 4 de siempre)
+  const pal=(Array.isArray(_pal)&&_pal.length?_pal:HB_INTER_VARIANTES).map(v=>String(v).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase()).filter(Boolean)
+  return pal.some(v=>t.includes(v))
 }
 function hbVent1Show(listos){
   const rows=[]
@@ -31258,6 +31851,12 @@ window.hbVent1Undo=(i)=>{ // Mejora 3 aplicada aquí: botón aparte de deshacer
 }
 window.hbVent1Cancel=()=>{document.getElementById('hb-v1-modal')?.remove();window._hbV1=null}
 window.hbVent1Continuar=()=>{
+  if(!hbReglaActiva('stock_conv')){ // FASE 6 · M16 regla 11 [CRÍTICA]: OFF = generar directo sin Ventana 2
+    if(!confirm('¿Seguro? Se genera la hoja SIN pedir stock ni conversaciones (regla apagada en el Centro de Control).'))return
+    document.getElementById('hb-v1-modal')?.remove()
+    const st=window._hb;if(st)st._convManual=[]
+    _hbGenerarFinal();return
+  }
   if(!confirm('¿Seguro? Vas a continuar a cargar Stock y Conversaciones.'))return
   document.getElementById('hb-v1-modal')?.remove()
   hbVent2Show()
@@ -31284,6 +31883,7 @@ async function hbVent2Show(){
   // (producto, día-de-brecha) con ventas: según la fecha REAL de cada fila
   const ventasDia={} // fecha → {pid: producto}
   for(const f of listos)for(const r of f.rows){
+    if(r._excluida)continue // FASE 6 (6jul26) · M15.C: los quitados no piden conversaciones
     if(!dias.includes(r.fecha))continue
     ;(ventasDia[r.fecha]=ventasDia[r.fecha]||{})[String(f.producto.id)]=f.producto
   }
@@ -31429,7 +32029,11 @@ async function _hbGenerarFinal(){
       regs.push({lote_id:loteId,fecha_lote:st.hoy,tipo:'export',archivo_nombre:f.name,storage_path:path,hash_sha256:hash||null,
         agente:f.agente,producto_id:f.producto.id,producto_nombre:f.producto.nombre,fecha_declarada:f.fechaDecl,filas:f.rows.length,
         resultado:(hbCorregidas(f).length||(f.corrPrecios&&f.corrPrecios.length))?'corregido':'ok',
-        detalle:{oferta:f.oferta,correcciones:hbCorregidas(f).map(r=>r.corr),correcciones_precio:f.corrPrecios||[]},usuario_id:currentMe().id})
+        detalle:{oferta:f.oferta,correcciones:hbCorregidas(f).map(r=>r.corr),correcciones_precio:f.corrPrecios||[],
+          secuencia:f.secuencia||1, // FASE 6 (6jul26) · M15.A: tanda declarada en el nombre
+          telefonos:f.rows.filter(r=>!r._excluida).map(r=>String(r.tel==null?'':r.tel).replace(/\D/g,'')).filter(Boolean), // FASE 6 · M15.B: base del anti-duplicado
+          repetidos_quitados:(f.repetidos||[]).filter(x=>x.resuelto==='quitar').length||undefined,
+          repetidos_recompra:(f.repetidos||[]).filter(x=>x.resuelto==='recompra').length||undefined},usuario_id:currentMe().id})
     }
     let hojaPath=`${carpeta}/${hojaNombre}`,hojaHash=''
     try{hojaHash=await hbSha256(xbytes.buffer)}catch(_){}
@@ -31452,6 +32056,7 @@ async function _hbGenerarFinal(){
     //      del usuario; g.n queda solo informativo en memoria.)
     const grupos={}
     for(const f of listos)for(const r of f.rows){
+      if(r._excluida)continue // FASE 6 (6jul26) · M15.C: quitado como duplicado — NO entra a reportes
       const k=r.fecha+'|'+f.producto.id
       if(!grupos[k])grupos[k]={fecha:r.fecha,producto:f.producto,ids:[],n:0}
       grupos[k].n++
@@ -31495,7 +32100,7 @@ async function _hbGenerarFinal(){
     hbPintarVentana();hbListarHojasHoy()
     if(out)out.innerHTML=`<div class="card" style="margin-top:10px;border:2px solid var(--green)">
       <div class="section-title" style="color:var(--green)">✅ Hoja base lista — ${filas.length} filas · ${bloques.length} producto(s)${totCorr?` · ✏️ ${totCorr} corregida(s)`:''}</div>
-      <div style="font-size:13px;line-height:1.9">${bloques.map((b,i)=>`<span style="display:inline-block;padding:2px 10px;border-radius:8px;margin:2px;background:#${HB_PALETA[i%HB_PALETA.length].slice(2)};color:#1a1a1a;font-weight:700">${hbEsc(b.producto.nombre)} · ${b.items.length}</span>`).join('')}</div>
+      <div style="font-size:13px;line-height:1.9">${bloques.map((b,i)=>`<span style="display:inline-block;padding:2px 10px;border-radius:8px;margin:2px;background:#${hbCfgPaleta()[i%hbCfgPaleta().length].slice(2)};color:#1a1a1a;font-weight:700">${hbEsc(b.producto.nombre)} · ${b.items.length}</span>`).join('')}</div>
       <div style="font-size:13px;line-height:1.9;margin-top:8px">${repLineas.join('<br>')||'—'}</div>
       ${err.length?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:12px;margin-top:8px">⚠️ Detalles no críticos:<br>${err.map(hbEsc).join('<br>')}</div>`:''}
       <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
@@ -31560,8 +32165,8 @@ async function hbRenderDashboard(body){
   </div>
   <div id="hb-exp-out"><div style="font-size:13px;color:var(--muted)">Elige el rango y dale Buscar.</div></div>
   <div class="divider"></div>
-  <div class="section-title">⚙️ Configuración de la hoja base (columnas + fórmula)</div>
-  <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Esto define cómo el Constructor arma cada hoja. Arranca EXACTO como la hoja base actual. Guardar no recarga nada.</div>
+  <div class="section-title">🎛️ CENTRO DE CONTROL — toda la configuración del Constructor</div><!-- FASE 6 (6jul26) · Mejora 16 -->
+  <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Umbrales, porcentajes, palabras clave, colores, reglas ON/OFF, columnas, fórmula y plantilla del masivo — todo editable aquí, con explicación humana y red de seguridad (🔄 volver a original). Solo administradores.</div>
   <div id="hb-cfg-out"><div class="loading">Cargando configuración...</div></div>`
   hbExpBuscar()
   hbRenderCfg()
@@ -31641,12 +32246,194 @@ window.hbExpBuscar=async()=>{
     }).join('')
   }catch(e){out.innerHTML=`<div class="alert alert-red">${hbEsc(e&&e.message||e)}</div>`}
 }
+// ══ FASE 6 (6jul26) · Mejora 16: CENTRO DE CONTROL — metadatos, render y handlers ══
+// Cada VALOR: input + 💡 explicación humana + ejemplo + 3 botones (📌 fábrica / ↩️ fábrica / 🔄 original).
+// Cada REGLA: switch ON/OFF grande + explicación "para un bebé" + cómo bloquea / cómo pasa + qué pasa si se apaga.
+const HB_CC_VALORES={
+  paletaProducto:{label:'🎨 Colores de banda por producto (los mismos en la HOJA y en el MASIVO)',tipo:'paleta',regla:null,
+    explica:'Cada producto sale con un color de fondo para ubicarlo de un vistazo. El producto 1 usa el color 1, el 2 el color 2… y se repiten. Es UNA sola paleta: la cambias aquí y aplica igual en la hoja base y en el Excel del masivo.',
+    ejemplo:'Ej: con 2 productos, Nad Pro Max sale verde y Colágeno azul — en los dos Excel.'},
+  colorCorreccion:{label:'🖍️ Color de fila CORREGIDA (hoja base)',tipo:'color',regla:null,
+    explica:'Cuando el auxiliar corrige la fecha o el ad_id de una venta, esa fila sale de este color en la hoja para que se note.',
+    ejemplo:'Fábrica: ámbar.'},
+  colorOferta:{label:'🏷️ Color de fila de OFERTA (hoja base)',tipo:'color',regla:null,
+    explica:'Las ventas que vienen de un Excel __oferta salen de este color en la hoja.',
+    ejemplo:'Fábrica: rosa suave.'},
+  colorCancelado:{label:'🔴 Color de pedido CANCELADO (Excel del masivo)',tipo:'color',regla:'resaltado_masivo',
+    explica:'En el Excel que se descarga para Dropi, toda la fila de un pedido cancelado/anulado se pinta de este color.',
+    ejemplo:'Fábrica: rojo fuerte.'},
+  colorReservado:{label:'🟠 Color de pedido RESERVADO (Excel del masivo)',tipo:'color',regla:'resaltado_masivo',
+    explica:'Igual que el rojo, pero para pedidos reservados.',
+    ejemplo:'Fábrica: naranja.'},
+  nombreMalPiso:{label:'📉 Mínimo de pedidos para revisar el nombre',tipo:'num',regla:'nombre_mal',
+    explica:'Si el Excel tiene MENOS pedidos que este número, NO se evalúa si el nombre está mal — solo se revisan una a una las fechas raras.',
+    ejemplo:'Con 5: un Excel de 4 pedidos (3 con otra fecha) NO se bloquea; va a revisión fila por fila.'},
+  nombreMalPct:{label:'📊 % de fechas distintas que declara "nombre mal"',tipo:'pct',regla:'nombre_mal',
+    explica:'Si MÁS de este % de los pedidos traen una fecha distinta a la del nombre, el archivo se bloquea (hay que renombrarlo). El % se debe SUPERAR: 40% exacto no bloquea.',
+    ejemplo:'Con 40: 10 pedidos y 5 con otra fecha (50%) → bloquea. 10 y 4 (40%) → revisión normal.'},
+  dupPct:{label:'📵 % de teléfonos repetidos = mismo Excel',tipo:'pct',regla:'anti_duplicado',
+    explica:'Si MÁS de este % de los teléfonos del Excel nuevo ya se procesaron (en los días de la brecha o HOY), es el mismo archivo re-subido y NO se procesa.',
+    ejemplo:'Con 50: si 8 de 10 teléfonos (80%) ya estaban → bloquea. Si 2 de 10 (20%) → pasa, pero pide verificar esos 2.'},
+  precioTerminacion:{label:'💲 Terminación del precio (últimos 3 dígitos)',tipo:'num',regla:'redondeo900',
+    explica:'Al procesar, los últimos 3 dígitos de cada precio se cambian a este número.',
+    ejemplo:'Con 900: 129.700 → 129.900 · 164.500 → 164.900. Precios de menos de 4 cifras van a revisión.'},
+  interrapPalabras:{label:'🚚 Palabras que detectan Interrapidisimo',tipo:'lista',regla:'deteccion_interrap',
+    explica:'Si la dirección contiene alguna de estas palabras (sin importar tildes ni mayúsculas), se resalta como probable "reclama en oficina / Interrapidisimo" para que el auxiliar confirme.',
+    ejemplo:'Ej: "Reclama en OFICINA del pueblo" → se resalta 🟡.'},
+  estadoTokens:{label:'🏷️ Palabras que identifican la columna "estado"',tipo:'lista',regla:'deteccion_estado',
+    explica:'Si el Excel de Seller Chat no trae la columna "estado", NEXO busca una columna cuyos valores sean estas palabras y la sugiere.',
+    ejemplo:'Ej: una columna "situacion" llena de confirmado/cancelado → se usa esa y se avisa.'},
+  estadoUmbralPct:{label:'🎯 % de celdas con esas palabras para sugerir la columna',tipo:'pct',regla:'deteccion_estado',
+    explica:'Para aceptar una columna como "estado", al menos este % de sus celdas llenas deben ser una de las palabras de arriba.',
+    ejemplo:'Con 50: si 2 de 3 celdas (66%) son estados → se sugiere. Si 1 de 3 (33%) → no.'}
+}
+const HB_CC_REGLAS=[
+  {k:'candado_fechas',label:'🔒 Candado de fechas por fila',critica:true,
+   explica:'Cada venta trae su fecha real (first_message). Si no calza con la fecha del nombre del Excel, esa fila va a REVISIÓN para corregirla.',
+   pasa:'Pedido del 2026-07-05 en el Excel __2026-07-05__1 → entra directo.',bloquea:'Pedido del 2026-07-04 en ese mismo Excel → tarjeta de revisión (corregir fecha o confirmarla).',
+   siApagas:'Los pedidos entran con CUALQUIER fecha sin avisar: podrías registrar ventas en el día equivocado y descuadrar los reportes por día.'},
+  {k:'nombre_mal',label:'🚫 Nombre mal por mayoría (Excel mal nombrado)',critica:false,
+   explica:'Si la MAYORÍA de los pedidos traen otra fecha, el problema no son las filas: es el NOMBRE del archivo. Se bloquea y se pide renombrarlo (con la fecha sugerida).',
+   pasa:'10 pedidos, 2 con otra fecha (20%) → no es el nombre: revisión fila por fila.',bloquea:'10 pedidos, 6 del día anterior (60%) → "el nombre está mal, renómbralo al 2026-07-04".',
+   siApagas:'Nunca se detecta un Excel mal nombrado; todo se va a revisión fila por fila (más lento y con riesgo de "corregir" pedidos que estaban bien).'},
+  {k:'anti_duplicado',label:'📵 Anti-duplicado por teléfono',critica:true,
+   explica:'El teléfono es único por pedido. Si más del % configurado de los teléfonos del Excel nuevo YA estaban procesados, es el mismo Excel re-subido y NO procesa.',
+   pasa:'2ª tanda del día (__2) con teléfonos todos nuevos → 0% repetidos → entra.',bloquea:'Re-subes el mismo Excel del sábado → 100% repetidos → "ya lo subiste".',
+   siApagas:'Se puede re-subir el mismo Excel y DUPLICAR ventas e IDs en Reportes Diarios (con la acumulación de la Fase 5, los IDs se sumarían dos veces).'},
+  {k:'verif_repetidos',label:'📞 Verificación de teléfonos repetidos',critica:false,
+   explica:'Cuando hay POCOS teléfonos repetidos (por debajo del umbral), el Excel sí procesa, pero cada número repetido se debe verificar: ¿recompra real o duplicado colado? No se genera hasta resolverlos.',
+   pasa:'Cliente que recompró: "✓ Es recompra" → entra normal.',bloquea:'Pedido que ya estaba: "🗑️ Quitar duplicado" → no entra a la hoja ni a reportes.',
+   siApagas:'Los repetidos entran sin verificación: posibles duplicados sin revisar.'},
+  {k:'secuencia',label:'🔢 Secuencia obligatoria en el nombre (__1, __2…)',critica:false,
+   explica:'El nombre del Excel declara la tanda del día: __1 la primera subida (SIEMPRE), __2 la segunda con pedidos nuevos, etc. "oferta" va al final.',
+   pasa:'38__Neocell_A6_A2__2026-07-05__1 → válido.',bloquea:'38__Neocell_A6_A2__2026-07-05 (sin secuencia) → se rechaza con la explicación del formato.',
+   siApagas:'Se aceptan nombres con el formato viejo (sin secuencia, tanda=1); se pierde una señal para distinguir tandas legítimas de re-subidas.'},
+  {k:'obligatorios',label:'📋 Campos obligatorios del pedido',critica:true,
+   explica:'Una línea sin ciudad, departamento, dirección, teléfono, cantidad, fecha, producto, agente, ID Dropi, precio o nombre/apellido NO procesa (las demás siguen).',
+   pasa:'Línea completa → procesa.',bloquea:'Línea sin teléfono → "FALTAN DATOS: TELÉFONO" y no entra.',
+   siApagas:'Entran pedidos incompletos que Dropi puede rechazar (guías sin dirección o sin teléfono).'},
+  {k:'candado_filas',label:'🔢 Candado de filas (el número del nombre)',critica:true,
+   explica:'El número al inicio del nombre debe ser IGUAL a las filas reales del Excel. Es la prueba de que el archivo está completo.',
+   pasa:'38__... y el Excel trae 38 filas → procesa.',bloquea:'38__... pero trae 35 → "Dice 38 filas pero el Excel trae 35" y no procesa.',
+   siApagas:'No se valida que el Excel esté completo: podrías subir un archivo cortado y perder ventas sin darte cuenta.'},
+  {k:'precios_oferta',label:'🏷️ Verificación de precios de OFERTA',critica:false,
+   explica:'En archivos __oferta, cada combinación cantidad+precio se confirma a mano ("✓ Está perfecto" o corregir) antes de quedar listo.',
+   pasa:'2u → $99.900 confirmado → listo.',bloquea:'Combo sin confirmar → el archivo queda "verificando precios".',
+   siApagas:'Las ofertas entran con sus precios tal cual, sin verificación.'},
+  {k:'precio_mayoria',label:'👥 Revisión de precio por mayoría (normales)',critica:false,
+   explica:'En archivos normales, el precio que MÁS se repite por cantidad es el correcto; las ventas que se salen van a corrección obligatoria.',
+   pasa:'5 ventas de 1u a $129.900 → mayoría clara, todo listo.',bloquea:'1 venta de 1u a $119.900 entre esas 5 → tarjeta de corrección.',
+   siApagas:'Precios díscolos entran sin marcar (errores de digitación pasan directo a la hoja).'},
+  {k:'redondeo900',label:'💲 Redondeo de precio a X900',critica:false,
+   explica:'Al procesar, los últimos 3 dígitos de cada precio se cambian a la terminación configurada. Precios ilógicos (<4 cifras) van a revisión.',
+   pasa:'129.700 → 129.900 automático.',bloquea:'Precio "99" → ilógico → revisión de precio.',
+   siApagas:'Los precios quedan tal cual vienen del Excel (con centenas irregulares) y no se marcan ilógicos.'},
+  {k:'stock_conv',label:'📦 Stock + conversaciones obligatorios al generar',critica:true,
+   explica:'Antes de generar la hoja, el auxiliar registra el stock de HOY y las conversaciones de los días de la brecha (por producto). Sin eso, no se genera.',
+   pasa:'Llena stock y conversaciones → se genera y queda todo en Reportes Diarios.',bloquea:'Falta el stock de un producto → "🔒 Falta llenar" y no genera.',
+   siApagas:'Se genera la hoja SIN registrar stock ni conversaciones: los reportes del día quedan incompletos.'},
+  {k:'deteccion_interrap',label:'🚚 Detección de Interrapidisimo',critica:false,
+   explica:'En la Ventana 1 del generar, las direcciones que contienen las palabras clave se resaltan 🟡 como probables "reclama en oficina" para que el auxiliar confirme la transportadora.',
+   pasa:'"Oficina Interrapidisimo La 80" → resaltada, un clic y queda marcada.',bloquea:'(No bloquea nada: solo sugiere.)',
+   siApagas:'No se sugiere ninguna candidata: el auxiliar revisa y marca todo a mano.'},
+  {k:'deteccion_estado',label:'🏷️ Detección de columna "estado"',critica:false,
+   explica:'Si el Excel no trae la columna "estado", NEXO busca una columna cuyos valores parezcan estados (con las palabras y el % configurados) y la usa por esa vez, avisando.',
+   pasa:'Columna "situacion" llena de confirmado/cancelado → se usa y se avisa.',bloquea:'(No bloquea: si no encuentra, el estado sale vacío con aviso.)',
+   siApagas:'Si falta "estado", queda vacío sin buscar alternativa (la columna K "NOTA" del masivo saldría vacía).'},
+  {k:'resaltado_masivo',label:'🎨 Resaltado cancelado/reservado en el Excel del masivo',critica:false,
+   explica:'En el Excel descargado para Dropi, los pedidos cancelados salen en rojo y los reservados en naranja (colores configurables arriba), con prioridad sobre el color del producto.',
+   pasa:'Pedido "confirmado" → color de su producto.',bloquea:'(No bloquea: solo pinta.) Pedido "CANCELADO" → fila roja.',
+   siApagas:'Todas las filas salen solo con el color de su producto, sin alertas visuales.'}
+]
+// ── helpers de UI ──
+function hbCcValorHTML(k){
+  const m=HB_CC_VALORES[k];if(!m)return''
+  const v=hbCfgVal(k)
+  const off=m.regla&&!hbReglaActiva(m.regla)
+  const dis=off?'disabled ':''
+  let input=''
+  if(m.tipo==='num'||m.tipo==='pct')input=`<input type="number" id="hb-cc-v-${k}" value="${hbEscA(v)}" style="width:110px" ${dis}onchange="hbCcSetVal('${k}')">${m.tipo==='pct'?' <b>%</b>':''}`
+  else if(m.tipo==='lista')input=`<input type="text" id="hb-cc-v-${k}" value="${hbEscA((Array.isArray(v)?v:[]).join(', '))}" style="width:100%;font-family:monospace;font-size:12px" ${dis}onchange="hbCcSetVal('${k}')" placeholder="palabras separadas por coma">`
+  else if(m.tipo==='color')input=`<input type="color" id="hb-cc-v-${k}" value="#${String(v||'FF000000').slice(2)}" style="width:44px;height:30px;padding:0;border:1px solid var(--border);border-radius:6px;cursor:pointer;background:var(--card)" ${dis}onchange="hbCcSetVal('${k}')"> <span style="font-family:monospace;font-size:11px;color:var(--muted)">${hbEsc(v)}</span>`
+  else if(m.tipo==='paleta')input=`<div style="display:flex;gap:6px;flex-wrap:wrap">${(Array.isArray(v)?v:[]).map((c,i)=>`<input type="color" id="hb-cc-v-${k}-${i}" value="#${String(c||'FF000000').slice(2)}" style="width:44px;height:30px;padding:0;border:1px solid var(--border);border-radius:6px;cursor:pointer;background:var(--card)" ${dis}onchange="hbCcSetVal('${k}')" title="Color del producto ${i+1}">`).join('')}</div>`
+  return`<div style="margin-top:10px;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--card2);${off?'opacity:.45':''}">
+    <div style="font-weight:800;font-size:13px">${m.label}${off?' <span style="font-size:11px;color:var(--muted)">(regla apagada — no editable)</span>':''}</div>
+    <div style="font-size:12px;color:var(--muted);margin:4px 0 6px">💡 ${hbEsc(m.explica)}${m.ejemplo?`<br><span style="color:var(--text)">${hbEsc(m.ejemplo)}</span>`:''}</div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">${input}</div>
+    <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+      <button class="btn-sm" ${off?'disabled':''} onclick="hbCcBtn('${k}','fab')" title="Toma el valor actual y lo fija como TU fábrica">📌 Establecer como fábrica</button>
+      <button class="btn-sm" ${off?'disabled':''} onclick="hbCcBtn('${k}','volver')" title="Vuelve al último valor que fijaste como fábrica">↩️ Volver a fábrica</button>
+      <button class="btn-sm" ${off?'disabled':''} onclick="hbCcBtn('${k}','orig')" title="Vuelve al ORIGINAL del sistema (siempre disponible)">🔄 Volver a original</button>
+    </div>
+  </div>`
+}
+function hbCcSwitchHTML(r){
+  const on=hbReglaActiva(r.k)
+  return`<div style="margin-top:10px;padding:10px;border:1px solid ${on?'var(--green)':'var(--border)'};border-radius:10px;background:var(--card2)">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button class="btn-sm" onclick="hbCcSwitch('${r.k}')" style="min-width:120px;font-weight:800;background:${on?'var(--green)':'var(--card)'};color:${on?'#fff':'var(--muted)'};border:1px solid ${on?'var(--green)':'var(--border)'}">${on?'✅ ACTIVA':'⛔ APAGADA'}</button>
+      <div style="font-weight:800;font-size:13px;flex:1;min-width:200px">${r.label}${r.critica?' <span style="font-size:10px;background:var(--red);color:#fff;border-radius:6px;padding:1px 6px;vertical-align:middle">CRÍTICA</span>':''}</div>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-top:6px;line-height:1.6">💡 ${hbEsc(r.explica)}<br>
+      ✅ <b>Cómo pasa:</b> ${hbEsc(r.pasa)}<br>
+      🔒 <b>Cómo actúa:</b> ${hbEsc(r.bloquea)}<br>
+      ⚠️ <b>Si la apagas:</b> ${hbEsc(r.siApagas)}</div>
+  </div>`
+}
+// ── handlers ──
+async function _hbCcSave(){const e=await hbSaveConfig(window._hbCfgFull);if(e)alert('No se pudo guardar: '+e);if(window._hb)window._hb.config=window._hbCfgFull}
+window.hbCcSetVal=async(k)=>{
+  const m=HB_CC_VALORES[k];const cfg=window._hbCfgFull;if(!m||!cfg)return
+  let val
+  if(m.tipo==='paleta'){
+    val=[];for(let i=0;;i++){const el=document.getElementById(`hb-cc-v-${k}-${i}`);if(!el)break;val.push('FF'+el.value.slice(1).toUpperCase())}
+    if(!val.length)return
+  }else{
+    const el=document.getElementById(`hb-cc-v-${k}`);if(!el)return
+    if(m.tipo==='num'||m.tipo==='pct'){val=parseFloat(el.value);if(!isFinite(val)||val<0){alert('Debe ser un número válido (0 o más).');hbRenderCfg();return}}
+    else if(m.tipo==='lista'){val=el.value.split(',').map(s=>s.trim()).filter(Boolean);if(!val.length){alert('La lista no puede quedar vacía. Para desactivar la función, usa su switch.');hbRenderCfg();return}}
+    else if(m.tipo==='color')val='FF'+el.value.slice(1).toUpperCase()
+  }
+  cfg.valores[k]=cfg.valores[k]||{};cfg.valores[k].actual=val
+  if(cfg.valores[k].fabrica==null)cfg.valores[k].fabrica=_hbClone(HB_ORIG.valores[k])
+  await _hbCcSave();hbRenderCfg()
+}
+window.hbCcBtn=async(k,acc)=>{
+  const cfg=window._hbCfgFull;if(!cfg||!cfg.valores)return
+  cfg.valores[k]=cfg.valores[k]||{actual:_hbClone(HB_ORIG.valores[k]),fabrica:_hbClone(HB_ORIG.valores[k])}
+  if(acc==='fab'){cfg.valores[k].fabrica=_hbClone(cfg.valores[k].actual)}
+  else if(acc==='volver'){cfg.valores[k].actual=_hbClone(cfg.valores[k].fabrica!=null?cfg.valores[k].fabrica:HB_ORIG.valores[k])}
+  else if(acc==='orig'){cfg.valores[k].actual=_hbClone(HB_ORIG.valores[k])}
+  await _hbCcSave();hbRenderCfg()
+}
+window.hbCcSwitch=async(k)=>{
+  const cfg=window._hbCfgFull;if(!cfg)return
+  cfg.reglas=cfg.reglas||{...HB_ORIG.reglas}
+  const on=cfg.reglas[k]!==false
+  if(on){ // va a APAGARSE
+    const r=HB_CC_REGLAS.find(x=>x.k===k)
+    if(r&&r.critica){
+      const txt=`⚠️ ¿SEGURO que quieres DESACTIVAR "${r.label.replace(/^[^ ]+ /,'')}"?\n\nAHORA: ${r.explica}\nEjemplo: ${r.bloquea}\n\nSI LA APAGAS: ${r.siApagas}\n\n¿Estás seguro?`
+      if(!confirm(txt))return
+    }
+    cfg.reglas[k]=false
+  }else cfg.reglas[k]=true
+  await _hbCcSave();hbRenderCfg()
+}
 async function hbRenderCfg(){
   const out=document.getElementById('hb-cfg-out');if(!out)return
   const cfg=await hbLoadConfig()
   const fuentes=[['vacia','— Vacía —'],['formula','ƒ Fórmula'],['auto:dropi_id','AUTO: ID Dropi'],['auto:agente','AUTO: Agente'],['auto:producto_nombre','AUTO: Nombre de producto'],...HB_SC_HEADERS.map(h=>['sellerchat:'+h,'Seller Chat: '+h])]
+  // FASE 6 (6jul26) · Mejora 16: 🎛️ CENTRO DE CONTROL — bloques por tema, cada uno con su color.
+  // La config que YA existía (columnas, fórmula, masivo) vive DENTRO de los bloques 🟦 y 🟩 (absorbida, no duplicada).
+  const _blk=(color,titulo,inner,open)=>`<details ${open?'open ':''}style="margin-top:12px;border:1px solid var(--border);border-left:6px solid ${color};border-radius:12px;background:${color}0d;padding:10px 12px">
+    <summary style="cursor:pointer;font-weight:800;font-size:14px">${titulo}</summary>${inner}</details>`
+  const _reglaHTML=k=>hbCcSwitchHTML(HB_CC_REGLAS.find(x=>x.k===k))
   out.innerHTML=`
-  <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+  <div style="font-size:12.5px;color:var(--muted);line-height:1.6;margin-bottom:4px">🎛️ Aquí se controla TODO lo que el Constructor decide solo: umbrales, porcentajes, palabras clave, colores, la fórmula y las plantillas. Cada valor tiene 3 botones: 📌 fija TU fábrica · ↩️ vuelve a tu fábrica · 🔄 vuelve al original del sistema (red de seguridad). Cada regla tiene su switch ✅/⛔ — las CRÍTICAS piden confirmación al apagarse. Todo se guarda solo al cambiarlo (menos columnas/fórmula/plantilla, que usan su botón 💾).</div>
+
+  ${_blk('#3b82f6','🟦 HOJA BASE — columnas, fórmula y colores',`
+  <div style="overflow-x:auto;margin-top:8px"><table style="width:100%;border-collapse:collapse;font-size:12px">
     <tr style="color:var(--muted);text-align:left"><th style="padding:4px 6px">Col</th><th style="padding:4px 6px">Encabezado (fila 1)</th><th style="padding:4px 6px">De dónde sale</th></tr>
     ${cfg.columnas.map((c,i)=>`<tr>
       <td style="padding:3px 6px;font-weight:800">${c.col}</td>
@@ -31659,13 +32446,16 @@ async function hbRenderCfg(){
   <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-top:12px">
     <div class="fld" style="margin:0"><label>Columna de la fórmula</label><select id="hb-cfg-fcol" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text)">${cfg.columnas.map(c=>`<option value="${c.col}"${cfg.formula_col===c.col?' selected':''}>${c.col}</option>`).join('')}</select></div>
   </div>
-  <div class="fld" style="margin-top:10px"><label>Fórmula (usa {r} donde va el número de fila)</label>
+  <div class="fld" style="margin-top:10px"><label>Fórmula (usa {r} donde va el número de fila) 💡 Cómo se arma cada línea del pedido que lee el Asignador</label>
     <textarea id="hb-cfg-formula" rows="3" style="width:100%;font-family:monospace;font-size:12px;box-sizing:border-box">${hbEsc(cfg.formula)}</textarea></div>
   <div class="fld" style="margin-top:10px"><label>Orden de campos que el ASIGNADOR lee (formato corchetes · separados por coma · debe ir de la mano con la fórmula)</label>
     <input type="text" id="hb-cfg-orden" value="${hbEscA((cfg.orden_linea||HB_ORDEN_LINEA).join(', '))}" style="width:100%;font-family:monospace;font-size:12px;box-sizing:border-box;padding:8px"></div>
-  <div class="divider"></div>
-  <div class="section-title">📦 Plantilla del Masivo Dropi (columnas flexibles — fila 1 del copiado)</div>
-  <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Sube el Excel VACÍO de Dropi y NEXO llena los encabezados solo (emparejando cada columna con su dato por nombre). También puedes editar encabezado y dato columna por columna. El botón "📦 Copiar para Dropi masivo" del Asignador usa EXACTAMENTE esto.</div>
+  ${hbCcValorHTML('paletaProducto')}
+  ${hbCcValorHTML('colorCorreccion')}
+  ${hbCcValorHTML('colorOferta')}`,true)}
+
+  ${_blk('#22c55e','🟩 MASIVO DROPI — plantilla, mapeo y alertas de color',`
+  <div style="font-size:12px;color:var(--muted);margin:8px 0">Sube el Excel VACÍO de Dropi y NEXO llena los encabezados solo (emparejando cada columna con su dato por nombre). También puedes editar encabezado y dato columna por columna. El botón "📦 Copiar para Dropi masivo" del Asignador usa EXACTAMENTE esto.</div>
   <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;align-items:center">
     <label class="btn-sm btn-primary" style="cursor:pointer">📤 Subir plantilla de Dropi (Excel)
       <input type="file" id="hb-cfg-mfile" accept=".xlsx,.xls" style="display:none" onchange="hbCfgMasivoUpload(this)">
@@ -31674,8 +32464,45 @@ async function hbRenderCfg(){
   </div>
   <div id="hb-cfg-mavisos"></div>
   <div id="hb-cfg-mgrid">${hbCfgMasivoGridHTML(cfg.masivo_cols||hbMasivoColsDefault())}</div>
-  <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
-    <button class="btn-sm btn-primary" id="hb-cfg-save" onclick="hbCfgGuardar()">💾 Guardar configuración</button>
+  ${_reglaHTML('resaltado_masivo')}
+  ${hbCcValorHTML('colorCancelado')}
+  ${hbCcValorHTML('colorReservado')}`)}
+
+  ${_blk('#f97316','🟧 FECHAS Y NOMBRES DE ARCHIVO',`
+  <div style="font-size:12px;color:var(--muted);margin-top:8px">📛 Formato del nombre (regla fija): <b style="font-family:monospace">filas__AGENTE__fecha__secuencia</b> — y "__oferta" al final si aplica. La secuencia es la tanda del día (__1 la primera SIEMPRE).</div>
+  ${_reglaHTML('candado_fechas')}
+  ${_reglaHTML('nombre_mal')}
+  ${hbCcValorHTML('nombreMalPiso')}
+  ${hbCcValorHTML('nombreMalPct')}
+  ${_reglaHTML('secuencia')}
+  ${_reglaHTML('candado_filas')}`)}
+
+  ${_blk('#ef4444','🟥 DUPLICADOS (anti re-subida)',`
+  ${_reglaHTML('anti_duplicado')}
+  ${hbCcValorHTML('dupPct')}
+  ${_reglaHTML('verif_repetidos')}`)}
+
+  ${_blk('#eab308','🟨 PRECIOS',`
+  ${_reglaHTML('redondeo900')}
+  ${hbCcValorHTML('precioTerminacion')}
+  ${_reglaHTML('precio_mayoria')}
+  ${_reglaHTML('precios_oferta')}`)}
+
+  ${_blk('#a855f7','🟪 TRANSPORTADORA',`
+  ${_reglaHTML('deteccion_interrap')}
+  ${hbCcValorHTML('interrapPalabras')}`)}
+
+  ${_blk('#a16207','🟫 ESTADO DEL PEDIDO',`
+  ${_reglaHTML('deteccion_estado')}
+  ${hbCcValorHTML('estadoTokens')}
+  ${hbCcValorHTML('estadoUmbralPct')}`)}
+
+  ${_blk('#64748b','⬛ OBLIGATORIOS Y GENERACIÓN',`
+  ${_reglaHTML('obligatorios')}
+  ${_reglaHTML('stock_conv')}`)}
+
+  <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
+    <button class="btn-sm btn-primary" id="hb-cfg-save" onclick="hbCfgGuardar()">💾 Guardar configuración (columnas, fórmula y plantilla)</button>
     <button class="btn-sm btn-outline" onclick="hbCfgReset()">↩️ Restaurar la de fábrica</button>
   </div>
   <div id="hb-cfg-msg" style="margin-top:8px"></div>`
@@ -31697,11 +32524,13 @@ window.hbCfgGuardar=async()=>{
     if(!h||!s)break
     _mc.push({header:h.value.trim(),campo:s.value})
   }
-  const cfg={version:3,columnas:cols,formula_col:document.getElementById('hb-cfg-fcol')?.value||'S',
+  const cfg={version:Math.max(5,prev.version||5),columnas:cols,formula_col:document.getElementById('hb-cfg-fcol')?.value||'S',
     formula:(document.getElementById('hb-cfg-formula')?.value||'').trim()||HB_FORMULA_V2,
     orden_linea:_ordenRaw.length>=15?_ordenRaw:(prev.orden_linea||HB_ORDEN_LINEA.slice()),
     masivo_cols:_mc.length?_mc:(prev.masivo_cols||hbMasivoColsDefault()),
-    masivo_headers:(_mc.length?_mc:(prev.masivo_cols||hbMasivoColsDefault())).map(c=>c.header)}
+    masivo_headers:(_mc.length?_mc:(prev.masivo_cols||hbMasivoColsDefault())).map(c=>c.header),
+    valores:prev.valores||hbValoresDefault(), // FASE 6 (6jul26) · Mejora 16: preservar Centro de Control
+    reglas:prev.reglas||{...HB_ORIG.reglas}}
   // coherencia: la columna elegida para la fórmula queda con fuente 'formula'; ninguna otra la duplica
   for(const c of cfg.columnas){if(c.col===cfg.formula_col)c.fuente='formula';else if(c.fuente==='formula')c.fuente='vacia'}
   const e=await hbSaveConfig(cfg)

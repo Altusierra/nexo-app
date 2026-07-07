@@ -8294,12 +8294,25 @@ async function pageAuxHome(c){
 // ── AUXILIAR: REPORTE ──────────────────────────────────────
 async function pageAuxReporte(c){
   const modoHist=currentMe()?.modo_historico===true
+  // NUEVO (7jul26 · Candado fecha): refrescar el permiso EN VIVO al abrir la página — así un cambio
+  // del admin en Equipo aplica de una, sin que el auxiliar tenga que cerrar sesión. Tolerante: si la
+  // consulta falla, se queda el valor de la sesión (y el default es bloqueado).
+  try{
+    if(me?.rol==='auxiliar'){
+      const{data:_ppV}=await sb.from('usuarios').select('permite_ids_pasados').eq('id',me.id).maybeSingle()
+      if(_ppV!=null)me.permite_ids_pasados=_ppV.permite_ids_pasados===true
+    }
+  }catch(_){}
+  // Candado: auxiliar SIN el permiso "🗓️ Editar IDs de días anteriores" → el selector queda CLAVADO en HOY
+  // (min=max=hoy: el calendario no deja ni mirar días de atrás). Con el permiso prendido, igual que siempre.
+  const _repSoloHoy=(me?.rol==='auxiliar')&&me?.permite_ids_pasados!==true
   c.innerHTML=`<div class="page-title">📝 Reporte del día</div>
     <div class="page-sub">Datos automáticos de Dropi + ventas manuales</div>
     <!-- R3 (2jul26): UN solo selector de fecha manda en TODA la página (órdenes arriba + IDs abajo) -->
     <div style="background:var(--card);border:2px solid var(--border);border-radius:16px;padding:14px 16px;margin:4px 0 10px">
       <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:8px">👇 ¿Qué día vas a llenar? <span style="font-size:11px;font-weight:600;color:var(--muted)">(toca la fecha para cambiar)</span></div>
-      <input type="date" id="rep-fecha-sel" value="${today()}" max="${today()}" onchange="window._setRepFecha(this.value)" style="width:100%;max-width:340px;padding:14px;font-size:19px;font-weight:700;border:3px solid var(--border);border-radius:14px;background:var(--card2);color:var(--text);cursor:pointer">
+      <input type="date" id="rep-fecha-sel" value="${today()}" ${_repSoloHoy?`min="${today()}"`:''} max="${today()}" onchange="window._setRepFecha(this.value)" style="width:100%;max-width:340px;padding:14px;font-size:19px;font-weight:700;border:3px solid var(--border);border-radius:14px;background:var(--card2);color:var(--text);cursor:pointer">
+      ${_repSoloHoy?`<div style="margin-top:8px;font-size:12px;color:var(--muted)">🔒 Solo puedes llenar <b>HOY</b>. Para ver o meter IDs de días anteriores, el administrador debe prender <b>"🗓️ Editar IDs de días anteriores"</b> en Equipo.</div>`:''}
       <button id="rep-dia-btn" onclick="(()=>{const i=document.getElementById('rep-fecha-sel');if(i){try{i.showPicker?i.showPicker():i.focus()}catch(e){i.focus()}}})()" style="display:block;width:100%;margin-top:10px;border:3px solid var(--green);background:var(--green-bg);color:var(--text);border-radius:16px;padding:16px 12px;cursor:pointer;text-align:center;font-weight:800;font-size:20px;line-height:1.25">📅 HOY</button>
       <div id="rep-faltan"></div>
     </div>
@@ -8321,9 +8334,14 @@ window._repDiaInfo=(fecha)=>{
   return{txt:'🕐 '+nombre,sub:'🔒 Para guardar: conversaciones obligatorias',bc:'var(--blue)',bg:'rgba(59,130,246,.12)'}
 }
 // R3: LA fecha manda en toda la página (órdenes + IDs). Nunca futuras.
+// NUEVO (7jul26 · Candado fecha): helper único del candado — auxiliar SIN "🗓️ Editar IDs de días anteriores".
+window._repSoloHoy=()=>((me?.rol==='auxiliar')&&me?.permite_ids_pasados!==true)
 window._setRepFecha=(val)=>{
   if(!val)return
   if(val>today())val=today()
+  // Candado (7jul26): sin el permiso, CUALQUIER intento de ir a otra fecha (calendario, chips,
+  // atajos, enlaces) se fuerza a HOY. Es el candado central: cubre todas las vías de entrada.
+  if(window._repSoloHoy()&&val!==today())val=today()
   const f=document.getElementById('rep-fecha'),t=document.getElementById('rep-tipo-fecha'),s=document.getElementById('rep-fecha-sel')
   if(t)t.value='compra'
   if(f)f.value=val
@@ -8345,6 +8363,9 @@ window._marcarBtnDia=()=>{
 // R2b (2jul26): días de los ÚLTIMOS 7 con IDs reportados pero SIN conversaciones → aviso con clic directo
 window._repCargarFaltantes=async()=>{
   const box=document.getElementById('rep-faltan');if(!box)return
+  // Candado (7jul26): estos chips llevan a días PASADOS — el auxiliar sin permiso no los ve
+  // (no puede tocar esos días; corregirlos es tarea del admin o de un aux con el permiso).
+  if(window._repSoloHoy&&window._repSoloHoy()){box.innerHTML='';return}
   try{
     const desde=_daysAgo(7),hasta=_daysAgo(1)
     const{data}=await sb.from('reportes_diarios').select('fecha,producto_nombre,ad_ids,conversaciones,conversaciones_aprox')
@@ -8688,9 +8709,20 @@ window.saveReporteV2=async(fecha)=>{
   const msg=document.getElementById('rep-msg')
   // NUEVO (7jul26 · Mejora 6): DOBLE SEGURO del candado — aunque algo pinte el formulario, el
   // auxiliar sin el permiso NO guarda nada de días distintos a HOY. Admin y demás roles, igual.
-  if((me?.rol==='auxiliar')&&me?.permite_ids_pasados!==true&&fecha!==today()){
-    if(msg)msg.innerHTML='<div class="alert alert-red">🔒 Solo puedes guardar los IDs de <b>HOY</b>. Para días anteriores pídele al administrador que prenda "🗓️ Editar IDs de días anteriores" en Equipo.</div>'
-    return
+  // MEJORA (7jul26 · Candado fecha): el permiso se re-verifica EN VIVO contra la BD antes de dejar
+  // guardar otro día — así, si el admin lo apagó con la sesión del aux ya abierta, el candado
+  // aplica AL INSTANTE (el valor viejo de la sesión ya no sirve de puerta). Tolerante: si la
+  // consulta falla, manda el valor de la sesión (default: bloqueado).
+  if((me?.rol==='auxiliar')&&fecha!==today()){
+    let _ppOk=me?.permite_ids_pasados===true
+    try{
+      const{data:_ppL}=await sb.from('usuarios').select('permite_ids_pasados').eq('id',me.id).maybeSingle()
+      if(_ppL!=null){_ppOk=_ppL.permite_ids_pasados===true;me.permite_ids_pasados=_ppOk}
+    }catch(_){}
+    if(!_ppOk){
+      if(msg)msg.innerHTML='<div class="alert alert-red">🔒 Solo puedes guardar los IDs de <b>HOY</b>. Para días anteriores pídele al administrador que prenda "🗓️ Editar IDs de días anteriores" en Equipo.</div>'
+      return
+    }
   }
 
   if(!permiteVentas){
@@ -20319,7 +20351,7 @@ function _renderProductoCardResumen(data,ranking){
       const dim=n===0?'opacity:.35;cursor:default':'cursor:pointer'
       return `<button class="rp-fus-urgpill" data-code="${code}" ${n>0?`onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','sem','${code}',this)"`:''} title="${tooltip}" style="${dim};background:${bg};color:${color};border:1px solid ${color};border-radius:8px;padding:5px 9px;font-size:10.5px;font-weight:600;display:flex;align-items:center;gap:5px"><span style="font-size:13px">${label.split(' ')[0]}</span><span style="font-weight:700">${n}</span><span style="opacity:.85">${label.split(' ').slice(1).join(' ')}</span></button>`
     }
-    const _filtroRowF=`<div data-nx-urg="1" style="display:flex;gap:6px;flex-wrap:wrap;margin:0 0 8px;padding:7px 9px;background:var(--card2);border-radius:8px;align-items:center;position:sticky;top:0;z-index:34;box-shadow:0 3px 10px rgba(0,0,0,.45)" title="📌 Fila pegada: los botones de urgencia y el buscador te acompañan al hacer scroll">
+    const _filtroRowF=`<div data-nx-urg="1" style="display:flex;gap:6px;flex-wrap:wrap;margin:0;padding:7px 9px;background:var(--card2);border-radius:8px;align-items:center;box-shadow:0 3px 10px rgba(0,0,0,.45)" title="📌 Fila pegada: los botones de urgencia y el buscador te acompañan al hacer scroll">
         <span style="font-size:10px;color:var(--muted);letter-spacing:.5px">URGENCIA →</span>
         ${_urgPillF('prender_ya',_contaF.prender_ya,'🛑 PRENDER YA','var(--red)','var(--red-bg)','PRENDER YA: hoy $0 de gasto pero vendían en los días anteriores. Click para filtrar y prenderlas. Click de nuevo para quitar el filtro.')}
         ${_urgPillF('stop',_contaF.stop,'🔴 PAUSAR','var(--red)','var(--red-bg)','APAGAR: el CPA Real Efectivas de hoy pasa el break-even — pierden plata (misma lógica del desglose de la cuenta). Click para filtrar.')}
@@ -20376,7 +20408,8 @@ function _renderProductoCardResumen(data,ranking){
     return`<div id="${_cidF}-wrap" class="rp-fus-main" data-fslug="${_slugProd}" style="margin-top:10px;padding:12px 13px;background:rgba(0,0,0,.18);border-radius:8px;border-left:3px solid var(--purple)">
       ${_ctrlRango}
       <div style="display:flex;align-items:center;gap:8px;margin:6px 0 3px;font-size:9.5px;letter-spacing:.8px;color:var(--subtle);font-weight:700" title="ZONA 2 · Filtros: cambian LO QUE VES, no tocan Meta. Se CRUZAN entre sí y dentro de cada grupo solo puede haber UNA opción activa. Activo = borde blanco. En 0 = se atenúa solo.">🔍 FILTRA LO QUE VES — SE CRUZAN ENTRE SÍ · UNA OPCIÓN POR GRUPO<span style="flex:1;height:1px;background:var(--border)"></span></div>
-      <div data-nx-est="1" style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin:0 0 6px;padding:6px 9px;background:var(--card2);border-radius:8px;position:sticky;top:0;z-index:35;box-shadow:0 3px 10px rgba(0,0,0,.45)" title="📌 Fila pegada: los estados te acompañan al hacer scroll">
+      <div data-nx-stack="1" style="display:flow-root;position:sticky;top:0;z-index:37;background:var(--bg);margin:0 0 8px" title="📌 Bloque pegado: estados + urgencia + buscador te acompañan al hacer scroll, apilados sin huecos">
+      <div data-nx-est="1" style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin:0 0 6px;padding:6px 9px;background:var(--card2);border-radius:8px;box-shadow:0 3px 10px rgba(0,0,0,.45)" title="📌 Fila pegada: los estados te acompañan al hacer scroll">
           <button class="rp-fus-estpill" data-est="act" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','estado','act',this)" style="font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;background:var(--green-bg);color:var(--green);border:1px solid var(--green);cursor:pointer" title="🟢 Activas DE VERDAD: botón prendido en Meta, ≥1 anuncio entregando AHORA, y SIN alerta PRENDER YA. ${_actHdrF} de ${_lista.length}. CLIC para ver SOLO las activas.">🟢 Activas: ${_actHdrF}</button>
           <button class="rp-fus-estpill" data-est="ventas" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','estado','ventas',this)" style="font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;background:var(--red-bg);color:var(--red);border:1px solid var(--red);cursor:pointer" title="🔴 Inactivas ventas (PRENDER YA): hoy $0 de gasto pero CON ventas en los días anteriores — dejan plata sobre la mesa. ${_ventasHdrF} de ${_lista.length}. CLIC para ver SOLO estas y prenderlas.">🔴 Inactivas ventas: ${_ventasHdrF}</button>
           <button class="rp-fus-estpill" data-est="inact" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','estado','inact',this)" style="font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border);cursor:pointer" title="⚫ Inactivas HOY: apagadas (o sin entregar) pero que SÍ gastaron plata HOY antes de apagarse — y SIN alerta PRENDER YA. ${_inactHdrF}. CLIC para ver SOLO estas. Las que solo corrieron días anteriores no entran aquí: véelas con los chips de días o 'Ver todas'.">⚫ Inactivas: ${_inactHdrF}</button>
@@ -20388,6 +20421,7 @@ function _renderProductoCardResumen(data,ranking){
           <span id="${_cidF}-vsvtot" style="font-size:10.5px;color:var(--subtle)">= ${_totVentasF}</span>
       </div>
       ${_filtroRowF}
+      </div>
       <div style="display:flex;align-items:center;gap:8px;margin:6px 0 3px;font-size:9.5px;letter-spacing:.8px;color:var(--subtle);font-weight:700" title="ZONA 1 · Filtro por DÍA: toca un chip para ver SOLO las campañas que vendieron ese día (clic de nuevo lo quita). Se cruza con los demás filtros. El detalle de cada día está en el tooltip y abajo de la tabla.">📊 ASÍ VAMOS — CÓMO FUE CADA DÍA (TOCA UN CHIP PARA FILTRAR)<span style="flex:1;height:1px;background:var(--border)"></span></div>
       <div id="${_cidF}-diachips" style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:0 0 6px" title="Ventas de cada día sumando todas las campañas (detalle en el tooltip de cada chip). Si un día está en 0 igual se muestra.">
         ${_totPorDiaF.map(t=>{const _onT=(t.n>0||t.ids>0||(t.g||0)>0);return`<button class="rp-fus-diapill" data-dia="${t.k}" ${_onT?`onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','dia','${t.k}',this)"`:''} style="cursor:${_onT?'pointer':'default'};font-size:10.5px;font-weight:700;padding:3px 10px;border-radius:999px;white-space:nowrap;${_onT?'background:var(--green-bg);color:var(--green);border:1px solid var(--green)':'background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)'}" title="${t.lab}: ${t.n} venta${t.n===1?'':'s'} Dropi (cuadre) · ${t.ids} por IDs del aux · ${t.conv} conversaciones · gasto $${fmt(Math.round(t.g||0))} · 📦 stock ${t.stk!=null?fmt(t.stk):'—'}${!_onT?' — ese día no hubo gasto ni ventas por ninguna fuente':' · CLIC para ver TODAS las campañas que GASTARON '+t.lab+' (con o sin ventas; clic de nuevo lo quita). Se COMBINA con Activas/Inactivas, urgencia y el buscador por ID.'}">${t.lab}</button>`}).join('')}
@@ -22049,6 +22083,30 @@ window._rpFusionStickyRow=function(rowEl,ccid){
   }catch(_){}
 }
 
+// ═══ NUEVO (7jul26 · pila única): ANCLA ÚNICA DE LA PILA PEGADA ═══════════════════════════
+// UNA sola fuente de verdad para dónde empieza cada capa fija del modo rango. Devuelve la Y
+// (viewport) justo DEBAJO del bloque pegado de filtros (estados+urgencia) de la MISMA fusión
+// del elemento de referencia, más la barrita morada de scroll de esa tabla si está visible.
+// Sin espacios mágicos: si una pieza no está, su alto no se suma — la pila queda flush.
+window._nxPileAnchor=function(refEl,scr){
+  try{
+    const _vsc=document.querySelector('.content')
+    const _ct=_vsc?_vsc.getBoundingClientRect().top:0
+    let base=_ct
+    const w=refEl&&refEl.closest?refEl.closest('.rp-fus-main'):null
+    const stk=w?(w.querySelector('[data-nx-stack="1"]')||w.querySelector('[data-nx-urg="1"]')||w.querySelector('[data-nx-est="1"]')):null
+    if(stk&&stk.offsetParent!==null){
+      const r=stk.getBoundingClientRect()
+      if(r.bottom>base)base=r.bottom
+    }
+    if(scr){
+      const pb=scr.previousElementSibling
+      if(pb&&pb.classList&&pb.classList.contains('nexo-hbar')&&pb.offsetParent!==null&&pb.style.display!=='none')base+=(pb.offsetHeight||13)+3
+    }
+    return Math.max(base,_ct)
+  }catch(_){return 0}
+}
+
 // ═══ NUEVO (6jul26 · Mejora 1): CAMPAÑA PEGADA en el MODO RANGO ═══════════════════════════
 // Al navegar DENTRO del desglose de una campaña del rango, su barra (ID · gasto · CPA ·
 // presupuesto · Duplicar · nombre) se queda PEGADA entre las dos barritas moradas de scroll:
@@ -22086,14 +22144,9 @@ window._nxRngStickyCampInit=function(){
       const boxes=document.querySelectorAll('.rp-rng-box')
       if(!boxes.length){_hide();return}
       const _cRect=_vsc.getBoundingClientRect()
-      // Línea de anclaje: debajo de la fila URGENCIA pegada + la barra morada grande del rango
-      let anchor=_cRect.top+4+16
-      const _urgS=document.querySelector('[data-nx-urg="1"]')
-      if(_urgS&&_urgS.offsetParent!==null)anchor=_urgS.getBoundingClientRect().bottom+6+16
-      // NUEVO (7jul26 · Mejora 3): si la BARRA DE DÍAS está pegada, la campaña se ancla DEBAJO de ella
-      anchor+=(window._nxRngDiasH||0)
-      // ¿Cuál desglose abierto cruza la línea? (la fila ya subió y su caja aún cubre la zona)
-      let act=null
+      // MEJORA (7jul26 · pila única): ancla POR CAJA con _nxPileAnchor (bloque pegado de SU fusión +
+      // barrita morada de su tabla) + el alto de la BARRA DE DÍAS pegada. Sin +px mágicos.
+      let act=null,anchor=_cRect.top
       const _hEst=(_wrap&&_wrap.style.display!=='none')?(_wrap.offsetHeight||32):32
       for(const box of boxes){
         if(box.offsetParent===null)continue
@@ -22101,9 +22154,12 @@ window._nxRngStickyCampInit=function(){
         if(!sub||sub.style.display==='none')continue
         const row=box.querySelector('.rp-rng-row')
         if(!row)continue
+        let scrB=null
+        {let p=box.parentElement;while(p&&p!==document.body){const cs=getComputedStyle(p);if(/(auto|scroll)/.test(cs.overflowX||'')){scrB=p;break}p=p.parentElement}}
+        const _anc=(window._nxPileAnchor?window._nxPileAnchor(box,scrB):(_cRect.top+4+16))+(window._nxRngDiasH||0)
         const rr=row.getBoundingClientRect()
         const br=box.getBoundingClientRect()
-        if(rr.bottom<anchor+2&&br.bottom>anchor+_hEst+6){act={box,row};break}
+        if(rr.bottom<_anc+2&&br.bottom>_anc+_hEst+6){act={box,row};anchor=_anc;break}
       }
       if(!act){_hide();return}
       _mkW()
@@ -22176,20 +22232,19 @@ window._nxRngStickyDiasInit=function(){
       const hdrs=document.querySelectorAll('.rp-rng-hdr')
       if(!hdrs.length){_hide();return}
       const _cRect=_vsc.getBoundingClientRect()
-      // Línea de anclaje: debajo de la fila URGENCIA pegada + la barra morada grande del rango
-      let anchor=_cRect.top+4+16
-      const _urgS=document.querySelector('[data-nx-urg="1"]')
-      if(_urgS&&_urgS.offsetParent!==null)anchor=_urgS.getBoundingClientRect().bottom+6+16
-      // ¿Cuál tabla de rango cruza la línea? (su header ya subió y la tabla aún cubre la zona)
-      let act=null
+      // MEJORA (7jul26 · pila única): el ancla se calcula POR TABLA con _nxPileAnchor — debajo del
+      // bloque pegado de SU MISMA fusión (antes tomaba la primera fila de urgencia del documento,
+      // que podía ser de otro producto) y de su barrita morada si está visible. Sin +px mágicos.
+      let act=null,anchor=_cRect.top
       const _hEst=(_wrap&&_wrap.style.display!=='none')?(_wrap.offsetHeight||24):24
       for(const hdr of hdrs){
         if(hdr.offsetParent===null)continue
         let scr=null
         {let p=hdr.parentElement;while(p&&p!==document.body){const cs=getComputedStyle(p);if(/(auto|scroll)/.test(cs.overflowX||'')){scr=p;break}p=p.parentElement}}
         if(!scr)continue
+        const _anc=window._nxPileAnchor?window._nxPileAnchor(hdr,scr):(_cRect.top+4+16)
         const hr=hdr.getBoundingClientRect(),sr=scr.getBoundingClientRect()
-        if(hr.bottom<anchor+2&&sr.bottom>anchor+_hEst+6){act={hdr,scr};break}
+        if(hr.bottom<_anc+2&&sr.bottom>_anc+_hEst+6){act={hdr,scr};anchor=_anc;break}
       }
       if(!act){_hide();return}
       _mkW()
@@ -23020,7 +23075,7 @@ window._rpFusionRango=async function(slug,cidF){
     const _MESHR=['ENE','FEB','MAR','ABR','MAY','JUN','JUL','AGO','SEP','OCT','NOV','DIC']
     const _DIASEMHR=['DOM','LUN','MAR','MIÉ','JUE','VIE','SÁB']
     const _hoyISO_R=_isoR(new Date())
-    const _fLabHR=f=>{const p=String(f).split('-');if(p.length!==3)return f;const _dN=String(parseInt(p[2],10)),_mS=_MESHR[parseInt(p[1],10)-1]||p[1];if(f===_hoyISO_R)return 'HOY '+_dN+' '+_mS;const _dd=new Date(p[0]+'-'+p[1]+'-'+p[2]+'T12:00:00');return (_DIASEMHR[_dd.getDay()]||'')+' '+_dN}
+    const _fLabHR=f=>{const p=String(f).split('-');if(p.length!==3)return f;const _dN=String(parseInt(p[2],10)),_mS=_MESHR[parseInt(p[1],10)-1]||p[1];if(f===_hoyISO_R)return 'HOY '+_dN;const _dd=new Date(p[0]+'-'+p[1]+'-'+p[2]+'T12:00:00');return (_DIASEMHR[_dd.getDay()]||'')+' '+_dN}
     const _idsCampR=(ck,f)=>((_idsCampDiaRg[String(ck)]||{})[f]||0)
     const _idsCampTotR=(ck)=>_todasFechasR.reduce((s,f)=>s+_idsCampR(ck,f),0)
     const _gAbrR=(g)=>g>=1e6?('$'+(g/1e6).toFixed(3)+'M'):(g>=1000?('$'+Math.round(g/1000)+'k'):('$'+Math.round(g)))
@@ -23165,7 +23220,7 @@ window._rpFusionRango=async function(slug,cidF){
       [_cwR.dup,'🔁 DUPLICAR','#c4b5fd','Duplicar la campaña COMPLETA (adsets + anuncios) a OTRAS cuentas publicitarias del mismo Business Manager'],
       [_cwR.nom,'📣 CAMPAÑA','#e2e8f0','Nombre de la campaña',1],
       [_cwR.alr,'🚨 ALERTA','#fda4af','🛑 PRENDER YA (foto de HOY): hoy $0 pero vendía antes · 📉 NO REMONTA: el CPA de TODO el rango pasa el break-even']
-    ].map(h=>h[5]?`<span onclick="event.stopPropagation();window._rpRangoSort('${cidF}','${h[5]}',this)" style="display:inline-block;width:${h[0]}px;flex-shrink:0;font-size:8.5px;font-weight:700;letter-spacing:.3px;color:${h[2]};white-space:nowrap;cursor:pointer;padding-right:6px;user-select:none;${h[6]||''}" title="${h[3]} · CLIC: ordenar de mayor a menor · otro CLIC: de menor a mayor">${h[1]}<span class="rp-sort-arr" data-key="${h[5]}" style="color:var(--text)"></span></span>`:`<span style="display:inline-block;width:${h[0]}px;flex-shrink:0;font-size:8.5px;font-weight:700;letter-spacing:.3px;color:${h[2]};white-space:nowrap;cursor:help;padding-right:6px;${h[6]||''}" title="${h[3]}">${h[1]}</span>`).join('')}</div>`
+    ].map(h=>h[5]?`<span onclick="event.stopPropagation();window._rpRangoSort('${cidF}','${h[5]}',this)" style="display:inline-block;width:${h[0]}px;flex-shrink:0;font-size:8.5px;font-weight:700;letter-spacing:.3px;color:${h[2]};white-space:nowrap;overflow:hidden;cursor:pointer;padding-right:6px;user-select:none;${h[6]||''}" title="${h[3]} · CLIC: ordenar de mayor a menor · otro CLIC: de menor a mayor">${h[1]}<span class="rp-sort-arr" data-key="${h[5]}" style="color:var(--text)"></span></span>`:`<span style="display:inline-block;width:${h[0]}px;flex-shrink:0;font-size:8.5px;font-weight:700;letter-spacing:.3px;color:${h[2]};white-space:nowrap;overflow:hidden;cursor:help;padding-right:6px;${h[6]||''}" title="${h[3]}">${h[1]}</span>`).join('')}</div>`
     const _mkTotRowR=(suf)=>{
       const _tG=_listaR.reduce((s,F)=>s+(F.gasto||0),0)
       const _tV=_listaR.reduce((s,F)=>s+(F.count||0),0)
@@ -24524,12 +24579,19 @@ window._nexoStickyHBar=function(el){
       const _topPx=()=>{try{
         let t=4
         const _wrapU=el.closest('.rp-fus-main')
+        // MEJORA (7jul26 · pila única): si existe el bloque pegado [data-nx-stack], SU alto es la
+        // única fuente de verdad — la barrita queda pegada justo debajo, sin espacio sobrante.
+        const _stkU=_wrapU&&_wrapU.querySelector('[data-nx-stack="1"]')
+        if(_stkU&&_stkU.offsetParent!==null){
+          t=_stkU.offsetHeight
+        }else{
         // NUEVO (7jul26 · Mejora 3): la fila de ESTADOS pegada va PRIMERO → todo lo demás baja su alto
         const _est=_wrapU&&_wrapU.querySelector('[data-nx-est="1"]')
         const _estH=(_est&&_est.offsetParent!==null)?_est.offsetHeight:0
         const _urg=_wrapU&&_wrapU.querySelector('[data-nx-urg="1"]')
         if(_urg&&_urg.offsetParent!==null)t=_estH+_urg.offsetHeight+6
         else if(_estH)t=_estH+6
+        }
         // NUEVO (6jul26 · Mejora 1): si la BARRA DE LA CAMPAÑA está pegada (modo rango), la
         // barrita del desglose baja ese alto extra → secuencia: estados → urgencia → barra grande →
         // barra de días → campaña pegada → barrita del desglose. Si no hay campaña pegada, todo como antes.
@@ -24645,6 +24707,9 @@ window._nxStackTops=function(){
       const est=w.querySelector('[data-nx-est="1"]')
       const urg=w.querySelector('[data-nx-urg="1"]')
       if(!urg)return
+      // MEJORA (7jul26 · pila única): si las dos filas ya viven dentro del bloque pegado
+      // [data-nx-stack], se apilan solas en el flujo — no hay top que sincronizar.
+      if(urg.closest('[data-nx-stack="1"]'))return
       const h=(est&&est.offsetParent!==null)?est.offsetHeight:0
       const t=h+'px'
       if(urg.style.top!==t)urg.style.top=t
@@ -31317,25 +31382,32 @@ async function hbProcesarArchivo(file,ctx){
   // más los archivos de ESTA sesión con la misma fecha). Repetir tanda o saltarse una se explica.
   // Respeta el switch "secuencia" del Centro de Control (misma regla 5 del formato del nombre).
   if(hbReglaActiva('secuencia')){
+    // MEJORA (7jul26 · tanda POR AGENTE): la llave del duplicado es AGENTE + FECHA + TIPO (normal/oferta).
+    // Cada agente lleva su propia numeración __1, __2… y las series normal y __oferta son INDEPENDIENTES
+    // (el mismo agente puede tener __1 y __1__oferta el mismo día sin chocar). Agentes DIFERENTES pueden
+    // subir ambos __1 de la misma fecha sin bloquearse entre sí.
     let _maxSec=0
+    const _tipoTanda=f.oferta?'OFERTA':'normal'
     try{
-      const{data:_pSec}=await sb.from('constructor_subidas').select('detalle,resultado')
-        .eq('tipo','export').eq('fecha_declarada',f.fechaDecl)
+      const{data:_pSec}=await sb.from('constructor_subidas').select('detalle,resultado,agente')
+        .eq('tipo','export').eq('fecha_declarada',f.fechaDecl).eq('agente',f.agente)
       for(const g of(_pSec||[])){
         if(g&&g.resultado==='sin_ventas')continue // un "día sin ventas" confirmado NO es una tanda de pedidos
+        const _ofG=!!(g&&g.detalle&&g.detalle.oferta) // pre-Fase 6 sin la marca = normal
+        if(_ofG!==!!f.oferta)continue // serie independiente: normal y oferta NO se cruzan
         const s=g&&g.detalle&&isFinite(parseInt(g.detalle.secuencia))?parseInt(g.detalle.secuencia):1 // sin secuencia (pre-Fase 6) = tanda 1
         if(s>_maxSec)_maxSec=s
       }
     }catch(_e){console.warn('[hb secuencia] lectura BD:',_e?.message)}
     for(const o of(ctx.archivosSesion||[])){ // tandas ya cargadas en esta sesión (aún sin generar)
       if(o===f||['error','duplicado','nombre_mal'].includes(o.estado))continue
-      if(o.fechaDecl===f.fechaDecl){const s=parseInt(o.secuencia)||1;if(s>_maxSec)_maxSec=s}
+      if(o.fechaDecl===f.fechaDecl&&o.agente===f.agente&&(!!o.oferta)===(!!f.oferta)){const s=parseInt(o.secuencia)||1;if(s>_maxSec)_maxSec=s}
     }
     const _esperada=_maxSec+1
     if((parseInt(f.secuencia)||1)!==_esperada){
       const _mia=parseInt(f.secuencia)||1
-      if(_mia<=_maxSec)f.secProblema=`🔢 La tanda __${_mia} del ${f.fechaDecl} YA se subió. Si estos son pedidos NUEVOS de ese día, renombra el archivo con __${_esperada} y vuelve a subirlo.`
-      else f.secProblema=`🔢 Te saltaste una tanda: ${_maxSec?`la última del ${f.fechaDecl} fue __${_maxSec}`:`el ${f.fechaDecl} aún no tiene ninguna subida`}, así que esta debe ser __${_esperada} (no __${_mia}). Renombra el archivo y vuelve a subirlo.`
+      if(_mia<=_maxSec)f.secProblema=`🔢 La tanda __${_mia} (${_tipoTanda}) de <b>${f.agente}</b> del ${f.fechaDecl} YA se subió. Si estos son pedidos NUEVOS de ese día, renombra el archivo con __${_esperada} y vuelve a subirlo.`
+      else f.secProblema=`🔢 Te saltaste una tanda de <b>${f.agente}</b> (${_tipoTanda}): ${_maxSec?`la última del ${f.fechaDecl} fue __${_maxSec}`:`el ${f.fechaDecl} aún no tiene ninguna subida de este agente`}, así que esta debe ser __${_esperada} (no __${_mia}). Renombra el archivo y vuelve a subirlo.`
     }
   }
   // ══ FASE 6 (6jul26) · M15.B: ANTI-DUPLICADO POR TELÉFONO (regla 3, [CRÍTICA]) ══
@@ -31548,7 +31620,7 @@ async function pageAuxHojaBase(c){
     <div style="font-size:14px;line-height:1.8"><!-- FASE 6 (6jul26) · M15.A: formato con SECUENCIA de tanda -->
       Formato: <b style="font-family:monospace">filas__AGENTE__fecha__secuencia</b> (separador = <b>doble</b> guion bajo "__") · si es oferta: <b style="font-family:monospace">...__secuencia__oferta</b><br>
       ✅ <span style="font-family:monospace">38__Neocell_A6_A2__2026-07-05__1</span> &nbsp;·&nbsp; ✅ <span style="font-family:monospace">10__Neocell_A6_A2__2026-07-05__2</span> &nbsp;·&nbsp; ✅ <span style="font-family:monospace">20__Neocell_A6_A2__2026-07-05__1__oferta</span><br>
-      <span style="color:var(--muted);font-size:12px">1) filas = cuántas ventas trae (candado) · 2) AGENTE tal como está en NEXO · 3) fecha AAAA-MM-DD · 4) secuencia de tanda: <b>__1</b> la primera subida del día (SIEMPRE, aunque sea la única), __2 la segunda tanda con pedidos nuevos, etc. · 5) "oferta" AL FINAL solo si aplica</span>
+      <span style="color:var(--muted);font-size:12px">1) filas = cuántas ventas trae (candado) · 2) AGENTE tal como está en NEXO · 3) fecha AAAA-MM-DD · 4) secuencia de tanda: <b>__1</b> la primera subida del día (SIEMPRE, aunque sea la única), __2 la segunda tanda con pedidos nuevos, etc. — la cuenta es <b>POR AGENTE</b> (agentes distintos pueden subir __1 de la misma fecha) y la serie de __oferta es independiente de la normal · 5) "oferta" AL FINAL solo si aplica</span>
     </div>
   </div>
   <div class="card" style="margin-top:12px">
@@ -32684,8 +32756,8 @@ const HB_CC_REGLAS=[
    pasa:'Cliente que recompró: "✓ Es recompra" → entra normal.',bloquea:'Pedido que ya estaba: "🗑️ Quitar duplicado" → no entra a la hoja ni a reportes.',
    siApagas:'Los repetidos entran sin verificación: posibles duplicados sin revisar.'},
   {k:'secuencia',label:'🔢 Secuencia obligatoria en el nombre (__1, __2…)',critica:false,
-   explica:'El nombre del Excel declara la tanda del día: __1 la primera subida (SIEMPRE), __2 la segunda con pedidos nuevos, etc. "oferta" va al final. Además, NEXO valida que la tanda sea LA SIGUIENTE: si ya subiste __1 de un día, la próxima de ese día debe ser __2 (ni repetida ni salteada).',
-   pasa:'38__Neocell_A6_A2__2026-07-05__1 → válido. Y si __1 ya existe, la siguiente con __2 → válido.',bloquea:'Sin secuencia → se rechaza con el formato. Repetir __1 el mismo día → "esa tanda YA se subió, usa __2". Saltar a __3 sin __2 → "te saltaste una tanda".',
+   explica:'El nombre del Excel declara la tanda del día: __1 la primera subida (SIEMPRE), __2 la segunda con pedidos nuevos, etc. "oferta" va al final. NEXO valida que la tanda sea LA SIGUIENTE, y la cuenta es POR AGENTE y POR TIPO: cada agente lleva su propia numeración, y la serie normal y la de __oferta son independientes (el mismo agente puede tener __1 y __1__oferta el mismo día). Agentes distintos pueden subir __1 de la misma fecha sin bloquearse.',
+   pasa:'38__Neocell_A6_A2__2026-07-05__1 → válido. Si __1 de ese agente ya existe, la siguiente con __2 → válido. Y __1 de OTRO agente en la misma fecha → también válido.',bloquea:'Sin secuencia → se rechaza con el formato. Repetir __1 del MISMO agente el mismo día → "esa tanda YA se subió, usa __2". Saltar a __3 sin __2 → "te saltaste una tanda".',
    siApagas:'Se aceptan nombres con el formato viejo (sin secuencia, tanda=1) y NO se valida el orden de las tandas; se pierde una señal para distinguir tandas legítimas de re-subidas.'},
   {k:'obligatorios',label:'📋 Campos obligatorios del pedido',critica:true,
    explica:'Una línea sin ciudad, departamento, dirección, teléfono, cantidad, fecha, producto, agente, ID Dropi, precio o nombre/apellido NO procesa (las demás siguen).',

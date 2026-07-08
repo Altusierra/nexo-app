@@ -16487,11 +16487,28 @@ async function _logNovedadesPendientes(marcas){
 async function _aplicarCorreccionAnuncio(data,nuevoAd){
   const esOrg=!String(nuevoAd||'').trim()
   const _nuevo=esOrg?null:String(nuevoAd).trim()
+  // ══ FASE 8 (8jul26) · VALIDACIÓN ANTES DE GUARDAR (anclada a LA ORDEN, no al teléfono) ══
+  // El producto CORRECTO de esta orden lo decide su ID de Dropi (viene del cruce) — data.id_dropi /
+  // data.prod_real. Un cliente puede tener OTRO pedido de OTRO producto con su propio anuncio: por
+  // eso el ID nuevo se verifica contra EL PRODUCTO DE ESTA ORDEN. Si pertenece a otro → NO se guarda.
+  let _adInfoNuevo=null
+  if(!esOrg){
+    try{const _mv=await buildAdProductMap([_nuevo]);_adInfoNuevo=_mv[_nuevo]||null}catch(_){}
+    const _pReal=(productos||[]).find(pp=>String(pp.dropi_id||'').trim()===String(data.id_dropi||'').trim())
+      ||(productos||[]).find(pp=>String(pp.nombre||'').trim().toLowerCase()===String(data.prod_real||'').trim().toLowerCase())
+    if(_adInfoNuevo&&_adInfoNuevo.producto_id&&_pReal&&String(_adInfoNuevo.producto_id)!==String(_pReal.id)){
+      return{ok:false,error:`ese ID pertenece a "${_adInfoNuevo.producto_nombre||'otro producto'}", NO a "${data.prod_real||_pReal.nombre}". Esta orden es de ${data.prod_real||_pReal.nombre} (lo dice su ID de Dropi) — busca en Meta Ads el anuncio correcto de ese producto y vuelve a intentarlo. No se guardó nada.`}
+    }
+    if(!_adInfoNuevo){ // el ID no está en las campañas sincronizadas → no se puede verificar: confirmar a conciencia
+      const _okSin=confirm(`⚠️ No pude verificar a qué producto pertenece el ID ${_nuevo} (no aparece en las campañas sincronizadas de Meta Ads).\n\nEsta orden es de: ${data.prod_real||'?'}\n\n¿Estás SEGURO de que ese anuncio es de ${data.prod_real||'ese producto'}? Se guardará bajo tu confirmación.`)
+      if(!_okSin)return{ok:false,error:'corrección cancelada — el ID no se pudo verificar contra las campañas de Meta.'}
+    }
+  }
   const{error}=await sb.from('mapeos').update({ad_id:_nuevo}).eq('id',data.mapeo_id)
   if(error)return{ok:false,error:error.message}
-  // producto al que apunta el anuncio nuevo (para el historial)
+  // producto al que apunta el anuncio nuevo (para el historial) — reusa la verificación de arriba
   let prodDespues=esOrg?'Orgánica':'(anuncio sin campaña)'
-  if(!esOrg){try{const _m=await buildAdProductMap([_nuevo]);if(_m[_nuevo]&&_m[_nuevo].producto_nombre)prodDespues=_m[_nuevo].producto_nombre}catch(_){}}
+  if(!esOrg&&_adInfoNuevo&&_adInfoNuevo.producto_nombre)prodDespues=_adInfoNuevo.producto_nombre
   // recalcular semáforos del anuncio viejo + el nuevo → CPA correcto en Meta Ads al instante
   try{await _calcularYGuardarSemaforos([data.ad_antes,_nuevo].filter(Boolean),'correccion_anuncio')}catch(_){}
   // Timeline de la orden (ley del owner): dejar huella imborrable del cambio de anuncio
@@ -16585,12 +16602,31 @@ window._renderNovedadesId=async function(){
     const _h=window._novHistData||[]
     if(!_h.length)return''
     const _n=Math.min(_h.length,Math.max(1,window._novHistShow||1))
-    const _items=_h.slice(0,_n).map(h=>`<div style="border-top:1px solid var(--border);padding:9px 0">
+    const _items=_h.slice(0,_n).map((h,hi)=>{
+      // FASE 8 (8jul26) · DOBLE CORRECCIÓN: si el ID "corregido" SIGUE siendo de otro producto, delatarlo
+      const _sigueMal=h.tipo!=='organica'&&h.prod_despues&&h.producto_real&&String(h.prod_despues).trim().toLowerCase()!==String(h.producto_real).trim().toLowerCase()&&h.prod_despues!=='(anuncio sin campaña)'
+      const _ahoraHtml=h.tipo==='organica'
+        ?`<div style="font-size:11.5px;color:var(--green)">✅ AHORA: Sin anuncio (orgánica) → fuera del CPA</div>`
+        :(_sigueMal
+          ?`<div style="font-size:11.5px;color:var(--red)">🚨 AHORA: ID <code>${h.ad_despues||'—'}</code> → <b>SIGUE apuntando a otro producto</b> (es de ${h.prod_despues}, la orden es de ${h.producto_real}). Corrígelo abajo 👇</div>`
+          :`<div style="font-size:11.5px;color:var(--green)">✅ AHORA: ID <code>${h.ad_despues||'—'}</code> → es de ${h.prod_despues||'—'}</div>`)
+      const _reBtn=h.tipo==='organica'?'':`
+        <div id="nov-re-${hi}" style="display:none;margin-top:6px;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--card2)">
+          <div style="font-size:11.5px;color:var(--muted);margin-bottom:5px">Pon el ID de un anuncio de <b>${h.producto_real||'este producto'}</b> — NEXO lo verifica contra la orden antes de guardar.</div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <input type="text" inputmode="numeric" id="nov-rein-${hi}" placeholder="ID de anuncio correcto" style="font-family:monospace;font-size:12px;max-width:230px;padding:6px 9px;background:var(--card);border:1px solid var(--border);border-radius:8px;color:var(--text)">
+            <button onclick="_novReCorregir(${hi})" style="padding:6px 13px;font-size:12px;background:var(--blue);color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600">Guardar ID verificado</button>
+          </div>
+          <div id="nov-remsg-${hi}" style="margin-top:4px"></div>
+        </div>
+        <button onclick="_novReAbrir(${hi})" style="margin-top:5px;padding:4px 11px;font-size:11px;background:${_sigueMal?'var(--red)':'var(--card2)'};color:${_sigueMal?'#fff':'var(--text)'};border:1px solid ${_sigueMal?'var(--red)':'var(--border)'};border-radius:7px;cursor:pointer;font-weight:600">🔁 Re-corregir ID${_sigueMal?' (¡sigue mal!)':''}</button>`
+      return`<div style="border-top:1px solid var(--border);padding:9px 0">
       <div style="font-size:13px;margin-bottom:4px">📦 <b>${h.producto_real||'—'}</b> · Guía <code style="color:var(--muted)">${h.numero_guia||'—'}</code> · Tel <code style="color:var(--muted)">${h.telefono||'—'}</code></div>
       <div style="font-size:11.5px;color:var(--red)">❌ ANTES: ID <code>${h.ad_antes||'—'}</code> → era de ${h.prod_antes||'—'}</div>
-      <div style="font-size:11.5px;color:var(--green)">✅ AHORA: ${h.tipo==='organica'?'Sin anuncio (orgánica) → fuera del CPA':('ID <code>'+(h.ad_despues||'—')+'</code> → es de '+(h.prod_despues||'—'))}</div>
+      ${_ahoraHtml}
       <div style="font-size:10.5px;color:var(--muted);margin-top:3px">👤 ${h.corregido_por||'—'} · ${_fmtFecha(h.corregido_at||h.created_at)} · ${h.fuente||'—'}</div>
-    </div>`).join('')
+      ${_reBtn}
+    </div>`}).join('')
     const _btn=_h.length>_n?`<div style="padding:8px 0 2px"><button onclick="window._novHistVerMas()" style="padding:6px 14px;font-size:12px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:8px;cursor:pointer;font-weight:600" title="Muestra 3 corregidas más (ahora ves ${_n} de ${_h.length})">➕ Ver 3 más (${_h.length-_n} ocultas)</button></div>`:''
     return`
     <div style="font-weight:700;font-size:14px;color:var(--green);margin:12px 0 6px">✅ CORREGIDAS (${_h.length})</div>
@@ -16600,6 +16636,29 @@ window._renderNovedadesId=async function(){
     window._novHistShow=(window._novHistShow||1)+3
     const _w=document.getElementById('nov-hist-wrap')
     if(_w)_w.innerHTML=window._novHistBloque()
+  }
+  // ══ FASE 8 (8jul26) · DOBLE CORRECCIÓN desde el Dashboard (Novedades ID) ══
+  // Re-corrige un ID que un auxiliar "corrigió" mal. Usa LA MISMA vía validada
+  // (_aplicarCorreccionAnuncio): el nuevo ID se verifica contra el producto de LA ORDEN antes de guardar.
+  window._novReAbrir=function(hi){
+    const el=document.getElementById('nov-re-'+hi)
+    if(el)el.style.display=el.style.display==='none'?'block':'none'
+    const inp=document.getElementById('nov-rein-'+hi);if(inp&&el&&el.style.display!=='none')inp.focus()
+  }
+  window._novReCorregir=async function(hi){
+    const h=(window._novHistData||[])[hi];if(!h)return
+    const inp=document.getElementById('nov-rein-'+hi)
+    const msg=document.getElementById('nov-remsg-'+hi)
+    const nuevo=String(inp?.value||'').trim()
+    if(!nuevo){if(inp){inp.style.borderColor='var(--red)';inp.focus()}return}
+    if(msg)msg.innerHTML='<div style="font-size:11.5px;color:var(--muted)">Verificando contra la orden…</div>'
+    const data={mapeo_id:h.mapeo_id,telefono:h.telefono,guia:h.numero_guia,prod_real:h.producto_real,id_dropi:h.id_dropi,
+      ad_antes:h.ad_despues||h.ad_antes,prod_antes:h.prod_despues||h.prod_antes,fuente:'doble_correccion (dashboard)'}
+    const r=await _aplicarCorreccionAnuncio(data,nuevo)
+    if(!r.ok){if(msg)msg.innerHTML=`<div style="font-size:11.5px;color:var(--red)">❌ ${r.error}</div>`;return}
+    if(msg)msg.innerHTML=`<div style="font-size:11.5px;color:var(--green)">✅ Re-corregido a <code>${nuevo}</code> (${r.prodDespues}). CPA actualizado.</div>`
+    logAction('novedad_id_doble_correccion',{mapeo_id:h.mapeo_id,telefono:h.telefono,ad_malo:h.ad_despues,ad_nuevo:nuevo}).catch(()=>{})
+    setTimeout(()=>{try{window._renderNovedadesId()}catch(_){}},1400)
   }
   const histHtml=hist.length?`<div id="nov-hist-wrap">${window._novHistBloque()}</div>`:''
   box.innerHTML=`<div class="card" style="margin-bottom:14px">

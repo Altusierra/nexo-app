@@ -578,6 +578,7 @@ async function loadProductos(){
     productos=data||[]
   }catch(e){console.error('loadProductos exception:',e);productos=[]}
   try{await cargarDropiIdsArchivados()}catch(_){}
+  try{await cargarCostosEsperados()}catch(_){} // 💰 verificador Dropi (8jul26): índice de costos esperados + IDs paralelos
   await cargarMensajesDinamicos()
 }
 
@@ -1392,6 +1393,17 @@ function resolveProdByDropiId(idDr){
     // Producto archivado / no cargado: devolver un objeto mínimo con el nombre conocido
     if(_arch.nombre)return{id:_arch.producto_id,nombre:_arch.nombre,dropi_id:_id}
   }
+  // 3) NUEVO (8jul26): IDs PARALELOS (variantes de proveedor con varios IDs simultáneos).
+  // Viven en dropi_costos_esperados → el Cruce/Seguimiento los casa al producto sin tocar
+  // la regla del Asignador (que sigue exigiendo el único ID vigente).
+  const _par=window._dceIdsIndex&&window._dceIdsIndex[_id]
+  if(_par){
+    if(Array.isArray(productos)){
+      const _p=productos.find(pp=>pp.id===_par.producto_id)
+      if(_p)return _p
+    }
+    if(_par.nombre)return{id:_par.producto_id,nombre:_par.nombre,dropi_id:_id}
+  }
   return null
 }
 window.resolveProdByDropiId=resolveProdByDropiId
@@ -1421,6 +1433,102 @@ async function getPrecioVigente(producto_id,cantidad,fecha){
   }catch(e){console.warn('getPrecioVigente exception:',e);return null}
 }
 window.getPrecioVigente=getPrecioVigente
+
+// ══ NUEVO (8jul26) · 💰 COSTOS ESPERADOS POR ID (verificador Dropi) ═══════════
+// Tabla dropi_costos_esperados: por cada ID de Dropi (y opcionalmente variación)
+// registra el costo UNITARIO que el Excel de Dropi DEBERÍA traer, con rangos
+// desde/hasta (hasta EXCLUSIVO, igual que producto_precios_historial). NO cambia
+// de dónde sale el costo de los informes (regla única de costo intacta): esto es
+// SOLO un guardián → en cada cruce se compara PRECIO PROVEEDOR vs lo esperado y
+// si no cuadra se crea alerta en dropi_costo_alertas (Dashboard). Todo tolerante:
+// si las tablas no existen, nada se rompe (legacy).
+window._dceCache=window._dceCache||null      // filas de dropi_costos_esperados
+window._dceIdsIndex=window._dceIdsIndex||{}  // {dropi_id → {producto_id,nombre}} IDs PARALELOS (reconocimiento en cruce)
+async function cargarCostosEsperados(){
+  try{
+    const{data,error}=await sb.from('dropi_costos_esperados')
+      .select('id,producto_id,dropi_id,variacion_id,etiqueta,costo_unitario,vigente_desde,vigente_hasta,nota')
+    if(error){window._dceCache=window._dceCache||[];return} // tabla aún no existe → legacy
+    window._dceCache=data||[]
+    // Índice de IDs paralelos: IDs que viven en costos esperados pero NO en productos.dropi_id
+    // ni en el historial de IDs → el Cruce/Seguimiento los reconoce como del producto (multi-ID simultáneo).
+    const idx={}
+    const _prodById={};for(const p of (productos||[]))_prodById[p.id]=p
+    for(const r of (window._dceCache||[])){
+      const k=String(r.dropi_id||'').trim();if(!k)continue
+      const _yaVig=Array.isArray(productos)&&productos.some(pp=>String(pp.dropi_id||'').trim()===k)
+      const _yaArch=window._dropiIdArchivados&&window._dropiIdArchivados[k]
+      if(_yaVig||_yaArch)continue
+      const prod=_prodById[r.producto_id]
+      idx[k]={producto_id:r.producto_id,nombre:prod?prod.nombre:null}
+    }
+    window._dceIdsIndex=idx
+  }catch(e){console.warn('[DCE] no se pudo cargar costos esperados:',e?.message||e);window._dceCache=window._dceCache||[]}
+}
+window.cargarCostosEsperados=cargarCostosEsperados
+// Lookup sincrónico: costo unitario esperado de un ID (+variación opcional) en una fecha YYYY-MM-DD.
+// Prioridad: fila con ESA variación → fila general (sin variación). Devuelve {costo,etiqueta,row} o null.
+window._dceCostoEsperado=function(dropiId,variacionId,fechaYMD){
+  const rows=window._dceCache
+  if(!rows||!rows.length)return null
+  const _id=String(dropiId||'').trim();if(!_id)return null
+  const _var=String(variacionId||'').trim()
+  const _d=String(fechaYMD||'').slice(0,10);if(!_d)return null
+  const _vive=(r)=>{
+    const vd=r.vigente_desde?String(r.vigente_desde).slice(0,10):''
+    const vh=r.vigente_hasta?String(r.vigente_hasta).slice(0,10):''
+    if(vd&&vd>_d)return false
+    if(vh&&vh<=_d)return false // hasta EXCLUSIVO
+    return true
+  }
+  const _pick=(arr)=>{let b=null,bv='';for(const r of arr){if(!_vive(r))continue;const vd=r.vigente_desde?String(r.vigente_desde).slice(0,10):'';if(!b||vd>bv){b=r;bv=vd}}return b}
+  const delId=rows.filter(r=>String(r.dropi_id||'').trim()===_id)
+  if(!delId.length)return null
+  let best=null
+  if(_var)best=_pick(delId.filter(r=>String(r.variacion_id||'').trim()===_var))
+  if(!best)best=_pick(delId.filter(r=>!String(r.variacion_id||'').trim()))
+  return best?{costo:Number(best.costo_unitario)||0,etiqueta:best.etiqueta||'',row:best}:null
+}
+// ── Helpers de HUECOS (compartidos: modal de precios + badges de Productos) ──
+// rows: [{vigente_desde,vigente_hasta}] de UNA misma oferta/variación. hasta EXCLUSIVO.
+// Devuelve {huecos:[{desde,hasta}], sinVigente:bool}. desde/hasta del hueco son límites
+// EXCLUSIVOS listos para pre-llenar (contiguidad exacta con los vecinos).
+window._phHuecosCalc=function(rows){
+  const rs=(rows||[]).filter(r=>r.vigente_desde).map(r=>({d:String(r.vigente_desde).slice(0,10),h:r.vigente_hasta?String(r.vigente_hasta).slice(0,10):null})).sort((a,b)=>a.d<b.d?-1:1)
+  const huecos=[];let sinVigente=true
+  for(let i=0;i<rs.length;i++){
+    if(!rs[i].h)sinVigente=false
+    if(i>0){
+      const prevH=rs[i-1].h
+      if(prevH&&rs[i].d>prevH)huecos.push({desde:prevH,hasta:rs[i].d})
+    }
+  }
+  if(rs.length&&sinVigente){
+    // Sin registro vigente: hueco abierto desde el fin del último rango
+    const ult=rs[rs.length-1];if(ult.h)huecos.push({desde:ult.h,hasta:null})
+  }
+  return{huecos,sinVigente,vacio:!rs.length}
+}
+// Cobertura de las ofertas activas de un producto contra su historial de precios.
+// ofertas: [{cantidad}] · histRows: filas de producto_precios_historial del producto.
+// Devuelve lista de problemas [{cantidad,tipo:'sin_registro'|'sin_vigente'|'hueco',desde,hasta}]
+window._phCoberturaOfertas=function(ofertas,histRows){
+  const out=[]
+  const porCant={};for(const r of (histRows||[])){const c=parseInt(r.cantidad);(porCant[c]=porCant[c]||[]).push(r)}
+  for(const o of (ofertas||[])){
+    const c=parseInt(o.cantidad);if(!c)continue
+    const rs=porCant[c]||[]
+    const{huecos,sinVigente,vacio}=window._phHuecosCalc(rs)
+    if(vacio){out.push({cantidad:c,tipo:'sin_registro'});continue}
+    for(const h of huecos)out.push({cantidad:c,tipo:'hueco',desde:h.desde,hasta:h.hasta})
+    if(sinVigente&&!huecos.some(h=>h.hasta===null))out.push({cantidad:c,tipo:'sin_vigente'})
+  }
+  return out
+}
+// Formato bebé de fechas para avisos: '2026-07-06' → '06/07'. hasta EXCLUSIVO → se muestra el día anterior.
+window._phFmtDia=function(ymd){if(!ymd)return'?';const p=String(ymd).slice(0,10).split('-');return p[2]+'/'+p[1]}
+window._phDiaAntes=function(ymd){try{const d=new Date(ymd+'T00:00:00');d.setDate(d.getDate()-1);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}catch(_){return ymd}}
+// ══ FIN módulo Costos Esperados ═══════════════════════════════════════════════
 
 // Valida que el nombre canónico o algún alias no colisione con otro producto (activo o archivado)
 // Devuelve string descriptivo del primer conflicto, o null si todo OK.
@@ -1525,11 +1633,13 @@ async function pageAdminHome(c){
       <div class="fld" style="margin:0"><label style="font-size:10px">📅 Un solo día</label><input type="date" id="dash-dia" title="Elige un solo día: pone Desde y Hasta en esa misma fecha y refresca" style="font-size:12px;padding:6px 8px" onchange="const _d=this.value;if(_d){const _a=document.getElementById('dash-desde'),_b=document.getElementById('dash-hasta');if(_a)_a.value=_d;if(_b)_b.value=_d;loadDash()}"></div>
     </div>
     <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px">${_quickDateBtns('dash-desde','dash-hasta','loadDash()')}</div>
+    <div id="dash-costo-alertas"></div>
     <div id="dash-content"><div class="loading">Cargando métricas...</div></div>
     ${_dashCajonesHTML()}`
   window.loadDash=loadDash
   loadDash()
   _dashCajonesMini() // NUEVO (2jul26): mini-resúmenes de los cajones (liviano, nunca bloquea el dashboard)
+  _renderCostoAlertasDash() // 💰 NUEVO (8jul26): tarjeta de alertas de costo Dropi (decorativa, nunca bloquea)
 }
 
 // ══ NUEVO (2jul26) · CAJONES DEL DASHBOARD ══════════════════════════════════
@@ -1589,6 +1699,61 @@ window._dashCajonToggle=async(k)=>{
       body.innerHTML='<div class="alert alert-blue">Error cargando la sección: '+(e.message||e)+'</div>'
     }
   }
+}
+// ══ NUEVO (8jul26) · 💰 TARJETA DE ALERTAS DE COSTO DROPI EN EL DASHBOARD ═══
+// Lee dropi_costo_alertas (estado='pendiente'), agrupa por producto+ID+esperado+excel
+// y muestra una tarjeta roja arriba del dashboard con botón "✔ Resuelta" y un atajo
+// para abrir el modal de costos esperados. 100% decorativa: si la tabla no existe o
+// no hay alertas, no renderiza nada y NADA se rompe.
+async function _renderCostoAlertasDash(){
+  const cont=document.getElementById('dash-costo-alertas')
+  if(!cont)return
+  try{
+    const{data,error}=await sb.from('dropi_costo_alertas')
+      .select('id,fecha,producto_id,producto_nombre,dropi_id,variacion_id,orden_id_dropi,costo_esperado,costo_excel,estado')
+      .eq('estado','pendiente').order('fecha',{ascending:false}).limit(50)
+    if(error||!data||!data.length){cont.innerHTML='';return}
+    // Agrupar por producto + ID + variación + costos (una línea por "problema", con conteo de órdenes)
+    const _g={}
+    for(const a of data){
+      const k=(a.producto_id||a.producto_nombre||'?')+'|'+a.dropi_id+'|'+(a.variacion_id||'')+'|'+a.costo_esperado+'|'+a.costo_excel
+      if(!_g[k])_g[k]={producto_id:a.producto_id,producto_nombre:a.producto_nombre,dropi_id:a.dropi_id,variacion_id:a.variacion_id,costo_esperado:a.costo_esperado,costo_excel:a.costo_excel,ids:[],n:0}
+      _g[k].ids.push(a.id);_g[k].n++
+    }
+    const grupos=Object.values(_g)
+    const _filas=grupos.map(g=>{
+      const _idsAttr=g.ids.join(',')
+      const _abreBtn=g.producto_id?`<button type="button" class="btn-sm" style="font-size:10.5px;padding:3px 9px;background:rgba(167,139,250,.12);border:1px solid var(--purple);color:var(--purple)" onclick="verHistorialDropiIds('${g.producto_id}')">💰 Revisar costos</button>`:''
+      return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 11px;border-radius:8px;margin-bottom:7px;background:rgba(239,68,68,.06);border:1px solid var(--red)">
+        <div style="font-size:12px;line-height:1.6">
+          🆔 <b style="font-family:monospace">${g.dropi_id}</b>${g.variacion_id?` <span style="font-size:10px;color:var(--muted)">(var. ${g.variacion_id})</span>`:''} · <b>${g.producto_nombre||'?'}</b><br>
+          El Excel trajo <b style="color:var(--red)">$${fmt(g.costo_excel)}</b>/u pero se esperaba <b>$${fmt(g.costo_esperado)}</b>/u <span style="color:var(--muted)">· ${g.n} orden${g.n>1?'es':''}</span>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">${_abreBtn}
+          <button type="button" class="btn-sm" style="font-size:10.5px;padding:3px 9px;background:rgba(34,197,94,.12);border:1px solid var(--green);color:var(--green)" onclick="window._dceResolverAlerta('${_idsAttr}')">✔ Resuelta</button>
+        </div>
+      </div>`
+    }).join('')
+    cont.innerHTML=`<div class="card" style="margin-bottom:16px;border:2px solid var(--red);background:rgba(239,68,68,.03)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+        <span style="font-weight:800;font-size:15px">🚨 COSTOS DE DROPI QUE NO CUADRAN</span>
+        <span style="font-size:11px;color:var(--muted)">${grupos.length} problema(s) · ${data.length} orden(es) — el proveedor cobró distinto a lo esperado</span>
+      </div>
+      <div style="font-size:11.5px;color:var(--muted);margin-bottom:10px;line-height:1.6">Si el proveedor <b>subió el costo de verdad</b>, actualízalo (💰 Costos esperados en el ID y 📜 Historial de precios para los informes). Si fue un <b>error puntual</b>, dale ✔ Resuelta.</div>
+      ${_filas}
+    </div>`
+  }catch(e){cont.innerHTML='';console.warn('[DCE] dashboard alertas:',e?.message||e)}
+}
+window._renderCostoAlertasDash=_renderCostoAlertasDash
+// Marca un grupo de alertas como resueltas (por id, separados por coma)
+window._dceResolverAlerta=async(idsCsv)=>{
+  const _ids=String(idsCsv||'').split(',').map(s=>s.trim()).filter(Boolean)
+  if(!_ids.length)return
+  try{
+    await sb.from('dropi_costo_alertas').update({estado:'resuelta',resuelta_por:me?.id||null,resuelta_at:new Date().toISOString()}).in('id',_ids)
+    logAction('dce_alerta_resuelta',{cantidad:_ids.length}).catch(()=>{})
+    await _renderCostoAlertasDash()
+  }catch(e){alert((e&&e.message)||e)}
 }
 // Mini-resúmenes de cabecera (para que los cajones "hablen" aunque estén cerrados).
 // Consultas livianas e independientes del rango del dashboard. Si algo falla, los
@@ -4829,6 +4994,16 @@ async function pageAdminProductos(c){
                 .update({vigente_hasta:_vigenteDesdeIso})
                 .eq('id',vig.id)
             }
+            // NUEVO (8jul26): nota AUTOMÁTICA nivel bebé — qué cambió exactamente ($X → $Y)
+            let _motivoAuto='Edición desde Productos'
+            if(vig){
+              const _cambios=[]
+              if(Number(vig.costo)!==o.costo)_cambios.push(`💰 Cambio de costo: $${fmt(Number(vig.costo)||0)} → $${fmt(o.costo)}`)
+              if(Number(vig.precio)!==o.precio)_cambios.push(`🏷️ Cambio de precio: $${fmt(Number(vig.precio)||0)} → $${fmt(o.precio)}`)
+              if(_cambios.length)_motivoAuto=_cambios.join(' · ')
+            }else{
+              _motivoAuto='Registro inicial (primer guardado con historial)'
+            }
             const _histInsert={
               producto_id:id,
               cantidad:cantNum,
@@ -4836,7 +5011,7 @@ async function pageAdminProductos(c){
               costo:o.costo,
               vigente_desde:_vigenteDesdeIso,
               usuario_id:me?.id||null,
-              motivo:'Edición desde Productos'
+              motivo:_motivoAuto
             }
             if(!o.ofId.startsWith('legacy_'))_histInsert.oferta_id=o.ofId
             await sb.from('producto_precios_historial').insert(_histInsert)
@@ -4889,6 +5064,8 @@ async function pageAdminProductos(c){
           if(_vig)await sb.from('producto_dropi_ids').update({vigente_hasta:_ahoraIso}).eq('id',_vig.id)
           await sb.from('producto_dropi_ids').insert({producto_id:id,dropi_id:_idNuevo,vigente_desde:_ahoraIso,usuario_id:me?.id||null,motivo:'Cambio de ID desde Productos'})
         }
+        // 💰 NUEVO (8jul26): ID nuevo → pedir de una qué costo traerá en los Excel (verificador)
+        window._dcePendingNuevoId={prodId:id,dropiId:_idNuevo}
       }
     }catch(e){console.warn('historial dropi_id fail:',e)}
 
@@ -4901,6 +5078,13 @@ async function pageAdminProductos(c){
     await renderCampanasEnlazadas(id)
     // Re-renderizar el body del card para refrescar inputs con los datos persistidos
     try{if(typeof renderProdBody==='function'&&document.getElementById('prod-body-'+id))await renderProdBody(id,maestrosList)}catch(_){}
+    // 💰 NUEVO (8jul26): si entró un ID de Dropi nuevo, pedir de una su costo esperado en los Excel
+    try{
+      if(window._dcePendingNuevoId&&window._dcePendingNuevoId.prodId===id){
+        const _pend=window._dcePendingNuevoId;window._dcePendingNuevoId=null
+        if(typeof window._dceModalNuevoId==='function')window._dceModalNuevoId(_pend.prodId,_pend.dropiId)
+      }
+    }catch(_){}
   }
 
   window.modalAddProducto=()=>{
@@ -5895,6 +6079,30 @@ async function renderProdBody(id,maestrosList){
     if(_dh&&_dh[0]&&_dh[0].vigente_desde)_dropiVigDesde=String(_dh[0].vigente_desde).slice(0,10)
   }catch(_){}
 
+  // 🚨 NUEVO (8jul26): BADGES DE ALERTA — nada en silencio, todo a la vista con botón para corregir.
+  // (1) Ofertas con huecos o sin costo vigente en el historial de precios (el costo de los informes).
+  // (2) ID de Dropi vigente sin costo esperado (el cruce no puede verificarlo).
+  let _phBadgeHtml='',_dceBadgeHtml=''
+  try{
+    const _probs=window._phCoberturaOfertas(ofertasDB.filter(o=>((parseInt(o.precio)||0)>0||(parseInt(o.costo)||0)>0)),_precHistList)
+    if(_probs.length){
+      const _lineas=_probs.slice(0,6).map(p=>{
+        if(p.tipo==='sin_registro')return `📦 Oferta ${p.cantidad}u <b>sin ningún registro</b> de costo en el historial`
+        if(p.tipo==='sin_vigente')return `📦 Oferta ${p.cantidad}u <b>sin costo VIGENTE</b> (los informes de HOY usan el costo actual)`
+        return `📦 Oferta ${p.cantidad}u con <b>HUECO</b> del ${window._phFmtDia(p.desde)} al ${p.hasta?window._phFmtDia(window._phDiaAntes(p.hasta)):'HOY'}`
+      }).join('<br>')
+      _phBadgeHtml=`<div style="padding:9px 11px;border-radius:8px;margin:6px 0 10px;background:rgba(239,68,68,.08);border:1px solid var(--red);font-size:11.5px;line-height:1.7">🚨 <b>FALTA COSTO en el historial</b> — los informes de esos días usan el costo actual (puede ser incorrecto):<br>${_lineas}${_probs.length>6?`<br>… y ${_probs.length-6} más`:''}<br><button type="button" class="btn-sm" style="font-size:10.5px;padding:3px 9px;margin-top:4px;background:rgba(239,68,68,.15);border:1px solid var(--red);color:var(--red)" onclick="verHistorialPrecios('${id}')">🔧 Corregir ahora</button></div>`
+    }
+  }catch(_){}
+  try{
+    const _idVigP=String(prod.dropi_id||'').trim()
+    if(_idVigP&&Array.isArray(window._dceCache)){
+      const _hoyB=today()
+      const _tieneCosto=!!window._dceCostoEsperado(_idVigP,'',_hoyB)||((window._dceCache||[]).some(c=>c.producto_id===id&&String(c.dropi_id||'').trim()===_idVigP&&!c.vigente_hasta))
+      if(!_tieneCosto)_dceBadgeHtml=`<div style="padding:7px 10px;border-radius:7px;margin-top:6px;background:rgba(245,158,11,.08);border:1px solid var(--amber);font-size:11px;line-height:1.6">💰 <b>El ID ${_idVigP} no tiene costo esperado</b> — el cruce no puede verificar si el Excel trae el PRECIO PROVEEDOR correcto. <button type="button" class="btn-sm" style="font-size:10px;padding:2px 8px;background:rgba(245,158,11,.15);border:1px solid var(--amber);color:var(--amber)" onclick="verHistorialDropiIds('${id}')">🔧 Ponerlo ahora</button></div>`
+    }
+  }catch(_){}
+
   body.innerHTML=`<div style="padding-top:14px">
     <div style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:14px">
       <button id="prod-tab-config-btn-${id}" onclick="switchProdTab('${id}','config')" style="background:transparent;border:none;color:var(--text);padding:10px 16px;cursor:pointer;font-size:14px;font-weight:500;border-bottom:2px solid var(--primary);outline:none">⚙️ Configuración</button>
@@ -5910,8 +6118,9 @@ async function renderProdBody(id,maestrosList){
         <input type="text" inputmode="numeric" id="pdropi-${id}" value="${prod.dropi_id||''}" placeholder="Ej: 152345" style="font-family:monospace;font-size:12px">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
           <span style="font-size:10px;color:var(--muted)">${_dropiVigDesde?`✅ Vigente desde ${_dropiVigDesde.split('-').reverse().join('/')}`:'ℹ️ Sin historial de IDs todavía'}</span>
-          <button type="button" class="btn-sm" onclick="verHistorialDropiIds('${id}')" style="background:rgba(167,139,250,.12);border:1px solid var(--purple);color:var(--purple);font-size:11px;padding:3px 8px">📜 Historial de IDs</button>
+          <button type="button" class="btn-sm" onclick="verHistorialDropiIds('${id}')" style="background:rgba(167,139,250,.12);border:1px solid var(--purple);color:var(--purple);font-size:11px;padding:3px 8px">📜 Historial de IDs · 💰 Costos esperados</button>
         </div>
+        <div id="dce-badge-${id}">${_dceBadgeHtml}</div>
         <label style="margin-top:10px;display:block">🔗 URL de Dropi del producto <span style="color:var(--muted);font-size:10px">(única por producto — enlace directo a su ficha en Dropi)</span></label>
         <div style="display:flex;gap:6px;align-items:center">
           <input type="text" id="purl-${id}" value="${(prod.dropi_url||'').replace(/"/g,'&quot;')}" placeholder="https://app.dropi.co/..." autocapitalize="off" style="flex:1;font-family:monospace;font-size:11px">
@@ -5937,6 +6146,7 @@ async function renderProdBody(id,maestrosList){
       <div class="section-title" style="margin:0">🏷️ Ofertas (cantidades de unidades)</div>
       <button class="btn-sm" onclick="verHistorialPrecios('${id}')" style="background:rgba(167,139,250,.12);border:1px solid var(--purple);color:var(--purple);font-size:12px">📜 Historial de precios</button>
     </div>
+    <div id="ph-badge-${id}">${_phBadgeHtml}</div>
     <div id="ofertas-list-${id}" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:10px">
       ${ofertasDB.map(o=>renderOfertaCard(id,o)).join('')}
     </div>
@@ -6171,36 +6381,282 @@ window.verHistorialPrecios=async(prodId)=>{
   const prod=productos.find(p=>p.id===prodId)
   const div=document.createElement('div')
   div.id='user-modal';div.className='modal-bg'
-  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:560px">
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:680px">
     <div class="modal-title">📜 Historial de precios</div>
-    <div class="modal-sub">${prod?(prod.nombre||''):''} — cada precio y desde/hasta cuándo estuvo vigente</div>
+    <div class="modal-sub">${prod?(prod.nombre||''):''} — cada precio y desde/hasta cuándo estuvo vigente. Editable: corrige fechas, agrega registros viejos y llena huecos.</div>
     <div id="hist-precios-body" style="margin-top:14px;max-height:60vh;overflow:auto"><div class="loading">Cargando...</div></div>
     <div class="modal-actions"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>
   </div>`
   div.onclick=closeModal
   document.body.appendChild(div)
+  await _renderHistPreciosBody(prodId)
+}
+
+// ══ NUEVO (8jul26) · HISTORIAL DE PRECIOS EDITABLE ═══════════════════════════
+// El costo de aquí alimenta TODOS los informes (regla única de costo) → sección
+// blindada: detector de HUECOS con botón para llenarlos pre-llenado, eliminar
+// exige reemplazo si deja rango descubierto, candados anti-solape / anti-fechas
+// invertidas / un solo vigente por oferta, notas por registro, logAction en todo
+// e invalidación de cache tras cada cambio. hasta = EXCLUSIVO (el día que ENTRA
+// el siguiente precio).
+window._phRows=window._phRows||{} // {prodId:[filas]} para validaciones sin re-consultar
+async function _renderHistPreciosBody(prodId){
   const cont=document.getElementById('hist-precios-body')
+  if(!cont)return
   try{
-    const{data:rows}=await sb.from('producto_precios_historial').select('cantidad,precio,costo,vigente_desde,vigente_hasta,motivo').eq('producto_id',prodId).order('cantidad',{ascending:true}).order('vigente_desde',{ascending:false})
-    if(!rows||!rows.length){cont.innerHTML='<div style="color:var(--muted);font-size:13px;padding:8px">Todavía no hay cambios de precio registrados. Cuando cambies un precio y elijas la fecha, aparecerá aquí.</div>';return}
+    const{data:rows,error}=await sb.from('producto_precios_historial').select('id,cantidad,precio,costo,vigente_desde,vigente_hasta,motivo').eq('producto_id',prodId).order('cantidad',{ascending:true}).order('vigente_desde',{ascending:false})
+    if(error){cont.innerHTML=`<div class="alert alert-red">No se pudo cargar el historial: ${error.message}</div>`;return}
+    window._phRows[prodId]=rows||[]
+    const _toD=(v)=>v?String(v).slice(0,10):''
     const _fmtF=(v)=>v?String(v).slice(0,10).split('-').reverse().join('/'):'?'
     const porCant={}
-    for(const r of rows){(porCant[r.cantidad]=porCant[r.cantidad]||[]).push(r)}
-    let html=''
+    for(const r of (rows||[])){(porCant[r.cantidad]=porCant[r.cantidad]||[]).push(r)}
+    let html=`<div class="alert alert-blue" style="font-size:11px;line-height:1.6">💡 <b>Este costo alimenta TODOS los informes.</b> "Hasta" = el día que <b>ENTRÓ el siguiente</b> precio (ese día ya aplica el nuevo). Los días <b>sin registro</b> usan el costo actual del producto en silencio → llenar los huecos SÍ importa.</div>`
+    if(!rows||!rows.length)html+='<div style="color:var(--muted);font-size:13px;padding:8px">Todavía no hay registros. Agrega el primero abajo (o cambia un precio en la tarjeta y nacerá solo).</div>'
     for(const cant of Object.keys(porCant).sort((a,b)=>a-b)){
-      html+=`<div style="font-weight:700;color:var(--text);margin:10px 0 6px">📦 Oferta ${cant}u</div>`
+      html+=`<div style="font-weight:700;color:var(--text);margin:12px 0 6px">📦 Oferta ${cant}u</div>`
+      // 🕳️ Detector de huecos de ESTA oferta
+      const{huecos,sinVigente}=window._phHuecosCalc(porCant[cant])
+      for(const h of huecos){
+        if(h.hasta===null)continue // el "sin vigente" se avisa aparte abajo
+        html+=`<div style="padding:8px 10px;border-radius:7px;margin-bottom:6px;background:rgba(239,68,68,.08);border:1px solid var(--red);font-size:11.5px;line-height:1.6">
+          ⚠️ <b>HUECO:</b> del <b>${_fmtF(h.desde)}</b> al <b>${_fmtF(window._phDiaAntes(h.hasta))}</b> no hay costo definido.<br>
+          <span style="color:var(--muted)">Los informes de esos días usan el costo actual (puede ser incorrecto).</span>
+          <button type="button" class="btn-sm" style="font-size:10.5px;padding:3px 8px;margin-left:6px;background:rgba(239,68,68,.15);border:1px solid var(--red);color:var(--red)" onclick="_phLlenarHueco('${prodId}','${cant}','${h.desde}','${h.hasta}')">➕ Llenar este hueco</button>
+        </div>`
+      }
+      if(sinVigente)html+=`<div style="padding:8px 10px;border-radius:7px;margin-bottom:6px;background:rgba(245,158,11,.08);border:1px solid var(--amber);font-size:11.5px">⚠️ <b>Esta oferta NO tiene precio vigente</b> (todas las filas tienen "hasta"). Agrega uno abajo o borra el "hasta" de la fila correcta.</div>`
       for(const r of porCant[cant]){
         const vigente=!r.vigente_hasta
-        const hasta=vigente?'HOY':_fmtF(r.vigente_hasta)
-        html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 10px;border-radius:7px;margin-bottom:5px;background:${vigente?'rgba(34,197,94,.08)':'rgba(255,255,255,.03)'};border:1px solid ${vigente?'var(--green)':'var(--border)'}">
-          <div><div style="font-weight:700;font-size:13px">$${fmt(r.precio||0)} <span style="color:var(--muted);font-weight:400">· costo $${fmt(r.costo||0)}</span></div>${r.motivo?`<div style="font-size:10px;color:var(--muted)">${r.motivo}</div>`:''}</div>
-          <div style="text-align:right;font-size:12px;white-space:nowrap">${_fmtF(r.vigente_desde)} → <b style="color:${vigente?'var(--green)':'var(--text)'}">${hasta}</b>${vigente?' <span style="font-size:10px;color:var(--green)">✅ vigente</span>':''}</div>
+        html+=`<div style="padding:9px 11px;border-radius:8px;margin-bottom:8px;background:${vigente?'rgba(34,197,94,.08)':'rgba(255,255,255,.03)'};border:1px solid ${vigente?'var(--green)':'var(--border)'}">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:7px">
+            <div style="font-weight:700;font-size:13px">$${fmt(r.precio||0)} <span style="color:var(--muted);font-weight:400">· costo $${fmt(r.costo||0)}</span> ${vigente?'<span style="font-size:10px;color:var(--green)">✅ VIGENTE</span>':''}</div>
+            <div style="font-size:11px;color:var(--muted)">${_fmtF(r.vigente_desde)} → <b style="color:${vigente?'var(--green)':'var(--text)'}">${vigente?'HOY':_fmtF(r.vigente_hasta)}</b></div>
+          </div>
+          <div style="display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap">
+            <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Precio</div><input type="number" id="ph-precio-${r.id}" value="${r.precio||0}" style="font-size:11px;padding:4px 6px;width:88px"></div>
+            <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Costo</div><input type="number" id="ph-costo-${r.id}" value="${r.costo||0}" style="font-size:11px;padding:4px 6px;width:84px"></div>
+            <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Desde</div><input type="date" id="ph-desde-${r.id}" value="${_toD(r.vigente_desde)}" style="font-size:11px;padding:4px 6px"></div>
+            <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Hasta ${vigente?'(vacío = HOY)':''}</div><input type="date" id="ph-hasta-${r.id}" value="${_toD(r.vigente_hasta)}" style="font-size:11px;padding:4px 6px"></div>
+            <button type="button" class="btn-sm btn-primary" style="font-size:11px;padding:4px 9px" onclick="guardarFilaPrecioHist('${prodId}','${r.id}')">💾 Guardar</button>
+            <button type="button" class="btn-sm" style="font-size:11px;padding:4px 9px;background:rgba(239,68,68,.1);border:1px solid var(--red);color:var(--red)" onclick="eliminarFilaPrecioHist('${prodId}','${r.id}')">🗑️</button>
+          </div>
+          <div style="margin-top:6px"><input type="text" id="ph-nota-${r.id}" value="${String(r.motivo||'').replace(/"/g,'&quot;')}" placeholder="📝 Nota (ej: subió el proveedor, promo, corrección...)" style="font-size:11px;padding:4px 7px;width:100%"></div>
+          <div id="ph-del-${r.id}"></div>
         </div>`
       }
     }
+    // ➕ Agregar registro histórico (para reconstruir el pasado)
+    const _cants=[...new Set((rows||[]).map(r=>String(r.cantidad)))].sort((a,b)=>a-b)
+    html+=`<div class="divider"></div>
+      <div style="font-weight:700;font-size:13px;margin-bottom:6px">➕ Agregar registro histórico</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Para registrar un precio/costo viejo con su rango real (ej: "este costo fue del 15/06 al 08/07"). Si dejas "hasta" vacío queda como el vigente.</div>
+      <div style="display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;background:rgba(167,139,250,.06);border:1px solid var(--purple);border-radius:8px;padding:10px">
+        <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Oferta</div><select id="ph-new-cant" style="font-size:11px;padding:5px 7px">${_cants.map(c=>`<option value="${c}">${c}u</option>`).join('')}${_cants.length?'':'<option value="1">1u</option><option value="2">2u</option><option value="3">3u</option><option value="4">4u</option>'}</select></div>
+        <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Precio</div><input type="number" id="ph-new-precio" placeholder="0" style="font-size:11px;padding:5px 7px;width:90px"></div>
+        <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Costo</div><input type="number" id="ph-new-costo" placeholder="0" style="font-size:11px;padding:5px 7px;width:86px"></div>
+        <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Desde</div><input type="date" id="ph-new-desde" style="font-size:11px;padding:5px 7px"></div>
+        <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Hasta</div><input type="date" id="ph-new-hasta" style="font-size:11px;padding:5px 7px"></div>
+        <button type="button" class="btn-sm btn-primary" style="font-size:11px;padding:6px 11px" onclick="agregarPrecioHist('${prodId}')">➕ Agregar</button>
+        <div style="flex-basis:100%"><input type="text" id="ph-new-nota" placeholder="📝 Nota (ej: costo del proveedor antes de la subida)" style="font-size:11px;padding:5px 7px;width:100%;margin-top:2px"></div>
+      </div>
+      <div id="ph-msg" style="margin-top:8px"></div>`
     cont.innerHTML=html
   }catch(e){cont.innerHTML=`<div class="alert alert-red">No se pudo cargar el historial: ${(e&&e.message)||e}</div>`}
 }
+window._renderHistPreciosBody=_renderHistPreciosBody
+
+// Pre-llena el formulario de agregar con las fechas exactas del hueco y hace scroll
+window._phLlenarHueco=(prodId,cant,desde,hasta)=>{
+  const _s=(i,v)=>{const e=document.getElementById(i);if(e)e.value=v}
+  _s('ph-new-cant',cant);_s('ph-new-desde',desde);_s('ph-new-hasta',hasta||'')
+  _s('ph-new-nota','Relleno de hueco '+window._phFmtDia(desde)+' → '+(hasta?window._phFmtDia(window._phDiaAntes(hasta)):'HOY'))
+  const f=document.getElementById('ph-new-costo');if(f){f.focus();f.scrollIntoView({behavior:'smooth',block:'center'})}
+  const m=document.getElementById('ph-msg');if(m)m.innerHTML='<div class="alert alert-blue" style="font-size:11px">📅 Fechas del hueco pre-llenadas. Pon el costo (y precio) de esa época y dale ➕ Agregar.</div>'
+}
+
+// Candado anti-solape: valida un rango contra las demás filas de la MISMA oferta.
+// hasta EXCLUSIVO → [d1,h1) choca con [d2,h2) si d1<h2 && d2<h1 (null = infinito).
+function _phChocaRango(prodId,cant,desde,hasta,excluirId){
+  const rows=(window._phRows[prodId]||[]).filter(r=>String(r.cantidad)===String(cant)&&String(r.id)!==String(excluirId))
+  for(const r of rows){
+    const d2=String(r.vigente_desde||'').slice(0,10),h2=r.vigente_hasta?String(r.vigente_hasta).slice(0,10):null
+    if(!d2)continue
+    const _choca=(desde<(h2||'9999'))&&(d2<(hasta||'9999'))
+    if(_choca)return r
+  }
+  return null
+}
+
+// 💾 Guardar edición de una fila (precio/costo/fechas/nota) con candados
+window.guardarFilaPrecioHist=async(prodId,rowId)=>{
+  const msg=document.getElementById('ph-msg')
+  const _g=(i)=>document.getElementById(i)
+  const _precio=parseInt((_g('ph-precio-'+rowId)||{}).value)||0
+  const _costo=parseInt((_g('ph-costo-'+rowId)||{}).value)||0
+  const _desde=(_g('ph-desde-'+rowId)||{}).value||''
+  const _hasta=(_g('ph-hasta-'+rowId)||{}).value||''
+  const _nota=((_g('ph-nota-'+rowId)||{}).value||'').trim()
+  if(!_desde){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">La fecha "desde" es obligatoria</div>';return}
+  if(_hasta&&_hasta<=_desde){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">"Hasta" tiene que ser DESPUÉS de "desde" (hasta = el día que entró el siguiente precio)</div>';return}
+  const _fila=(window._phRows[prodId]||[]).find(r=>String(r.id)===String(rowId))
+  const _cant=_fila?_fila.cantidad:null
+  // Candado: solo UN vigente por oferta
+  if(!_hasta){
+    const _otroVig=(window._phRows[prodId]||[]).find(r=>String(r.cantidad)===String(_cant)&&!r.vigente_hasta&&String(r.id)!==String(rowId))
+    if(_otroVig){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">🔒 Ya hay OTRO registro vigente para esta oferta. Ponle "hasta" a uno de los dos.</div>';return}
+  }
+  // Candado anti-solape
+  const _choque=_phChocaRango(prodId,_cant,_desde,_hasta||null,rowId)
+  if(_choque){if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">🔒 Ese rango se SOLAPA con otro registro de esta oferta ($${fmt(_choque.precio||0)}/costo $${fmt(_choque.costo||0)} del ${window._phFmtDia(_choque.vigente_desde)}). Dos costos el mismo día = informes ambiguos.</div>`;return}
+  // Confirmación fuerte si toca el VIGENTE
+  if(_fila&&!_fila.vigente_hasta){
+    if(!confirm('⚠️ Estás editando el registro VIGENTE.\nEste costo se usa en los informes del '+window._phFmtDia(_desde)+' en adelante.\n\n¿Seguro que quieres guardarlo?'))return
+  }
+  try{
+    const _upd={precio:_precio,costo:_costo,vigente_desde:new Date(_desde+'T00:00:00').toISOString(),vigente_hasta:_hasta?new Date(_hasta+'T00:00:00').toISOString():null,motivo:_nota||null}
+    const{error}=await sb.from('producto_precios_historial').update(_upd).eq('id',rowId)
+    if(error){if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">${error.message}</div>`;return}
+    window._precioHistCache=null // ⭐ Regla única de costo: invalidar cache
+    logAction('precio_hist_editado',{producto_id:prodId,registro_id:rowId,precio:_precio,costo:_costo,desde:_desde,hasta:_hasta||null}).catch(()=>{})
+    if(msg)msg.innerHTML='<div class="alert alert-green" style="font-size:11px">✅ Guardado</div>'
+    await _renderHistPreciosBody(prodId)
+    try{if(typeof _phRefreshBadge==='function')_phRefreshBadge(prodId)}catch(_){}
+  }catch(e){if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">${(e&&e.message)||e}</div>`}
+}
+
+// 🗑️ Eliminar fila. Si deja un HUECO entre vecinos → exige reemplazo ANTES de borrar (nunca queda vacío).
+window.eliminarFilaPrecioHist=async(prodId,rowId)=>{
+  const _fila=(window._phRows[prodId]||[]).find(r=>String(r.id)===String(rowId))
+  if(!_fila){alert('No se encontró el registro');return}
+  const _cant=_fila.cantidad
+  const _d=String(_fila.vigente_desde||'').slice(0,10)
+  const _h=_fila.vigente_hasta?String(_fila.vigente_hasta).slice(0,10):null
+  const _vecinos=(window._phRows[prodId]||[]).filter(r=>String(r.cantidad)===String(_cant)&&String(r.id)!==String(rowId))
+  // ¿Deja hueco? Solo si hay un vecino ANTES (que termina donde este empieza o antes) y otro DESPUÉS.
+  const _hayAntes=_vecinos.some(r=>String(r.vigente_desde||'').slice(0,10)<_d)
+  const _hayDespues=_h?_vecinos.some(r=>String(r.vigente_desde||'').slice(0,10)>=_h):false
+  if(_hayAntes&&_hayDespues){
+    // Rango del medio → pedir reemplazo en línea, pre-llenado con las fechas exactas
+    const box=document.getElementById('ph-del-'+rowId)
+    if(!box)return
+    box.innerHTML=`<div style="margin-top:8px;padding:9px;border-radius:7px;background:rgba(239,68,68,.08);border:1px solid var(--red);font-size:11.5px;line-height:1.6">
+      ⚠️ Si eliminas este registro, del <b>${window._phFmtDia(_d)}</b> al <b>${window._phFmtDia(window._phDiaAntes(_h))}</b> quedará <b>SIN costo</b> y los informes de esos días usarían el costo actual (incorrecto).<br>
+      <b>¿Qué precio/costo aplica para esas fechas?</b> (queda en su lugar, nunca hay hueco)
+      <div style="display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap;margin-top:6px">
+        <div><div style="font-size:10px;color:var(--muted)">Precio</div><input type="number" id="ph-repl-precio-${rowId}" value="${_fila.precio||0}" style="font-size:11px;padding:4px 6px;width:88px"></div>
+        <div><div style="font-size:10px;color:var(--muted)">Costo</div><input type="number" id="ph-repl-costo-${rowId}" value="${_fila.costo||0}" style="font-size:11px;padding:4px 6px;width:84px"></div>
+        <button type="button" class="btn-sm" style="font-size:11px;padding:4px 9px;background:rgba(239,68,68,.15);border:1px solid var(--red);color:var(--red)" onclick="_phEliminarConReemplazo('${prodId}','${rowId}','${_d}','${_h}')">💾 Guardar reemplazo y eliminar</button>
+        <button type="button" class="btn-sm btn-outline" style="font-size:11px;padding:4px 9px" onclick="document.getElementById('ph-del-${rowId}').innerHTML=''">Cancelar</button>
+      </div>
+    </div>`
+    return
+  }
+  // Vigente o extremo → confirmación fuerte y borrado directo (el badge de Productos avisa si queda sin vigente)
+  const _txt=!_h?'⚠️ Este es el registro VIGENTE: se usa en los informes de HOY en adelante.\nSi lo eliminas, esta oferta queda SIN costo vigente (verás la alerta roja en Productos hasta que agregues uno).':'Este registro está en el extremo del historial (no deja hueco entre vecinos).'
+  if(!confirm(_txt+'\n\n¿Eliminar de todas formas?'))return
+  try{
+    const{error}=await sb.from('producto_precios_historial').delete().eq('id',rowId)
+    if(error){alert(error.message);return}
+    window._precioHistCache=null
+    logAction('precio_hist_eliminado',{producto_id:prodId,registro_id:rowId,cantidad:_cant,desde:_d,hasta:_h}).catch(()=>{})
+    await _renderHistPreciosBody(prodId)
+    try{if(typeof _phRefreshBadge==='function')_phRefreshBadge(prodId)}catch(_){}
+  }catch(e){alert((e&&e.message)||e)}
+}
+// Paso 2 del eliminar-con-reemplazo: inserta el reemplazo con el MISMO rango y luego borra. Nunca hay hueco.
+window._phEliminarConReemplazo=async(prodId,rowId,desde,hasta)=>{
+  const _fila=(window._phRows[prodId]||[]).find(r=>String(r.id)===String(rowId))
+  if(!_fila)return
+  const _precio=parseInt((document.getElementById('ph-repl-precio-'+rowId)||{}).value)||0
+  const _costo=parseInt((document.getElementById('ph-repl-costo-'+rowId)||{}).value)||0
+  try{
+    const _rec={producto_id:prodId,cantidad:_fila.cantidad,precio:_precio,costo:_costo,vigente_desde:new Date(desde+'T00:00:00').toISOString(),vigente_hasta:new Date(hasta+'T00:00:00').toISOString(),usuario_id:me?.id||null,motivo:'Reemplazo al eliminar registro (mismo rango, sin hueco)'}
+    const{error:e1}=await sb.from('producto_precios_historial').insert(_rec)
+    if(e1){alert(e1.message);return}
+    const{error:e2}=await sb.from('producto_precios_historial').delete().eq('id',rowId)
+    if(e2){alert(e2.message);return}
+    window._precioHistCache=null
+    logAction('precio_hist_reemplazado',{producto_id:prodId,registro_id:rowId,precio:_precio,costo:_costo,desde,hasta}).catch(()=>{})
+    await _renderHistPreciosBody(prodId)
+    try{if(typeof _phRefreshBadge==='function')_phRefreshBadge(prodId)}catch(_){}
+  }catch(e){alert((e&&e.message)||e)}
+}
+
+// ➕ Agregar registro histórico a mano (reconstruir el pasado). Candados incluidos.
+window.agregarPrecioHist=async(prodId)=>{
+  const msg=document.getElementById('ph-msg')
+  const _g=(i)=>document.getElementById(i)
+  const _cant=parseInt((_g('ph-new-cant')||{}).value)||0
+  const _precio=parseInt((_g('ph-new-precio')||{}).value)||0
+  const _costo=parseInt((_g('ph-new-costo')||{}).value)||0
+  const _desde=(_g('ph-new-desde')||{}).value||''
+  const _hasta=(_g('ph-new-hasta')||{}).value||''
+  const _nota=((_g('ph-new-nota')||{}).value||'').trim()
+  if(!_cant){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">Elige la oferta</div>';return}
+  if(_precio<=0&&_costo<=0){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">Pon el precio y/o el costo de esa época</div>';return}
+  if(!_desde){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">La fecha "desde" es obligatoria</div>';return}
+  if(_hasta&&_hasta<=_desde){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">"Hasta" tiene que ser DESPUÉS de "desde"</div>';return}
+  // Candado: solo UN vigente por oferta
+  if(!_hasta){
+    const _otroVig=(window._phRows[prodId]||[]).find(r=>String(r.cantidad)===String(_cant)&&!r.vigente_hasta)
+    if(_otroVig){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">🔒 Ya hay un registro VIGENTE para esta oferta. Ponle "hasta" a este nuevo, o edita primero el vigente.</div>';return}
+  }
+  // Candado anti-solape
+  const _choque=_phChocaRango(prodId,_cant,_desde,_hasta||null,null)
+  if(_choque){if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">🔒 Ese rango se SOLAPA con un registro existente ($${fmt(_choque.precio||0)}/costo $${fmt(_choque.costo||0)} desde ${window._phFmtDia(_choque.vigente_desde)}). Ajusta las fechas.</div>`;return}
+  try{
+    const _rec={producto_id:prodId,cantidad:_cant,precio:_precio,costo:_costo,vigente_desde:new Date(_desde+'T00:00:00').toISOString(),usuario_id:me?.id||null,motivo:_nota||'Registro histórico agregado a mano'}
+    if(_hasta)_rec.vigente_hasta=new Date(_hasta+'T00:00:00').toISOString()
+    const{error}=await sb.from('producto_precios_historial').insert(_rec)
+    if(error){if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">${error.message}</div>`;return}
+    window._precioHistCache=null // ⭐ Regla única de costo: invalidar cache
+    logAction('precio_hist_agregado',{producto_id:prodId,cantidad:_cant,precio:_precio,costo:_costo,desde:_desde,hasta:_hasta||null}).catch(()=>{})
+    if(msg)msg.innerHTML='<div class="alert alert-green" style="font-size:11px">✅ Registro agregado</div>'
+    await _renderHistPreciosBody(prodId)
+    try{if(typeof _phRefreshBadge==='function')_phRefreshBadge(prodId)}catch(_){}
+  }catch(e){if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">${(e&&e.message)||e}</div>`}
+}
+
+// 🔄 Recalcula EN VIVO los badges de alerta de la tarjeta (huecos + costo esperado)
+// tras cualquier edición en los modales. Decorativo: si algo falla, no rompe nada.
+async function _phRefreshBadge(prodId){
+  try{
+    const _bx=document.getElementById('ph-badge-'+prodId)
+    if(_bx){
+      let _ofs=[]
+      try{const{data}=await sb.from('producto_ofertas').select('cantidad,precio,costo').eq('producto_id',prodId).eq('activo',true);if(data)_ofs=data}catch(_){}
+      if(!_ofs.length){
+        const p=(productos||[]).find(x=>x.id===prodId)
+        if(p)for(const n of[1,2,3,4]){const pr=parseInt(p['precio_'+n+'u'])||0,co=parseInt(p['costo_'+n+'u'])||0;if(pr>0||co>0)_ofs.push({cantidad:n,precio:pr,costo:co})}
+      }
+      let _hist=[]
+      try{const{data}=await sb.from('producto_precios_historial').select('cantidad,vigente_desde,vigente_hasta').eq('producto_id',prodId);if(data)_hist=data}catch(_){}
+      const _probs=window._phCoberturaOfertas(_ofs.filter(o=>((parseInt(o.precio)||0)>0||(parseInt(o.costo)||0)>0)),_hist)
+      if(!_probs.length)_bx.innerHTML=''
+      else{
+        const _lineas=_probs.slice(0,6).map(p=>{
+          if(p.tipo==='sin_registro')return `📦 Oferta ${p.cantidad}u <b>sin ningún registro</b> de costo en el historial`
+          if(p.tipo==='sin_vigente')return `📦 Oferta ${p.cantidad}u <b>sin costo VIGENTE</b> (los informes de HOY usan el costo actual)`
+          return `📦 Oferta ${p.cantidad}u con <b>HUECO</b> del ${window._phFmtDia(p.desde)} al ${p.hasta?window._phFmtDia(window._phDiaAntes(p.hasta)):'HOY'}`
+        }).join('<br>')
+        _bx.innerHTML=`<div style="padding:9px 11px;border-radius:8px;margin:6px 0 10px;background:rgba(239,68,68,.08);border:1px solid var(--red);font-size:11.5px;line-height:1.7">🚨 <b>FALTA COSTO en el historial</b> — los informes de esos días usan el costo actual (puede ser incorrecto):<br>${_lineas}${_probs.length>6?`<br>… y ${_probs.length-6} más`:''}<br><button type="button" class="btn-sm" style="font-size:10.5px;padding:3px 9px;margin-top:4px;background:rgba(239,68,68,.15);border:1px solid var(--red);color:var(--red)" onclick="verHistorialPrecios('${prodId}')">🔧 Corregir ahora</button></div>`
+      }
+    }
+    const _dx=document.getElementById('dce-badge-'+prodId)
+    if(_dx){
+      const p=(productos||[]).find(x=>x.id===prodId)
+      const _idVigP=String((p&&p.dropi_id)||'').trim()
+      let out=''
+      if(_idVigP&&Array.isArray(window._dceCache)){
+        const _tiene=((window._dceCache||[]).some(c=>c.producto_id===prodId&&String(c.dropi_id||'').trim()===_idVigP&&!c.vigente_hasta))
+        if(!_tiene)out=`<div style="padding:7px 10px;border-radius:7px;margin-top:6px;background:rgba(245,158,11,.08);border:1px solid var(--amber);font-size:11px;line-height:1.6">💰 <b>El ID ${_idVigP} no tiene costo esperado</b> — el cruce no puede verificar si el Excel trae el PRECIO PROVEEDOR correcto. <button type="button" class="btn-sm" style="font-size:10px;padding:2px 8px;background:rgba(245,158,11,.15);border:1px solid var(--amber);color:var(--amber)" onclick="verHistorialDropiIds('${prodId}')">🔧 Ponerlo ahora</button></div>`
+      }
+      _dx.innerHTML=out
+    }
+  }catch(_){}
+}
+window._phRefreshBadge=_phRefreshBadge
 
 // ── MODAL: HISTORIAL DE IDs DE DROPI (editable) ─────────────────────────────
 // Clona el look del historial de precios pero permite editar fechas, eliminar y
@@ -6213,7 +6669,7 @@ window.verHistorialDropiIds=async(prodId)=>{
   div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:600px">
     <div class="modal-title">🆔 Historial de IDs de Dropi</div>
     <div class="modal-sub">${prod?(prod.nombre||''):''} — cada ID y desde/hasta cuándo estuvo vigente</div>
-    <div class="alert alert-blue" style="font-size:11px;margin-top:10px">Solo UN ID puede estar vigente (sin fecha "hasta"). El <b>Asignador</b> exige el vigente; el <b>Cruce</b> y <b>Seguimiento</b> reconocen los archivados para las órdenes viejas.</div>
+    <div class="alert alert-blue" style="font-size:11px;margin-top:10px">Solo UN ID puede estar vigente (sin fecha "hasta"). El <b>Asignador</b> exige el vigente; el <b>Cruce</b> y <b>Seguimiento</b> reconocen los archivados para las órdenes viejas. 💰 <b>Costos esperados:</b> lo que el Excel de Dropi DEBERÍA traer en PRECIO PROVEEDOR (unitario) — el cruce lo verifica y si no cuadra avisa en el Dashboard. NO cambia el costo de los informes.</div>
     <div id="hist-dropi-body" style="margin-top:12px;max-height:60vh;overflow:auto"><div class="loading">Cargando...</div></div>
     <div class="modal-actions"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>
   </div>`
@@ -6247,6 +6703,7 @@ async function _renderHistDropiBody(prodId){
           ${vigente?'':`<button type="button" class="btn-sm" style="font-size:11px;padding:4px 9px;background:rgba(34,197,94,.12);border:1px solid var(--green);color:var(--green)" onclick="marcarDropiIdVigente('${prodId}','${r.id}')">⭐ Hacer vigente</button>`}
           <button type="button" class="btn-sm" style="font-size:11px;padding:4px 9px;background:rgba(239,68,68,.1);border:1px solid var(--red);color:var(--red)" onclick="eliminarFilaDropiId('${prodId}','${r.id}')">🗑️</button>
         </div>
+        ${_dceBloqueHTML(prodId,r.dropi_id,{desde:r.vigente_desde,hasta:r.vigente_hasta})}
       </div>`
     }
     if(!rows||!rows.length)html='<div style="color:var(--muted);font-size:13px;padding:8px">Todavía no hay IDs registrados. Agrega uno abajo, o cambia el ID en la tarjeta y se archivará solo.</div>'
@@ -6260,6 +6717,32 @@ async function _renderHistDropiBody(prodId){
         <button type="button" class="btn-sm btn-primary" style="font-size:11px;padding:6px 11px" onclick="agregarDropiIdHist('${prodId}')">➕ Agregar</button>
       </div>
       <div id="hd-msg" style="margin-top:8px"></div>`
+    // ── 🔀 IDs PARALELOS (8jul26): IDs simultáneos del proveedor (uno por oferta/variante).
+    // Viven SOLO en dropi_costos_esperados. El Cruce los reconoce; el Asignador NO cambia.
+    const _idsEnHist=new Set((rows||[]).map(r=>String(r.dropi_id||'').trim()))
+    const _paralelos=[...new Set(((window._dceCache||[]).filter(c=>c.producto_id===prodId&&!_idsEnHist.has(String(c.dropi_id||'').trim()))).map(c=>String(c.dropi_id||'').trim()))].filter(Boolean)
+    let parHtml=''
+    for(const pid of _paralelos){
+      parHtml+=`<div style="padding:9px 11px;border-radius:8px;margin-bottom:8px;background:rgba(59,130,246,.06);border:1px solid var(--blue,#3b82f6)">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">
+          <div style="font-weight:700;font-size:14px;font-family:monospace">🔀 ${pid} <span style="font-size:10px;color:var(--blue,#3b82f6);font-family:inherit">ID PARALELO</span></div>
+          <div style="font-size:10px;color:var(--muted)">El cruce lo reconoce como este producto · el Asignador sigue con el vigente</div>
+        </div>
+        ${_dceBloqueHTML(prodId,pid,null)}
+      </div>`
+    }
+    html+=`<div class="divider"></div>
+      <div style="font-weight:700;font-size:13px;margin-bottom:6px">🔀 IDs PARALELOS (varios IDs a la vez)</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Para proveedores que dan un ID distinto por oferta/variante (ej: ID para 1u, otro para 2u...) funcionando TODOS al tiempo. El Cruce los casa a este producto y verifica el costo de cada uno.</div>
+      ${parHtml||'<div style="font-size:11.5px;color:var(--muted);padding:4px 0 8px">Sin IDs paralelos. El caso simple (un solo ID) no necesita esto.</div>'}
+      <div style="display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;background:rgba(59,130,246,.06);border:1px solid var(--blue,#3b82f6);border-radius:8px;padding:10px">
+        <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">ID de Dropi</div><input type="text" inputmode="numeric" id="dce-par-id" placeholder="Ej: 2195800" style="font-size:11px;padding:5px 7px;font-family:monospace;width:110px"></div>
+        <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Etiqueta</div><input type="text" id="dce-par-etq" placeholder="Ej: Oferta 2u — Deonline" style="font-size:11px;padding:5px 7px;width:160px"></div>
+        <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Costo/u esperado</div><input type="number" id="dce-par-costo" placeholder="0" style="font-size:11px;padding:5px 7px;width:100px"></div>
+        <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Desde</div><input type="date" id="dce-par-desde" value="${today()}" style="font-size:11px;padding:5px 7px"></div>
+        <button type="button" class="btn-sm" style="font-size:11px;padding:6px 11px;background:rgba(59,130,246,.15);border:1px solid var(--blue,#3b82f6);color:var(--blue,#3b82f6)" onclick="dceAgregarParalelo('${prodId}')">🔀 Agregar ID paralelo</button>
+      </div>
+      <div id="dce-msg" style="margin-top:8px"></div>`
     cont.innerHTML=html
   }catch(e){cont.innerHTML=`<div class="alert alert-red">No se pudo cargar: ${(e&&e.message)||e}</div>`}
 }
@@ -6337,6 +6820,222 @@ window.marcarDropiIdVigente=async(prodId,rowId,silencioso)=>{
     await loadProductos()
     if(!silencioso)await _renderHistDropiBody(prodId)
   }catch(e){if(!silencioso)alert((e&&e.message)||e)}
+}
+
+// ══ NUEVO (8jul26) · 💰 BLOQUE DE COSTOS ESPERADOS DENTRO DE CADA ID ═════════
+// Sub-sección auto-alimentada: cada ID del historial muestra sus costos esperados
+// (lo que el Excel DEBERÍA traer en PRECIO PROVEEDOR, unitario). Un ID puede tener
+// varias VARIANTES (todas vigentes a la vez) y cada variante su historial de costos
+// con desde/hasta. Producto simple = un costo general y ya.
+function _dceBloqueHTML(prodId,dropiId,rangoId){
+  const _id=String(dropiId||'').trim()
+  if(!_id)return''
+  const _toD=(v)=>v?String(v).slice(0,10):''
+  const _fmtF=(v)=>v?String(v).slice(0,10).split('-').reverse().join('/'):'?'
+  const filas=((window._dceCache||[]).filter(c=>String(c.dropi_id||'').trim()===_id&&c.producto_id===prodId))
+    .sort((a,b)=>{const va=String(a.variacion_id||''),vb=String(b.variacion_id||'');if(va!==vb)return va<vb?-1:1;return String(b.vigente_desde||'')<String(a.vigente_desde||'')?-1:1})
+  const _u=_id.replace(/[^0-9a-zA-Z]/g,'')
+  let inner=''
+  if(!filas.length){
+    inner=`<div style="font-size:11px;color:var(--amber);padding:2px 0 6px">⚠️ <b>SIN COSTO ESPERADO</b> — el cruce no puede verificar este ID todavía.</div>`
+  }else{
+    for(const f of filas){
+      const vig=!f.vigente_hasta
+      const _var=String(f.variacion_id||'').trim()
+      inner+=`<div style="display:flex;align-items:flex-end;gap:6px;flex-wrap:wrap;padding:6px 8px;border-radius:6px;margin-bottom:5px;background:${vig?'rgba(34,197,94,.07)':'rgba(255,255,255,.03)'};border:1px solid ${vig?'var(--green)':'var(--border)'}">
+        <div style="min-width:120px"><div style="font-size:10px;color:var(--muted)">${_var?'🔀 Variante':'Costo general'}</div><div style="font-size:11px;font-weight:700">${f.etiqueta?String(f.etiqueta):(_var?('var. '+_var):'—')}${_var?` <span style="font-size:9px;color:var(--muted);font-family:monospace">(${_var})</span>`:''}</div></div>
+        <div><div style="font-size:10px;color:var(--muted)">Costo/u</div><input type="number" id="dce-costo-${f.id}" value="${f.costo_unitario||0}" style="font-size:11px;padding:3px 5px;width:82px"></div>
+        <div><div style="font-size:10px;color:var(--muted)">Desde</div><input type="date" id="dce-desde-${f.id}" value="${_toD(f.vigente_desde)}" style="font-size:11px;padding:3px 5px"></div>
+        <div><div style="font-size:10px;color:var(--muted)">Hasta ${vig?'(vacío=HOY)':''}</div><input type="date" id="dce-hasta-${f.id}" value="${_toD(f.vigente_hasta)}" style="font-size:11px;padding:3px 5px"></div>
+        <button type="button" class="btn-sm btn-primary" style="font-size:10.5px;padding:3px 8px" onclick="dceGuardarFila('${prodId}','${f.id}')">💾</button>
+        <button type="button" class="btn-sm" style="font-size:10.5px;padding:3px 8px;background:rgba(239,68,68,.1);border:1px solid var(--red);color:var(--red)" onclick="dceEliminarFila('${prodId}','${f.id}')">🗑️</button>
+        <div style="flex-basis:100%;display:flex;gap:6px;align-items:center"><input type="text" id="dce-nota-${f.id}" value="${String(f.nota||'').replace(/"/g,'&quot;')}" placeholder="📝 Nota" style="font-size:10.5px;padding:3px 6px;flex:1"><span style="font-size:10px;color:var(--muted);white-space:nowrap">${_fmtF(f.vigente_desde)} → <b style="color:${vig?'var(--green)':'var(--text)'}">${vig?'HOY ✅':_fmtF(f.vigente_hasta)}</b></span></div>
+      </div>`
+    }
+  }
+  // Mini-form: agregar costo (general o de una variante) a ESTE ID. Fechas del ID pre-llenadas si es archivado.
+  const _preD=rangoId&&rangoId.desde?_toD(rangoId.desde):today()
+  const _preH=rangoId&&rangoId.hasta?_toD(rangoId.hasta):''
+  inner+=`<details style="margin-top:2px"><summary style="font-size:11px;color:var(--purple);cursor:pointer;user-select:none">➕ Agregar costo${filas.length?' / variante':''} a este ID</summary>
+    <div style="display:flex;align-items:flex-end;gap:6px;flex-wrap:wrap;margin-top:6px;padding:8px;border-radius:6px;background:rgba(167,139,250,.05);border:1px dashed var(--purple)">
+      <div><div style="font-size:10px;color:var(--muted)">Variación ID <span style="opacity:.7">(vacío = general)</span></div><input type="text" id="dce-add-var-${_u}" placeholder="Ej: 8834412" style="font-size:11px;padding:3px 5px;width:100px;font-family:monospace"></div>
+      <div><div style="font-size:10px;color:var(--muted)">Etiqueta</div><input type="text" id="dce-add-etq-${_u}" placeholder="Ej: Rojo / Oferta 2u" style="font-size:11px;padding:3px 5px;width:120px"></div>
+      <div><div style="font-size:10px;color:var(--muted)">Costo/u</div><input type="number" id="dce-add-costo-${_u}" placeholder="0" style="font-size:11px;padding:3px 5px;width:82px"></div>
+      <div><div style="font-size:10px;color:var(--muted)">Desde</div><input type="date" id="dce-add-desde-${_u}" value="${_preD}" style="font-size:11px;padding:3px 5px"></div>
+      <div><div style="font-size:10px;color:var(--muted)">Hasta</div><input type="date" id="dce-add-hasta-${_u}" value="${_preH}" style="font-size:11px;padding:3px 5px"></div>
+      <div style="flex-basis:100%"><input type="text" id="dce-add-nota-${_u}" placeholder="📝 Nota" style="font-size:10.5px;padding:3px 6px;width:100%"></div>
+      <button type="button" class="btn-sm btn-primary" style="font-size:10.5px;padding:4px 9px" onclick="dceAgregar('${prodId}','${_id}')">➕ Agregar</button>
+    </div></details>`
+  return `<div style="margin-top:8px;padding-top:7px;border-top:1px dashed var(--border)"><div style="font-size:11px;font-weight:700;margin-bottom:5px">💰 Costos esperados en los Excel:</div>${inner}</div>`
+}
+window._dceBloqueHTML=_dceBloqueHTML
+
+// Candado anti-solape de costos esperados por (dropi_id + variación)
+function _dceChocaRango(prodId,dropiId,varId,desde,hasta,excluirId){
+  const _v=String(varId||'').trim()
+  const rows=(window._dceCache||[]).filter(r=>r.producto_id===prodId&&String(r.dropi_id||'').trim()===String(dropiId).trim()&&String(r.variacion_id||'').trim()===_v&&String(r.id)!==String(excluirId))
+  for(const r of rows){
+    const d2=String(r.vigente_desde||'').slice(0,10),h2=r.vigente_hasta?String(r.vigente_hasta).slice(0,10):null
+    if(!d2)continue
+    if((desde<(h2||'9999'))&&(d2<(hasta||'9999')))return r
+  }
+  return null
+}
+
+// ➕ Agregar costo esperado (general o variante) a un ID. Si va sin "hasta" y ya hay
+// vigente de la MISMA variación → cierra el viejo en la fecha nueva (rango contiguo).
+window.dceAgregar=async(prodId,dropiId)=>{
+  const msg=document.getElementById('dce-msg')||document.getElementById('hd-msg')
+  const _u=String(dropiId).replace(/[^0-9a-zA-Z]/g,'')
+  const _g=(i)=>document.getElementById(i)
+  const _var=((_g('dce-add-var-'+_u)||{}).value||'').trim()
+  const _etq=((_g('dce-add-etq-'+_u)||{}).value||'').trim()
+  const _costo=parseInt((_g('dce-add-costo-'+_u)||{}).value)||0
+  const _desde=(_g('dce-add-desde-'+_u)||{}).value||''
+  const _hasta=(_g('dce-add-hasta-'+_u)||{}).value||''
+  if(_costo<=0){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">Pon el costo unitario esperado</div>';return}
+  if(!_desde){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">La fecha "desde" es obligatoria</div>';return}
+  if(_hasta&&_hasta<=_desde){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">"Hasta" tiene que ser DESPUÉS de "desde"</div>';return}
+  const _nota=((_g('dce-add-nota-'+_u)||{}).value||'').trim()
+  try{
+    // Vigente previo de la misma variación → cerrarlo en la fecha nueva (patrón del historial de precios)
+    if(!_hasta){
+      const _vig=(window._dceCache||[]).find(r=>r.producto_id===prodId&&String(r.dropi_id||'').trim()===String(dropiId).trim()&&String(r.variacion_id||'').trim()===_var&&!r.vigente_hasta)
+      if(_vig){
+        const _vd=String(_vig.vigente_desde||'').slice(0,10)
+        if(_vd>=_desde){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">🔒 El costo vigente de esta variación empezó el '+window._phFmtDia(_vd)+'. La fecha nueva debe ser DESPUÉS (o edita esa fila).</div>';return}
+        await sb.from('dropi_costos_esperados').update({vigente_hasta:new Date(_desde+'T00:00:00').toISOString()}).eq('id',_vig.id)
+      }
+    }else{
+      const _choque=_dceChocaRango(prodId,dropiId,_var,_desde,_hasta,null)
+      if(_choque){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">🔒 Ese rango se SOLAPA con otro costo de esta variación (desde '+window._phFmtDia(_choque.vigente_desde)+').</div>';return}
+    }
+    const _rec={producto_id:prodId,dropi_id:String(dropiId).trim(),variacion_id:_var||null,etiqueta:_etq||null,costo_unitario:_costo,vigente_desde:new Date(_desde+'T00:00:00').toISOString(),usuario_id:me?.id||null,nota:_nota||null}
+    if(_hasta)_rec.vigente_hasta=new Date(_hasta+'T00:00:00').toISOString()
+    const{error}=await sb.from('dropi_costos_esperados').insert(_rec)
+    if(error){
+      if(error.code==='42P01'||/dropi_costos_esperados/.test(error.message||'')){if(msg)msg.innerHTML='<div class="alert alert-amber" style="font-size:11px">⚠️ Falta crear la tabla <code>dropi_costos_esperados</code>. Ejecuta el SQL de esta entrega.</div>';return}
+      if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">${error.message}</div>`;return
+    }
+    logAction('dce_costo_agregado',{producto_id:prodId,dropi_id:dropiId,variacion_id:_var||null,costo:_costo,desde:_desde,hasta:_hasta||null}).catch(()=>{})
+    await cargarCostosEsperados()
+    if(msg)msg.innerHTML='<div class="alert alert-green" style="font-size:11px">✅ Costo esperado agregado</div>'
+    await _renderHistDropiBody(prodId)
+    try{if(typeof _phRefreshBadge==='function')_phRefreshBadge(prodId)}catch(_){}
+  }catch(e){if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">${(e&&e.message)||e}</div>`}
+}
+
+// 💾 Guardar edición de una fila de costo esperado
+window.dceGuardarFila=async(prodId,rowId)=>{
+  const msg=document.getElementById('dce-msg')||document.getElementById('hd-msg')
+  const _fila=(window._dceCache||[]).find(r=>String(r.id)===String(rowId))
+  if(!_fila){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">No se encontró el registro</div>';return}
+  const _g=(i)=>document.getElementById(i)
+  const _costo=parseInt((_g('dce-costo-'+rowId)||{}).value)||0
+  const _desde=(_g('dce-desde-'+rowId)||{}).value||''
+  const _hasta=(_g('dce-hasta-'+rowId)||{}).value||''
+  const _nota=((_g('dce-nota-'+rowId)||{}).value||'').trim()
+  if(_costo<=0){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">El costo unitario es obligatorio</div>';return}
+  if(!_desde){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">La fecha "desde" es obligatoria</div>';return}
+  if(_hasta&&_hasta<=_desde){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">"Hasta" tiene que ser DESPUÉS de "desde"</div>';return}
+  if(!_hasta){
+    const _otroVig=(window._dceCache||[]).find(r=>r.producto_id===prodId&&String(r.dropi_id||'').trim()===String(_fila.dropi_id||'').trim()&&String(r.variacion_id||'').trim()===String(_fila.variacion_id||'').trim()&&!r.vigente_hasta&&String(r.id)!==String(rowId))
+    if(_otroVig){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">🔒 Ya hay OTRO costo vigente para esta variación. Ponle "hasta" a uno de los dos.</div>';return}
+  }
+  const _choque=_dceChocaRango(prodId,_fila.dropi_id,_fila.variacion_id,_desde,_hasta||null,rowId)
+  if(_choque){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">🔒 Ese rango se SOLAPA con otro costo de esta variación (desde '+window._phFmtDia(_choque.vigente_desde)+').</div>';return}
+  try{
+    const _upd={costo_unitario:_costo,vigente_desde:new Date(_desde+'T00:00:00').toISOString(),vigente_hasta:_hasta?new Date(_hasta+'T00:00:00').toISOString():null,nota:_nota||null}
+    const{error}=await sb.from('dropi_costos_esperados').update(_upd).eq('id',rowId)
+    if(error){if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">${error.message}</div>`;return}
+    logAction('dce_costo_editado',{producto_id:prodId,registro_id:rowId,costo:_costo,desde:_desde,hasta:_hasta||null}).catch(()=>{})
+    await cargarCostosEsperados()
+    if(msg)msg.innerHTML='<div class="alert alert-green" style="font-size:11px">✅ Guardado</div>'
+    await _renderHistDropiBody(prodId)
+    try{if(typeof _phRefreshBadge==='function')_phRefreshBadge(prodId)}catch(_){}
+  }catch(e){if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">${(e&&e.message)||e}</div>`}
+}
+
+// 🗑️ Eliminar fila de costo esperado (con aviso fuerte si es la vigente)
+window.dceEliminarFila=async(prodId,rowId)=>{
+  const _fila=(window._dceCache||[]).find(r=>String(r.id)===String(rowId))
+  const _esVig=_fila&&!_fila.vigente_hasta
+  if(!confirm((_esVig?'⚠️ Este es el costo esperado VIGENTE de este ID/variación. Si lo eliminas, el cruce dejará de verificarlo (verás el aviso ⚠️ SIN COSTO ESPERADO).':'Se elimina este rango de costo esperado.')+'\n\n¿Eliminar?'))return
+  try{
+    const{error}=await sb.from('dropi_costos_esperados').delete().eq('id',rowId)
+    if(error){alert(error.message);return}
+    logAction('dce_costo_eliminado',{producto_id:prodId,registro_id:rowId}).catch(()=>{})
+    await cargarCostosEsperados()
+    await _renderHistDropiBody(prodId)
+    try{if(typeof _phRefreshBadge==='function')_phRefreshBadge(prodId)}catch(_){}
+  }catch(e){alert((e&&e.message)||e)}
+}
+
+// 🔀 Agregar ID PARALELO: ID nuevo (no está en el historial) + su costo esperado, de una.
+window.dceAgregarParalelo=async(prodId)=>{
+  const msg=document.getElementById('dce-msg')
+  const _g=(i)=>document.getElementById(i)
+  const _id=((_g('dce-par-id')||{}).value||'').trim()
+  const _etq=((_g('dce-par-etq')||{}).value||'').trim()
+  const _costo=parseInt((_g('dce-par-costo')||{}).value)||0
+  const _desde=(_g('dce-par-desde')||{}).value||today()
+  if(!_id){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">Escribe el ID de Dropi paralelo</div>';return}
+  if(_costo<=0){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">Pon el costo unitario esperado (así nace verificable, nunca en silencio)</div>';return}
+  try{
+    const _rec={producto_id:prodId,dropi_id:_id,variacion_id:null,etiqueta:_etq||null,costo_unitario:_costo,vigente_desde:new Date(_desde+'T00:00:00').toISOString(),usuario_id:me?.id||null,nota:'ID paralelo agregado a mano'}
+    const{error}=await sb.from('dropi_costos_esperados').insert(_rec)
+    if(error){
+      if(error.code==='42P01'||/dropi_costos_esperados/.test(error.message||'')){if(msg)msg.innerHTML='<div class="alert alert-amber" style="font-size:11px">⚠️ Falta crear la tabla <code>dropi_costos_esperados</code>. Ejecuta el SQL de esta entrega.</div>';return}
+      if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">${error.message}</div>`;return
+    }
+    logAction('dce_id_paralelo_agregado',{producto_id:prodId,dropi_id:_id,costo:_costo}).catch(()=>{})
+    await cargarCostosEsperados()
+    if(msg)msg.innerHTML='<div class="alert alert-green" style="font-size:11px">✅ ID paralelo agregado — el cruce ya lo reconoce y verifica</div>'
+    await _renderHistDropiBody(prodId)
+    try{if(typeof _phRefreshBadge==='function')_phRefreshBadge(prodId)}catch(_){}
+  }catch(e){if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">${(e&&e.message)||e}</div>`}
+}
+
+// 💬 Mini-modal al cambiar el ID de Dropi desde la tarjeta: pide de una el costo esperado
+// del ID nuevo (desde=HOY). "Ahora no" → el badge de Productos lo sigue recordando.
+window._dceModalNuevoId=(prodId,dropiId)=>{
+  try{if(document.getElementById('dce-nuevoid-modal'))return}catch(_){}
+  const prod=(productos||[]).find(p=>p.id===prodId)
+  const _ov=document.createElement('div')
+  _ov.id='dce-nuevoid-modal'
+  _ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px'
+  _ov.innerHTML=`<div class="card" style="max-width:440px;width:100%;border:2px solid var(--purple)">
+    <div class="section-title" style="margin-bottom:4px">🆔 Nuevo ID de Dropi registrado</div>
+    <div style="font-size:12.5px;color:var(--muted);line-height:1.6;margin-bottom:10px">${prod?('<b>'+prod.nombre+'</b> · '):''}ID <b style="font-family:monospace">${dropiId}</b> quedó vigente.<br>💰 <b>¿Qué costo UNITARIO traerá en los Excel de Dropi?</b> (columna PRECIO PROVEEDOR) — así el cruce lo verifica desde HOY y te avisa si el proveedor lo cambia.</div>
+    <div style="display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap">
+      <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Costo/u esperado</div><input type="number" id="dce-nid-costo" placeholder="Ej: 14000" style="font-size:12px;padding:6px 8px;width:120px"></div>
+      <div><div style="font-size:10px;color:var(--muted);margin-bottom:2px">Nota</div><input type="text" id="dce-nid-nota" placeholder="Ej: proveedor Deonline" style="font-size:12px;padding:6px 8px;width:170px"></div>
+    </div>
+    <div id="dce-nid-msg" style="margin-top:8px"></div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn-sm btn-primary" onclick="window._dceGuardarNuevoId('${prodId}','${dropiId}')">💾 Guardar costo esperado</button>
+      <button class="btn-sm btn-outline" onclick="document.getElementById('dce-nuevoid-modal')?.remove()">Ahora no</button>
+    </div>
+  </div>`
+  document.body.appendChild(_ov)
+  try{document.getElementById('dce-nid-costo')?.focus()}catch(_){}
+}
+window._dceGuardarNuevoId=async(prodId,dropiId)=>{
+  const msg=document.getElementById('dce-nid-msg')
+  const _costo=parseInt((document.getElementById('dce-nid-costo')||{}).value)||0
+  const _nota=((document.getElementById('dce-nid-nota')||{}).value||'').trim()
+  if(_costo<=0){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">Pon el costo unitario esperado</div>';return}
+  try{
+    const{error}=await sb.from('dropi_costos_esperados').insert({producto_id:prodId,dropi_id:String(dropiId).trim(),variacion_id:null,etiqueta:null,costo_unitario:_costo,vigente_desde:new Date(today()+'T00:00:00').toISOString(),usuario_id:me?.id||null,nota:_nota||'Registrado al cambiar el ID'})
+    if(error){
+      if(error.code==='42P01'||/dropi_costos_esperados/.test(error.message||'')){if(msg)msg.innerHTML='<div class="alert alert-amber" style="font-size:11px">⚠️ Falta crear la tabla <code>dropi_costos_esperados</code>. Ejecuta el SQL de esta entrega.</div>';return}
+      if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">${error.message}</div>`;return
+    }
+    logAction('dce_costo_agregado',{producto_id:prodId,dropi_id:dropiId,costo:_costo,origen:'modal_nuevo_id'}).catch(()=>{})
+    await cargarCostosEsperados()
+    document.getElementById('dce-nuevoid-modal')?.remove()
+    try{if(typeof _phRefreshBadge==='function')_phRefreshBadge(prodId)}catch(_){}
+  }catch(e){if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">${(e&&e.message)||e}</div>`}
 }
 
 window.guardarOferta=async(prodId)=>{
@@ -15218,6 +15917,7 @@ window.procesarDropi=async()=>{
       precio_proveedor_unit:parseFloat(r['PRECIO PROVEEDOR'])||0,
       tipo_envio:String(r['TIPO DE ENVIO']||'').trim(),
       producto_id_dropi:String(r['PRODUCTO ID']||'').trim(),
+      variacion_id_dropi:String(r['VARIACION ID']||'').trim(), // 💰 verificador (8jul26): variación para costo esperado
       hora_orden:String(r['HORA']||'').trim(),
       fecha_reporte:String(r['FECHA DE REPORTE']||'').trim(),
     })).filter(o=>o.telefono.length>=7)
@@ -15333,6 +16033,55 @@ window.procesarDropi=async()=>{
         healthHtml+=`<div class="dropi-health bad" style="border-color:var(--amber)">⏳ <b>Problema de FECHA:</b> ${_viejasPrev.length} orden(es) con fecha de subida mayor a <b>4 días</b>. Pídele a un administrador que te active el <b>modo histórico</b> para poder cruzarlas.</div>`
       }
     }
+
+    // ══ 💰 NUEVO (8jul26) · VERIFICADOR DE COSTOS DROPI ══════════════════════
+    // Por cada orden: costo esperado del ID (+variación) VIGENTE en la fecha de la
+    // orden vs PRECIO PROVEEDOR del Excel (unitario). Si NO cuadra → aviso aquí y
+    // alerta persistida en dropi_costo_alertas (Dashboard). Solo verifica IDs que
+    // TIENEN costo esperado configurado (opt-in, cero falsas alarmas). Todo en
+    // try/catch: jamás bloquea el cruce.
+    try{
+      if(window._dceCache===null){try{await cargarCostosEsperados()}catch(_){}}
+      if(Array.isArray(window._dceCache)&&window._dceCache.length){
+        const _dceAlertas=[]
+        for(const r of resultados){
+          const _pidD=String(r.producto_id_dropi||'').trim()
+          const _pu=Number(r.precio_proveedor_unit)||0
+          if(!_pidD||_pu<=0)continue
+          // FECHA viene DD-MM-YYYY → YYYY-MM-DD
+          const _pf=String(r.fecha_dropi||'').split(/[-/]/)
+          const _fIso=(_pf.length===3&&_pf[2]&&_pf[2].length===4)?`${_pf[2]}-${_pf[1]}-${_pf[0]}`:today()
+          const _esp=window._dceCostoEsperado(_pidD,r.variacion_id_dropi||'',_fIso)
+          if(!_esp||!(_esp.costo>0))continue // ID sin costo configurado → no se verifica (el badge de Productos lo recuerda)
+          if(Math.round(_esp.costo)!==Math.round(_pu)){
+            const _prodV=(typeof resolveProdByDropiId==='function')?resolveProdByDropiId(_pidD):null
+            _dceAlertas.push({fecha:_fIso,producto_id:_prodV?_prodV.id:null,producto_nombre:_prodV?(_prodV.nombre||''):(r.producto||''),dropi_id:_pidD,variacion_id:String(r.variacion_id_dropi||'').trim()||null,orden_id_dropi:String(r.id_dropi||'').trim()||null,costo_esperado:_esp.costo,costo_excel:_pu})
+          }
+        }
+        if(_dceAlertas.length){
+          const _porClave={}
+          for(const a of _dceAlertas){const k=a.dropi_id+'|'+(a.variacion_id||'')+'|'+a.costo_esperado+'|'+a.costo_excel;(_porClave[k]=_porClave[k]||{a,n:0}).n++}
+          const _lineasV=Object.values(_porClave).map(g=>`🆔 <b>${g.a.dropi_id}</b>${g.a.variacion_id?` (var. ${g.a.variacion_id})`:''} · ${g.a.producto_nombre||'?'} → Excel trae <b style="color:var(--red)">$${fmt(g.a.costo_excel)}</b>/u, esperado <b>$${fmt(g.a.costo_esperado)}</b>/u (${g.n} orden${g.n>1?'es':''})`).join('<br>')
+          healthHtml+=`<div class="dropi-health bad">🚨 <b>COSTO DROPI NO CUADRA:</b> ${_dceAlertas.length} orden(es) traen un PRECIO PROVEEDOR distinto al esperado:<br>${_lineasV}<br>💡 Si el proveedor cambió el costo de verdad, actualízalo en Productos → 📜 Historial de IDs · 💰 Costos esperados (y revisa el Historial de precios para los informes).</div>`
+          // Persistir en dropi_costo_alertas (dedupe por orden+ID: no duplica si re-cruzas el mismo día)
+          try{
+            const _ordIds=[...new Set(_dceAlertas.map(a=>a.orden_id_dropi).filter(Boolean))]
+            const _yaSet=new Set()
+            for(let i=0;i<_ordIds.length;i+=100){
+              const _b=_ordIds.slice(i,i+100)
+              const{data:_ya}=await sb.from('dropi_costo_alertas').select('orden_id_dropi,dropi_id').in('orden_id_dropi',_b)
+              for(const y of (_ya||[]))_yaSet.add(String(y.orden_id_dropi)+'|'+String(y.dropi_id))
+            }
+            const _nuevas=_dceAlertas.filter(a=>!a.orden_id_dropi||!_yaSet.has(String(a.orden_id_dropi)+'|'+String(a.dropi_id))).map(a=>({...a,estado:'pendiente'}))
+            if(_nuevas.length){
+              const{error:_eIns}=await sb.from('dropi_costo_alertas').insert(_nuevas)
+              if(!_eIns)logAction('dce_alertas_creadas',{cantidad:_nuevas.length}).catch(()=>{})
+            }
+          }catch(_ePers){console.warn('[DCE] no se pudieron persistir alertas:',_ePers?.message||_ePers)}
+        }
+      }
+    }catch(_eVer){console.warn('[DCE] verificador de costos falló (no bloquea el cruce):',_eVer?.message||_eVer)}
+    // ══ FIN verificador de costos ═════════════════════════════════════════════
 
     resEl.innerHTML=`
       <div class="cards-row c4">
@@ -16813,6 +17562,7 @@ window.procesarSeguimiento=async()=>{
       precio_proveedor_unit:parseFloat(r['PRECIO PROVEEDOR'])||0,
       tipo_envio:String(r['TIPO DE ENVIO']||'').trim(),
       producto_id_dropi:String(r['PRODUCTO ID']||'').trim(),
+      variacion_id_dropi:String(r['VARIACION ID']||'').trim(), // 💰 verificador (8jul26): variación para costo esperado
       hora_orden:String(r['HORA']||'').trim(),
       fecha_reporte:String(r['FECHA DE REPORTE']||'').trim(),
     })).filter(o=>o.telefono.length>=7)

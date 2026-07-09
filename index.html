@@ -32500,7 +32500,11 @@ async function hbProcesarArchivo(file,ctx){
         }
       }catch(_e){console.warn('[hb dup] lectura BD:',_e?.message)} // sin lectura → compara solo sesión
       for(const o of(ctx.archivosSesion||[])){ // otros archivos cargados en ESTA sesión (aún sin generar)
-        if(o===f||o.estado==='error')continue
+        // MEJORA (9jul26) · #4: los archivos MUERTOS (error/duplicado/nombre_mal) NO envenenan la comparación:
+        // no se van a generar, así que un re-subido CORREGIDO con sus mismos teléfonos NO es duplicado real.
+        // El duplicado REAL sigue bloqueado: si la otra copia está viva ('listo'/'revision'/'precio'/'oferta')
+        // o ya se generó (BD), la coincidencia de teléfonos lo marca igual que siempre.
+        if(o===f||['error','duplicado','nombre_mal'].includes(o.estado))continue
         for(const r2 of(o.rows||[])){const n=_dnorm(r2.tel);if(n&&_rango.has(r2.fecha)&&!(n in _vistos))_vistos[n]=`en el archivo ${o.name} de esta misma sesión`}
       }
       const _reps=_mios.filter(x=>x.tel in _vistos)
@@ -32930,14 +32934,17 @@ function hbRender(){
     // ══ FASE 6 (6jul26) · M14-F6 + M15: gate reforzado — mal nombrados, duplicados y repetidos pendientes bloquean GENERAR ══
     const nMal=st.files.filter(x=>x.estado==='nombre_mal').length
     const nDup=st.files.filter(x=>x.estado==='duplicado').length
+    const nErr=st.files.filter(x=>x.estado==='error').length // MEJORA (9jul26) · #4: también bloquean
     const nRep=st.files.reduce((a,x)=>a+((x.repetidos||[]).filter(y=>!y.resuelto).length),0)
-    const genBloqueado=nMal>0||nRep>0
+    // MEJORA (9jul26) · #4: "lo que ves cargado = lo que se genera" — CUALQUIER archivo no-listo bloquea
+    const genBloqueado=nMal>0||nRep>0||nDup>0||nErr>0||enRev>0||enPre>0
     acc.innerHTML=listos.length?`<div class="card" style="margin-top:10px">
       ${nMal?`<div class="alert alert-red" style="font-size:13px;margin-bottom:10px">🚫 Hay ${nMal} archivo(s) con el <b>NOMBRE MAL</b> (fecha equivocada). Renómbralos con su fecha correcta y vuelve a subirlos — <b>no se puede generar</b> mientras estén aquí (o quítalos con ✕).</div>`:''}
-      ${nDup?`<div class="alert alert-red" style="font-size:13px;margin-bottom:10px">🚫 ${nDup} archivo(s) <b>DUPLICADO(S)</b> no entran (ya estaban procesados). Los demás sí pueden generar.</div>`:''}
+      ${nDup?`<div class="alert alert-red" style="font-size:13px;margin-bottom:10px">🚫 ${nDup} archivo(s) <b>DUPLICADO(S)</b> — <b>no se puede generar</b> mientras estén aquí: quítalos con ✕. Si es el corregido legítimo, quita PRIMERO la copia mala y vuelve a subirlo.</div>`:''}
+      ${nErr?`<div class="alert alert-red" style="font-size:13px;margin-bottom:10px">❌ Hay ${nErr} archivo(s) con <b>ERROR</b> — corrígelos y vuelve a subirlos, o quítalos con ✕. <b>No se puede generar</b> con archivos en error cargados (nada se salta en silencio).</div>`:''}
       ${nRep?`<div class="alert alert-red" style="font-size:13px;margin-bottom:10px">📞 Hay <b>${nRep} teléfono(s) repetido(s) sin resolver</b>. Confirma si son recompra o quítalos — <b>no se puede generar</b> hasta resolverlos todos.</div>`:''}
-      ${enRev?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:13px;margin-bottom:10px">⚠️ Hay ${enRev} archivo(s) EN REVISIÓN — no entran hasta resolver sus filas. Los ${listos.length} listos sí se procesan.</div>`:''}
-      ${enPre?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:13px;margin-bottom:10px">💲 Hay ${enPre} archivo(s) verificando PRECIOS (oferta/mayoría) — no entran hasta resolverlos.</div>`:''}
+      ${enRev?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:13px;margin-bottom:10px">⚠️ Hay ${enRev} archivo(s) EN REVISIÓN — <b>no se puede generar</b> hasta resolver sus filas (lo que ves cargado = lo que se genera).</div>`:''}
+      ${enPre?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:13px;margin-bottom:10px">💲 Hay ${enPre} archivo(s) verificando PRECIOS (oferta/mayoría) — <b>no se puede generar</b> hasta resolverlos.</div>`:''}
       <button class="btn-full btn-primary" id="hb-btn-gen" onclick="window._hbPrueba=false;hbGenerar()"${genBloqueado?' disabled style="opacity:.5;cursor:not-allowed"':''}>${genBloqueado?'🔒 Generar bloqueado — corrige lo de arriba':'🧮 Generar hoja base + guardar constancia + enviar a Reportes Diarios ('+listos.length+' archivo'+(listos.length===1?'':'s')+')'}</button>
       ${(me?.permite_prueba_hojabase===true&&!genBloqueado)?`<button class="btn-full" id="hb-btn-prueba" style="margin-top:8px;background:var(--amber-bg);border:2px solid var(--amber);color:var(--text);font-weight:700" onclick="hbGenerarPrueba()">🧪 PRUEBA: generar en simulacro — pide stock y conversaciones pero NO guarda NADA</button>`:''}
     </div>`:''
@@ -33303,6 +33310,32 @@ async function hbSha256(buf){
 // [GENERAR] → Ventana 1 🚚 Transportadora (Mejora 8) → ¿Seguro? → Ventana 2 📦 Stock + 💬 Conversaciones
 // (Mejora 9, obligatoria) → _hbGenerarFinal() (la lógica original de siempre, intacta abajo).
 // Si el auxiliar CANCELA en cualquier punto, NO se genera y NO se escribe nada.
+// ══ MEJORA (9jul26) · #3: CANDADO DE CANTIDADES — toda cantidad debe ser una OFERTA VÁLIDA ══
+// Antes: un pedido con una cantidad que NO existe en las ofertas del producto (ej. 130u cuando la
+// máxima es 129u) se caía de la hoja EN SILENCIO. Ahora: NO se genera y se avisa exactamente cuál
+// pedido corregir. Fuente de verdad: producto_ofertas (activo=true) — la MISMA que usa el sistema.
+// Si un producto NO tiene ofertas registradas en esa tabla (viejo sin migrar), no se le exige.
+async function hbCantidadesInvalidas(listos){
+  const pids=[...new Set(listos.map(f=>String(f.producto.id)))]
+  if(!pids.length)return[]
+  const map={}
+  try{
+    const{data,error}=await sb.from('producto_ofertas').select('producto_id,cantidad').in('producto_id',pids).eq('activo',true)
+    if(error){console.warn('[hb cantidades] producto_ofertas:',error.message);return[]} // sin lectura → no bloquear a ciegas
+    for(const o of(data||[])){const c=parseInt(o.cantidad);if(isFinite(c)){const k=String(o.producto_id);(map[k]=map[k]||new Set()).add(c)}}
+  }catch(e){console.warn('[hb cantidades]',e?.message);return[]}
+  const malas=[]
+  for(const f of listos){
+    const set=map[String(f.producto.id)]
+    if(!set||!set.size)continue // producto sin ofertas registradas → no se le exige
+    for(const r of f.rows){
+      if(r._excluida)continue // fila quitada: no cuenta (no entra a la hoja)
+      const c=parseInt(String(r.sc.cantidad==null?'':r.sc.cantidad).trim())
+      if(!isFinite(c)||!set.has(c))malas.push({producto:f.producto.nombre,cant:isFinite(c)?c:'(vacía)',tel:r.tel||'—',archivo:f.name,validas:[...set].sort((a,b)=>a-b)})
+    }
+  }
+  return malas
+}
 window.hbGenerar=async()=>{
   const st=window._hb;if(!st)return
   // FASE 6 (6jul26) · M14-F6 + M15.C: doble seguro del gate (además del botón deshabilitado)
@@ -33310,6 +33343,27 @@ window.hbGenerar=async()=>{
   if(st.files.some(x=>(x.repetidos||[]).some(y=>!y.resuelto))){alert('Hay teléfonos repetidos sin resolver. Confirma si son recompra o quítalos antes de generar.');return}
   const listos=st.files.filter(x=>x.estado==='listo')
   if(!listos.length)return
+  // ══ MEJORA (9jul26) · #4: "LO QUE VES CARGADO EN PANTALLA = LO QUE SE GENERA" ══
+  // Antes: los archivos en error/duplicado/revisión/precios se SALTABAN EN SILENCIO al generar
+  // (filtro estado==='listo') y la hoja salía incompleta (ej: 5 en vez de 7). Ahora se FRENA
+  // y se dice qué hacer con cada uno. Nada se salta en silencio.
+  const _noListos=st.files.filter(x=>x.estado!=='listo')
+  if(_noListos.length){
+    const _txt={error:'tiene un ERROR — corrígelo y vuelve a subirlo, o quítalo con ✕',
+      duplicado:'quedó como DUPLICADO — si de verdad ya lo subiste, quítalo con ✕; si es el corregido legítimo, quita PRIMERO la copia mala y vuelve a subirlo',
+      revision:'está EN REVISIÓN — resuelve sus filas pendientes arriba',
+      precio:'está verificando PRECIOS (mayoría) — corrige sus grupos arriba',
+      oferta:'está verificando PRECIOS DE OFERTA — confirma sus combos arriba',
+      nombre_mal:'tiene el NOMBRE MAL — renómbralo y vuelve a subirlo'}
+    alert(`🔒 NO se puede generar todavía: ${_noListos.length} archivo(s) cargado(s) NO están ✓ listos.\nRegla: lo que ves cargado en pantalla = lo que se genera. Nada se salta en silencio.\n\n${_noListos.map(x=>`• ${x.name}: ${_txt[x.estado]||('está en estado "'+x.estado+'"')}`).join('\n')}\n\nCorrige o quita (✕) cada uno y vuelve a dar GENERAR.`)
+    return
+  }
+  // ══ MEJORA (9jul26) · #3: BLOQUEO TOTAL si alguna cantidad NO es una oferta válida del producto ══
+  const _malas=await hbCantidadesInvalidas(listos)
+  if(_malas.length){
+    alert(`🔒 NO se puede generar: ${_malas.length} pedido(s) tienen una CANTIDAD que NO existe en las ofertas del producto.\n\n${_malas.map(m=>`• ${m.producto}: pusieron ${m.cant}u → esa oferta NO existe (válidas: ${m.validas.join(', ')}u · máxima: ${m.validas[m.validas.length-1]}u) · 📞 ${m.tel} · 📄 ${m.archivo}`).join('\n')}\n\nCorrige la cantidad a una oferta válida (en el Excel o en Dropi) y vuelve a subir ese archivo.`)
+    return
+  }
   hbVent1Show(listos)
 }
 // ══ FASE 4 (6jul26) · Mejora 8: VENTANA 1 — 🚚 TRANSPORTADORA (Interrapidisimo) ══
@@ -33402,7 +33456,12 @@ async function hbVent2Show(){
   const prods=[],seen={}
   for(const f of listos){const k=String(f.producto.id);if(!seen[k]){seen[k]=1;prods.push(f.producto)}}
   // Días de la brecha (SOLO la brecha — HOY jamás; días consolidados jamás)
+  // MEJORA (9jul26) · #2: la brecha de CONVERSACIONES incluye el ÚLTIMO día procesado (`ultima`, INCLUSIVE):
+  // el día que se sube queda parcial y sus conversaciones se piden al siguiente día hábil (lunes pide
+  // sábado+domingo; martes tras festivo pide sáb+dom+lun; jueves pide miércoles). Si ese día no trae
+  // pedidos en los Excel, NO aparece (igual que siempre). SOLO afecta este modal — IDs/ventas intactos.
   const dias=(st.esperadas||[]).slice()
+  if(st.ultima&&st.ultima<st.hoy&&!dias.includes(st.ultima))dias.unshift(st.ultima)
   // (producto, día-de-brecha) con ventas: según la fecha REAL de cada fila
   const ventasDia={} // fecha → {pid: producto}
   for(const f of listos)for(const r of f.rows){
@@ -33579,13 +33638,14 @@ async function _hbGenerarFinal(){
       resultado:'ok',detalle:{productos:bloques.map(b=>({nombre:b.producto.nombre,filas:b.items.length})),correcciones:totCorr,archivos:listos.length},usuario_id:currentMe().id})
     const{error:eR}=_prueba?{error:null}:await sb.from('constructor_subidas').insert(regs)
     if(eR)err.push('constancia en tabla: '+eR.message)
-    // 3) Reportes Diarios — FASE 5 (6jul26) · Mejora 13 + 9-BIS: "LA BRECHA REEMPLAZA, EL RESTO ACUMULA"
-    //    · fecha EN la brecha  → ad_ids REEMPLAZA (día en consolidación — comportamiento de siempre).
-    //    · fecha = HOY o ANTERIOR a la brecha (consolidada) → ad_ids ACUMULA (leer existentes + append,
-    //      SIN deduplicar: cada ID repetido = 1 venta). Corrige la pérdida de IDs (2ª hoja / venta tardía).
-    //    · conversaciones: 100% MANUALES (9-BIS) — solo para (producto, día de brecha), desde la Ventana 2.
-    //      HOY y días consolidados NO tocan conversaciones. (Se retiró el conteo automático g.n por pedido
-    //      del usuario; g.n queda solo informativo en memoria.)
+    // 3) Reportes Diarios — MEJORA (9jul26): "IDs SOLO ANTES DE LA BRECHA — BRECHA Y HOY SON MANUALES"
+    //    · fecha EN la brecha (`ultima`..ayer) o fecha = HOY → NEXO NO escribe ad_ids (los registra el
+    //      auxiliar A MANO). Solo se escriben las CONVERSACIONES manuales de la Ventana 2 (si las hay).
+    //    · fecha ANTERIOR a `ultima` (día ya cerrado — venta tardía) → ad_ids ACUMULA (leer existentes +
+    //      append, SIN deduplicar: cada ID repetido = 1 venta). NUNCA reemplaza ni borra los que ya están.
+    //    · conversaciones y stock: siguen registrándose NORMAL en cada día (stock en la Ventana 2;
+    //      conversaciones manuales por (producto, día) — la brecha de conversaciones incluye `ultima`).
+    //    (Reemplaza la regla anterior "LA BRECHA REEMPLAZA, EL RESTO ACUMULA" — decisión de Leidy 9jul26.)
     const grupos={}
     for(const f of listos)for(const r of f.rows){
       if(r._excluida)continue // FASE 6 (6jul26) · M15.C: quitado como duplicado — NO entra a reportes
@@ -33596,34 +33656,39 @@ async function _hbGenerarFinal(){
     }
     const _mapConv={} // 'fecha|pid' → valor manual (solo días de brecha, desde la Ventana 2)
     for(const c of(st._convManual||[]))_mapConv[c.fecha+'|'+String(c.producto.id)]=c.val
-    const _brecha=new Set(st.esperadas||[])
+    // Días donde NEXO NO toca los ad_ids: la brecha (`ultima`..ayer) + HOY. Todo lo demás es "anterior".
+    const _sinIds=new Set([...(st.esperadas||[]),st.hoy]);if(st.ultima)_sinIds.add(st.ultima)
     const repLineas=[]
     for(const g of Object.values(grupos)){
-      const enBrecha=_brecha.has(g.fecha)
+      const _manual=_sinIds.has(g.fecha) // día cuyos ad_ids los registra el auxiliar a mano
+      const cm=_mapConv[g.fecha+'|'+String(g.producto.id)]
+      if(_manual&&cm==null){ // nada que escribir en este día: ni IDs (manuales) ni conversaciones
+        repLineas.push(`⏭️ <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${g.ids.length} ID(s) detectado(s) — NO se envían (brecha/HOY: los registra el auxiliar a mano)`)
+        continue
+      }
       const pay={fecha:g.fecha,producto_id:g.producto.id,producto_nombre:g.producto.nombre,
         usuario_id:currentMe().id,updated_at:new Date().toISOString()}
-      if(enBrecha){
-        pay.ad_ids=g.ids.join('\n') // REEMPLAZO (día en consolidación)
-      }else{
+      if(!_manual){ // día YA CERRADO (anterior a `ultima`) — venta tardía: ACUMULA, nunca reemplaza
         let viejos=[]
         try{
           const{data:prev}=await sb.from('reportes_diarios').select('ad_ids')
             .eq('fecha',g.fecha).eq('producto_id',g.producto.id).eq('usuario_id',currentMe().id).maybeSingle()
           viejos=String(prev?.ad_ids||'').split('\n').filter(Boolean)
         }catch(_e){err.push(`lectura previa ${g.producto.nombre} ${g.fecha}: ${_e?.message||_e} — se escriben solo los nuevos`)}
-        pay.ad_ids=[...viejos,...g.ids].filter(Boolean).join('\n') // ACUMULA (hoy / consolidado)
+        pay.ad_ids=[...viejos,...g.ids].filter(Boolean).join('\n') // ACUMULA (día consolidado)
       }
-      const cm=_mapConv[g.fecha+'|'+String(g.producto.id)]
-      if(enBrecha&&cm!=null){pay.conversaciones=cm;pay.conversaciones_aprox=cm}
+      if(_manual&&cm!=null){pay.conversaciones=cm;pay.conversaciones_aprox=cm} // SOLO conversaciones — ad_ids NO se toca
       let{error:e1}=_prueba?{error:null}:await sb.from('reportes_diarios').upsert(pay,{onConflict:'fecha,producto_id,usuario_id'})
       if(e1&&/conversaciones_aprox/i.test(e1.message||'')){
         delete pay.conversaciones_aprox
         ;({error:e1}=await sb.from('reportes_diarios').upsert(pay,{onConflict:'fecha,producto_id,usuario_id'}))
       }
       if(e1)err.push(`reporte ${g.producto.nombre} ${g.fecha}: ${e1.message}`)
-      else{
+      else if(_manual){
+        repLineas.push(`${_prueba?'🧪':'💬'} <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${cm} conversaciones (manual) · IDs NO se envían (los registra el auxiliar)${_prueba?' — <b>SIMULACRO: NO enviado</b>':''}`)
+      }else{
         const tot=pay.ad_ids.split('\n').filter(Boolean).length
-        repLineas.push(`${_prueba?'🧪':'📤'} <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${tot} IDs${enBrecha?'':` (acumulados: +${g.ids.length} nuevos)`}${(enBrecha&&cm!=null)?` · 💬 ${cm} conversaciones (manual)`:''}${_prueba?' — <b>SIMULACRO: NO enviado</b>':''}`)
+        repLineas.push(`${_prueba?'🧪':'📤'} <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${tot} IDs (acumulados: +${g.ids.length} nuevos)${_prueba?' — <b>SIMULACRO: NO enviado</b>':''}`)
       }
     }
     st._convManual=null // no re-escribir si el auxiliar vuelve a generar en la misma sesión

@@ -567,6 +567,9 @@ async function loadMe(uid){
       me.dropi_url=dData?.dropi_url||''
       me.sellerchat_url=dData?.sellerchat_url||''
     }catch(e){me.dropi_email='';me.dropi_password='';me.dropi_cuentas=[];me.sellerchat_cuentas=[];me.dropi_url='';me.sellerchat_url=''}
+    // NUEVO (9jul26 · Mejoras 1-2): 🌐 Valores del Sistema — se cargan con la sesión (caché local +
+    // Supabase). Tolerante: si falla, nxSysVal() cae a los ORIGINALES del código y nada se rompe.
+    try{await nxSysLoad()}catch(_){}
     return true
   }catch(e){console.error('loadMe exception:',e);return false}
 }
@@ -1563,6 +1566,89 @@ const _isoDate=(d)=>d.toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
 const _horaBog=(iso)=>{if(!iso)return '';const d=new Date(iso);return isNaN(d)?'':d.toLocaleTimeString('en-GB',{timeZone:'America/Bogota',hour:'2-digit',minute:'2-digit'})}
 const _fechaHoraBog=(iso)=>{if(!iso)return '';const d=new Date(iso);if(isNaN(d))return '';return _isoDate(d)+' '+_horaBog(iso)}
 const _daysAgo=(n)=>{const d=new Date();d.setDate(d.getDate()-n);return _isoDate(d)}
+// ══ NUEVO (9jul26) · Mejoras 1-2: 🌐 VALORES DEL SISTEMA (globales de toda la app) ══════════
+// Patrón "Remote Config": ORIGINALES inmutables en el código (NX_SYS_ORIG) + overrides guardados
+// en Supabase (tabla `config`, clave 'valores_sistema') + caché en localStorage + fallback al
+// original si algo falta/está corrupto. nxSysVal(k) es EL getter: todo el código lee de ahí.
+// Se edita desde: Equipo → Editar usuario (inline en cada regla) y Centro de Control → 🌐 bloque.
+const NX_SYS_ORIG={
+  limiteDiasAtras:{v:4,min:1,max:60,label:'⏳ Límite de días atrás (Asignador y Cruce Dropi)',mod:'Asignador · Cruce Dropi',
+    explica:'Hasta cuántos días atrás puede tener fecha una orden para cargarla SIN modo histórico. Manda en el Asignador (fecha de la venta) y en el Cruce Dropi (fecha de subida). El modo histórico por usuario sigue quitando todo límite.'},
+  repDiasAtrasAux:{v:0,min:0,max:30,label:'🗓️ Ventana de IDs para auxiliares SIN permiso (Reporte del día)',mod:'Reporte del día',
+    explica:'Cuántos días atrás puede el auxiliar agregar/modificar IDs SIN el permiso "🗓️ Editar IDs de días anteriores". 0 = solo HOY (como siempre) · 1 = HOY y AYER · 2 = suma antier · etc. Con el permiso prendido no hay límite (igual que hoy).'},
+  arrastreDias:{v:14,min:1,max:60,label:'📦 Días de arrastre (Novedades y Reclame)',mod:'Novedades · Reclame',
+    explica:'Cuántos días atrás se buscan pedidos NO resueltos para arrastrarlos al lote de hoy (y para calcular el "✓ Hecho hoy" del auxiliar).'}
+}
+window._nxSysCfg=window._nxSysCfg||{} // overrides vigentes {clave:número}
+function nxSysVal(k){ // getter único: override válido → original del sistema
+  const m=NX_SYS_ORIG[k];if(!m)return 0
+  const o=window._nxSysCfg?window._nxSysCfg[k]:null
+  const n=typeof o==='number'?o:parseFloat(o)
+  if(o!=null&&isFinite(n)&&n>=m.min&&n<=m.max)return Math.round(n)
+  return m.v
+}
+async function nxSysLoad(){ // 1º caché local (rápido) → 2º Supabase (verdad) → si nada, originales
+  try{const raw=localStorage.getItem('nx_sys_cfg');if(raw){const o=JSON.parse(raw);if(o&&typeof o==='object'&&!Array.isArray(o))window._nxSysCfg=o}}catch(_){}
+  try{
+    const raw=await getConfig('valores_sistema')
+    if(raw){const o=JSON.parse(raw);if(o&&typeof o==='object'&&!Array.isArray(o)){window._nxSysCfg=o;try{localStorage.setItem('nx_sys_cfg',JSON.stringify(o))}catch(_){}}}
+  }catch(_){}
+}
+async function nxSysSave(){ // guarda overrides: localStorage + Supabase (tabla config existente — cero SQL nuevo)
+  const o=window._nxSysCfg||{}
+  try{localStorage.setItem('nx_sys_cfg',JSON.stringify(o))}catch(_){}
+  try{
+    const{error}=await sb.from('config').upsert({clave:'valores_sistema',valor:JSON.stringify(o),updated_at:new Date().toISOString()},{onConflict:'clave'})
+    return error?error.message:null
+  }catch(e){return e&&e.message||'sin conexión'}
+}
+window.nxSysSet=async(k,el)=>{ // guardar desde un input (Equipo inline o Centro de Control)
+  const m=NX_SYS_ORIG[k];if(!m||!el)return
+  const n=parseFloat(el.value)
+  if(!isFinite(n)||n<m.min||n>m.max){alert(`Debe ser un número entre ${m.min} y ${m.max}.`);el.value=nxSysVal(k);return}
+  window._nxSysCfg=window._nxSysCfg||{};window._nxSysCfg[k]=Math.round(n)
+  const err=await nxSysSave()
+  if(err)alert('⚠️ El valor quedó aplicado en este navegador pero NO se pudo guardar en la nube: '+err)
+  try{logAction('sys_config',{clave:k,valor:nxSysVal(k)}).catch(()=>{})}catch(_){}
+  nxSysPintar(k)
+}
+window.nxSysOrig=async(k)=>{ // 🔄 volver al original del sistema (borra el override)
+  if(!NX_SYS_ORIG[k])return
+  if(window._nxSysCfg)delete window._nxSysCfg[k]
+  const err=await nxSysSave()
+  if(err)alert('⚠️ Se restauró en este navegador pero NO se pudo guardar en la nube: '+err)
+  try{logAction('sys_config',{clave:k,valor:'original'}).catch(()=>{})}catch(_){}
+  nxSysPintar(k)
+}
+function nxSysPintar(k){ // refresca EN VIVO inputs y textos de ese valor (Equipo + Centro de Control)
+  const v=nxSysVal(k),m=NX_SYS_ORIG[k]
+  document.querySelectorAll(`input[data-nxsys="${k}"]`).forEach(i=>{i.value=v})
+  document.querySelectorAll(`.nxsys-txt-${k}`).forEach(s=>{s.textContent=v})
+  document.querySelectorAll(`.nxsys-est-${k}`).forEach(s=>{
+    const cambiado=m&&v!==m.v
+    s.textContent=cambiado?`✏️ modificado (original: ${m.v})`:`original del sistema: ${m.v}`
+    s.style.color=cambiado?'var(--amber)':'var(--muted)'
+  })
+}
+function nxSysInputHTML(k,w){ // input numérico reutilizable, guarda solo al cambiar
+  const m=NX_SYS_ORIG[k];if(!m)return''
+  return`<input type="number" data-nxsys="${k}" value="${nxSysVal(k)}" min="${m.min}" max="${m.max}" step="1" style="width:${w||70}px;padding:4px 6px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text);font-weight:700;text-align:center" onchange="nxSysSet('${k}',this)">`
+}
+function nxSysCcHTML(){ // tarjetas del bloque 🌐 del Centro de Control
+  return Object.keys(NX_SYS_ORIG).map(k=>{
+    const m=NX_SYS_ORIG[k],v=nxSysVal(k),cambiado=v!==m.v
+    return`<div style="margin-top:10px;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--card2)">
+      <div style="font-weight:800;font-size:13px">${m.label} <span style="font-size:10px;background:rgba(14,165,233,.15);color:#38bdf8;border:1px solid #0ea5e9;border-radius:6px;padding:1px 6px;vertical-align:middle">${m.mod}</span></div>
+      <div style="font-size:12px;color:var(--muted);margin:4px 0 6px">💡 ${m.explica}</div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        ${nxSysInputHTML(k,90)}
+        <span class="nxsys-est-${k}" style="font-size:11px;color:${cambiado?'var(--amber)':'var(--muted)'}">${cambiado?`✏️ modificado (original: ${m.v})`:`original del sistema: ${m.v}`}</span>
+        <button class="btn-sm" onclick="nxSysOrig('${k}')" title="Vuelve al ORIGINAL del sistema (siempre disponible)">🔄 Volver a original</button>
+      </div>
+    </div>`
+  }).join('')
+}
+// ══ FIN VALORES DEL SISTEMA ══════════════════════════════════════════════════════════════════
 function _quickDateBtns(desdeId,hastaId,onchangeFn){
   const sets=[
     ['Hoy',0,0],['Ayer',1,1],['Antier',2,2],['Hoy+Ayer',1,0],['7d',6,0],['14d',13,0],['30d',29,0],
@@ -7650,14 +7736,16 @@ window.modalUserEdit=(u)=>{
       <div class="fld" id="eu-modo-hist-wrap" style="${u.rol==='auxiliar'?'':'display:none'}">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" id="eu-modo-historico" ${u.modo_historico?'checked':''}>
-          <span><strong>⏳ Modo histórico</strong> — permite al auxiliar cargar órdenes de cualquier fecha (sin límite de 4 días atrás)</span>
+          <span><strong>⏳ Modo histórico</strong> — permite al auxiliar cargar órdenes de cualquier fecha (sin límite de <span class="nxsys-txt-limiteDiasAtras">${nxSysVal('limiteDiasAtras')}</span> días atrás)</span>
         </label>
         <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-left:24px">Activa esta opción solo cuando necesites cargar datos viejos. Desactiva al terminar.</div>
+        <!-- NUEVO (9jul26 · Mejora 1): límite GLOBAL editable inline — vive junto a su regla -->
+        <div style="font-size:11px;color:var(--muted);margin-top:6px;margin-left:24px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">🌐 <b>Límite global:</b> ${nxSysInputHTML('limiteDiasAtras',60)} días atrás — aplica a TODOS (Asignador y Cruce Dropi). Se guarda solo al cambiarlo.</div>
       </div>
       <div class="fld" id="eu-permite-hoy-wrap" style="${u.rol==='auxiliar'?'':'display:none'}">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" id="eu-permite-hoy" ${u.permite_hoy?'checked':''}>
-          <span><strong>☀️ Permitir ventas de HOY</strong> — deja que el auxiliar suba en el Asignador las ventas del día de hoy (se SUMA a ayer y hasta 4 días atrás)</span>
+          <span><strong>☀️ Permitir ventas de HOY</strong> — deja que el auxiliar suba en el Asignador las ventas del día de hoy (se SUMA a ayer y hasta <span class="nxsys-txt-limiteDiasAtras">${nxSysVal('limiteDiasAtras')}</span> días atrás)</span>
         </label>
         <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-left:24px">Útil para despachar el mismo día (ej. sábado). NUNCA permite fechas futuras. Desactiva al terminar.</div>
       </div>
@@ -7667,6 +7755,8 @@ window.modalUserEdit=(u)=>{
           <span><strong>🗓️ Editar IDs de días anteriores</strong> — deja que el auxiliar modifique/agregue IDs de días PASADOS en Reporte del día (HOY siempre puede, sin este permiso)</span>
         </label>
         <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-left:24px">Ahora la Hoja Base rellena los IDs en automático: la aux solo necesita HOY. Prende esto únicamente cuando haya que corregir un día viejo y apágalo al terminar.</div>
+        <!-- NUEVO (9jul26 · Mejora 2): ventana GLOBAL editable inline — vive junto a su regla -->
+        <div style="font-size:11px;color:var(--muted);margin-top:6px;margin-left:24px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">🌐 <b>Ventana global sin permiso:</b> HOY + ${nxSysInputHTML('repDiasAtrasAux',60)} día(s) atrás — 0 = solo HOY (como siempre) · 1 = HOY y AYER. Aplica a TODOS los auxiliares sin este permiso. Se guarda solo al cambiarlo.</div>
       </div>
       <div class="fld" id="eu-prueba-hb-wrap" style="${u.rol==='auxiliar'?'':'display:none'}">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -8249,6 +8339,9 @@ function _asigInstrucciones(orden){
 // ══ FIN INSTRUCCIONES DINÁMICAS ══════════════════════════════════════════════
 
 async function pageAuxAsignador(c){
+  // NUEVO (9jul26 · Mejora 1): refrescar 🌐 Valores del Sistema EN VIVO al abrir la página — así un
+  // cambio del admin (ej: límite 4→10) aplica de una, sin relogin. Tolerante: si falla, queda lo cargado.
+  try{await nxSysLoad()}catch(_){}
   c.innerHTML=`<div class="page-title">📍 Asignador</div>
     <div class="page-sub">Procesa órdenes del día y asigna carrier por ciudad</div>
     <div class="aux-steps">
@@ -8428,7 +8521,7 @@ async function pageAuxAsignador(c){
       <div class="card">
         <div style="font-size:12px;color:var(--muted);margin-bottom:8px">
           <strong>Formato (1 línea por orden):</strong> <code>${_ins.formato}</code><br>
-          Cada dato entre <strong>[corchetes]</strong> · AGENTE = bot que generó la venta · ID_DROPI = número del producto en Dropi (obligatorio, debe coincidir) · ID_ANUNCIO vacío [] = orgánico · transportadora opcional · fecha en formato M/D/YYYY${modoHistorico?'':(permiteHoy?'<br>☀️ <strong>Modo HOY activo:</strong> fecha permitida de <strong>HOY hasta 4 días atrás</strong>':'<br>📅 Fecha permitida: <strong>de hoy hasta 4 días atrás</strong>')}
+          Cada dato entre <strong>[corchetes]</strong> · AGENTE = bot que generó la venta · ID_DROPI = número del producto en Dropi (obligatorio, debe coincidir) · ID_ANUNCIO vacío [] = orgánico · transportadora opcional · fecha en formato M/D/YYYY${modoHistorico?'':(permiteHoy?`<br>☀️ <strong>Modo HOY activo:</strong> fecha permitida de <strong>HOY hasta ${nxSysVal('limiteDiasAtras')} días atrás</strong>`:`<br>📅 Fecha permitida: <strong>de hoy hasta ${nxSysVal('limiteDiasAtras')} días atrás</strong>`)}
         </div>
         <textarea id="asign-input" placeholder="${_ins.placeholder}" style="width:100%;min-height:140px;padding:10px;font-family:monospace;font-size:12px;border:1px solid var(--border);border-radius:8px;background:var(--card2);color:var(--text);resize:vertical"></textarea>
         <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
@@ -8575,7 +8668,9 @@ window.procesarAsignador=async()=>{
   const modoHistorico=window._asignModoHist===true
   const permiteHoy=window._asignPermiteHoy===true
   const hoyStr=today()
-  const limiteAtras=_isoDate(new Date(Date.now()-4*86400000))
+  // NUEVO (9jul26 · Mejora 1): el 4 dejó de estar quemado — sale de 🌐 Valores del Sistema (default 4)
+  const _limDias=nxSysVal('limiteDiasAtras')
+  const limiteAtras=_isoDate(new Date(Date.now()-_limDias*86400000))
   parsed.forEach((p,i)=>{
     if(p.tipo!=='nuevo'||p.errores.length>0)return
     // Validar producto SOLO contra aliases visibles (lista controlada por el admin del producto).
@@ -8597,9 +8692,9 @@ window.procesarAsignador=async()=>{
       if(p.fecha>hoyStr){
         conErrores.push({linea:i+1,raw:p.raw,faltan:[`fecha ${p.fecha} es futura (máximo: ayer)`]})
       }else if(p.fecha===hoyStr&&!permiteHoy){
-        conErrores.push({linea:i+1,raw:p.raw,faltan:[`fecha ${p.fecha} es de HOY · las ventas de hoy se suben mañana. Use fecha de ayer o anterior (hasta 4 días atrás)`]})
+        conErrores.push({linea:i+1,raw:p.raw,faltan:[`fecha ${p.fecha} es de HOY · las ventas de hoy se suben mañana. Use fecha de ayer o anterior (hasta ${_limDias} días atrás)`]})
       }else if(p.fecha<limiteAtras){
-        conErrores.push({linea:i+1,raw:p.raw,faltan:[`fecha ${p.fecha} es anterior al límite (mínimo: ${limiteAtras}, máximo 4 días atrás)`]})
+        conErrores.push({linea:i+1,raw:p.raw,faltan:[`fecha ${p.fecha} es anterior al límite (mínimo: ${limiteAtras}, máximo ${_limDias} días atrás)`]})
       }
     }
   })
@@ -9064,16 +9159,22 @@ async function pageAuxReporte(c){
       if(_ppV!=null)me.permite_ids_pasados=_ppV.permite_ids_pasados===true
     }
   }catch(_){}
+  // NUEVO (9jul26 · Mejora 2): refrescar también 🌐 Valores del Sistema (la ventana puede haber cambiado)
+  try{await nxSysLoad()}catch(_){}
   // Candado: auxiliar SIN el permiso "🗓️ Editar IDs de días anteriores" → el selector queda CLAVADO en HOY
   // (min=max=hoy: el calendario no deja ni mirar días de atrás). Con el permiso prendido, igual que siempre.
+  // NUEVO (9jul26 · Mejora 2): el candado ahora tiene VENTANA configurable (🌐 repDiasAtrasAux, default 0):
+  // 0 = solo HOY (idéntico a antes) · 1 = HOY y AYER · etc. min = hoy - N (con N=0, min=hoy: mismo candado).
   const _repSoloHoy=(me?.rol==='auxiliar')&&me?.permite_ids_pasados!==true
+  const _repVenN=nxSysVal('repDiasAtrasAux')
+  const _repMinSel=_repSoloHoy?_daysAgo(_repVenN):''
   c.innerHTML=`<div class="page-title">📝 Reporte del día</div>
     <div class="page-sub">Datos automáticos de Dropi + ventas manuales</div>
     <!-- R3 (2jul26): UN solo selector de fecha manda en TODA la página (órdenes arriba + IDs abajo) -->
     <div style="background:var(--card);border:2px solid var(--border);border-radius:16px;padding:14px 16px;margin:4px 0 10px">
       <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:8px">👇 ¿Qué día vas a llenar? <span style="font-size:11px;font-weight:600;color:var(--muted)">(toca la fecha para cambiar)</span></div>
-      <input type="date" id="rep-fecha-sel" value="${today()}" ${_repSoloHoy?`min="${today()}"`:''} max="${today()}" onchange="window._setRepFecha(this.value)" style="width:100%;max-width:340px;padding:14px;font-size:19px;font-weight:700;border:3px solid var(--border);border-radius:14px;background:var(--card2);color:var(--text);cursor:pointer">
-      ${_repSoloHoy?`<div style="margin-top:8px;font-size:12px;color:var(--muted)">🔒 Solo puedes llenar <b>HOY</b>. Para ver o meter IDs de días anteriores, el administrador debe prender <b>"🗓️ Editar IDs de días anteriores"</b> en Equipo.</div>`:''}
+      <input type="date" id="rep-fecha-sel" value="${today()}" ${_repSoloHoy?`min="${_repMinSel}"`:''} max="${today()}" onchange="window._setRepFecha(this.value)" style="width:100%;max-width:340px;padding:14px;font-size:19px;font-weight:700;border:3px solid var(--border);border-radius:14px;background:var(--card2);color:var(--text);cursor:pointer">
+      ${_repSoloHoy?`<div style="margin-top:8px;font-size:12px;color:var(--muted)">${_repVenN>0?`🔒 Puedes llenar <b>HOY y hasta ${_repVenN} día(s) atrás</b>. Para días más viejos,`:`🔒 Solo puedes llenar <b>HOY</b>. Para ver o meter IDs de días anteriores,`} el administrador debe prender <b>"🗓️ Editar IDs de días anteriores"</b> en Equipo.</div>`:''}
       <button id="rep-dia-btn" onclick="(()=>{const i=document.getElementById('rep-fecha-sel');if(i){try{i.showPicker?i.showPicker():i.focus()}catch(e){i.focus()}}})()" style="display:block;width:100%;margin-top:10px;border:3px solid var(--green);background:var(--green-bg);color:var(--text);border-radius:16px;padding:16px 12px;cursor:pointer;text-align:center;font-weight:800;font-size:20px;line-height:1.25">📅 HOY</button>
       <div id="rep-faltan"></div>
     </div>
@@ -9102,7 +9203,9 @@ window._setRepFecha=(val)=>{
   if(val>today())val=today()
   // Candado (7jul26): sin el permiso, CUALQUIER intento de ir a otra fecha (calendario, chips,
   // atajos, enlaces) se fuerza a HOY. Es el candado central: cubre todas las vías de entrada.
-  if(window._repSoloHoy()&&val!==today())val=today()
+  // NUEVO (9jul26 · Mejora 2): fechas DENTRO de la ventana 🌐 (hoy - N) pasan; fuera de ella → HOY.
+  // Con N=0: _daysAgo(0)=hoy → val<hoy ≡ cualquier día pasado → idéntico al candado de siempre.
+  if(window._repSoloHoy()&&val<_daysAgo(nxSysVal('repDiasAtrasAux')))val=today()
   const f=document.getElementById('rep-fecha'),t=document.getElementById('rep-tipo-fecha'),s=document.getElementById('rep-fecha-sel')
   if(t)t.value='compra'
   if(f)f.value=val
@@ -9126,9 +9229,13 @@ window._repCargarFaltantes=async()=>{
   const box=document.getElementById('rep-faltan');if(!box)return
   // Candado (7jul26): estos chips llevan a días PASADOS — el auxiliar sin permiso no los ve
   // (no puede tocar esos días; corregirlos es tarea del admin o de un aux con el permiso).
-  if(window._repSoloHoy&&window._repSoloHoy()){box.innerHTML='';return}
+  // NUEVO (9jul26 · Mejora 2): si la ventana 🌐 es N>0, el aux candado SÍ ve los chips de esos N
+  // días (los puede tocar). Con N=0 se ocultan todos — idéntico al comportamiento de siempre.
+  const _fltCandado=!!(window._repSoloHoy&&window._repSoloHoy())
+  const _fltVenN=_fltCandado?nxSysVal('repDiasAtrasAux'):7
+  if(_fltCandado&&_fltVenN<=0){box.innerHTML='';return}
   try{
-    const desde=_daysAgo(7),hasta=_daysAgo(1)
+    const desde=_daysAgo(Math.min(7,_fltVenN)),hasta=_daysAgo(1)
     const{data}=await sb.from('reportes_diarios').select('fecha,producto_nombre,ad_ids,conversaciones,conversaciones_aprox')
       .gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','')
     const porDia={}
@@ -9169,8 +9276,13 @@ async function cargarReporteData(){
   // bloqueados hasta que el admin prenda "🗓️ Editar IDs de días anteriores" en Equipo.
   // Admin y demás roles siguen EXACTAMENTE igual que antes.
   const _candadoAuxRep=(me?.rol==='auxiliar')&&me?.permite_ids_pasados!==true
-  const esHistManual=tipo==='compra'&&!!fecha&&fecha<=today()&&!esHoy&&!esAyer&&!_candadoAuxRep
-  const permiteVentas=esHoy||((esAyer||esHistManual)&&!_candadoAuxRep)
+  // NUEVO (9jul26 · Mejora 2): VENTANA 🌐 del candado — fechas dentro de [hoy-N, hoy] pasan aunque
+  // el aux no tenga el permiso total. Con N=0 la ventana es solo HOY → _bloqueaAux ≡ _candadoAuxRep
+  // para cualquier día pasado (comportamiento idéntico al de antes). Admin y demás roles, intactos.
+  const _enVentanaAux=!!fecha&&fecha<=today()&&fecha>=_daysAgo(nxSysVal('repDiasAtrasAux'))
+  const _bloqueaAux=_candadoAuxRep&&!_enVentanaAux
+  const esHistManual=tipo==='compra'&&!!fecha&&fecha<=today()&&!esHoy&&!esAyer&&!_bloqueaAux
+  const permiteVentas=esHoy||((esAyer||esHistManual)&&!_bloqueaAux)
   const usandoDropi=tipo==='dropi'
   const campo=usandoDropi?'fecha_dropi':'fecha'
   // Resaltar el botón del día activo
@@ -9279,8 +9391,9 @@ async function cargarReporteData(){
   if(!permiteVentas&&prods.length>0&&!usandoDropi){
     // NUEVO (7jul26 · Mejora 6): si el bloqueo es por el CANDADO del auxiliar, se explica clarito
     // y SIN el botón de habilitar edición (eso es solo para admin/roles con permiso).
-    if(_candadoAuxRep&&fecha<today()){
-      motivoHtml=`<div class="alert alert-amber" style="margin-bottom:14px">🔒 <strong>Días anteriores bloqueados.</strong> Solo puedes agregar/modificar los IDs de <b>HOY</b> (la Hoja Base ya rellena los IDs en automático). Si necesitas corregir este día, pídele al administrador que prenda <b>"🗓️ Editar IDs de días anteriores"</b> en Equipo → Editar usuario.</div>`
+    if(_bloqueaAux&&fecha<today()){
+      const _venNMsg=nxSysVal('repDiasAtrasAux')
+      motivoHtml=`<div class="alert alert-amber" style="margin-bottom:14px">🔒 <strong>Días anteriores bloqueados.</strong> Solo puedes agregar/modificar los IDs de <b>${_venNMsg>0?`HOY y hasta ${_venNMsg} día(s) atrás`:'HOY'}</b> (la Hoja Base ya rellena los IDs en automático). Si necesitas corregir este día, pídele al administrador que prenda <b>"🗓️ Editar IDs de días anteriores"</b> en Equipo → Editar usuario.</div>`
     }else{
     motivoHtml=`<div class="alert alert-blue" style="margin-bottom:14px">📅 Fecha anterior — solo lectura. Para modificar conversaciones, activa edición.</div>
     <div style="margin-bottom:14px">
@@ -9480,8 +9593,13 @@ window.saveReporteV2=async(fecha)=>{
       const{data:_ppL}=await sb.from('usuarios').select('permite_ids_pasados').eq('id',me.id).maybeSingle()
       if(_ppL!=null){_ppOk=_ppL.permite_ids_pasados===true;me.permite_ids_pasados=_ppOk}
     }catch(_){}
-    if(!_ppOk){
-      if(msg)msg.innerHTML='<div class="alert alert-red">🔒 Solo puedes guardar los IDs de <b>HOY</b>. Para días anteriores pídele al administrador que prenda "🗓️ Editar IDs de días anteriores" en Equipo.</div>'
+    // NUEVO (9jul26 · Mejora 2): la ventana 🌐 también se re-verifica EN VIVO. Sin permiso total,
+    // solo bloquea fechas FUERA de [hoy-N, hoy]. Con N=0: fecha<hoy ≡ cualquier día pasado (igual que antes).
+    try{await nxSysLoad()}catch(_){}
+    const _enVenSave=fecha<=today()&&fecha>=_daysAgo(nxSysVal('repDiasAtrasAux'))
+    if(!_ppOk&&!_enVenSave){
+      const _venNSv=nxSysVal('repDiasAtrasAux')
+      if(msg)msg.innerHTML=`<div class="alert alert-red">🔒 Solo puedes guardar los IDs de <b>${_venNSv>0?`HOY y hasta ${_venNSv} día(s) atrás`:'HOY'}</b>. Para días anteriores pídele al administrador que prenda "🗓️ Editar IDs de días anteriores" en Equipo.</div>`
       return
     }
   }
@@ -13696,7 +13814,7 @@ async function cargarReclamePorFecha(){
     // y mapeos con estado_final cerrado (ENTREGADO/DEVOLUCION/CANCELADO).
     let arrastrados=[]
     try{
-      const hace14=_isoDate(new Date(Date.now()-14*24*60*60*1000))
+      const hace14=_isoDate(new Date(Date.now()-nxSysVal('arrastreDias')*24*60*60*1000)) // NUEVO (9jul26): 🌐 configurable, default 14
       const{data:repsViejos}=await sb.from('reclame_reportes')
         .select('id,fecha_lote,uploaded_by_name')
         .gte('fecha_lote',hace14)
@@ -15303,7 +15421,7 @@ window.auxNovedadesHecho=async(force)=>{
     const{count:_procHoy}=await sb.from('audit_log').select('*',{count:'exact',head:true})
       .eq('accion','novedades_procesadas').gte('created_at',_hoyDesde)
     if(!_procHoy){window._auxNovHecho={hecho:false,faltan:null};return window._auxNovHecho}
-    const desde=_daysAgo(14)
+    const desde=_daysAgo(nxSysVal('arrastreDias')) // NUEVO (9jul26): 🌐 mismo valor que el módulo — siguen cuadrando
     const{data:reps}=await sb.from('novedades_reportes').select('id').gte('fecha_lote',desde)
     const ids=(reps||[]).map(r=>r.id)
     if(!ids.length){window._auxNovHecho={hecho:true,faltan:0};return window._auxNovHecho}
@@ -15432,7 +15550,7 @@ window.auxReclameHecho=async(force)=>{
     const{count:_procHoy}=await sb.from('audit_log').select('*',{count:'exact',head:true})
       .eq('accion','reclame_procesado').gte('created_at',_hoyDesde)
     if(!_procHoy){window._auxRecHecho={hecho:false,faltan:null};return window._auxRecHecho}
-    const hoy=today(), desde=_daysAgo(14)
+    const hoy=today(), desde=_daysAgo(nxSysVal('arrastreDias')) // NUEVO (9jul26): 🌐 mismo valor que el módulo — siguen cuadrando
     const{data:reps}=await sb.from('reclame_reportes').select('id,fecha_lote').gte('fecha_lote',desde)
     if(!reps||!reps.length){window._auxRecHecho={hecho:true,faltan:0};return window._auxRecHecho}
     const repFecha={}; for(const r of reps)repFecha[r.id]=r.fecha_lote
@@ -16045,7 +16163,7 @@ window.procesarDropi=async()=>{
     // Escape: si el usuario tiene modo_historico=true, no se avisa (puede cruzar viejas).
     const _modoHistPrev=currentMe()?.modo_historico===true
     if(!_modoHistPrev){
-      const _limitePrev=_daysAgo(4) // YYYY-MM-DD, hora Bogotá
+      const _limitePrev=_daysAgo(nxSysVal('limiteDiasAtras')) // YYYY-MM-DD, hora Bogotá · NUEVO (9jul26 · Mejora 1): 🌐 configurable, default 4
       const _viejasPrev=resultados.filter(r=>{
         const p=String(r.fecha_dropi||'').split('-')
         if(p.length!==3)return false
@@ -16053,7 +16171,7 @@ window.procesarDropi=async()=>{
         return iso<_limitePrev
       })
       if(_viejasPrev.length>0){
-        healthHtml+=`<div class="dropi-health bad" style="border-color:var(--amber)">⏳ <b>Problema de FECHA:</b> ${_viejasPrev.length} orden(es) con fecha de subida mayor a <b>4 días</b>. Pídele a un administrador que te active el <b>modo histórico</b> para poder cruzarlas.</div>`
+        healthHtml+=`<div class="dropi-health bad" style="border-color:var(--amber)">⏳ <b>Problema de FECHA:</b> ${_viejasPrev.length} orden(es) con fecha de subida mayor a <b>${nxSysVal('limiteDiasAtras')} días</b>. Pídele a un administrador que te active el <b>modo histórico</b> para poder cruzarlas.</div>`
       }
     }
 
@@ -16247,7 +16365,7 @@ window.actualizarEstadosDropi=async()=>{
   // Escape: si el usuario tiene modo_historico=true (lo activa un admin en Equipo), no se valida.
   const _modoHist=currentMe()?.modo_historico===true
   if(!_modoHist){
-    const _limite=_daysAgo(4) // YYYY-MM-DD, hora Bogotá
+    const _limite=_daysAgo(nxSysVal('limiteDiasAtras')) // YYYY-MM-DD, hora Bogotá · NUEVO (9jul26 · Mejora 1): 🌐 configurable, default 4
     const _viejas=cruzados.filter(r=>{
       const p=String(r.fecha_dropi||'').split('-')
       if(p.length!==3)return false
@@ -16258,7 +16376,7 @@ window.actualizarEstadosDropi=async()=>{
       const _tels=_viejas.map(r=>r.telefono).slice(0,15).join(', ')
       const _extra=_viejas.length>15?` y ${_viejas.length-15} más`:''
       msgEl.innerHTML=`<div class="alert alert-red" style="margin-top:6px">
-        🚫 No se puede guardar: hay <b>${_viejas.length}</b> orden(es) con fecha de subida mayor a <b>4 días</b>.<br>
+        🚫 No se puede guardar: hay <b>${_viejas.length}</b> orden(es) con fecha de subida mayor a <b>${nxSysVal('limiteDiasAtras')} días</b>.<br>
         Pídele a un administrador que te active el <b>modo histórico</b> para poder cruzarlas.<br>
         <span style="color:var(--muted);font-size:11px">Teléfonos: ${_tels}${_extra}</span>
       </div>`
@@ -34102,6 +34220,10 @@ async function hbRenderCfg(){
   ${_blk('#64748b','⬛ OBLIGATORIOS Y GENERACIÓN',`
   ${_reglaHTML('obligatorios')}
   ${_reglaHTML('stock_conv')}`)}
+
+  ${_blk('#0ea5e9','🌐 VALORES DEL SISTEMA — globales de TODA la app (no solo el Constructor)',`
+  <div style="font-size:12px;color:var(--muted);margin-top:8px;line-height:1.6">Estos números mandan en <b>toda NEXO</b> (Asignador, Cruce Dropi, Reporte del día, Novedades/Reclame). Cada uno se guarda solo al cambiarlo (Supabase + respaldo en este navegador) y tiene su 🔄 para volver al original del sistema. También se editan inline desde <b>Equipo → Editar usuario</b>, junto a su regla.</div>
+  ${nxSysCcHTML()}`)}<!-- NUEVO (9jul26 · Mejoras 1-2): bloque 🌐 Valores del Sistema -->
 
   <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
     <button class="btn-sm btn-primary" id="hb-cfg-save" onclick="hbCfgGuardar()">💾 Guardar configuración (columnas, fórmula y plantilla)</button>

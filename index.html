@@ -1587,20 +1587,55 @@ function nxSysVal(k){ // getter único: override válido → original del sistem
   if(o!=null&&isFinite(n)&&n>=m.min&&n<=m.max)return Math.round(n)
   return m.v
 }
-async function nxSysLoad(){ // 1º caché local (rápido) → 2º Supabase (verdad) → si nada, originales
+async function nxSysLoad(){ // 1º caché local (rápido) → 2º Supabase clave propia → 3º respaldo .sys del Constructor → si nada, originales
   try{const raw=localStorage.getItem('nx_sys_cfg');if(raw){const o=JSON.parse(raw);if(o&&typeof o==='object'&&!Array.isArray(o))window._nxSysCfg=o}}catch(_){}
+  let _nube=null
   try{
     const raw=await getConfig('valores_sistema')
-    if(raw){const o=JSON.parse(raw);if(o&&typeof o==='object'&&!Array.isArray(o)){window._nxSysCfg=o;try{localStorage.setItem('nx_sys_cfg',JSON.stringify(o))}catch(_){}}}
-  }catch(_){}
+    if(raw){const o=JSON.parse(raw);if(o&&typeof o==='object'&&!Array.isArray(o))_nube=o}
+  }catch(e){console.warn('[nxSys] lectura valores_sistema falló:',e&&e.message)}
+  // FIX (9jul26-b): PLAN B de lectura — si la clave propia no existe o el RLS no la entrega, se lee
+  // el respaldo .sys anidado en constructor_hoja_base (clave que TODOS los roles ya leen a diario).
+  if(!_nube){
+    try{
+      const raw2=await getConfig('constructor_hoja_base')
+      if(raw2){const c=JSON.parse(raw2);if(c&&c.sys&&typeof c.sys==='object'&&!Array.isArray(c.sys))_nube=c.sys}
+    }catch(e){console.warn('[nxSys] lectura respaldo .sys falló:',e&&e.message)}
+  }
+  if(_nube){window._nxSysCfg=_nube;try{localStorage.setItem('nx_sys_cfg',JSON.stringify(_nube))}catch(_){}}
 }
-async function nxSysSave(){ // guarda overrides: localStorage + Supabase (tabla config existente — cero SQL nuevo)
+async function nxSysSave(){ // guarda overrides: localStorage + Supabase con VERIFICACIÓN + plan B (cero SQL)
   const o=window._nxSysCfg||{}
-  try{localStorage.setItem('nx_sys_cfg',JSON.stringify(o))}catch(_){}
+  const js=JSON.stringify(o)
+  try{localStorage.setItem('nx_sys_cfg',js)}catch(_){}
+  // Canal 1: clave propia 'valores_sistema' en la tabla config
+  let err1=null
   try{
-    const{error}=await sb.from('config').upsert({clave:'valores_sistema',valor:JSON.stringify(o),updated_at:new Date().toISOString()},{onConflict:'clave'})
-    return error?error.message:null
-  }catch(e){return e&&e.message||'sin conexión'}
+    const{error}=await sb.from('config').upsert({clave:'valores_sistema',valor:js,updated_at:new Date().toISOString()},{onConflict:'clave'})
+    err1=error?error.message:null
+    if(!err1){ // FIX (9jul26-b): verificación de IDA Y VUELTA — un RLS puede "aceptar" el upsert sin escribir la fila
+      const eco=await getConfig('valores_sistema')
+      if(eco!==js)err1='la nube no devolvió lo guardado (¿RLS de la tabla config para la clave nueva?)'
+    }
+  }catch(e){err1=e&&e.message||'sin conexión'}
+  if(!err1)return null
+  console.warn('[nxSys] canal propio falló → plan B (.sys en constructor_hoja_base):',err1)
+  // Canal 2 · PLAN B: anidar .sys dentro de constructor_hoja_base — clave que el admin YA guarda
+  // (Centro de Control) y TODOS los roles ya leen. Se preserva el resto del JSON tal cual.
+  try{
+    const raw=await getConfig('constructor_hoja_base')
+    let c=null;try{c=raw?JSON.parse(raw):{}}catch(_){c=null}
+    if(!c||typeof c!=='object'||Array.isArray(c))return err1
+    c.sys=o
+    const js2=JSON.stringify(c)
+    const{error:e2}=await sb.from('config').upsert({clave:'constructor_hoja_base',valor:js2,updated_at:new Date().toISOString()},{onConflict:'clave'})
+    if(e2)return err1+' · plan B: '+e2.message
+    const eco2=await getConfig('constructor_hoja_base')
+    let ok2=false;try{const c2=eco2?JSON.parse(eco2):null;ok2=!!(c2&&c2.sys&&JSON.stringify(c2.sys)===js)}catch(_){ok2=false}
+    if(!ok2)return err1+' · plan B tampoco verificó'
+    if(window._hbCfgFull&&typeof window._hbCfgFull==='object')window._hbCfgFull.sys=o // caché del Constructor coherente
+    return null // ✅ guardado y verificado por el plan B
+  }catch(e){return err1+' · plan B: '+(e&&e.message||'falló')}
 }
 window.nxSysSet=async(k,el)=>{ // guardar desde un input (Equipo inline o Centro de Control)
   const m=NX_SYS_ORIG[k];if(!m||!el)return
@@ -1619,6 +1654,24 @@ window.nxSysOrig=async(k)=>{ // 🔄 volver al original del sistema (borra el ov
   if(err)alert('⚠️ Se restauró en este navegador pero NO se pudo guardar en la nube: '+err)
   try{logAction('sys_config',{clave:k,valor:'original'}).catch(()=>{})}catch(_){}
   nxSysPintar(k)
+}
+window.nxSysProbar=async()=>{ // FIX (9jul26-b): 🧪 diagnóstico de un clic — guarda, relee y da veredicto
+  const el=document.getElementById('nxsys-test-out')
+  if(el)el.innerHTML='<span style="color:var(--blue)">⏳ Probando guardado y lectura en la nube…</span>'
+  const err=await nxSysSave()
+  if(err){
+    if(el)el.innerHTML=`<span style="color:var(--red)">❌ La nube NO está guardando: ${err}. Los auxiliares no recibirán cambios hasta resolverlo.</span>`
+    return
+  }
+  // relectura completa simulando otro navegador: sin caché local
+  const _bak=window._nxSysCfg
+  try{localStorage.removeItem('nx_sys_cfg')}catch(_){}
+  window._nxSysCfg={}
+  await nxSysLoad()
+  const _leido=JSON.stringify(window._nxSysCfg||{})===JSON.stringify(_bak||{})
+  if(!_leido)window._nxSysCfg=_bak
+  const okTxt=`✅ Guardado y releído de la nube sin problema (ventana IDs: ${nxSysVal('repDiasAtrasAux')} · límite días: ${nxSysVal('limiteDiasAtras')} · arrastre: ${nxSysVal('arrastreDias')}). El auxiliar lo recibe al entrar/recargar su página.`
+  if(el)el.innerHTML=_leido?`<span style="color:var(--green)">${okTxt}</span>`:`<span style="color:var(--amber)">⚠️ Se guardó, pero la relectura no coincidió. Vuelve a intentar o revisa la tabla config.</span>`
 }
 function nxSysPintar(k){ // refresca EN VIVO inputs y textos de ese valor (Equipo + Centro de Control)
   const v=nxSysVal(k),m=NX_SYS_ORIG[k]
@@ -34223,6 +34276,7 @@ async function hbRenderCfg(){
 
   ${_blk('#0ea5e9','🌐 VALORES DEL SISTEMA — globales de TODA la app (no solo el Constructor)',`
   <div style="font-size:12px;color:var(--muted);margin-top:8px;line-height:1.6">Estos números mandan en <b>toda NEXO</b> (Asignador, Cruce Dropi, Reporte del día, Novedades/Reclame). Cada uno se guarda solo al cambiarlo (Supabase + respaldo en este navegador) y tiene su 🔄 para volver al original del sistema. También se editan inline desde <b>Equipo → Editar usuario</b>, junto a su regla.</div>
+  <div style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><button class="btn-sm btn-outline" onclick="nxSysProbar()">🧪 Probar guardado en la nube</button><span id="nxsys-test-out" style="font-size:12px"></span></div>
   ${nxSysCcHTML()}`)}<!-- NUEVO (9jul26 · Mejoras 1-2): bloque 🌐 Valores del Sistema -->
 
   <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
@@ -34254,6 +34308,7 @@ window.hbCfgGuardar=async()=>{
     masivo_cols:_mc.length?_mc:(prev.masivo_cols||hbMasivoColsDefault()),
     masivo_headers:(_mc.length?_mc:(prev.masivo_cols||hbMasivoColsDefault())).map(c=>c.header),
     valores:prev.valores||hbValoresDefault(), // FASE 6 (6jul26) · Mejora 16: preservar Centro de Control
+    sys:prev.sys||undefined, // FIX (9jul26-b): preservar el respaldo 🌐 Valores del Sistema (plan B)
     reglas:prev.reglas||{...HB_ORIG.reglas}}
   // coherencia: la columna elegida para la fórmula queda con fuente 'formula'; ninguna otra la duplica
   for(const c of cfg.columnas){if(c.col===cfg.formula_col)c.fuente='formula';else if(c.fuente==='formula')c.fuente='vacia'}

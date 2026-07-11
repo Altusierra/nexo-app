@@ -9107,6 +9107,7 @@ window.procesarAsignador=async()=>{
       const{data:insertados,error}=await sb.from('mapeos').insert(nuevos).select('id,telefono,fecha,ad_id,producto,estado_inicial')
       if(error){msg.innerHTML=`<div class="alert alert-red">Error guardando: ${error.message}</div>`;return}
       guardadas=nuevos.length
+      try{window._nexoAutoSyncLastCheck=0}catch(_){} // NUEVO (11jul26 · Auto-sync HOY): recién asignaste → el próximo producto que abras en Meta Ads chequea DE UNA si toca sincronizar hoy (sin esperar el cooldown)
       logAction('asignador_procesado',{guardadas,duplicadas,total:lineas.length,correcciones:correcciones.length}).catch(()=>{})
       // Log de correcciones automáticas por ad_id (solo si hubo)
       if(correcciones.length>0){
@@ -19201,6 +19202,62 @@ window._nexoSyncDiaTodas=async function(offset,btn){
   }
 }
 
+// ══ NUEVO (11jul26): AUTO-SYNC DE HOY AL ABRIR UN PRODUCTO ═══════════════════════════════════
+// Problema real: asignabas IDs → abrías Meta Ads → los datos de hoy estaban viejos → tocaba darle
+// 🔃 HOY a mano. Ahora al ABRIR un producto en la vista principal el sistema decide SOLO:
+//   · ¿Hubo asignaciones (mapeos creados) DESPUÉS de la última sync de hoy? → sincroniza solo.
+//   · ¿La última sync de hoy tiene más de 10 minutos? → sincroniza solo.
+//   · ¿Todo fresco? → no hace NADA (cero llamadas a Meta de más).
+// Fuentes de verdad EN SUPABASE (cruza dispositivos — Deysi asigna en su PC y aquí se detecta):
+//   · última sync de hoy = MAX(synced_at) en meta_insights con fecha=hoy (nivel campaign)
+//   · última asignación  = MAX(created_at) en mapeos creados HOY (TZ Bogotá, UTC-5 fijo)
+// Reusa el MISMO motor del botón 🔃 HOY (_nexoSyncDiaTodas(0)) — cero lógica duplicada. Mientras
+// corre ves lo que ya hay + pill flotante "🔄 Actualizando…" con el avance; al terminar refresca
+// EN VIVO la tabla del producto abierto (_rpFusionRango) SIN recargar la página ni moverte.
+// Blindajes: lock anti-doble-disparo · cooldown de chequeo (2 min: abrir/cerrar no spamea la BD)
+// · si algo falla, calla y no molesta (el botón 🔃 HOY manual sigue intacto como siempre).
+window._nexoAutoSyncMs=10*60*1000      // 10 min → umbral de "datos de hoy viejos"
+window._nexoAutoSyncCheckMs=2*60*1000  // 2 min → mínimo entre chequeos a la BD
+window._nexoAutoSyncHoy=async function(slug){
+  try{
+    if(window._nexoAutoSyncBusy)return
+    const _now=Date.now()
+    if(window._nexoAutoSyncLastCheck&&(_now-window._nexoAutoSyncLastCheck)<window._nexoAutoSyncCheckMs)return
+    window._nexoAutoSyncLastCheck=_now
+    const _hoyBg=new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
+    // 1) Última sync de HOY (de cualquier dispositivo)
+    const{data:_ls}=await sb.from('meta_insights').select('synced_at').eq('fecha',_hoyBg).eq('nivel','campaign').order('synced_at',{ascending:false}).limit(1)
+    const _syncAt=(_ls&&_ls[0]&&_ls[0].synced_at)?new Date(_ls[0].synced_at).getTime():0
+    // 2) Última asignación creada HOY (de cualquier dispositivo)
+    const _iniHoy=new Date(_hoyBg+'T00:00:00-05:00').toISOString()
+    const{data:_lm}=await sb.from('mapeos').select('created_at').gte('created_at',_iniHoy).order('created_at',{ascending:false}).limit(1)
+    const _asigAt=(_lm&&_lm[0]&&_lm[0].created_at)?new Date(_lm[0].created_at).getTime():0
+    const _viejo=(_now-_syncAt)>window._nexoAutoSyncMs
+    const _hayNueva=_asigAt>_syncAt
+    if(!_viejo&&!_hayNueva)return // todo fresco → cero llamadas a Meta
+    // 3) Sincronizar HOY en segundo plano con pill flotante (mismo motor del botón 🔃 HOY)
+    window._nexoAutoSyncBusy=1
+    let _pill=null
+    try{
+      _pill=document.createElement('div')
+      _pill.id='nexo-autosync-pill'
+      _pill.style.cssText='position:fixed;bottom:18px;right:18px;z-index:99999;background:var(--card2,#1e1e2e);border:1px solid var(--green,#22c55e);color:var(--green,#22c55e);font-size:12px;font-weight:800;padding:8px 14px;border-radius:999px;box-shadow:0 4px 18px rgba(0,0,0,.45);display:flex;align-items:center;gap:7px;pointer-events:none'
+      _pill.innerHTML='🔄 Actualizando datos de hoy…'
+      document.body.appendChild(_pill)
+    }catch(_){}
+    // Botón "fantasma": recibe el avance (⏳ 3/9 · 33%) del motor y lo pinta en el pill
+    const _fakeBtn={dataset:{},style:{},set innerHTML(v){try{if(_pill)_pill.innerHTML='🔄 Hoy · '+String(v).replace(/⏳\s*/,'')}catch(_){}},get innerHTML(){return''}}
+    try{await window._nexoSyncDiaTodas(0,_fakeBtn)}catch(_){}
+    window._nexoAutoSyncLastCheck=Date.now() // la sync recién hecha cuenta como chequeo fresco
+    // 4) Refrescar EN VIVO la tabla del producto abierto (sin recargar ni moverte de donde estás)
+    try{if(slug&&document.getElementById('cuadf_'+slug+'-wrap')&&window._rpFusionRango)window._rpFusionRango(slug,'cuadf_'+slug)}catch(_){}
+    try{if(_pill){_pill.innerHTML='✅ Datos de hoy al día';setTimeout(()=>{try{_pill.remove()}catch(_){}},3500)}}catch(_){}
+  }catch(_e){
+    console.warn('[auto-sync-hoy]',_e&&_e.message)
+    try{const p=document.getElementById('nexo-autosync-pill');if(p)p.remove()}catch(_){}
+  }finally{window._nexoAutoSyncBusy=0}
+}
+
 // ── RESUMEN POR PRODUCTO (Meta Ads) ────────────────────────
 // Consolida datos por producto desde meta_insights + mapeos + reportes_diarios.
 // Aplica reglas oficiales del semaforo NEXO (45%/70%/100% del break-even).
@@ -22589,6 +22646,9 @@ window._rpFusGrpToggle=function(slug,forceOpen){
     try{const s=document.getElementById('rp-sinprod-sub');if(s)s.style.display='block'}catch(_){}
     return
   }
+  // NUEVO (11jul26 · Auto-sync HOY): al ABRIR el producto, en segundo plano se decide si toca
+  // sincronizar hoy (asignaciones nuevas o datos >10 min). No bloquea nada: la vista abre igual.
+  try{if(window._nexoAutoSyncHoy)setTimeout(()=>{window._nexoAutoSyncHoy(slug)},0)}catch(_){}
   const cidF='cuadf_'+slug
   // MEJORA LAZY (3jul26): el PRIMER desglose paga la carga de vivos (estados + entrega + gasto
   // por anuncio) que antes pagaba el arranque. Se avisa con un status arriba del grupo (sin pisar

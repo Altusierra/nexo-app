@@ -1652,7 +1652,21 @@ async function nxSysSave(){ // guarda overrides: localStorage + Supabase con VER
       if(eco!==js)err1='la nube no devolvió lo guardado (¿RLS de la tabla config para la clave nueva?)'
     }
   }catch(e){err1=e&&e.message||'sin conexión'}
-  if(!err1)return null
+  if(!err1){
+    // NUEVO (13jul26 · Mejoras 1-2): canal 1 OK → refrescar TAMBIÉN el respaldo .sys (best effort,
+    // sin bloquear). Antes el respaldo solo se escribía cuando el canal 1 fallaba → podía quedar
+    // VIEJO y servirle valores obsoletos a un auxiliar cuya lectura del canal 1 fallara.
+    try{
+      const raw0=await getConfig('constructor_hoja_base')
+      let c0=null;try{c0=raw0?JSON.parse(raw0):null}catch(_){c0=null}
+      if(c0&&typeof c0==='object'&&!Array.isArray(c0)&&JSON.stringify(c0.sys||null)!==js){
+        c0.sys=o
+        await sb.from('config').upsert({clave:'constructor_hoja_base',valor:JSON.stringify(c0),updated_at:new Date().toISOString()},{onConflict:'clave'})
+        if(window._hbCfgFull&&typeof window._hbCfgFull==='object')window._hbCfgFull.sys=o
+      }
+    }catch(_){}
+    return null
+  }
   console.warn('[nxSys] canal propio falló → plan B (.sys en constructor_hoja_base):',err1)
   // Canal 2 · PLAN B: anidar .sys dentro de constructor_hoja_base — clave que el admin YA guarda
   // (Centro de Control) y TODOS los roles ya leen. Se preserva el resto del JSON tal cual.
@@ -1734,6 +1748,22 @@ function nxSysCcHTML(){ // tarjetas del bloque 🌐 del Centro de Control
       </div>
     </div>`
   }).join('')
+}
+// NUEVO (13jul26 · Mejoras 1-2 EN VIVO): refresca 🌐 valores del sistema + permisos del usuario
+// (modo_historico, permite_hoy, permite_ids_pasados) EN EL MOMENTO de usarlos — no los de cuando
+// se abrió la página. Así un cambio del admin aplica de una, sin relogin ni recarga del auxiliar.
+// Tolerante: si algo falla, quedan los valores de la sesión (nunca rompe nada).
+window._permisosLive=async()=>{
+  try{await nxSysLoad()}catch(_){}
+  try{
+    const _c=currentMe();if(!_c||!_c.id)return
+    const{data:_pv}=await sb.from('usuarios').select('modo_historico,permite_hoy,permite_ids_pasados').eq('id',_c.id).maybeSingle()
+    if(_pv){
+      if(_pv.modo_historico!=null)_c.modo_historico=_pv.modo_historico===true
+      if(_pv.permite_hoy!=null)_c.permite_hoy=_pv.permite_hoy===true
+      if(_pv.permite_ids_pasados!=null)_c.permite_ids_pasados=_pv.permite_ids_pasados===true
+    }
+  }catch(_){}
 }
 // ══ FIN VALORES DEL SISTEMA ══════════════════════════════════════════════════════════════════
 function _quickDateBtns(desdeId,hastaId,onchangeFn){
@@ -8832,6 +8862,11 @@ window.procesarAsignador=async()=>{
   //   - Si está vacío → cae a la lista completa de aliases (comportamiento legacy).
   // La lista correcta ya está armada en window._asignKwVisibles (construida en pageAuxAsignador).
   const kwList=window._asignKwVisibles||window._asignKw||[]
+  // NUEVO (13jul26 · Mejora 2 EN VIVO): permisos y 🌐 valores frescos AL PROCESAR — no los de cuando
+  // se abrió la página. Un admin cambia el límite (4→15) o prende modo histórico y aplica DE UNA.
+  try{await window._permisosLive()}catch(_){}
+  window._asignModoHist=currentMe()?.modo_historico===true
+  window._asignPermiteHoy=currentMe()?.permite_hoy===true
   const modoHistorico=window._asignModoHist===true
   const permiteHoy=window._asignPermiteHoy===true
   const hoyStr=today()
@@ -9347,8 +9382,8 @@ async function pageAuxReporte(c){
     <div style="background:var(--card);border:2px solid var(--border);border-radius:16px;padding:14px 16px;margin:4px 0 10px">
       <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:8px">👇 ¿Qué día vas a llenar? <span style="font-size:11px;font-weight:600;color:var(--muted)">(toca la fecha para cambiar)</span></div>
       <input type="date" id="rep-fecha-sel" value="${today()}" ${_repSoloHoy?`min="${_repMinSel}"`:''} max="${today()}" onchange="window._setRepFecha(this.value)" style="width:100%;max-width:340px;padding:14px;font-size:19px;font-weight:700;border:3px solid var(--border);border-radius:14px;background:var(--card2);color:var(--text);cursor:pointer">
-      ${_repSoloHoy?`<div style="margin-top:8px;font-size:12px;color:var(--muted)">${_repVenN>0?`🔒 Puedes llenar <b>HOY y hasta ${_repVenN} día(s) atrás</b>. Para días más viejos,`:`🔒 Solo puedes llenar <b>HOY</b>. Para ver o meter IDs de días anteriores,`} el administrador debe prender <b>"🗓️ Editar IDs de días anteriores"</b> en Equipo.</div>`:''}
-      <button id="rep-dia-btn" onclick="(()=>{const i=document.getElementById('rep-fecha-sel');if(i){try{i.showPicker?i.showPicker():i.focus()}catch(e){i.focus()}}})()" style="display:block;width:100%;margin-top:10px;border:3px solid var(--green);background:var(--green-bg);color:var(--text);border-radius:16px;padding:16px 12px;cursor:pointer;text-align:center;font-weight:800;font-size:20px;line-height:1.25">📅 HOY</button>
+      <div id="rep-ventana-txt" style="margin-top:8px;font-size:12px;color:var(--muted)">${_repSoloHoy?`${_repVenN>0?`🔒 Puedes llenar <b>HOY y hasta ${_repVenN} día(s) atrás</b>. Para días más viejos,`:`🔒 Solo puedes llenar <b>HOY</b>. Para ver o meter IDs de días anteriores,`} el administrador debe prender <b>"🗓️ Editar IDs de días anteriores"</b> en Equipo.`:''}</div>
+      <button id="rep-dia-btn" onclick="window._repAbrirPicker()" style="display:block;width:100%;margin-top:10px;border:3px solid var(--green);background:var(--green-bg);color:var(--text);border-radius:16px;padding:16px 12px;cursor:pointer;text-align:center;font-weight:800;font-size:20px;line-height:1.25">📅 HOY</button>
       <div id="rep-faltan"></div>
     </div>
     <input type="hidden" id="rep-fecha" value="${today()}">
@@ -9365,12 +9400,81 @@ window._repDiaInfo=(fecha)=>{
   let nombre=''
   try{nombre=new Date(fecha+'T12:00:00').toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long'}).toUpperCase()}catch(e){nombre=fecha}
   if(fecha===hoy)return{txt:'📅 HOY · '+nombre,sub:'Ventas de hoy',bc:'var(--green)',bg:'var(--green-bg)'}
-  if(fecha===ayer)return{txt:'🕐 '+nombre+' (AYER)',sub:'🔒 Para guardar: stock + conversaciones obligatorios',bc:'var(--amber)',bg:'var(--amber-bg)'}
-  return{txt:'🕐 '+nombre,sub:'🔒 Para guardar: conversaciones obligatorias',bc:'var(--blue)',bg:'rgba(59,130,246,.12)'}
+  if(fecha===ayer)return{txt:'🕐 '+nombre+' (AYER)',sub:'💾 IDs guardan SIEMPRE · completa stock + conversaciones',bc:'var(--amber)',bg:'var(--amber-bg)'}
+  return{txt:'🕐 '+nombre,sub:'💾 IDs guardan SIEMPRE · completa las conversaciones',bc:'var(--blue)',bg:'rgba(59,130,246,.12)'}
 }
 // R3: LA fecha manda en toda la página (órdenes + IDs). Nunca futuras.
 // NUEVO (7jul26 · Candado fecha): helper único del candado — auxiliar SIN "🗓️ Editar IDs de días anteriores".
 window._repSoloHoy=()=>((me?.rol==='auxiliar')&&me?.permite_ids_pasados!==true)
+// NUEVO (13jul26 · Mejora 1): la ventana 🌐 y el permiso se refrescan EN VIVO al abrir el calendario —
+// antes el min del selector quedaba CONGELADO con el valor de cuando se abrió la página, y un cambio
+// del admin (ej: ventana 0→3) no aplicaba hasta recargar. Ahora aplica al instante.
+window._repAplicarVentana=()=>{ // pinta min + texto según los valores YA en memoria
+  const i=document.getElementById('rep-fecha-sel');if(!i)return
+  const soloHoy=window._repSoloHoy()
+  const n=nxSysVal('repDiasAtrasAux')
+  if(soloHoy)i.min=_daysAgo(n);else i.removeAttribute('min')
+  const t=document.getElementById('rep-ventana-txt')
+  if(t)t.innerHTML=soloHoy?(n>0?`🔒 Puedes llenar <b>HOY y hasta ${n} día(s) atrás</b>. Para días más viejos, el administrador debe prender <b>"🗓️ Editar IDs de días anteriores"</b> en Equipo.`:`🔒 Solo puedes llenar <b>HOY</b>. Para ver o meter IDs de días anteriores, el administrador debe prender <b>"🗓️ Editar IDs de días anteriores"</b> en Equipo.`):''
+}
+window._repAbrirPicker=async()=>{
+  try{await window._permisosLive()}catch(_){}
+  window._repAplicarVentana()
+  const i=document.getElementById('rep-fecha-sel');if(i){try{i.showPicker?i.showPicker():i.focus()}catch(e){i.focus()}}
+}
+// ══ NUEVO (13jul26 · Mejora 4): BANDEJA DE IDs PENDIENTES (sin producto) ══════════════════════
+// Registra en la tabla `ids_pendientes` los IDs que no se pudieron asignar a un producto. Si la
+// tabla no existe o el insert falla, NO se pierde nada: alerta de emergencia con los IDs a la vista
+// para anotarlos a mano. LEY: un ID sin producto NUNCA se guarda a medias ni desaparece en silencio.
+window._idsPendReg=async(reg)=>{
+  try{
+    const _row={fecha:reg.fecha||today(),agente:reg.agente||'',ids:reg.ids||'',motivo:reg.motivo||'',origen:reg.origen||'hoja_base',resuelto:false,usuario_id:currentMe()?.id||null,creado_en:new Date().toISOString()}
+    const{error}=await sb.from('ids_pendientes').insert(_row)
+    if(error)throw error
+    return true
+  }catch(e){
+    console.warn('[ids_pendientes] no se pudo registrar:',e&&e.message)
+    try{alert(`🚨 IDs SIN PRODUCTO que NO se pudieron guardar en la bandeja (anótalos a mano AHORA):\n\nFecha: ${reg.fecha}\nAgente: ${reg.agente||'?'}\nMotivo: ${reg.motivo||''}\n\nIDs:\n${reg.ids||''}\n\n(¿Falta crear la tabla ids_pendientes en Supabase? Pídeselo al admin.)`)}catch(_){}
+    return false
+  }
+}
+// NUEVO (13jul26 · Mejora 4): asigna un lote pendiente al producto elegido. Suma sobre la fila
+// existente de (fecha, producto) de CUALQUIER usuario (15+2=17, nunca fila paralela), verifica IDA
+// Y VUELTA, y solo entonces marca el pendiente como resuelto. Si algo falla, el lote SIGUE en la
+// bandeja — nada se pierde jamás.
+window._idsPendAsignar=async(pendId)=>{
+  const msg=document.getElementById('pend-msg-'+pendId)
+  const sel=document.getElementById('pend-prod-'+pendId)
+  const prodId=sel?.value||''
+  if(!prodId){if(msg)msg.innerHTML='<div class="alert alert-amber" style="font-size:12px">Elige un producto primero.</div>';return}
+  const prodObj=productos.find(p=>String(p.id)===String(prodId))
+  if(!prodObj){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:12px">Ese producto ya no existe.</div>';return}
+  try{
+    // Releer el pendiente (por si otro ya lo resolvió)
+    const{data:p}=await sb.from('ids_pendientes').select('*').eq('id',pendId).maybeSingle()
+    if(!p){if(msg)msg.innerHTML='<div class="alert alert-amber" style="font-size:12px">Ese lote ya no está.</div>';return}
+    if(p.resuelto){if(msg)msg.innerHTML='<div class="alert alert-green" style="font-size:12px">Ese lote ya estaba resuelto.</div>';return}
+    const _nuevos=String(p.ids||'').split(/[\n,;\s]+/).filter(Boolean)
+    // Fila MÁS RECIENTE de (fecha, producto) de CUALQUIER usuario → sumar sobre ella
+    const{data:prev}=await sb.from('reportes_diarios').select('ad_ids,usuario_id')
+      .eq('fecha',p.fecha).eq('producto_id',prodObj.id).order('updated_at',{ascending:false}).limit(1).maybeSingle()
+    const _viejos=String(prev?.ad_ids||'').split('\n').filter(Boolean)
+    const _merged=[..._viejos,..._nuevos].filter(Boolean).join('\n')
+    const _pay={fecha:p.fecha,producto_id:prodObj.id,producto_nombre:prodObj.nombre,ad_ids:_merged,
+      usuario_id:(prev&&prev.usuario_id)||currentMe().id,updated_at:new Date().toISOString()}
+    const{data:_eco,error:_e1}=await sb.from('reportes_diarios').upsert(_pay,{onConflict:'fecha,producto_id,usuario_id'}).select('ad_ids')
+    if(_e1)throw _e1
+    if(!_eco||!_eco.length||String(_eco[0].ad_ids||'')!==_merged)throw new Error('la nube NO devolvió lo guardado (¿RLS de UPDATE en reportes_diarios?)')
+    // Recién ahora marcamos el pendiente como resuelto
+    const{error:_e2}=await sb.from('ids_pendientes').update({resuelto:true,producto_id:prodObj.id,resuelto_en:new Date().toISOString()}).eq('id',pendId)
+    if(_e2)throw new Error('los IDs se sumaron pero el pendiente no se marcó resuelto: '+_e2.message)
+    try{logAction('ids_pendientes_asignados',{pendiente:pendId,producto:prodObj.nombre,fecha:p.fecha,ids:_nuevos.length}).catch(()=>{})}catch(_){}
+    if(msg)msg.innerHTML=`<div class="alert alert-green" style="font-size:12px">✅ ${_nuevos.length} ID(s) sumados a <b>${prodObj.nombre}</b> (total ${_merged.split('\n').filter(Boolean).length}) y verificados en la nube.</div>`
+    setTimeout(()=>{try{cargarReporteData()}catch(_){}},1200)
+  }catch(e){
+    if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:12px">🚫 NO se sumó: ${e&&e.message||e}. El pendiente <b>sigue en la bandeja</b> — nada se perdió.</div>`
+  }
+}
 window._setRepFecha=(val)=>{
   if(!val)return
   if(val>today())val=today()
@@ -9388,7 +9492,7 @@ window._setRepFecha=(val)=>{
 // Compat: atajos viejos HOY/AYER siguen funcionando (cards "¿Qué hago hoy?", enlaces, etc.)
 window._setRepDia=(dia)=>{window._setRepFecha(dia==='ayer'?_daysAgo(1):today())}
 window._setRepOtroDia=(val)=>{window._setRepFecha(val)}
-window._toggleRepOtroDia=()=>{const i=document.getElementById('rep-fecha-sel');if(i){try{i.showPicker?i.showPicker():i.focus()}catch(e){i.focus()}}}
+window._toggleRepOtroDia=()=>{window._repAbrirPicker()}
 // Repinta el botón gigante según la fecha elegida (se llama desde cargarReporteData)
 window._marcarBtnDia=()=>{
   const f=document.getElementById('rep-fecha')?.value||today()
@@ -9499,6 +9603,41 @@ async function cargarReporteData(){
 
   const prods=Object.keys(porProd)
 
+  // ══ NUEVO (13jul26 · Mejora 4): BANDEJA DE IDs PENDIENTES (sin producto asignado) ══
+  // Se muestra SIEMPRE arriba (no depende de la fecha del selector): son IDs que llegaron sin
+  // producto y siguen esperando asignación. Persisten en Supabase → sobreviven recargas y cierres.
+  let pendHtml=''
+  try{
+    const{data:_pend}=await sb.from('ids_pendientes').select('*').eq('resuelto',false).order('creado_en',{ascending:true})
+    if(_pend&&_pend.length){
+      const _cards=_pend.map(p=>{
+        const _ids=String(p.ids||'').split(/[\n,;\s]+/).filter(Boolean)
+        const _muestra=_ids.slice(0,10).join(', ')+(_ids.length>10?` … (+${_ids.length-10})`:'')
+        const _fLbl=(()=>{const q=String(p.fecha||'').split('-');return q.length===3?`${q[2]}/${q[1]}/${q[0]}`:p.fecha})()
+        const _opts=productos.map(pr=>`<option value="${pr.id}">${String(pr.nombre).replace(/</g,'&lt;')}</option>`).join('')
+        return`<div style="border:2px solid var(--red);border-radius:12px;padding:12px 14px;margin-bottom:10px;background:rgba(239,68,68,.05)">
+          <div style="font-size:14px;font-weight:800;color:var(--red);margin-bottom:6px">🚨 ${_ids.length} ID(s) sin producto</div>
+          <div style="font-size:12px;color:var(--text);line-height:1.7">
+            📅 <b>${_fLbl}</b> · 🤖 Agente: <b>${String(p.agente||'?').replace(/</g,'&lt;')}</b><br>
+            <span style="font-size:11px;color:var(--muted)">Motivo: ${String(p.motivo||'').replace(/</g,'&lt;')}</span><br>
+            <span style="font-family:monospace;font-size:11px;color:var(--text);display:inline-block;margin-top:4px;word-break:break-all">${_muestra}</span>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
+            <select id="pend-prod-${p.id}" style="flex:1;min-width:180px;padding:8px;border:2px solid var(--border);border-radius:8px;background:var(--card);color:var(--text)">
+              <option value="">➕ Asignar al producto…</option>${_opts}
+            </select>
+            <button class="btn-sm btn-primary" onclick="window._idsPendAsignar('${p.id}')">➕ Sumar al producto</button>
+          </div>
+          <div id="pend-msg-${p.id}" style="margin-top:6px"></div>
+        </div>`
+      }).join('')
+      pendHtml=`<div style="margin-bottom:16px;padding:14px;border:2px dashed var(--red);border-radius:14px;background:rgba(239,68,68,.03)">
+        <div style="font-size:16px;font-weight:900;color:var(--red);margin-bottom:10px">🚨 ${_pend.length} lote(s) de IDs SIN PRODUCTO — asígnalos para no perderlos</div>
+        ${_cards}
+      </div>`
+    }
+  }catch(_ePend){/* tabla puede no existir aún — silencioso, no rompe la página */}
+
   // Auto section HTML
   let autoHtml=''
   if(prods.length===0){
@@ -9594,9 +9733,9 @@ async function cargarReporteData(){
           <b>3.</b> Dale al botón morado de abajo 💾</div>`
       :`<div class="aux-banner amber" style="margin-bottom:14px"><span>✍️</span><span><b>Aquí SÍ escribes tú</b> — anota las ventas</span></div>`
     const candadoHtml=esAyer
-      ?`<div style="background:rgba(245,158,11,.08);border:2px solid var(--amber);border-radius:12px;padding:10px 14px;margin-bottom:14px;font-size:13px;font-weight:700;color:var(--text)">🔒 Para poder GUARDAR el día de AYER es obligatorio poner <b>💬 conversaciones</b> y <b>📦 stock</b> de cada producto. Sin eso, el botón no guarda.</div>`
+      ?`<div style="background:rgba(245,158,11,.08);border:2px solid var(--amber);border-radius:12px;padding:10px 14px;margin-bottom:14px;font-size:13px;font-weight:700;color:var(--text)">⚠️ Para AYER debes poner <b>💬 conversaciones</b> y <b>📦 stock</b> de cada producto. Los <b>IDs se guardan SIEMPRE</b> aunque falten — pero quedas debiendo esos datos y el aviso te lo recordará.</div>`
       :esHistManual
-      ?`<div style="background:rgba(59,130,246,.08);border:2px solid var(--blue);border-radius:12px;padding:10px 14px;margin-bottom:14px;font-size:13px;font-weight:700;color:var(--text)">🔒 Para poder GUARDAR este día es obligatorio poner <b>💬 conversaciones</b> de cada producto (el stock ya no aplica para días viejos).</div>`
+      ?`<div style="background:rgba(59,130,246,.08);border:2px solid var(--blue);border-radius:12px;padding:10px 14px;margin-bottom:14px;font-size:13px;font-weight:700;color:var(--text)">⚠️ Para este día debes poner <b>💬 conversaciones</b> de cada producto (el stock ya no aplica para días viejos). Los <b>IDs se guardan SIEMPRE</b> aunque falten.</div>`
       :''
     ventasHtml=`<div class="divider"></div>
     <div class="section-title">${tit}</div>
@@ -9614,7 +9753,7 @@ async function cargarReporteData(){
   else if(esAyer)modoBanner=`<div style="background:var(--amber-bg);border:3px solid var(--amber);border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:15px;font-weight:700;color:var(--text);line-height:1.6">⏳ Estás completando los IDs de <b>AYER</b>.<br><span style="font-weight:500;font-size:13px;color:var(--muted)">Es temporal, hasta que llegue el archivo de Dropi al mediodía. Cuando llegue, esto se reemplaza solo. No pasa nada si lo dejas.</span></div>`
   else if(esHistManual)modoBanner=`<div style="background:rgba(59,130,246,.10);border:3px solid var(--blue);border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:15px;font-weight:700;color:var(--text);line-height:1.6">🕐 Estás llenando el <b>${window._repDiaInfo(fecha).txt.replace('🕐 ','')}</b>.<br><span style="font-weight:500;font-size:13px;color:var(--muted)">Órdenes de Dropi arriba · tus IDs y conversaciones abajo. Todo de ESTE día.</span></div>`
   el.innerHTML=`
-    ${modoBanner}
+    ${pendHtml}${modoBanner}
     <div class="section-title" style="color:var(--green)">📊 Datos ${labelFecha} (auto desde Dropi)</div>
     <div class="aux-banner" style="background:var(--green-bg);border:1px solid rgba(34,197,94,.4);color:#86efac;margin-bottom:14px"><span>✅</span><span><b>Esto sale solo</b> — no lo toques, se llena con Dropi.</span></div>
     ${motivoHtml}${autoHtml}${ventasHtml}
@@ -9679,7 +9818,16 @@ window.addVentaRow=(prodNom,adIds,convAp,stockAct)=>{
       <button class="btn-sm btn-red" onclick="document.getElementById('vrow-${idx}').remove()" style="margin-top:6px;font-size:11px">✕ Quitar</button></div>
   </div>`
   container.appendChild(div)
-  // NUEVO (7jul26 · Mejora 3): si la fila nace con producto precargado, pintar sus botones 🔗 de una
+  // NUEVO (13jul26 · Mejora 4): si la fila viene guardada con un producto que YA NO está en el
+  // catálogo activo (renombrado/archivado/vacío), se marca en ROJO con instrucción — antes la fila
+  // salía "sin nombre" con los IDs volando y al guardar se perdían en silencio.
+  if(prodNom&&!productos.find(x=>x.nombre===prodNom)){
+    div.style.border='2px solid var(--red)'
+    const _w=document.createElement('div')
+    _w.style.cssText='margin-top:8px;font-size:12px;font-weight:700;color:var(--red)'
+    _w.innerHTML=`⚠️ Estos IDs quedaron guardados con el producto "<b>${String(prodNom).replace(/</g,'&lt;')}</b>", que no está en el catálogo activo — selecciona arriba el producto correcto y guarda.`
+    div.appendChild(_w)
+  }
   if(prodNom){setTimeout(()=>{try{window._nxVentaRowBtns(idx)}catch(_){}},0)}
 }
 
@@ -9805,7 +9953,9 @@ window.saveReporteV2=async(fecha)=>{
   // Save ventas de hoy
   const rows=document.getElementById('ventas-rows')?.children||[]
   const esOtroDia=!esHoy&&!esAyer
-  // ── R2 (2jul26) · CANDADOS: AYER exige conversaciones + stock · días más viejos exigen conversaciones · HOY no exige ──
+  // ── R2 (2jul26) · CANDADOS — CAMBIO (13jul26 · Mejora 3): conv/stock faltantes YA NO BLOQUEAN.
+  // LO SAGRADO SON LOS IDs: se guardan SIEMPRE. Lo que falte se avisa clarito, pero nunca tumba el guardado.
+  let _avisoFaltas=''
   if(esAyer||esOtroDia){
     const _faltas=[]
     for(const row of rows){
@@ -9818,14 +9968,31 @@ window.saveReporteV2=async(fecha)=>{
       if(esAyer&&(_st===''||_st==null||isNaN(parseInt(_st))))_faltas.push(`📦 Stock de <b>${prodNom}</b>`)
     }
     if(_faltas.length){
-      msg.innerHTML=`<div class="alert alert-red" style="line-height:1.7">🔒 <b>NO se guardó.</b> Para ${esAyer?'AYER':'este día'} es OBLIGATORIO:<br>${_faltas.join('<br>')}</div>`
-      msg.scrollIntoView({behavior:'smooth',block:'center'})
-      return
+      _avisoFaltas=`<div class="alert alert-amber" style="line-height:1.7;margin-top:6px">⚠️ <b>Quedaste debiendo</b> (los IDs SÍ se guardaron):<br>${_faltas.join('<br>')}<br><span style="font-size:11px;color:var(--muted)">Complétalos y vuelve a guardar cuando los tengas — los IDs nunca se bloquean por esto.</span></div>`
     }
     // MEJORA C (3jul26): AYER llega pre-llenado con lo que se capturó en el cruce Dropi.
     // Antes de guardar, confirmación consciente: actualizar conversaciones y revisar el stock.
     if(esAyer){
       if(!confirm('📝 ANTES DE GUARDAR AYER, revisa:\n\n💬 ¿Actualizaste las CONVERSACIONES de ayer? (las del cruce eran de mediodía)\n📦 Puedes dejar el mismo stock, pero revisa en Dropi si cambió después del cruce.\n\nOK = guardar así · Cancelar = volver a revisar'))return
+    }
+  }
+  // ── NUEVO (13jul26 · Mejoras 3-4) · LEY: IDs SIN PRODUCTO seleccionado NUNCA se pierden en silencio.
+  // Antes la fila se saltaba calladita (continue) y esos IDs se PERDÍAN mostrando ✅. Ahora se frena con aviso.
+  {
+    const _sinProd=[]
+    for(const row of rows){
+      const idx=row.id.replace('vrow-','')
+      const _pn=document.getElementById(`vp-${idx}`)?.value
+      const _idsTxt=(document.getElementById(`vi-${idx}`)?.value||'').trim()
+      if(!_pn&&_idsTxt){
+        const _lst=_idsTxt.split(/[\n,;\s]+/).filter(Boolean)
+        _sinProd.push(_lst.slice(0,6).join(', ')+(_lst.length>6?` … (+${_lst.length-6})`:''))
+      }
+    }
+    if(_sinProd.length){
+      msg.innerHTML=`<div class="alert alert-red" style="line-height:1.7">🚫 <b>NO se guardó NADA.</b> Hay ${_sinProd.length} fila(s) con IDs pero <b>SIN producto seleccionado</b>:<br>${_sinProd.map(s=>`🎯 <span style="font-family:monospace">${s}</span>`).join('<br>')}<br><span style="font-size:11px;color:var(--muted)">Selecciona el producto de cada fila y vuelve a guardar — un ID sin producto queda volando y eso está PROHIBIDO.</span></div>`
+      msg.scrollIntoView({behavior:'smooth',block:'center'})
+      return
     }
   }
   // ── R1 (2jul26) · LEY: un ID de OTRO producto NO se guarda. ID sin producto (campaña nueva sin asignar) sí pasa ──
@@ -9855,6 +10022,7 @@ window.saveReporteV2=async(fecha)=>{
     }
   }catch(e){console.warn('[R1 validación IDs]',e?.message)}
   let saved=0
+  const _fallasIds=[],_avisosExtra=[] // NUEVO (13jul26 · Mejora 3): fallas de IDs (rojo) · problemas de conv/stock (ámbar)
   // Stock a sincronizar con la tabla productos (id → {stock, nombre})
   const stockToSync={}
   for(const row of rows){
@@ -9884,24 +10052,39 @@ window.saveReporteV2=async(fecha)=>{
     const adIdsMerged=adIds.split(/[\n,;\s]+/).map(s=>s.trim()).filter(Boolean).join('\n')
     // 📦 NUEVO: el stock del día queda también en el reporte (histórico por fecha).
     // Tolerante: si la columna stock_cierre no existe aún en la BD, reintenta sin ella.
-    const _payRep={
+    // ══ NUEVO (13jul26 · Mejora 3): GUARDADO EN 2 PASOS con verificación de IDA Y VUELTA ══
+    // PASO A (lo sagrado — LOS IDs): se guardan SOLOS y se RELEEN de la nube. Si la nube no
+    // devuelve lo mismo (ej: RLS que "acepta" el UPDATE sin escribir), sale en ROJO — NUNCA un ✅ falso.
+    const _payIds={
       fecha,producto_id:prodObj.id,producto_nombre:prodObj.nombre,
       ad_ids:adIdsMerged,
       nota:document.getElementById('rep-nota')?.value||'',
       usuario_id:currentMe().id,updated_at:new Date().toISOString()
     }
+    try{
+      const{data:_eco,error:_eIds}=await sb.from('reportes_diarios').upsert(_payIds,{onConflict:'fecha,producto_id,usuario_id'}).select('ad_ids')
+      if(_eIds)_fallasIds.push(`📦 <b>${prodObj.nombre}</b>: ${_eIds.message}`)
+      else if(!_eco||!_eco.length||String(_eco[0].ad_ids||'')!==adIdsMerged)_fallasIds.push(`📦 <b>${prodObj.nombre}</b>: la nube NO devolvió lo guardado — los IDs NO quedaron (revisa la política RLS de UPDATE en reportes_diarios)`)
+      else saved++
+    }catch(_ex){_fallasIds.push(`📦 <b>${prodObj.nombre}</b>: ${_ex&&_ex.message||'sin conexión'}`)}
+    // PASO B (secundario — conversaciones y stock): si fallan AVISAN, pero JAMÁS tumban los IDs.
     // MEJORA A (3jul26): las llaves de conversaciones solo van si el input existe (días anteriores)
     // o si hay conv real de la sección auto — en HOY (inputs ocultos) NO se tocan las del cruce.
-    if(convAp!==null){_payRep.conversaciones_aprox=convAp;_payRep.conversaciones=(convReal||convAp)}
-    else if(convReal>0)_payRep.conversaciones=convReal
-    if(stockVal!=null&&!isNaN(stockVal)&&stockVal>=0)_payRep.stock_cierre=stockVal
-    let{error}=await sb.from('reportes_diarios').upsert(_payRep,{onConflict:'fecha,producto_id,usuario_id'})
-    if(error&&/stock_cierre/i.test(error.message||'')){
-      delete _payRep.stock_cierre
-      ;({error}=await sb.from('reportes_diarios').upsert(_payRep,{onConflict:'fecha,producto_id,usuario_id'}))
+    const _payExtra={fecha,producto_id:prodObj.id,producto_nombre:prodObj.nombre,usuario_id:currentMe().id,updated_at:new Date().toISOString()}
+    let _hayExtra=false
+    if(convAp!==null){_payExtra.conversaciones_aprox=convAp;_payExtra.conversaciones=(convReal||convAp);_hayExtra=true}
+    else if(convReal>0){_payExtra.conversaciones=convReal;_hayExtra=true}
+    if(stockVal!=null&&!isNaN(stockVal)&&stockVal>=0){_payExtra.stock_cierre=stockVal;_hayExtra=true}
+    if(_hayExtra){
+      try{
+        let{error:_eEx}=await sb.from('reportes_diarios').upsert(_payExtra,{onConflict:'fecha,producto_id,usuario_id'})
+        if(_eEx&&/stock_cierre/i.test(_eEx.message||'')){
+          delete _payExtra.stock_cierre
+          ;({error:_eEx}=await sb.from('reportes_diarios').upsert(_payExtra,{onConflict:'fecha,producto_id,usuario_id'}))
+        }
+        if(_eEx)_avisosExtra.push(`💬/📦 <b>${prodObj.nombre}</b>: ${_eEx.message}`)
+      }catch(_ex2){_avisosExtra.push(`💬/📦 <b>${prodObj.nombre}</b>: ${_ex2&&_ex2.message||'sin conexión'}`)}
     }
-    if(error){msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
-    saved++
   }
   // Sincronizar stock_actual con productos (si la columna existe en DB; silencioso si no)
   for(const[prodId,info]of Object.entries(stockToSync)){
@@ -9974,8 +10157,17 @@ window.saveReporteV2=async(fecha)=>{
       </div>`
     }
   }catch(_eRes){console.warn('[resumen reporte]',_eRes&&_eRes.message)}
-  msg.innerHTML=`<div class="alert alert-green">✅ ${saved} producto(s) guardado(s)</div>`+_resHtml
-  logAction('reporte_guardado',{fecha,productos:saved}).catch(()=>{})
+  // NUEVO (13jul26 · Mejora 3): mensaje HONESTO — ✅ solo si la nube devolvió lo guardado.
+  const _avisoExtraHtml=_avisosExtra.length?`<div class="alert alert-amber" style="margin-top:6px">⚠️ Conversaciones/stock con problema (los IDs SÍ quedaron):<br>${_avisosExtra.join('<br>')}</div>`:''
+  if(_fallasIds.length){
+    msg.innerHTML=`<div class="alert alert-red" style="line-height:1.7">🚨 <b>OJO: ${_fallasIds.length} producto(s) NO guardaron sus IDs</b> (verificado releyendo la nube):<br>${_fallasIds.join('<br>')}</div>`
+      +(saved?`<div class="alert alert-green" style="margin-top:6px">✅ ${saved} producto(s) SÍ guardado(s) y verificado(s)</div>`:'')
+      +_avisoFaltas+_avisoExtraHtml
+    msg.scrollIntoView({behavior:'smooth',block:'center'})
+  }else{
+    msg.innerHTML=`<div class="alert alert-green">✅ ${saved} producto(s) guardado(s) y <b>verificado(s) en la nube</b></div>`+_avisoFaltas+_avisoExtraHtml+_resHtml
+  }
+  logAction('reporte_guardado',{fecha,productos:saved,fallas:_fallasIds.length||undefined}).catch(()=>{})
   // ── ENTREGA 3B: disparar histórico de semáforos con los ad_ids reportados ──
   try{
     const adIdsAfectados=[]
@@ -16334,6 +16526,8 @@ window.procesarDropi=async()=>{
     }
     // AVISO de fecha en el PREVIEW (misma regla que el bloqueo al guardar): órdenes con fecha de subida > 4 días.
     // Escape: si el usuario tiene modo_historico=true, no se avisa (puede cruzar viejas).
+    // NUEVO (13jul26 · Mejora 2 EN VIVO): permiso y límite 🌐 frescos en el momento (sin recargar página).
+    try{await window._permisosLive()}catch(_){}
     const _modoHistPrev=currentMe()?.modo_historico===true
     if(!_modoHistPrev){
       const _limitePrev=_daysAgo(nxSysVal('limiteDiasAtras')) // YYYY-MM-DD, hora Bogotá · NUEVO (9jul26 · Mejora 1): 🌐 configurable, default 4
@@ -16536,6 +16730,8 @@ window.actualizarEstadosDropi=async()=>{
 
   // ── VALIDACIÓN 2: fecha de subida (FECHA col D) máximo 4 días atrás.
   // Escape: si el usuario tiene modo_historico=true (lo activa un admin en Equipo), no se valida.
+  // NUEVO (13jul26 · Mejora 2 EN VIVO): permiso y límite 🌐 frescos en el momento (sin recargar página).
+  try{await window._permisosLive()}catch(_){}
   const _modoHist=currentMe()?.modo_historico===true
   if(!_modoHist){
     const _limite=_daysAgo(nxSysVal('limiteDiasAtras')) // YYYY-MM-DD, hora Bogotá · NUEVO (9jul26 · Mejora 1): 🌐 configurable, default 4
@@ -34037,7 +34233,7 @@ async function _hbGenerarFinal(){
     for(const f of listos)for(const r of f.rows){
       if(r._excluida)continue // FASE 6 (6jul26) · M15.C: quitado como duplicado — NO entra a reportes
       const k=r.fecha+'|'+f.producto.id
-      if(!grupos[k])grupos[k]={fecha:r.fecha,producto:f.producto,ids:[],n:0}
+      if(!grupos[k])grupos[k]={fecha:r.fecha,producto:f.producto,agente:f.agente,ids:[],n:0}
       grupos[k].n++
       if(r.adId)grupos[k].ids.push(r.adId) // NO deduplicar: cada ID repetido = 1 venta
     }
@@ -34047,6 +34243,19 @@ async function _hbGenerarFinal(){
     const _sinIds=new Set([...(st.esperadas||[]),st.hoy]);if(st.ultima)_sinIds.add(st.ultima)
     const repLineas=[]
     for(const g of Object.values(grupos)){
+      // ── NUEVO (13jul26 · Mejora 4) · LEY DE ORO: JAMÁS una fila con IDs y sin producto. ──
+      // Si el grupo no tiene producto identificado (agente sin mapeo, producto archivado, etc.),
+      // NO se escribe fila huérfana: los IDs van a la BANDEJA de pendientes (visible en Reporte del
+      // día) para asignarlos a mano, y queda avisado POR QUÉ. Nunca un guardado a medias en silencio.
+      if(!g.producto||!g.producto.id||!g.producto.nombre){
+        const _idsTxt=(g.ids||[]).filter(Boolean).join('\n')
+        if(_idsTxt&&!_prueba){
+          await window._idsPendReg({fecha:g.fecha,agente:g.agente||'',ids:_idsTxt,motivo:`Agente "${g.agente||'?'}" sin producto identificado (revisa su mapeo en Productos)`,origen:'hoja_base'})
+        }
+        repLineas.push(`🚨 <b style="color:var(--red)">SIN PRODUCTO</b> → ${g.fecha}: ${(g.ids||[]).length} ID(s) del agente <b>${hbEsc(g.agente||'?')}</b> — ${_prueba?'(simulacro) ':''}NO se escribió fila. Quedaron en la <b>bandeja de pendientes</b> del Reporte del día para asignarlos a mano.`)
+        err.push(`⚠️ ${(g.ids||[]).length} ID(s) del agente "${g.agente||'?'}" (${g.fecha}) no tienen producto — enviados a la bandeja de pendientes`)
+        continue
+      }
       const _manual=_sinIds.has(g.fecha) // día cuyos ad_ids los registra el auxiliar a mano
       const cm=_mapConv[g.fecha+'|'+String(g.producto.id)]
       if(_manual&&cm==null){ // nada que escribir en este día: ni IDs (manuales) ni conversaciones
@@ -34058,19 +34267,36 @@ async function _hbGenerarFinal(){
       if(!_manual){ // día YA CERRADO (anterior a `ultima`) — venta tardía: ACUMULA, nunca reemplaza
         let viejos=[]
         try{
-          const{data:prev}=await sb.from('reportes_diarios').select('ad_ids')
-            .eq('fecha',g.fecha).eq('producto_id',g.producto.id).eq('usuario_id',currentMe().id).maybeSingle()
+          // NUEVO (13jul26 · Mejora 4): leer la fila MÁS RECIENTE de (fecha, producto) de CUALQUIER
+          // usuario — antes solo leía la del usuario actual y creaba una fila PARALELA (15 y 2 por
+          // separado) en vez de SUMAR sobre la existente (15+2=17). Ahora acumula sobre la real.
+          const{data:prev}=await sb.from('reportes_diarios').select('ad_ids,usuario_id')
+            .eq('fecha',g.fecha).eq('producto_id',g.producto.id).order('updated_at',{ascending:false}).limit(1).maybeSingle()
           viejos=String(prev?.ad_ids||'').split('\n').filter(Boolean)
+          if(prev&&prev.usuario_id)pay.usuario_id=prev.usuario_id // escribir SOBRE la fila existente
         }catch(_e){err.push(`lectura previa ${g.producto.nombre} ${g.fecha}: ${_e?.message||_e} — se escriben solo los nuevos`)}
         pay.ad_ids=[...viejos,...g.ids].filter(Boolean).join('\n') // ACUMULA (día consolidado)
       }
       if(_manual&&cm!=null){pay.conversaciones=cm;pay.conversaciones_aprox=cm} // SOLO conversaciones — ad_ids NO se toca
-      let{error:e1}=_prueba?{error:null}:await sb.from('reportes_diarios').upsert(pay,{onConflict:'fecha,producto_id,usuario_id'})
+      // NUEVO (13jul26 · Mejora 4): verificación de IDA Y VUELTA — un RLS puede "aceptar" el upsert
+      // sin escribir. Releemos ad_ids; si no coincide → falla real (a la bandeja), no un ✅ falso.
+      const _esperado=pay.ad_ids
+      let{data:_ecoHb,error:e1}=_prueba?{data:null,error:null}:await sb.from('reportes_diarios').upsert(pay,{onConflict:'fecha,producto_id,usuario_id'}).select('ad_ids')
       if(e1&&/conversaciones_aprox/i.test(e1.message||'')){
         delete pay.conversaciones_aprox
-        ;({error:e1}=await sb.from('reportes_diarios').upsert(pay,{onConflict:'fecha,producto_id,usuario_id'}))
+        ;({data:_ecoHb,error:e1}=await sb.from('reportes_diarios').upsert(pay,{onConflict:'fecha,producto_id,usuario_id'}).select('ad_ids'))
       }
-      if(e1)err.push(`reporte ${g.producto.nombre} ${g.fecha}: ${e1.message}`)
+      if(!e1&&!_prueba&&!_manual&&_esperado!=null){ // solo verificamos días con ad_ids escritos
+        if(!_ecoHb||!_ecoHb.length||String(_ecoHb[0].ad_ids||'')!==_esperado)e1={message:'la nube NO devolvió lo guardado (¿RLS de UPDATE en reportes_diarios?)'}
+      }
+      if(e1){
+        err.push(`reporte ${g.producto.nombre} ${g.fecha}: ${e1.message}`)
+        // Los IDs no quedaron → a la bandeja para no perderlos jamás
+        if(!_manual&&!_prueba&&(g.ids||[]).length){
+          await window._idsPendReg({fecha:g.fecha,agente:g.agente||'',ids:(g.ids||[]).filter(Boolean).join('\n'),motivo:`No se pudieron sincronizar a "${g.producto.nombre}": ${e1.message}`,origen:'hoja_base'})
+          repLineas.push(`🚨 <b style="color:var(--red)">NO SINCRONIZÓ</b> <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${(g.ids||[]).length} ID(s) — enviados a la bandeja de pendientes.`)
+        }
+      }
       else if(_manual){
         repLineas.push(`${_prueba?'🧪':'💬'} <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${cm} conversaciones (manual) · IDs NO se envían (los registra el auxiliar)${_prueba?' — <b>SIMULACRO: NO enviado</b>':''}`)
       }else{
@@ -34087,7 +34313,7 @@ async function _hbGenerarFinal(){
       <div class="section-title" style="color:${_prueba?'var(--amber)':'var(--green)'}">${_prueba?'🧪 Hoja de PRUEBA lista':'✅ Hoja base lista'} — ${filas.length} filas · ${bloques.length} producto(s)${totCorr?` · ✏️ ${totCorr} corregida(s)`:''}</div>
       <div style="font-size:13px;line-height:1.9">${bloques.map((b,i)=>`<span style="display:inline-block;padding:2px 10px;border-radius:8px;margin:2px;background:#${hbCfgPaleta()[i%hbCfgPaleta().length].slice(2)};color:#1a1a1a;font-weight:700">${hbEsc(b.producto.nombre)} · ${b.items.length}</span>`).join('')}</div>
       <div style="font-size:13px;line-height:1.9;margin-top:8px">${repLineas.join('<br>')||'—'}</div>
-      ${err.length?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:12px;margin-top:8px">⚠️ Detalles no críticos:<br>${err.map(hbEsc).join('<br>')}</div>`:''}
+      ${err.length?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:12px;margin-top:8px">⚠️ Avisos (revisa la <b>bandeja de pendientes</b> en Reporte del día si hay IDs sin producto):<br>${err.map(hbEsc).join('<br>')}</div>`:''}
       <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
         <button class="btn-sm btn-primary" onclick="hbDescargarUltima()">⬇️ Descargar ${hbEsc(hojaNombre)}</button>
         <!-- FASE 5 (6jul26) · Mejora 14: vista rápida REACTIVADA en formato corchetes (decisión de ADS) — se pega directo al Asignador. Revertir = agregar display:none -->

@@ -9455,14 +9455,14 @@ window._idsPendAsignar=async(pendId)=>{
     if(!p){if(msg)msg.innerHTML='<div class="alert alert-amber" style="font-size:12px">Ese lote ya no está.</div>';return}
     if(p.resuelto){if(msg)msg.innerHTML='<div class="alert alert-green" style="font-size:12px">Ese lote ya estaba resuelto.</div>';return}
     const _nuevos=String(p.ids||'').split(/[\n,;\s]+/).filter(Boolean)
-    // Fila MÁS RECIENTE de (fecha, producto) de CUALQUIER usuario → sumar sobre ella
-    const{data:prev}=await sb.from('reportes_diarios').select('ad_ids,usuario_id')
-      .eq('fecha',p.fecha).eq('producto_id',prodObj.id).order('updated_at',{ascending:false}).limit(1).maybeSingle()
+    // FASE 4 (13jul26 · Opción B): fila ÚNICA por (fecha, producto) → se lee y se SUMA sobre ella.
+    const{data:prev}=await sb.from('reportes_diarios').select('ad_ids')
+      .eq('fecha',p.fecha).eq('producto_id',prodObj.id).maybeSingle()
     const _viejos=String(prev?.ad_ids||'').split('\n').filter(Boolean)
     const _merged=[..._viejos,..._nuevos].filter(Boolean).join('\n')
     const _pay={fecha:p.fecha,producto_id:prodObj.id,producto_nombre:prodObj.nombre,ad_ids:_merged,
-      usuario_id:(prev&&prev.usuario_id)||currentMe().id,updated_at:new Date().toISOString()}
-    const{data:_eco,error:_e1}=await sb.from('reportes_diarios').upsert(_pay,{onConflict:'fecha,producto_id,usuario_id'}).select('ad_ids')
+      usuario_id:currentMe().id,updated_at:new Date().toISOString()}
+    const{data:_eco,error:_e1}=await sb.from('reportes_diarios').upsert(_pay,{onConflict:'fecha,producto_id'}).select('ad_ids')
     if(_e1)throw _e1
     if(!_eco||!_eco.length||String(_eco[0].ad_ids||'')!==_merged)throw new Error('la nube NO devolvió lo guardado (¿RLS de UPDATE en reportes_diarios?)')
     // Recién ahora marcamos el pendiente como resuelto
@@ -9940,7 +9940,7 @@ window.saveReporteV2=async(fecha)=>{
         fecha,producto_id:prodObj.id,producto_nombre:prodObj.nombre,
         conversaciones:conv,nota:`[EDITADO] ${motivo}`,
         usuario_id:me.id,updated_at:new Date().toISOString()
-      },{onConflict:'fecha,producto_id,usuario_id'})
+      },{onConflict:'fecha,producto_id'})
       if(error)errMsg+=error.message+' '
       else saved++
     }
@@ -10062,7 +10062,7 @@ window.saveReporteV2=async(fecha)=>{
       usuario_id:currentMe().id,updated_at:new Date().toISOString()
     }
     try{
-      const{data:_eco,error:_eIds}=await sb.from('reportes_diarios').upsert(_payIds,{onConflict:'fecha,producto_id,usuario_id'}).select('ad_ids')
+      const{data:_eco,error:_eIds}=await sb.from('reportes_diarios').upsert(_payIds,{onConflict:'fecha,producto_id'}).select('ad_ids')
       if(_eIds)_fallasIds.push(`📦 <b>${prodObj.nombre}</b>: ${_eIds.message}`)
       else if(!_eco||!_eco.length||String(_eco[0].ad_ids||'')!==adIdsMerged)_fallasIds.push(`📦 <b>${prodObj.nombre}</b>: la nube NO devolvió lo guardado — los IDs NO quedaron (revisa la política RLS de UPDATE en reportes_diarios)`)
       else saved++
@@ -10077,10 +10077,10 @@ window.saveReporteV2=async(fecha)=>{
     if(stockVal!=null&&!isNaN(stockVal)&&stockVal>=0){_payExtra.stock_cierre=stockVal;_hayExtra=true}
     if(_hayExtra){
       try{
-        let{error:_eEx}=await sb.from('reportes_diarios').upsert(_payExtra,{onConflict:'fecha,producto_id,usuario_id'})
+        let{error:_eEx}=await sb.from('reportes_diarios').upsert(_payExtra,{onConflict:'fecha,producto_id'})
         if(_eEx&&/stock_cierre/i.test(_eEx.message||'')){
           delete _payExtra.stock_cierre
-          ;({error:_eEx}=await sb.from('reportes_diarios').upsert(_payExtra,{onConflict:'fecha,producto_id,usuario_id'}))
+          ;({error:_eEx}=await sb.from('reportes_diarios').upsert(_payExtra,{onConflict:'fecha,producto_id'}))
         }
         if(_eEx)_avisosExtra.push(`💬/📦 <b>${prodObj.nombre}</b>: ${_eEx.message}`)
       }catch(_ex2){_avisosExtra.push(`💬/📦 <b>${prodObj.nombre}</b>: ${_ex2&&_ex2.message||'sin conexión'}`)}
@@ -10116,7 +10116,7 @@ window.saveReporteV2=async(fecha)=>{
     await sb.from('reportes_diarios').upsert({
       fecha,producto_id:prodObj.id,producto_nombre:prodObj.nombre,
       conversaciones:conv,usuario_id:currentMe().id,updated_at:new Date().toISOString()
-    },{onConflict:'fecha,producto_id,usuario_id'}).catch(()=>{})
+    },{onConflict:'fecha,producto_id'}).catch(()=>{})
   }
   // MEJORA 6 (3jul26): AVISO COMPACTO post-guardar con botón 📋 Copiar — el aux te lo manda
   // por WhatsApp (captura o texto copiado) y verificas de una que hizo bien su trabajo.
@@ -16687,8 +16687,8 @@ window._cruceStockModalSave=async()=>{
   for(const v of _vals){
     // Upsert SIN ad_ids, nota ni conversaciones → no pisa nada del reporte de HOY (FASE 7: conv retiradas)
     const _payC={fecha:_hoyR,producto_id:v.p.id,producto_nombre:v.p.nombre,stock_cierre:v.stock,usuario_id:currentMe().id,updated_at:new Date().toISOString()}
-    let{error}=await sb.from('reportes_diarios').upsert(_payC,{onConflict:'fecha,producto_id,usuario_id'})
-    if(error&&/stock_cierre/i.test(error.message||'')){delete _payC.stock_cierre;({error}=await sb.from('reportes_diarios').upsert(_payC,{onConflict:'fecha,producto_id,usuario_id'}))}
+    let{error}=await sb.from('reportes_diarios').upsert(_payC,{onConflict:'fecha,producto_id'})
+    if(error&&/stock_cierre/i.test(error.message||'')){delete _payC.stock_cierre;({error}=await sb.from('reportes_diarios').upsert(_payC,{onConflict:'fecha,producto_id'}))}
     if(error){if(_msgM)_msgM.innerHTML=`<div class="alert alert-red">❌ ${v.p.nombre}: ${error.message}</div>`;return}
     // Sincronizar ficha del producto (mismos fallbacks tolerantes de saveReporteV2)
     try{
@@ -34055,13 +34055,16 @@ async function hbVent2Show(){
   // D.3 — INTELIGENCIA: consultar reportes_diarios (stock: para OMITIR · conversaciones: solo para PRECARGAR — nunca omitir)
   let prevConv={},prevStock={}
   try{
+    // FASE 4 (13jul26 · Opción B): la fila del día+producto es ÚNICA y COMPARTIDA — se lee sin filtrar
+    // por usuario. Antes solo miraba las filas propias, así que ignoraba lo que ya había capturado otro
+    // (y volvía a pedir conversaciones/stock que ya estaban puestos).
     if(dias.length){
       const{data}=await sb.from('reportes_diarios').select('fecha,producto_id,conversaciones')
-        .in('fecha',dias).eq('usuario_id',currentMe().id)
+        .in('fecha',dias)
       for(const r of(data||[]))if(r.conversaciones!=null)prevConv[r.fecha+'|'+String(r.producto_id)]=r.conversaciones
     }
     const{data:dS}=await sb.from('reportes_diarios').select('producto_id,stock_cierre')
-      .eq('fecha',st.hoy).eq('usuario_id',currentMe().id).in('producto_id',prods.map(p=>p.id))
+      .eq('fecha',st.hoy).in('producto_id',prods.map(p=>p.id))
     for(const r of(dS||[]))if(r.stock_cierre!=null)prevStock[String(r.producto_id)]=r.stock_cierre
   }catch(_e){console.warn('[hbVent2] preconsulta:',_e?.message)} // si falla, se pide todo (más seguro)
   const stockPend=prods.filter(p=>prevStock[String(p.id)]==null)
@@ -34150,8 +34153,8 @@ window.hbVent2Guardar=async()=>{
   // MEJORA C (8jul26): en MODO PRUEBA el loop no corre — los valores se validaron pero NO se escriben.
   for(const v of (window._hbPrueba===true?[]:stocks)){
     const _payC={fecha:st.hoy,producto_id:v.p.id,producto_nombre:v.p.nombre,stock_cierre:v.stock,usuario_id:currentMe().id,updated_at:new Date().toISOString()}
-    let{error}=await sb.from('reportes_diarios').upsert(_payC,{onConflict:'fecha,producto_id,usuario_id'})
-    if(error&&/stock_cierre/i.test(error.message||'')){delete _payC.stock_cierre;({error}=await sb.from('reportes_diarios').upsert(_payC,{onConflict:'fecha,producto_id,usuario_id'}))}
+    let{error}=await sb.from('reportes_diarios').upsert(_payC,{onConflict:'fecha,producto_id'})
+    if(error&&/stock_cierre/i.test(error.message||'')){delete _payC.stock_cierre;({error}=await sb.from('reportes_diarios').upsert(_payC,{onConflict:'fecha,producto_id'}))}
     if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">❌ Stock de ${hbEsc(v.p.nombre)}: ${hbEsc(error.message)}</div>`;return}
     try{
       const{error:eSt}=await sb.from('productos').update({stock_actual:v.stock,stock_updated_at:new Date().toISOString(),stock_updated_by:currentMe().id}).eq('id',v.p.id)
@@ -34267,13 +34270,12 @@ async function _hbGenerarFinal(){
       if(!_manual){ // día YA CERRADO (anterior a `ultima`) — venta tardía: ACUMULA, nunca reemplaza
         let viejos=[]
         try{
-          // NUEVO (13jul26 · Mejora 4): leer la fila MÁS RECIENTE de (fecha, producto) de CUALQUIER
-          // usuario — antes solo leía la del usuario actual y creaba una fila PARALELA (15 y 2 por
-          // separado) en vez de SUMAR sobre la existente (15+2=17). Ahora acumula sobre la real.
-          const{data:prev}=await sb.from('reportes_diarios').select('ad_ids,usuario_id')
-            .eq('fecha',g.fecha).eq('producto_id',g.producto.id).order('updated_at',{ascending:false}).limit(1).maybeSingle()
+          // FASE 4 (13jul26 · Opción B): la fila es ÚNICA por (fecha, producto) — ya NO por usuario.
+          // Se lee la fila real del día+producto (sea de quien sea) y se ACUMULA sobre ella (15+2=17).
+          // `usuario_id` ya no es identidad: queda como AUDITORÍA (quién la tocó de último).
+          const{data:prev}=await sb.from('reportes_diarios').select('ad_ids')
+            .eq('fecha',g.fecha).eq('producto_id',g.producto.id).maybeSingle()
           viejos=String(prev?.ad_ids||'').split('\n').filter(Boolean)
-          if(prev&&prev.usuario_id)pay.usuario_id=prev.usuario_id // escribir SOBRE la fila existente
         }catch(_e){err.push(`lectura previa ${g.producto.nombre} ${g.fecha}: ${_e?.message||_e} — se escriben solo los nuevos`)}
         pay.ad_ids=[...viejos,...g.ids].filter(Boolean).join('\n') // ACUMULA (día consolidado)
       }
@@ -34281,10 +34283,10 @@ async function _hbGenerarFinal(){
       // NUEVO (13jul26 · Mejora 4): verificación de IDA Y VUELTA — un RLS puede "aceptar" el upsert
       // sin escribir. Releemos ad_ids; si no coincide → falla real (a la bandeja), no un ✅ falso.
       const _esperado=pay.ad_ids
-      let{data:_ecoHb,error:e1}=_prueba?{data:null,error:null}:await sb.from('reportes_diarios').upsert(pay,{onConflict:'fecha,producto_id,usuario_id'}).select('ad_ids')
+      let{data:_ecoHb,error:e1}=_prueba?{data:null,error:null}:await sb.from('reportes_diarios').upsert(pay,{onConflict:'fecha,producto_id'}).select('ad_ids')
       if(e1&&/conversaciones_aprox/i.test(e1.message||'')){
         delete pay.conversaciones_aprox
-        ;({data:_ecoHb,error:e1}=await sb.from('reportes_diarios').upsert(pay,{onConflict:'fecha,producto_id,usuario_id'}).select('ad_ids'))
+        ;({data:_ecoHb,error:e1}=await sb.from('reportes_diarios').upsert(pay,{onConflict:'fecha,producto_id'}).select('ad_ids'))
       }
       if(!e1&&!_prueba&&!_manual&&_esperado!=null){ // solo verificamos días con ad_ids escritos
         if(!_ecoHb||!_ecoHb.length||String(_ecoHb[0].ad_ids||'')!==_esperado)e1={message:'la nube NO devolvió lo guardado (¿RLS de UPDATE en reportes_diarios?)'}

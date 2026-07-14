@@ -9537,7 +9537,16 @@ window._repCargarFaltantes=async()=>{
 
 const _autoStyle='background:rgba(0,180,80,0.08);border:1px solid rgba(0,180,80,0.2);color:var(--text);cursor:not-allowed'
 
+// ══ NUEVO (14jul26 · FIX CARRERA DE FECHAS) ══════════════════════════════════════════════════
+// Al TECLEAR la fecha, el navegador dispara VARIOS cambios (13 → primero "01", luego "13") y cada
+// uno lanzaba una carga. Ganaba la que TERMINABA de última — que podía ser la VIEJA. Resultado:
+// el selector decía 13/07 pero la pantalla mostraba el 1 de julio, y el botón Guardar quedaba
+// apuntando al día EQUIVOCADO (riesgo de guardar IDs en el día que no era).
+// Ahora cada carga lleva un TICKET. Solo la MÁS NUEVA tiene permiso de pintar. Las viejas se
+// descartan calladas. Con el calendario nunca se notó porque solo dispara un cambio.
+window._repLoadSeq=0
 async function cargarReporteData(){
+  const _seq=++window._repLoadSeq // 🎟️ ticket de ESTA carga
   const el=document.getElementById('rep-content')
   if(!el)return
   el.innerHTML='<div class="loading">Cargando...</div>'
@@ -9752,6 +9761,10 @@ async function cargarReporteData(){
   if(esHoy)modoBanner=`<div style="background:var(--green-bg);border:3px solid var(--green);border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:15px;font-weight:700;color:var(--text)">✅ Estás anotando las ventas de <b>HOY</b>.</div>`
   else if(esAyer)modoBanner=`<div style="background:var(--amber-bg);border:3px solid var(--amber);border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:15px;font-weight:700;color:var(--text);line-height:1.6">⏳ Estás completando los IDs de <b>AYER</b>.<br><span style="font-weight:500;font-size:13px;color:var(--muted)">Es temporal, hasta que llegue el archivo de Dropi al mediodía. Cuando llegue, esto se reemplaza solo. No pasa nada si lo dejas.</span></div>`
   else if(esHistManual)modoBanner=`<div style="background:rgba(59,130,246,.10);border:3px solid var(--blue);border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:15px;font-weight:700;color:var(--text);line-height:1.6">🕐 Estás llenando el <b>${window._repDiaInfo(fecha).txt.replace('🕐 ','')}</b>.<br><span style="font-weight:500;font-size:13px;color:var(--muted)">Órdenes de Dropi arriba · tus IDs y conversaciones abajo. Todo de ESTE día.</span></div>`
+  // 🎟️ PORTERO (14jul26): ¿mi ticket sigue siendo el más nuevo? Si mientras yo consultaba la nube
+  // el usuario cambió de fecha otra vez, YO SOY VIEJA → me callo y no pinto nada. Así la pantalla
+  // SIEMPRE queda con el día que el selector muestra, y el botón Guardar nunca apunta a otro día.
+  if(_seq!==window._repLoadSeq)return
   el.innerHTML=`
     ${pendHtml}${modoBanner}
     <div class="section-title" style="color:var(--green)">📊 Datos ${labelFecha} (auto desde Dropi)</div>
@@ -9784,7 +9797,7 @@ async function cargarReporteData(){
       addVentaRow()
     }
   }
-  }catch(e){el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`}
+  }catch(e){if(_seq===window._repLoadSeq)el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`} // 🎟️ portero también en el error
 }
 window.cargarReporteData=cargarReporteData
 
@@ -9897,11 +9910,31 @@ window._repCopiarResumen=async function(btn){
   if(btn){const o=btn.textContent;btn.textContent=ok?'✅ Copiado':'❌ No se pudo';setTimeout(()=>{btn.textContent=o},2200)}
 }
 window.saveReporteV2=async(fecha)=>{
+  // ══ NUEVO (14jul26 · BLINDAJE DEL GUARDADO) ═══════════════════════════════════════════════
+  // 1) CONGELA las cargas que vengan en camino. Si una carga terminaba justo después de guardar,
+  //    repintaba la pantalla entera y BORRABA el mensaje de resultado → parecía que "no pasaba nada".
+  window._repLoadSeq++
+  // 2) El mensaje JAMÁS puede fallar en silencio: si el contenedor no existe, se crea al vuelo.
+  //    (Antes, si no existía, el guardado reventaba sin decir ni pío.)
+  let msg=document.getElementById('rep-msg')
+  if(!msg){
+    const _cont=document.getElementById('rep-content')||document.body
+    msg=document.createElement('div');msg.id='rep-msg';msg.style.marginTop='10px'
+    _cont.appendChild(msg)
+  }
+  // 3) LEY: la PANTALLA y el SELECTOR tienen que apuntar al MISMO día. Si no coinciden, algo se
+  //    desincronizó y guardar metería los IDs en el día EQUIVOCADO → se frena en seco y avisa.
+  const _fSel=document.getElementById('rep-fecha')?.value||''
+  if(_fSel&&_fSel!==fecha){
+    const _fmt=(d)=>{const p=String(d).split('-');return p.length===3?`${p[2]}/${p[1]}/${p[0]}`:d}
+    msg.innerHTML=`<div class="alert alert-red" style="line-height:1.7">🚫 <b>NO se guardó NADA.</b> La pantalla se desincronizó:<br>🖥️ Los datos que ves son del <b>${_fmt(fecha)}</b><br>📅 Pero el selector marca el <b>${_fmt(_fSel)}</b><br><span style="font-size:11px;color:var(--muted)">Vuelve a elegir la fecha (mejor desde el calendario 📅) y guarda. Nada se perdió — pero NO iba a dejar que los IDs cayeran en el día equivocado.</span></div>`
+    msg.scrollIntoView({behavior:'smooth',block:'center'})
+    return
+  }
   const esHoy=fecha===today()
   const esAyer=fecha===_daysAgo(1)
   // R3 (2jul26): el selector único permite guardar IDs de CUALQUIER día pasado por la vía normal
   const permiteVentas=fecha<=today()
-  const msg=document.getElementById('rep-msg')
   // NUEVO (7jul26 · Mejora 6): DOBLE SEGURO del candado — aunque algo pinte el formulario, el
   // auxiliar sin el permiso NO guarda nada de días distintos a HOY. Admin y demás roles, igual.
   // MEJORA (7jul26 · Candado fecha): el permiso se re-verifica EN VIVO contra la BD antes de dejar

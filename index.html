@@ -22937,7 +22937,8 @@ window._rpResaltarIdBuscado=function(fid){
     st.textContent='[data-idwrap="'+f+'"]{background:#ffd60a!important;border-color:#ffd60a!important;box-shadow:0 0 0 2px rgba(255,214,10,.35)!important}\n'+
       '[data-idwrap="'+f+'"] span{color:#1a1205!important;font-weight:800!important}\n'+
       '[data-idwrap="'+f+'"] button{background:rgba(0,0,0,.15)!important;color:#1a1205!important;border-color:rgba(0,0,0,.35)!important}\n'+
-      '.rp-fus-row[data-fcampid="'+f+'"],.rp-rng-row[data-fcampid="'+f+'"]{outline:2px solid rgba(255,214,10,.75)!important;outline-offset:-2px!important}'
+      '.rp-fus-row[data-fcampid="'+f+'"],.rp-rng-row[data-fcampid="'+f+'"]{outline:2px solid rgba(255,214,10,.75)!important;outline-offset:-2px!important}\n'+
+      'span[data-rngadid="'+f+'"][data-rngtipo="as"]+span{background:#ffd60a!important;color:#1a1205!important;border-radius:6px;padding:1px 5px;font-weight:800!important}'
   }catch(_){}
 }
 // 2) _rpScrollBajoUrgencia(el): posiciona el elemento JUSTO DEBAJO del bloque pegado de estados+
@@ -22952,45 +22953,57 @@ window._rpScrollBajoUrgencia=function(el){
       if(scr&&typeof scr.scrollBy==='function')scr.scrollBy({top:delta,behavior:'smooth'})
       else window.scrollBy({top:delta,behavior:'smooth'})
     }
-    // FIX (16jul26): con la VENTANA REDUCIDA, la pila pegada (encabezado de días + fila de la
-    // campaña + barritas moradas) tapaba la tarjeta. 2ª pasada: tras asentarse el scroll se MIDE
-    // lo que realmente la cubre (elementos sticky/fixed encima de ella) y se corrige para que
-    // quede ABAJITO de la última barrita — garantiza tarjeta visible en cualquier tamaño.
-    setTimeout(()=>{try{window._rpDestaparTarjeta(el,scr)}catch(_){}},520)
-    setTimeout(()=>{try{window._rpDestaparTarjeta(el,scr)}catch(_){}},1050)
+    // FIX (16jul26 · v2): CONVERGENCIA — antes 2 correcciones ciegas (520/1050ms) se pisaban con
+    // el scroll suave y dejaban HUECO (o tapada). Ahora, tras el scroll inicial, se corrige en
+    // pasos INSTANTÁNEOS y bidireccionales hasta que la tarjeta quede clavada (±3px) debajo de
+    // la última pieza fija de la pila (barrita morada incluida): la SUBE si quedó hueco y la
+    // BAJA si quedó tapada. Máx 10 pasos — para solo cuando ya está en su puesto.
+    let _nCv=0
+    const _conv=()=>{try{if(window._rpDestaparTarjeta(el,scr)&&++_nCv<10)setTimeout(_conv,170)}catch(_){}}
+    setTimeout(_conv,620)
     return true
   }catch(_){return false}
 }
-// Mide con elementsFromPoint qué elementos PEGADOS (sticky/fixed) están cubriendo el borde
-// superior de la tarjeta y baja el scroll justo lo necesario para destaparla. Idempotente:
-// si nada la tapa, no mueve nada. No toca la pila — solo corrige la posición final.
+// Mide el FONDO REAL de la pila pegada sobre la tarjeta (sondas elementsFromPoint desde el bloque
+// de filtros hasta el borde de la tarjeta: capta encabezado de días, fila pegada de la campaña y
+// barritas moradas — cualquier sticky/fixed) y mueve el scroll EXACTO para dejar la tarjeta a 6px
+// debajo. Bidireccional e idempotente: devuelve true solo si tuvo que corregir.
 window._rpDestaparTarjeta=function(el,scr){
   try{
-    if(!el||el.offsetParent===null)return
+    if(!el||el.offsetParent===null)return false
     const r=el.getBoundingClientRect()
     const vw=window.innerWidth,vh=window.innerHeight
-    if(r.top>=vh-10)return
     const x0=Math.max(r.left,0),x1=Math.min(r.right,vw)
-    if(x1-x0<20)return
+    if(x1-x0<20)return false
     const xs=[x0+10,x0+Math.min(150,(x1-x0)*.4),(x0+x1)/2].map(x=>Math.min(Math.max(x,2),vw-2))
-    const y=Math.min(Math.max(r.top+3,2),vh-2)
-    let cov=0
-    for(const x of xs){
+    const yTop=Math.max((window._nxPileAnchor?window._nxPileAnchor(el,null):0)||0,0)
+    let cov=yTop
+    const ys=[]
+    const _paso=Math.max(10,(r.top-yTop)/6)
+    for(let y=yTop+3;y<Math.min(r.top+4,vh-2);y+=_paso)ys.push(y)
+    ys.push(Math.min(Math.max(r.top+2,2),vh-2))
+    for(const x of xs)for(const y of ys){
+      if(y<2)continue
       const pila=document.elementsFromPoint(x,y)||[]
       for(const e of pila){
         if(e===el||el.contains(e))break
         if(e.contains(el))continue
         let ps=''
         try{ps=getComputedStyle(e).position}catch(_){continue}
-        if(ps==='sticky'||ps==='fixed'){const b=e.getBoundingClientRect().bottom;if(b>cov)cov=b}
+        if(ps!=='sticky'&&ps!=='fixed')continue
+        const er=e.getBoundingClientRect()
+        if(er.top>r.top+1)continue // pegados que EMPIEZAN debajo de la tarjeta (barrita del piso) no son pila de arriba
+        if(er.bottom>cov)cov=er.bottom
       }
     }
-    if(cov>r.top+2){
-      const d=cov-r.top+6
-      if(scr&&typeof scr.scrollBy==='function')scr.scrollBy({top:-d,behavior:'smooth'})
-      else window.scrollBy({top:-d,behavior:'smooth'})
+    const d=r.top-(cov+6) // >0: quedó HUECO → subirla · <0: quedó TAPADA → bajarla
+    if(Math.abs(d)>3){
+      if(scr&&typeof scr.scrollBy==='function')scr.scrollBy({top:d,behavior:'auto'})
+      else window.scrollBy({top:d,behavior:'auto'})
+      return true
     }
-  }catch(_){}
+    return false
+  }catch(_){return false}
 }
 // 3) _rpUbicarIdBuscado(cidF,fid): tras filtrar, lleva la vista a lo encontrado — primero la tarjeta
 //    del anuncio/conjunto (desglose abierto, vía _rpSaltarATarjeta); si no, la CAMPAÑA visible que
@@ -23039,7 +23052,14 @@ window._rpSaltarATarjeta=function(fid){
     if(boxAd)card=boxAd.parentElement
     if(!card){
       const chipAs=document.querySelector('[data-idwrap="'+fid+'"]')
-      if(chipAs){const _bx=chipAs.closest('div[id*="-adsetbox-"]');card=_bx?_bx.parentElement:null}
+      if(chipAs){
+        const _bx=chipAs.closest('div[id*="-adsetbox-"]')
+        card=_bx?_bx.parentElement:null
+        // FIX (16jul26 · rango): chips 📦 adset / 📄 publicación del MODO RANGO no viven en un
+        // adsetbox — la tarjeta es el BLOQUE del anuncio: fila del encabezado (padre del chip)
+        // y su contenedor. Así el salto funciona igual en rango que en 4 días.
+        if(!card){const _fila=chipAs.parentElement;card=_fila?(_fila.parentElement||_fila):chipAs}
+      }
     }
     if(!card){
       const rngAd=document.querySelector('[data-rngadid="'+fid+'"]')

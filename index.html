@@ -22952,13 +22952,50 @@ window._rpScrollBajoUrgencia=function(el){
       if(scr&&typeof scr.scrollBy==='function')scr.scrollBy({top:delta,behavior:'smooth'})
       else window.scrollBy({top:delta,behavior:'smooth'})
     }
+    // FIX (16jul26): con la VENTANA REDUCIDA, la pila pegada (encabezado de días + fila de la
+    // campaña + barritas moradas) tapaba la tarjeta. 2ª pasada: tras asentarse el scroll se MIDE
+    // lo que realmente la cubre (elementos sticky/fixed encima de ella) y se corrige para que
+    // quede ABAJITO de la última barrita — garantiza tarjeta visible en cualquier tamaño.
+    setTimeout(()=>{try{window._rpDestaparTarjeta(el,scr)}catch(_){}},520)
+    setTimeout(()=>{try{window._rpDestaparTarjeta(el,scr)}catch(_){}},1050)
     return true
   }catch(_){return false}
+}
+// Mide con elementsFromPoint qué elementos PEGADOS (sticky/fixed) están cubriendo el borde
+// superior de la tarjeta y baja el scroll justo lo necesario para destaparla. Idempotente:
+// si nada la tapa, no mueve nada. No toca la pila — solo corrige la posición final.
+window._rpDestaparTarjeta=function(el,scr){
+  try{
+    if(!el||el.offsetParent===null)return
+    const r=el.getBoundingClientRect()
+    const vw=window.innerWidth,vh=window.innerHeight
+    if(r.top>=vh-10)return
+    const x0=Math.max(r.left,0),x1=Math.min(r.right,vw)
+    if(x1-x0<20)return
+    const xs=[x0+10,x0+Math.min(150,(x1-x0)*.4),(x0+x1)/2].map(x=>Math.min(Math.max(x,2),vw-2))
+    const y=Math.min(Math.max(r.top+3,2),vh-2)
+    let cov=0
+    for(const x of xs){
+      const pila=document.elementsFromPoint(x,y)||[]
+      for(const e of pila){
+        if(e===el||el.contains(e))break
+        if(e.contains(el))continue
+        let ps=''
+        try{ps=getComputedStyle(e).position}catch(_){continue}
+        if(ps==='sticky'||ps==='fixed'){const b=e.getBoundingClientRect().bottom;if(b>cov)cov=b}
+      }
+    }
+    if(cov>r.top+2){
+      const d=cov-r.top+6
+      if(scr&&typeof scr.scrollBy==='function')scr.scrollBy({top:-d,behavior:'smooth'})
+      else window.scrollBy({top:-d,behavior:'smooth'})
+    }
+  }catch(_){}
 }
 // 3) _rpUbicarIdBuscado(cidF,fid): tras filtrar, lleva la vista a lo encontrado — primero la tarjeta
 //    del anuncio/conjunto (desglose abierto, vía _rpSaltarATarjeta); si no, la CAMPAÑA visible que
 //    contiene ese ID (rango u 4 días), posicionada bajo la barra de urgencia.
-window._rpUbicarIdBuscado=function(cidF,fid){
+window._rpUbicarIdBuscado=function(cidF,fid,intento){
   try{
     if(!fid||fid.length<8)return
     if(window._rpSaltarATarjeta(fid))return
@@ -22973,7 +23010,23 @@ window._rpUbicarIdBuscado=function(cidF,fid){
       const sub=document.getElementById(cidF+'-sub')
       if(sub)sub.querySelectorAll('.rp-fus-box').forEach(box=>{if(obj||box.style.display==='none')return;if(_match(box.querySelector('.rp-fus-row')))obj=box})
     }
-    if(obj)window._rpScrollBajoUrgencia(obj)
+    if(!obj)return
+    // FIX (16jul26): si el ID es de un CONJUNTO o ANUNCIO (no el de la campaña), ABRIR el desglose
+    // de esa campaña automáticamente y REINTENTAR el salto a la tarjeta — antes con el desglose
+    // cerrado solo se veía la campaña. El chip del conjunto carga async (SemLoad) → hasta 6 reintentos.
+    const _rowB=obj.querySelector('.rp-rng-row,.rp-fus-row')
+    const _esCamp=!!(_rowB&&(_rowB.dataset.fcampid||'')===fid)
+    if(!_esCamp){
+      const _cc=(obj.id||'').replace(/-box$/,'')
+      const _subD=_cc?document.getElementById(_cc+'-sub'):null
+      if(_subD&&_subD.style.display==='none'){
+        try{window._rpToggleCuadre(_cc)}catch(_){}
+        try{window._rpFusionSemLoad&&window._rpFusionSemLoad(_cc)}catch(_){}
+      }
+      const _n=intento||0
+      if(_n<6){setTimeout(()=>{try{if(!window._rpSaltarATarjeta(fid))window._rpUbicarIdBuscado(cidF,fid,_n+1)}catch(_){}},_n===0?180:450);return}
+    }
+    window._rpScrollBajoUrgencia(obj)
   }catch(_){}
 }
 // Salto a la tarjeta: si el DESGLOSE está abierto, scrollea y resalta el bloque del anuncio (por su

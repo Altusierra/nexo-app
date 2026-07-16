@@ -22922,6 +22922,60 @@ window._rpResolverIdMeta=async function(cidF,fid){
     }
   }catch(_e){try{window._rpIdMetaCache[fid]=null}catch(_){}}
 }
+// ═══ MEJORA (16jul26): RESALTADO AMARILLO del ID buscado + posicionar bajo la barra de urgencia ═══
+// 1) _rpResaltarIdBuscado(fid): pinta de AMARILLO todos los chips [data-idwrap] cuyo ID sea el buscado
+//    (campaña, conjunto o anuncio) + marca con borde amarillo la fila de la campaña que lo contiene.
+//    Usa un <style> dinámico con !important → aplica también a chips que se pinten DESPUÉS (al abrir
+//    un desglose), sin observers ni hooks. fid vacío (✖ o borrar el buscador) = quita el resaltado.
+window._rpResaltarIdBuscado=function(fid){
+  try{
+    const f=String(fid||'').replace(/\D/g,'')
+    let st=document.getElementById('nx-idhl-style')
+    if(!f||f.length<8){if(st)st.textContent='';window._rpIdBuscado='';return}
+    window._rpIdBuscado=f
+    if(!st){st=document.createElement('style');st.id='nx-idhl-style';document.head.appendChild(st)}
+    st.textContent='[data-idwrap="'+f+'"]{background:#ffd60a!important;border-color:#ffd60a!important;box-shadow:0 0 0 2px rgba(255,214,10,.35)!important}\n'+
+      '[data-idwrap="'+f+'"] span{color:#1a1205!important;font-weight:800!important}\n'+
+      '[data-idwrap="'+f+'"] button{background:rgba(0,0,0,.15)!important;color:#1a1205!important;border-color:rgba(0,0,0,.35)!important}\n'+
+      '.rp-fus-row[data-fcampid="'+f+'"],.rp-rng-row[data-fcampid="'+f+'"]{outline:2px solid rgba(255,214,10,.75)!important;outline-offset:-2px!important}'
+  }catch(_){}
+}
+// 2) _rpScrollBajoUrgencia(el): posiciona el elemento JUSTO DEBAJO del bloque pegado de estados+
+//    urgencia+buscador (misma ancla _nxPileAnchor de la pila) — encontrado → arriba, sin taparse.
+window._rpScrollBajoUrgencia=function(el){
+  try{
+    if(!el||el.offsetParent===null)return false
+    const scr=document.querySelector('.content')
+    const anchor=(window._nxPileAnchor?window._nxPileAnchor(el,null):0)||0
+    const delta=el.getBoundingClientRect().top-anchor-6
+    if(Math.abs(delta)>2){
+      if(scr&&typeof scr.scrollBy==='function')scr.scrollBy({top:delta,behavior:'smooth'})
+      else window.scrollBy({top:delta,behavior:'smooth'})
+    }
+    return true
+  }catch(_){return false}
+}
+// 3) _rpUbicarIdBuscado(cidF,fid): tras filtrar, lleva la vista a lo encontrado — primero la tarjeta
+//    del anuncio/conjunto (desglose abierto, vía _rpSaltarATarjeta); si no, la CAMPAÑA visible que
+//    contiene ese ID (rango u 4 días), posicionada bajo la barra de urgencia.
+window._rpUbicarIdBuscado=function(cidF,fid){
+  try{
+    if(!fid||fid.length<8)return
+    if(window._rpSaltarATarjeta(fid))return
+    const _res=(window._rpIdMetaCache&&typeof window._rpIdMetaCache[fid]==='string'&&window._rpIdMetaCache[fid]!=='...')?window._rpIdMetaCache[fid]:''
+    const _match=(row)=>!!(row&&(((row.dataset.fcampid||'').includes(fid))||((row.dataset.fadids||'').includes(fid))||(_res&&(row.dataset.fcampid||'')===_res)))
+    let obj=null
+    const cont=document.getElementById(cidF+'-rango')
+    if(cont&&cont.style.display!=='none'&&cont.innerHTML){
+      cont.querySelectorAll('.rp-rng-box').forEach(box=>{if(obj||box.style.display==='none')return;if(_match(box.querySelector('.rp-rng-row')))obj=box})
+    }
+    if(!obj){
+      const sub=document.getElementById(cidF+'-sub')
+      if(sub)sub.querySelectorAll('.rp-fus-box').forEach(box=>{if(obj||box.style.display==='none')return;if(_match(box.querySelector('.rp-fus-row')))obj=box})
+    }
+    if(obj)window._rpScrollBajoUrgencia(obj)
+  }catch(_){}
+}
 // Salto a la tarjeta: si el DESGLOSE está abierto, scrollea y resalta el bloque del anuncio (por su
 // adsetbox id) o del conjunto (chip data-idwrap que pinta _rpFusionSemLoad · fila data-rngadid en rango).
 window._rpSaltarATarjeta=function(fid){
@@ -22939,7 +22993,7 @@ window._rpSaltarATarjeta=function(fid){
       if(rngAd)card=rngAd.parentElement
     }
     if(!card||card.offsetParent===null)return false
-    try{card.scrollIntoView({behavior:'smooth',block:'center'})}catch(_){card.scrollIntoView()}
+    try{if(!window._rpScrollBajoUrgencia||!window._rpScrollBajoUrgencia(card))card.scrollIntoView({behavior:'smooth',block:'center'})}catch(_){try{card.scrollIntoView()}catch(__){}}
     const _oOut=card.style.outline,_oOff=card.style.outlineOffset
     card.style.outline='2px solid var(--amber)';card.style.outlineOffset='2px'
     setTimeout(()=>{try{card.style.outline=_oOut||'';card.style.outlineOffset=_oOff||''}catch(_){}},2600)
@@ -23077,7 +23131,9 @@ window._rpFusionFiltro=function(cidF,tipo,valor,btn){
   // saltar directo a la tarjeta del anuncio/conjunto (scroll + resaltado ámbar).
   try{
     if(fid&&fid.length>=8&&vis===0&&!(fid in (window._rpIdMetaCache||{})))window._rpResolverIdMeta(cidF,fid)
-    if(tipo==='id'&&fid&&fid.length>=8)setTimeout(()=>{try{window._rpSaltarATarjeta(fid)}catch(_){}},120)
+    // MEJORA (16jul26): resaltado AMARILLO del ID encontrado (se limpia al borrar/✖/Ver todas) + posicionar bajo la barra
+    if(tipo==='id'||tipo==='reset')try{window._rpResaltarIdBuscado(fid)}catch(_){}
+    if(tipo==='id'&&fid&&fid.length>=8)setTimeout(()=>{try{window._rpUbicarIdBuscado(cidF,fid)}catch(_){}},120)
   }catch(_){}
   return vis
 }
@@ -23358,7 +23414,9 @@ window._rpRangoFiltroFull=function(cidF,tipo,valor,btn){
   // en meta_campanas y se re-filtra; con el desglose abierto salta a la tarjeta.
   try{
     if(fid&&fid.length>=8&&_visR===0&&!(fid in (window._rpIdMetaCache||{})))window._rpResolverIdMeta(cidF,fid)
-    if(tipo==='id'&&fid&&fid.length>=8)setTimeout(()=>{try{window._rpSaltarATarjeta(fid)}catch(_){}},120)
+    // MEJORA (16jul26): resaltado AMARILLO del ID encontrado (se limpia al borrar/✖/Ver todas) + posicionar bajo la barra
+    if(tipo==='id'||tipo==='reset')try{window._rpResaltarIdBuscado(fid)}catch(_){}
+    if(tipo==='id'&&fid&&fid.length>=8)setTimeout(()=>{try{window._rpUbicarIdBuscado(cidF,fid)}catch(_){}},120)
   }catch(_){}
   try{window._rpRangoTotales(cidF)}catch(_){}
   // Resaltar los pills activos (encabezado + subsección) — mismo lenguaje visual de los 4 días

@@ -22114,7 +22114,8 @@ function _renderProductoCardResumen(data,ranking){
         ${_urgPillF('escalar',_contaF.escalar,'🟢 ESCALAR','var(--green)','var(--green-bg)','ESCALAR: CPA Real Efectivas de hoy sano (45–70% del BE). Click para filtrar y subir +30%.')}
         ${_urgPillF('sin_ventas',_contaF.sin_ventas,'⏳ ESPERAR','var(--muted)','var(--card)','ESPERAR: gastó HOY y aún sin ventas (gasto bajo) — está esperando resultados DE VERDAD. Las que NO gastaron hoy ya no entran aquí: quedan solo con su badge (🔕 NO ENTREGA / ⏸ APAGADA). Click para filtrar y dejar correr.')}
         <button id="${_cidF}-btnclr" onclick="event.stopPropagation();window._rpFusionFiltro('${_cidF}','reset','',this)" title="Quitar TODOS los filtros de una (urgencia + activas/inactivas + día + con/sin ventas + buscador por ID) y mostrar todas las campañas" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:4px 9px;font-size:10px;cursor:pointer">Ver todas</button>
-        <input type="text" id="${_cidF}-buscarid" placeholder="🆔 Buscar por ID de campaña o anuncio..." onclick="event.stopPropagation()" oninput="window._rpFusionFiltro('${_cidF}','id',this.value)" style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:5px 10px;color:var(--text);font-size:11px;flex:1;min-width:170px;outline:none" title="Pega el ID de una campaña O de un anuncio: te deja la campaña donde está metido ese ID.">
+        <input type="text" id="${_cidF}-buscarid" placeholder="🆔 Buscar por ID de campaña, conjunto o anuncio..." onclick="event.stopPropagation()" oninput="window._rpFusionFiltro('${_cidF}','id',this.value)" style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:5px 10px;color:var(--text);font-size:11px;flex:1;min-width:170px;outline:none" title="Pega el ID de una campaña, de un CONJUNTO (adset) o de un anuncio: te deja la campaña donde está metido ese ID. Si el desglose está abierto, te lleva directo a la tarjeta del anuncio/conjunto.">
+        <button onclick="event.stopPropagation();window._rpPegarBuscarId('${_cidF}',this)" title="📋 PEGAR: lee el ID que tienes copiado en el portapapeles, lo mete al buscador y filtra de una — sin escribir nada" style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue);border-radius:6px;padding:4px 9px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap">📋 Pegar</button>
         <button onclick="event.stopPropagation();const i=document.getElementById('${_cidF}-buscarid');if(i){i.value='';window._rpFusionFiltro('${_cidF}','id','')}" title="Limpiar búsqueda por ID" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:4px 9px;font-size:10px;cursor:pointer">✖</button>
       </div>`
     // NUEVO: fila Σ TOTALES como FUNCIÓN con sufijo — se pinta DOS veces (arriba del listado y abajo)
@@ -22853,6 +22854,78 @@ window._rpCopiarId=function(id,btn){
 // Los filtros se combinan entre sí (AND). Urgencia y día son toggle: clic de nuevo en el mismo pill lo quita.
 // Combinaciones útiles: HOY + Activas (vendieron hoy y están prendidas) · AYER + Inactivas ventas (vendían y
 // están apagadas → prenderlas) · HOY + CUIDADO (vendieron hoy pero el CPA está al límite), etc.
+// ═══ MEJORA 1 (14jul26): 📋 PEGAR — lee el portapapeles, mete el ID al buscador y filtra de una ═══
+window._rpPegarBuscarId=async function(cidF,btn){
+  const i=document.getElementById(cidF+'-buscarid')
+  try{
+    const txt=await navigator.clipboard.readText()
+    const val=String(txt||'').trim()
+    if(i){i.value=val;window._rpFusionFiltro(cidF,'id',val)}
+    if(btn){const _t=btn.textContent;btn.textContent='✅';setTimeout(()=>{try{btn.textContent=_t}catch(_){}},1100)}
+  }catch(_e){
+    // Sin permiso de portapapeles (o navegador viejo): foco al input para pegar manual con Ctrl+V
+    if(i){i.focus()}
+    if(btn){const _t=btn.textContent;btn.textContent='⚠️ Ctrl+V';setTimeout(()=>{try{btn.textContent=_t}catch(_){}},1600)}
+  }
+}
+// ═══ MEJORA 2 (14jul26): el buscador también resuelve IDs de CONJUNTO (adset) y de anuncios SIN
+// ventas registradas → consulta meta_campanas (adset→campaña · ad→adset→campaña), cachea el
+// resultado y re-filtra dejando visible la campaña contenedora. Cero impacto si el ID es de campaña
+// o de un ad ya conocido (esos matchean directo por data-attrs, sin query). ═══
+window._rpIdMetaCache=window._rpIdMetaCache||{}
+window._rpResolverIdMeta=async function(cidF,fid){
+  try{
+    if(!fid||fid.length<8)return
+    const cache=window._rpIdMetaCache
+    if(fid in cache)return
+    cache[fid]='...'
+    let campId=null
+    if(typeof sb!=='undefined'&&sb){
+      const{data:asR}=await sb.from('meta_campanas').select('parent_id').eq('nivel','adset').eq('meta_id',fid).limit(1)
+      if(asR&&asR[0]&&asR[0].parent_id)campId=String(asR[0].parent_id)
+      if(!campId){
+        const{data:adR}=await sb.from('meta_campanas').select('parent_id').eq('nivel','ad').eq('meta_id',fid).limit(1)
+        const asId=(adR&&adR[0]&&adR[0].parent_id)?String(adR[0].parent_id):null
+        if(asId){
+          const{data:as2}=await sb.from('meta_campanas').select('parent_id').eq('nivel','adset').eq('meta_id',asId).limit(1)
+          if(as2&&as2[0]&&as2[0].parent_id)campId=String(as2[0].parent_id)
+        }
+      }
+    }
+    cache[fid]=campId
+    if(campId){
+      // Re-aplicar el filtro vigente (4 días o rango, la función decide sola) para que la campaña aparezca
+      const sub=document.getElementById(cidF+'-sub')
+      const cont=document.getElementById(cidF+'-rango')
+      const _fidVig=(sub&&sub.dataset.fid)||(cont&&cont.dataset.fid)||''
+      if(_fidVig===fid)window._rpFusionFiltro(cidF,'id',fid)
+    }
+  }catch(_e){try{window._rpIdMetaCache[fid]=null}catch(_){}}
+}
+// Salto a la tarjeta: si el DESGLOSE está abierto, scrollea y resalta el bloque del anuncio (por su
+// adsetbox id) o del conjunto (chip data-idwrap que pinta _rpFusionSemLoad · fila data-rngadid en rango).
+window._rpSaltarATarjeta=function(fid){
+  try{
+    if(!fid||fid.length<8)return false
+    let card=null
+    const boxAd=document.querySelector('[id$="-adsetbox-'+fid+'"]')
+    if(boxAd)card=boxAd.parentElement
+    if(!card){
+      const chipAs=document.querySelector('[data-idwrap="'+fid+'"]')
+      if(chipAs){const _bx=chipAs.closest('div[id*="-adsetbox-"]');card=_bx?_bx.parentElement:null}
+    }
+    if(!card){
+      const rngAd=document.querySelector('[data-rngadid="'+fid+'"]')
+      if(rngAd)card=rngAd.parentElement
+    }
+    if(!card||card.offsetParent===null)return false
+    try{card.scrollIntoView({behavior:'smooth',block:'center'})}catch(_){card.scrollIntoView()}
+    const _oOut=card.style.outline,_oOff=card.style.outlineOffset
+    card.style.outline='2px solid var(--amber)';card.style.outlineOffset='2px'
+    setTimeout(()=>{try{card.style.outline=_oOut||'';card.style.outlineOffset=_oOff||''}catch(_){}},2600)
+    return true
+  }catch(_){return false}
+}
 window._rpFusionFiltro=function(cidF,tipo,valor,btn){
   const sub=document.getElementById(cidF+'-sub');if(!sub)return
   // NUEVO (2jul26 · Mejoras 1+3): con el MODO RANGO visible, los mismos chips filtran EL RANGO
@@ -22875,6 +22948,9 @@ window._rpFusionFiltro=function(cidF,tipo,valor,btn){
   // NUEVO: 'reset' limpia TODOS los filtros de una (urgencia + estado + día + con/sin ventas + buscador por ID)
   else if(tipo==='reset'){sub.dataset.fsem='';sub.dataset.festado='';sub.dataset.fdia='';sub.dataset.fvsv='';sub.dataset.fid='';try{const _inp=document.getElementById(cidF+'-buscarid');if(_inp)_inp.value=''}catch(_){}}
   const fsem=sub.dataset.fsem||'',fest=sub.dataset.festado||'',fid=(sub.dataset.fid||'').trim(),fdia=sub.dataset.fdia||'',fvsv=sub.dataset.fvsv||''
+  // MEJORA 2 (14jul26): si el ID pegado es de un ADSET o de un ad sin ventas, _rpResolverIdMeta ya
+  // dejó en cache la campaña contenedora → se acepta como match adicional (fila cuyo campId = resuelto)
+  const _fidCampRes=(fid&&window._rpIdMetaCache&&typeof window._rpIdMetaCache[fid]==='string'&&window._rpIdMetaCache[fid]!=='...')?window._rpIdMetaCache[fid]:''
   let vis=0
   sub.querySelectorAll('.rp-fus-box').forEach(box=>{
     const row=box.querySelector('.rp-fus-row');if(!row)return
@@ -22898,7 +22974,8 @@ window._rpFusionFiltro=function(cidF,tipo,valor,btn){
       if(!(_vtaDiaF4||_gDiaF4>0))ok=false
     }
     // NUEVO (11jun26): el buscador también encuentra IDs de ANUNCIOS — deja la campaña que contiene ese ad
-    if(fid&&!((row.dataset.fcampid||'').includes(fid)||(row.dataset.fadids||'').includes(fid)))ok=false
+    // MEJORA 2 (14jul26): + IDs de CONJUNTO (adset) y ads sin ventas, vía campaña resuelta en meta_campanas
+    if(fid&&!((row.dataset.fcampid||'').includes(fid)||(row.dataset.fadids||'').includes(fid)||(_fidCampRes&&(row.dataset.fcampid||'')===_fidCampRes)))ok=false
     // NUEVO: ✅/⛔ con o sin ventas. Si hay un DÍA marcado, mira las ventas de ESE día (HOY = por 🆔 IDs, sin cruce todavía);
     // si no, mira el PERÍODO completo (confirmadas Dropi 🛒 VTS o 🆔 IDs del total). Se combina con todo lo de arriba.
     if(fvsv){
@@ -22923,7 +23000,7 @@ window._rpFusionFiltro=function(cidF,tipo,valor,btn){
     if(fsem&&(row.dataset.fsem||'')!==fsem)okE=false
     if(fest)okE=false
     if(fdia)okE=false
-    if(fid&&!((row.dataset.fcampid||'').includes(fid)))okE=false
+    if(fid&&!((row.dataset.fcampid||'').includes(fid)||(_fidCampRes&&(row.dataset.fcampid||'')===_fidCampRes)))okE=false
     if(fvsv){const _li=parseFloat(row.dataset.lifeIds)||0;if(fvsv==='con'&&!(_li>0))okE=false;if(fvsv==='sin'&&_li>0)okE=false}
     row.style.display=okE?'':'none'
     if(okE)vis++
@@ -22955,7 +23032,7 @@ window._rpFusionFiltro=function(cidF,tipo,valor,btn){
       if(fest==='inact'&&(row.dataset.factiva==='1'||_esPy||row.dataset.fghoy!=='1'))ok=false
       if(fest==='noent'&&row.dataset.fnoent!=='1')ok=false
       if(fest==='hoy'&&(_esPy||!(row.dataset.factiva==='1'||row.dataset.fghoy==='1')))ok=false
-      if(fid&&!((row.dataset.fcampid||'').includes(fid)||(row.dataset.fadids||'').includes(fid)))ok=false
+      if(fid&&!((row.dataset.fcampid||'').includes(fid)||(row.dataset.fadids||'').includes(fid)||(_fidCampRes&&(row.dataset.fcampid||'')===_fidCampRes)))ok=false
       box.style.display=ok?'':'none'
     })
   }}catch(_){}
@@ -22975,6 +23052,13 @@ window._rpFusionFiltro=function(cidF,tipo,valor,btn){
   // en 0 se atenúa sola → imposible armar una combinación vacía) + botón Ver todas ↔ ✖ Limpiar filtros
   try{window._rpFusionCounts&&window._rpFusionCounts(cidF)}catch(_){}
   try{window._rpFusionClrState&&window._rpFusionClrState(cidF)}catch(_){}
+  // MEJORA 2 (14jul26): ID sin match (adset o ad sin ventas) → resolver campaña contenedora en
+  // meta_campanas (async, cacheado; al resolver se re-filtra solo). Y si el desglose está abierto,
+  // saltar directo a la tarjeta del anuncio/conjunto (scroll + resaltado ámbar).
+  try{
+    if(fid&&fid.length>=8&&vis===0&&!(fid in (window._rpIdMetaCache||{})))window._rpResolverIdMeta(cidF,fid)
+    if(tipo==='id'&&fid&&fid.length>=8)setTimeout(()=>{try{window._rpSaltarATarjeta(fid)}catch(_){}},120)
+  }catch(_){}
   return vis
 }
 
@@ -23113,7 +23197,7 @@ window._rpFusRowOkC=function(row,f){
   if(f.fest==='noent'&&ds.fnoent!=='1')return false
   if(f.fest==='hoy'&&(_esPy||!(ds.factiva==='1'||ds.fghoy==='1')))return false
   if(f.fdia&&!(ds.fdias||'').split(',').includes(f.fdia))return false
-  if(f.fid&&!((ds.fcampid||'').includes(f.fid)||(ds.fadids||'').includes(f.fid)))return false
+  if(f.fid&&!((ds.fcampid||'').includes(f.fid)||(ds.fadids||'').includes(f.fid)||(window._rpIdMetaCache&&typeof window._rpIdMetaCache[f.fid]==='string'&&window._rpIdMetaCache[f.fid]!=='...'&&(ds.fcampid||'')===window._rpIdMetaCache[f.fid])))return false
   if(f.fvsv){
     const pi=a=>parseInt(ds[a]||'0',10)||0
     let v
@@ -23219,6 +23303,9 @@ window._rpRangoFiltroFull=function(cidF,tipo,valor,btn){
   else if(tipo==='dia')cont.dataset.fdia=(cont.dataset.fdia===String(valor)?'':String(valor??'')) // NUEVO (2jul26 · Mejora 5): filtro por DÍA del rango (índice de columna)
   else if(tipo==='reset'){cont.dataset.fsem='';cont.dataset.festado='';cont.dataset.fvsv='';cont.dataset.fid='';cont.dataset.fdia='';try{const _inp=document.getElementById(cidF+'-buscarid');if(_inp)_inp.value=''}catch(_){}}
   const fsem=cont.dataset.fsem||'',fest=cont.dataset.festado||'',fvsv=cont.dataset.fvsv||'',fid=(cont.dataset.fid||'').trim(),fdia=(cont.dataset.fdia||'').trim()
+  // MEJORA 2 (14jul26): mismo match adicional de los 4 días — adset/ad sin ventas → campaña resuelta del cache
+  const _fidCampRes=(fid&&window._rpIdMetaCache&&typeof window._rpIdMetaCache[fid]==='string'&&window._rpIdMetaCache[fid]!=='...')?window._rpIdMetaCache[fid]:''
+  let _visR=0
   cont.querySelectorAll('.rp-rng-box').forEach(box=>{
     const row=box.querySelector('.rp-rng-row');if(!row){box.style.display='';return}
     let ok=true
@@ -23230,7 +23317,7 @@ window._rpRangoFiltroFull=function(cidF,tipo,valor,btn){
     if(fest==='inact'&&(row.dataset.factiva==='1'||_esPy||row.dataset.fghoy!=='1'))ok=false
     if(fest==='hoy'&&(_esPy||!(row.dataset.factiva==='1'||row.dataset.fghoy==='1')))ok=false
     if(fest==='noent'&&row.dataset.fnoent!=='1')ok=false
-    if(fid&&!((row.dataset.fcampid||'').includes(fid)||(row.dataset.fadids||'').includes(fid)))ok=false
+    if(fid&&!((row.dataset.fcampid||'').includes(fid)||(row.dataset.fadids||'').includes(fid)||(_fidCampRes&&(row.dataset.fcampid||'')===_fidCampRes)))ok=false
     // MEJORA 2 (3jul26): día marcado → TODA campaña que GASTÓ ese día (con o sin ventas).
     // Antes solo mostraba las que vendieron (🛒 o 🆔) y escondía las que gastaron en cero.
     // Las que NO gastaron NI vendieron ese día siguen ocultas.
@@ -23245,7 +23332,14 @@ window._rpRangoFiltroFull=function(cidF,tipo,valor,btn){
       if(fvsv==='sin'&&v>0)ok=false
     }
     box.style.display=ok?'':'none'
+    if(ok)_visR++
   })
+  // MEJORA 2 (14jul26): igual que en los 4 días — ID sin match (adset/ad sin ventas) se resuelve
+  // en meta_campanas y se re-filtra; con el desglose abierto salta a la tarjeta.
+  try{
+    if(fid&&fid.length>=8&&_visR===0&&!(fid in (window._rpIdMetaCache||{})))window._rpResolverIdMeta(cidF,fid)
+    if(tipo==='id'&&fid&&fid.length>=8)setTimeout(()=>{try{window._rpSaltarATarjeta(fid)}catch(_){}},120)
+  }catch(_){}
   try{window._rpRangoTotales(cidF)}catch(_){}
   // Resaltar los pills activos (encabezado + subsección) — mismo lenguaje visual de los 4 días
   try{

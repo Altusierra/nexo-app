@@ -1831,14 +1831,27 @@ async function logAction(accion,detalles){
 }
 async function callEdge(action,payload){
   try{
+    // FIX (17jul26): "Invalid token" en Editar usuario / Cambiar contraseña = sesión vencida.
+    // Se verifica la sesión ANTES de invocar y se refresca si ya venció o está por vencer (<60s).
+    try{
+      const{data:_sd}=await sb.auth.getSession()
+      let _ses=_sd?.session
+      if(_ses&&_ses.expires_at&&(_ses.expires_at*1000-Date.now())<60000){
+        const{data:_rd}=await sb.auth.refreshSession()
+        if(_rd?.session)_ses=_rd.session
+      }
+      if(!_ses)return{ok:false,error:'⚠️ Tu sesión expiró — cierra sesión y vuelve a entrar para continuar.'}
+    }catch(_){}
+    const _sesMsg='⚠️ Tu sesión expiró — cierra sesión, vuelve a entrar y reintenta.'
     const{data,error}=await sb.functions.invoke('manage-user',{body:{action,payload}})
     if(error){
       // Intentar extraer el error real del body
       let realMsg=error.message
       try{const body=await error.context?.json?.();if(body?.error)realMsg=body.error}catch(_){}
+      if(/invalid token/i.test(String(realMsg||'')))realMsg=_sesMsg // FIX (17jul26)
       return{ok:false,error:realMsg}
     }
-    if(data?.error)return{ok:false,error:data.error}
+    if(data?.error)return{ok:false,error:/invalid token/i.test(String(data.error||''))?_sesMsg:data.error}
     return{ok:true,data}
   }catch(e){return{ok:false,error:e.message||'Error desconocido'}}
 }
@@ -33641,8 +33654,15 @@ async function hbProcesarArchivo(file,ctx){
       if(_disc/_tot>_umb){
         const _fr={};for(const r of f.rows)if(r.fecha)_fr[r.fecha]=(_fr[r.fecha]||0)+1
         let _fm=null;for(const[d,n]of Object.entries(_fr))if(!_fm||n>_fm.n)_fm={d,n}
-        f.nombreMal={fechaMayoritaria:_fm?_fm.d:'',discordantes:_disc,total:_tot,pct:Math.round(_disc/_tot*100)}
-        if(!_esDuplicado){f.estado='nombre_mal';return f} // FASE 7 · Punto 3: si además es duplicado, decide abajo (ambos mensajes)
+        // FIX (17jul26): NOMBRE MAL solo si la fecha MAYORITARIA es OTRA distinta a la del nombre.
+        // Antes bloqueaba aunque la mayoría coincidiera con el nombre (mensaje absurdo: "renombra
+        // a la misma fecha"). Ahora: mayoría = nombre → el nombre está BIEN → revisión por fila.
+        if(_fm&&_fm.d!==f.fechaDecl){
+          f.nombreMal={fechaMayoritaria:_fm.d,discordantes:_disc,total:_tot,pct:Math.round(_disc/_tot*100)}
+          if(!_esDuplicado){f.estado='nombre_mal';return f} // FASE 7 · Punto 3: si además es duplicado, decide abajo (ambos mensajes)
+        }else{
+          f.notas.push(`📅 ${_disc} de ${_tot} pedidos (${Math.round(_disc/_tot*100)}%) traen OTRA fecha, pero la mayoría sí coincide con el nombre — el nombre está bien; esas filas van a revisión una por una.`)
+        }
       }
     }
   }
@@ -33842,6 +33862,7 @@ window.hbOnFiles=async(inp)=>{
   if(!files.length)return
   const lista=document.getElementById('hb-lista')
   if(lista&&!window._hb.files.length)lista.innerHTML='<div class="loading">Procesando archivos...</div>'
+  try{window._hb.config=await hbLoadConfig()}catch(_){} // FIX (17jul26): config FRESCA de la BD en cada subida — los cambios del Centro de Control (ej. % nombre mal) aplican sin refrescar la página
   const ctx={hoy:window._hb.hoy,ultima:window._hb.ultima,cadena:window._hb.cadena,incluirHoy:!!document.getElementById('hb-hoy')?.checked,
     esperadas:(window._hb.esperadas||[]).slice(),archivosSesion:window._hb.files} // FASE 6 (6jul26) · M15.B: brecha + archivos de esta sesión para el anti-duplicado
   for(const file of files){

@@ -615,9 +615,13 @@ async function loadMe(uid){
 
 async function loadProductos(){
   try{
-    const{data,error}=await sb.from('productos').select('*').eq('archivado',false)
+    // 📅 MEJORA (19jul26): catálogo ordenado por FECHA DE CREACIÓN (antiguo → reciente) en TODA la app.
+    // Meta Ads y las secciones con lógica propia (urgencia/semáforos/nombre) re-ordenan por su cuenta → no las afecta.
+    const{data,error}=await sb.from('productos').select('*').eq('archivado',false).order('created_at',{ascending:true})
     if(error)console.error('loadProductos error:',error)
     productos=data||[]
+    // Defensivo: garantiza el orden aunque la BD devuelva algo raro; sin created_at → al final
+    try{productos.sort((a,b)=>{const ta=a.created_at?new Date(a.created_at).getTime():Infinity,tb=b.created_at?new Date(b.created_at).getTime():Infinity;return ta-tb})}catch(_){}
   }catch(e){console.error('loadProductos exception:',e);productos=[]}
   try{await cargarDropiIdsArchivados()}catch(_){}
   try{await cargarCostosEsperados()}catch(_){} // 💰 verificador Dropi (8jul26): índice de costos esperados + IDs paralelos
@@ -10046,18 +10050,23 @@ window._repHistGuardadosCargar=async(fecha)=>{
     const _repHistStrip=(s)=>String(s||'').replace(/<br\s*\/?>/gi,'\n').replace(/<[^>]*>/g,'').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&')
     const _fLbl=(()=>{const p=String(fecha).split('-');return p.length===3?(p[2]+'/'+p[1]+'/'+p[0]):fecha})()
     const _hora=(iso)=>{try{return new Date(iso).toLocaleString('es-CO',{timeZone:'America/Bogota',day:'2-digit',month:'2-digit',hour:'numeric',minute:'2-digit',hour12:true})}catch(_){return ''}}
+    // 🔢 MEJORA (19jul26): número por ORDEN DE CREACIÓN dentro del día — el guardado más viejo = 1️⃣.
+    // data viene DESC (el más reciente primero) → su número es data.length - i. Máx 10/día → emojis alcanzan;
+    // defensivo: del 11 en adelante sale "#11".
+    const _repHistNumEmo=(n)=>['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'][n-1]||('#'+n)
     const cards=data.map((r,i)=>{
+      const _numEmo=_repHistNumEmo(data.length-i)
       const rs=r.resumen||{}
       const lineas=(rs.lineas||[]).join('<br>')
       const tot=`Total: <b style="color:var(--text)">${rs.tot_ids||0} ID${(rs.tot_ids||0)===1?'':'s'}</b> · ${rs.productos||0} producto${(rs.productos||0)===1?'':'s'}${rs.es_hoy?'':` · 💬 ${rs.tot_conv||0} conv`}`
       // 📋 MEJORA (19jul26): texto de copia = espejo EXACTO de la tarjeta (mismo encabezado, mismas líneas, mismo total)
       window._repHistTxts[i]=(rs.lineas&&rs.lineas.length)
-        ?`📋 REPORTE — ${_fLbl} · 🕐 ${_hora(r.guardado_at)}${r.usuario?` · 👤 ${r.usuario}`:''}\n\n${rs.lineas.map(l=>_repHistStrip(l)).join('\n')}\n\n${_repHistStrip(tot)}`
-        :((rs.txt)||'')
+        ?`${_numEmo} 📋 REPORTE — ${_fLbl} · 🕐 ${_hora(r.guardado_at)}${r.usuario?` · 👤 ${r.usuario}`:''}\n\n${rs.lineas.map(l=>_repHistStrip(l)).join('\n')}\n\n${_repHistStrip(tot)}`
+        :((rs.txt)?(_numEmo+' '+rs.txt):'')
       return `<div ${i>=3?'data-hist-extra="1" style="display:none"':''}>
         <div style="margin-top:8px;padding:10px 12px;background:rgba(134,239,172,.06);border:1.5px solid var(--green);border-radius:10px;max-width:520px">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
-            <span style="font-size:13px;font-weight:800;color:var(--green)">📋 REPORTE — ${_fLbl}</span>
+            <span style="font-size:13px;font-weight:800;color:var(--green)">${_numEmo} 📋 REPORTE — ${_fLbl}</span>
             <span style="font-size:11px;font-weight:700;color:var(--muted)">🕐 ${_hora(r.guardado_at)}${r.usuario?` · 👤 ${String(r.usuario).replace(/</g,'&lt;')}`:''}</span>
             <button onclick="window._repHistCopiar(this,${i})" style="margin-left:auto;background:var(--green);border:none;border-radius:7px;color:#04110a;font-size:12px;font-weight:800;padding:5px 14px;cursor:pointer;flex-shrink:0" title="Copia el texto de ESTE guardado — pégalo en WhatsApp">📋 Copiar</button>
           </div>

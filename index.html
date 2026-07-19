@@ -5645,7 +5645,7 @@ function renderProdAccordion(prod,maestrosList){
     <div style="padding:14px;cursor:pointer;user-select:none" onclick="toggleProd('${prod.id}')">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
         <div style="flex:1;min-width:200px">
-          <div style="font-weight:600;font-size:15px;margin-bottom:6px">${prod.nombre}</div>
+          <div style="font-weight:600;font-size:15px;margin-bottom:6px">${prod.nombre}${prod.created_at?` <span style="font-size:11px;font-weight:400;color:var(--muted)" title="Fecha de creación del producto">· 📅 ${new Date(prod.created_at).toLocaleDateString('es-CO',{day:'2-digit',month:'2-digit',year:'numeric',timeZone:'America/Bogota'})}</span>`:''}</div>
           <div id="prod-resumen-${prod.id}" style="font-size:12px;color:var(--muted);line-height:1.7">Cargando...</div>
         </div>
         <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
@@ -10039,13 +10039,21 @@ window._repHistGuardadosCargar=async(fecha)=>{
     // Portero: si mientras consultaba cambiaron de día, no pinto historial de otra fecha
     if((document.getElementById('rep-fecha')?.value||'')!==fecha)return
     if(!data||!data.length){box.innerHTML='';return}
-    window._repHistTxts=data.map(r=>(r&&r.resumen&&r.resumen.txt)||'')
+    // ══ MEJORA (19jul26): 📋 Copiar = EXACTAMENTE lo que muestra la tarjeta (fecha, hora, auxiliar,
+    // productos y total tal cual se ven). Se arma tarjeta por tarjeta dentro del map de abajo desde los
+    // MISMOS datos que se pintan. Fallback: si un guardado viejo no trae `lineas`, usa su txt original.
+    window._repHistTxts=[]
+    const _repHistStrip=(s)=>String(s||'').replace(/<br\s*\/?>/gi,'\n').replace(/<[^>]*>/g,'').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&')
     const _fLbl=(()=>{const p=String(fecha).split('-');return p.length===3?(p[2]+'/'+p[1]+'/'+p[0]):fecha})()
     const _hora=(iso)=>{try{return new Date(iso).toLocaleString('es-CO',{timeZone:'America/Bogota',day:'2-digit',month:'2-digit',hour:'numeric',minute:'2-digit',hour12:true})}catch(_){return ''}}
     const cards=data.map((r,i)=>{
       const rs=r.resumen||{}
       const lineas=(rs.lineas||[]).join('<br>')
       const tot=`Total: <b style="color:var(--text)">${rs.tot_ids||0} ID${(rs.tot_ids||0)===1?'':'s'}</b> · ${rs.productos||0} producto${(rs.productos||0)===1?'':'s'}${rs.es_hoy?'':` · 💬 ${rs.tot_conv||0} conv`}`
+      // 📋 MEJORA (19jul26): texto de copia = espejo EXACTO de la tarjeta (mismo encabezado, mismas líneas, mismo total)
+      window._repHistTxts[i]=(rs.lineas&&rs.lineas.length)
+        ?`📋 REPORTE — ${_fLbl} · 🕐 ${_hora(r.guardado_at)}${r.usuario?` · 👤 ${r.usuario}`:''}\n\n${rs.lineas.map(l=>_repHistStrip(l)).join('\n')}\n\n${_repHistStrip(tot)}`
+        :((rs.txt)||'')
       return `<div ${i>=3?'data-hist-extra="1" style="display:none"':''}>
         <div style="margin-top:8px;padding:10px 12px;background:rgba(134,239,172,.06);border:1.5px solid var(--green);border-radius:10px;max-width:520px">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
@@ -17687,6 +17695,11 @@ window.novSembrar=async()=>{
 
 // ── AUXILIAR: SEGUIMIENTO DE ENTREGAS ─────────────────────
 async function pageAuxSeguimiento(c){
+  // 🚚 NUEVA REGLA (19jul26): "📦 Historial de lotes" solo se pinta si su switch está ACTIVO
+  // (Dashboard → Centro de Control → 🚚 VER ESTADO DE LOS ENVÍOS). Nace APAGADA. Si la config
+  // no carga (red caída), se queda oculto (su default) y la sección sigue normal.
+  let _segHistOn=false
+  try{await hbLoadConfig();_segHistOn=hbReglaActiva('historial_lotes')}catch(_){_segHistOn=false}
   // Fechas que el aux debe seleccionar en Dropi: DESDE = hoy-16, HASTA = hoy (Bogotá).
   const _segHasta=today(), _segDesde=_daysAgo(16)
   const _segFmt=(f)=>{try{return new Date(f+'T00:00:00').toLocaleDateString('es-CO',{day:'numeric',month:'long'})}catch(e){return f}}
@@ -17733,7 +17746,7 @@ async function pageAuxSeguimiento(c){
     </div>
     <div id="seg-pegados" style="margin-top:18px"></div>
     <div id="seg-resultado" style="margin-top:18px"></div>
-    <div class="divider"></div>
+    ${_segHistOn?`<div class="divider"></div>
     <div class="page-title" style="font-size:16px">📦 Historial de lotes</div>
     <div class="fld" style="max-width:250px;margin-bottom:14px">
       <label>Filtrar por producto</label>
@@ -17741,12 +17754,12 @@ async function pageAuxSeguimiento(c){
         <option value="">Todos</option>
         ${productos.map(p=>`<option value="${p.nombre}">${p.nombre}</option>`).join('')}
       </select></div>
-    <div id="seg-hist-content"><div class="loading">Cargando...</div></div>
+    <div id="seg-hist-content"><div class="loading">Cargando...</div></div>`:''}
     ${currentRol()==='admin'?`<div class="divider"></div>
     <div class="page-title" style="font-size:16px">📊 Devoluciones por anuncio</div>
     <div class="page-sub">Tasa de devolución real por ID de anuncio (dato clave)</div>
     <div id="seg-camp-content"><div class="loading">Cargando...</div></div>`:''}`
-  cargarSeguimientoHist()
+  if(_segHistOn)cargarSeguimientoHist() // 🚚 19jul26: no consulta la BD si el bloque está oculto
   try{ window._segLeerPegados&&window._segLeerPegados() }catch(e){}
   if(currentRol()==='admin')cargarDevPorCampana()
 }
@@ -33308,7 +33321,8 @@ const HB_ORIG={
   reglas:{ // las 14 reglas con switch — todas nacen ACTIVAS
     candado_fechas:true,nombre_mal:true,anti_duplicado:true,verif_repetidos:true,secuencia:true,
     obligatorios:true,candado_filas:true,precios_oferta:true,precio_mayoria:true,redondeo900:true,
-    stock_conv:true,deteccion_interrap:true,deteccion_estado:true,resaltado_masivo:true
+    stock_conv:true,deteccion_interrap:true,deteccion_estado:true,resaltado_masivo:true,
+    historial_lotes:false // 🚚 NUEVA (19jul26): mostrar "📦 Historial de lotes" en Ver estado de los envíos — ÚNICA que nace APAGADA
   }
 }
 // Estructura por valor en la config: {actual, fabrica}. hbValoresDefault crea todo desde HB_ORIG.
@@ -33430,7 +33444,7 @@ async function hbLoadConfig(){
           else if(e.fabrica==null)e.fabrica=_hbClone(v)
         }
         if(!cfg.reglas||typeof cfg.reglas!=='object')cfg.reglas={}
-        for(const k of Object.keys(HB_ORIG.reglas))if(typeof cfg.reglas[k]!=='boolean')cfg.reglas[k]=true
+        for(const k of Object.keys(HB_ORIG.reglas))if(typeof cfg.reglas[k]!=='boolean')cfg.reglas[k]=HB_ORIG.reglas[k]!==false // 19jul26: cada regla nace con SU default (las 14 clásicas ON; historial_lotes OFF)
         // MEJORA (19jul26): 📞 países de teléfono permitidos (Asignador) — backfill defensivo SIEMPRE.
         // Configs guardadas antes de esta mejora nacen con la fábrica: Colombia = 10 dígitos.
         if(!Array.isArray(cfg.tel_paises)||!cfg.tel_paises.length)cfg.tel_paises=[{pais:'Colombia',digitos:10}]
@@ -35290,7 +35304,11 @@ const HB_CC_REGLAS=[
   {k:'resaltado_masivo',label:'🎨 Resaltado cancelado/reservado en el Excel del masivo',critica:false,
    explica:'En el Excel descargado para Dropi, los pedidos cancelados salen en rojo y los reservados en naranja (colores configurables arriba), con prioridad sobre el color del producto.',
    pasa:'Pedido "confirmado" → color de su producto.',bloquea:'(No bloquea: solo pinta.) Pedido "CANCELADO" → fila roja.',
-   siApagas:'Todas las filas salen solo con el color de su producto, sin alertas visuales.'}
+   siApagas:'Todas las filas salen solo con el color de su producto, sin alertas visuales.'},
+  {k:'historial_lotes',label:'📦 Historial de lotes (Ver estado de los envíos)',critica:false,
+   explica:'Muestra u oculta el bloque "📦 Historial de lotes" (filtro por producto + tarjetas de lotes) al final de la sección "Ver estado de los envíos". El resto de la sección sigue igual. ÚNICA regla que nace APAGADA.',
+   pasa:'ACTIVA → el bloque aparece con su filtro y todos los lotes históricos.',bloquea:'APAGADA → el bloque no se pinta (subir el archivo y ver resultados sigue normal).',
+   siApagas:'Nadie ve el "📦 Historial de lotes" en esa sección hasta volver a activarla aquí.'}
 ]
 // ── helpers de UI ──
 function hbCcValorHTML(k){
@@ -35468,6 +35486,10 @@ async function hbRenderCfg(){
   ${_blk('#64748b','⬛ OBLIGATORIOS Y GENERACIÓN',`
   ${_reglaHTML('obligatorios')}
   ${_reglaHTML('stock_conv')}`)}
+
+  ${_blk('#f59e0b','🚚 VER ESTADO DE LOS ENVÍOS — qué se muestra',`
+  <div style="font-size:12px;color:var(--muted);margin-top:8px">Controla qué bloques se pintan dentro de la sección "Ver estado de los envíos". Aplica a todos (admin y auxiliar) al abrir la sección.</div>
+  ${_reglaHTML('historial_lotes')}`)}<!-- 🚚 NUEVO (19jul26): switch de Historial de lotes — nace APAGADA -->
 
   ${_blk('#14b8a6','📞 TELÉFONOS PERMITIDOS — el Asignador solo procesa estos dígitos',`
   <div style="font-size:12px;color:var(--muted);margin-top:8px;line-height:1.6">El teléfono de cada pedido debe tener los dígitos <b>EXACTOS</b> de alguno de estos países. Si no coincide (le sobran o le faltan), la línea <b>NO procesa</b> (error rojo) hasta corregirla. Agrega o elimina países aquí — aplica <b>de una</b> en el siguiente procesar, sin tocar código.</div>

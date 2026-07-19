@@ -444,6 +444,10 @@ tr:hover td{background:var(--card2)}
    (clase nx-cuadre-cmp) la tipografía y los paddings verticales se aprietan para que TODO el
    desglose (En campañas · Orgánicas · Huérfanos · Sin sync · TODO CUADRA) quepa a la vista en 2 columnas. */
 .nx-cuadre-cmp div{font-size:10.5px!important;padding-top:2px!important;padding-bottom:2px!important;line-height:1.3}
+/* ══ MEJORA (19jul26 · Hoja Base): AVISO ROJO PERSISTENTE — la tarjeta con problema PULSA en rojo
+   para que el auxiliar la ubique de una (se marca al dar GENERAR; se limpia al corregir/generar). */
+.hb-card-mal{border:2px solid var(--red)!important;animation:hbPulsoMal 1.15s ease-in-out infinite}
+@keyframes hbPulsoMal{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.55)}50%{box-shadow:0 0 14px 4px rgba(239,68,68,.3)}}
 </style>
 </head>
 <body>
@@ -34091,12 +34095,15 @@ function hbRender(){
       if(undoHtml)body+=`<div style="margin-top:8px;border-top:1px dashed var(--border);padding-top:6px"><div style="font-size:11px;color:var(--muted);margin-bottom:2px">Acciones aplicadas (puedes deshacerlas):</div>${undoHtml}</div>`
     }
     const notas=f.notas.length?`<div style="font-size:12px;color:var(--amber);margin-top:6px">${f.notas.map(hbEsc).join('<br>')}</div>`:''
-    html+=`<div class="card" style="margin-top:10px">
+    // MEJORA (19jul26): si este archivo quedó marcado al bloquear GENERAR → tarjeta pulsa en rojo
+    // (clase hb-card-mal) y, si trae detalle (ej. cantidades inválidas), banner con la fila exacta.
+    const _mal=(window._hbMalos instanceof Map)?window._hbMalos.get(f.name):undefined
+    html+=`<div class="card${_mal!==undefined?' hb-card-mal':''}" style="margin-top:10px">
       <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center">
         <div style="font-family:monospace;font-size:13px;word-break:break-all">📄 ${hbEsc(f.name)}</div>
         <button class="btn-sm btn-red" onclick="hbQuitar(${fi})">✕ Quitar</button>
       </div>
-      <div style="margin-top:6px;font-size:13px">${badge}</div>${notas}${body}
+      <div style="margin-top:6px;font-size:13px">${badge}</div>${_mal?`<div class="alert alert-red" style="margin-top:8px;line-height:1.9">🔴 <b>CORRIGE AQUÍ:</b><br>${_mal}</div>`:''}${notas}${body}
     </div>`
   })
   lista.innerHTML=html
@@ -34174,6 +34181,48 @@ window.hbCopyTel=(tel,btn)=>{
 }
 // Botoncito 📋 reutilizable junto a cualquier teléfono del Constructor
 const hbTelBtn=tel=>tel?`<button class="btn-sm" style="padding:1px 7px;font-size:11px" onclick="hbCopyTel('${hbEscA(String(tel))}',this)" title="Copiar teléfono">📋</button>`:''
+// ══ MEJORA (19jul26): AVISO ROJO PERSISTENTE al bloquear GENERAR ═══════════════════════════════
+// Reemplaza los alert() del navegador. Reglas del panel #hb-aviso-rojo:
+//  · SIN botón de cerrar — se queda en pantalla mientras el auxiliar corrige (teléfonos con 📋).
+//  · Cada GENERAR con errores lo REEMPLAZA (nunca dos apilados).
+//  · Cuando las validaciones pasan → se pone VERDE ("todo corregido"); cuando la hoja se GENERA
+//    con éxito → desaparece del todo (hbAvisoQuitar en _hbGenerarFinal).
+//  · window._hbMalos (Map nombre_archivo → detalle) marca las tarjetas: pulso rojo + banner con
+//    la fila exacta a corregir. Sobrevive a hbRender() porque el panel vive FUERA de #hb-lista.
+function hbMarcarMalos(m){window._hbMalos=(m&&m.size)?m:null;hbRender()}
+function hbAvisoRojo(html){
+  let el=document.getElementById('hb-aviso-rojo')
+  if(!el){
+    el=document.createElement('div');el.id='hb-aviso-rojo'
+    const acc=document.getElementById('hb-acciones'),lista=document.getElementById('hb-lista')
+    if(acc&&acc.parentNode)acc.parentNode.insertBefore(el,acc)
+    else if(lista&&lista.parentNode)lista.parentNode.insertBefore(el,lista.nextSibling)
+    else document.body.appendChild(el)
+  }
+  el.innerHTML=`<div class="card hb-card-mal" style="margin-top:10px;background:var(--red-bg)">
+    <div class="section-title" style="color:var(--red)">🔴 NO SE GENERÓ — CORRIGE ESTO PRIMERO</div>
+    <div style="font-size:13px;line-height:1.9;color:var(--text)">${html}</div>
+    <div style="font-size:11.5px;color:var(--muted);margin-top:8px">🔒 Este aviso no se puede cerrar: se quita solo cuando la hoja se genere bien. Corrige (las tarjetas en rojo parpadean) y vuelve a dar GENERAR — si queda algo, el aviso se actualiza.</div>
+  </div>`
+  try{el.scrollIntoView({behavior:'smooth',block:'center'})}catch(_){}
+}
+function hbAvisoOk(){
+  const had=!!window._hbMalos
+  window._hbMalos=null
+  if(had)hbRender()
+  const el=document.getElementById('hb-aviso-rojo')
+  if(!el)return
+  el.innerHTML=`<div class="card" style="margin-top:10px;border:2px solid var(--green)">
+    <div class="section-title" style="color:var(--green)">✅ Todo corregido — los errores quedaron resueltos</div>
+    <div style="font-size:13px">Este aviso desaparece cuando la hoja termine de generarse.</div>
+  </div>`
+}
+function hbAvisoQuitar(){
+  const had=!!window._hbMalos
+  window._hbMalos=null
+  document.getElementById('hb-aviso-rojo')?.remove()
+  if(had)hbRender()
+}
 window.hbRowOk=(fi,ri)=>{
   const f=window._hb?.files[fi];if(!f)return
   const r=f.rows[ri]
@@ -34533,8 +34582,22 @@ async function hbCantidadesInvalidas(listos){
 window.hbGenerar=async()=>{
   const st=window._hb;if(!st)return
   // FASE 6 (6jul26) · M14-F6 + M15.C: doble seguro del gate (además del botón deshabilitado)
-  if(st.files.some(x=>x.estado==='nombre_mal')){alert('Hay archivos con el NOMBRE MAL (fecha equivocada). Renómbralos y vuelve a subirlos antes de generar.');return}
-  if(st.files.some(x=>(x.repetidos||[]).some(y=>!y.resuelto))){alert('Hay teléfonos repetidos sin resolver. Confirma si son recompra o quítalos antes de generar.');return}
+  // MEJORA (19jul26): los alert() del navegador se reemplazaron por el AVISO ROJO PERSISTENTE
+  // (hbAvisoRojo) + tarjetas marcadas en rojo (hbMarcarMalos). Mismos textos, mismos bloqueos.
+  const _fMal=st.files.filter(x=>x.estado==='nombre_mal')
+  if(_fMal.length){
+    hbMarcarMalos(new Map(_fMal.map(f=>[f.name,''])))
+    hbAvisoRojo(`<b>Hay ${_fMal.length} archivo(s) con el NOMBRE MAL (fecha equivocada).</b><br>${_fMal.map(f=>`• 📄 <b>${hbEsc(f.name)}</b> → renómbralo con su fecha correcta y vuelve a subirlo`).join('<br>')}`)
+    return
+  }
+  const _fRep=st.files.filter(x=>(x.repetidos||[]).some(y=>!y.resuelto))
+  if(_fRep.length){
+    const _items=[]
+    _fRep.forEach(f=>(f.repetidos||[]).filter(y=>!y.resuelto).forEach(y=>_items.push(`• 📞 <b>${hbEsc(y.tel)}</b> ${hbTelBtn(y.tel)} · 📄 ${hbEsc(f.name)}`)))
+    hbMarcarMalos(new Map(_fRep.map(f=>[f.name,''])))
+    hbAvisoRojo(`<b>Hay ${_items.length} teléfono(s) repetido(s) sin resolver.</b><br>${_items.join('<br>')}<br>Confirma si son <b>recompra</b> o quítalos en su tarjeta y vuelve a dar GENERAR.`)
+    return
+  }
   const listos=st.files.filter(x=>x.estado==='listo')
   if(!listos.length)return
   // ══ MEJORA (9jul26) · #4: "LO QUE VES CARGADO EN PANTALLA = LO QUE SE GENERA" ══
@@ -34549,15 +34612,26 @@ window.hbGenerar=async()=>{
       precio:'está verificando PRECIOS (mayoría) — corrige sus grupos arriba',
       oferta:'está verificando PRECIOS DE OFERTA — confirma sus combos arriba',
       nombre_mal:'tiene el NOMBRE MAL — renómbralo y vuelve a subirlo'}
-    alert(`🔒 NO se puede generar todavía: ${_noListos.length} archivo(s) cargado(s) NO están ✓ listos.\nRegla: lo que ves cargado en pantalla = lo que se genera. Nada se salta en silencio.\n\n${_noListos.map(x=>`• ${x.name}: ${_txt[x.estado]||('está en estado "'+x.estado+'"')}`).join('\n')}\n\nCorrige o quita (✕) cada uno y vuelve a dar GENERAR.`)
+    // MEJORA (19jul26): alert() → aviso rojo persistente + tarjetas marcadas
+    hbMarcarMalos(new Map(_noListos.map(x=>[x.name,''])))
+    hbAvisoRojo(`<b>Todavía no: ${_noListos.length} archivo(s) cargado(s) NO están ✓ listos.</b><br><span style="font-size:12px;color:var(--muted)">Regla: lo que ves cargado en pantalla = lo que se genera. Nada se salta en silencio.</span><br>${_noListos.map(x=>`• 📄 <b>${hbEsc(x.name)}</b>: ${hbEsc(_txt[x.estado]||('está en estado "'+x.estado+'"'))}`).join('<br>')}<br>Corrige o quita (✕) cada uno y vuelve a dar GENERAR.`)
     return
   }
   // ══ MEJORA (9jul26) · #3: BLOQUEO TOTAL si alguna cantidad NO es una oferta válida del producto ══
   const _malas=await hbCantidadesInvalidas(listos)
   if(_malas.length){
-    alert(`🔒 NO se puede generar: ${_malas.length} pedido(s) tienen una CANTIDAD que NO existe en las ofertas del producto.\n\n${_malas.map(m=>`• ${m.producto}: pusieron ${m.cant}u → esa oferta NO existe (válidas: ${m.validas.join(', ')}u · máxima: ${m.validas[m.validas.length-1]}u) · 📞 ${m.tel} · 📄 ${m.archivo}`).join('\n')}\n\nCorrige la cantidad a una oferta válida (en el Excel o en Dropi) y vuelve a subir ese archivo.`)
+    // MEJORA (19jul26): alert() → aviso rojo persistente con 📋 copiar teléfono por pedido,
+    // y en la TARJETA del archivo un banner con la(s) fila(s) exacta(s) a corregir.
+    const _m=new Map()
+    for(const x of _malas){
+      const _lin=`🔢 pusieron <b>${hbEsc(x.cant)}u</b> → NO existe (válidas: <b>${x.validas.join(', ')}u</b> · máxima: ${x.validas[x.validas.length-1]}u) · 📞 <b>${hbEsc(x.tel)}</b> ${hbTelBtn(x.tel)}`
+      _m.set(x.archivo,_m.has(x.archivo)?_m.get(x.archivo)+'<br>'+_lin:_lin)
+    }
+    hbMarcarMalos(_m)
+    hbAvisoRojo(`<b>${_malas.length} pedido(s) tienen una CANTIDAD que NO existe en las ofertas del producto.</b><br>${_malas.map(m=>`• <b>${hbEsc(m.producto)}</b>: pusieron <b>${hbEsc(m.cant)}u</b> → esa oferta NO existe (válidas: <b>${m.validas.join(', ')}u</b> · máxima: ${m.validas[m.validas.length-1]}u) · 📞 <b>${hbEsc(m.tel)}</b> ${hbTelBtn(m.tel)} · 📄 ${hbEsc(m.archivo)}`).join('<br>')}<br>Corrige la cantidad a una oferta válida (en el Excel o en Dropi) y vuelve a subir ese archivo.`)
     return
   }
+  hbAvisoOk() // MEJORA (19jul26): pasó TODAS las validaciones — si había aviso rojo, pasa a verde (desaparece al generar)
   hbVent1Show(listos)
 }
 // ══ FASE 4 (6jul26) · Mejora 8: VENTANA 1 — 🚚 TRANSPORTADORA (Interrapidisimo) ══
@@ -34964,6 +35038,7 @@ async function _hbGenerarFinal(){
     const _btnP=document.getElementById('hb-btn-prueba')
     if(_btnP&&_prueba){_btnP.textContent='🧪 Simulacro terminado — nada se guardó ✔️';_btnP.style.borderColor='var(--green)'}
     if(!_prueba)logAction('constructor_hoja_generada',{lote:loteId,archivos:listos.length,filas:filas.length,correcciones:totCorr}).catch(()=>{})
+    hbAvisoQuitar() // MEJORA (19jul26): la hoja YA se generó → el aviso persistente se quita (única forma de cerrarlo)
     window._hbPrueba=false
   }catch(e){
     window._hbPrueba=false

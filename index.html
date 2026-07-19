@@ -8511,10 +8511,11 @@ function _parseLineaCorchetes(linea){
   if(!precio)faltan.push('PRECIO')
   if(!String(v.nombre||'').trim()&&!String(v.apellido||'').trim())faltan.push('NOMBRE o APELLIDO (al menos uno de los dos)')
   }
-  // NUEVA REGLA (18jul26 · Colombia): teléfono con MENOS de 10 dígitos NO procesa — bloqueo duro (todo-o-nada) para que el auxiliar revise.
-  if(tel&&tel.length<10)faltan.push(`TELÉFONO de 10 dígitos — llegó "${v.telefono}" (${tel.length} dígitos). Revisa qué pasó con este pedido · NOTA: guarda ese teléfono en la columna de envíos`)
+  // NUEVA REGLA (18jul26 · Colombia) → AMPLIADA (19jul26): el teléfono debe tener los dígitos EXACTOS
+  // de algún PAÍS PERMITIDO (Centro de Control → 📞 Teléfonos permitidos · fábrica: Colombia = 10).
+  // Menos O MÁS dígitos = BLOQUEO DURO, la línea no procesa (antes: >10 era solo aviso suave).
+  if(tel&&!hbTelPaisOk(tel))faltan.push(`TELÉFONO de país permitido (${hbTelPaisesTxt()} dígitos) — llegó "${v.telefono}" con ${tel.length} dígitos. Corrígelo para poder procesar · NOTA: guarda ese teléfono en la columna de envíos`)
   // ── AVISOS SUAVES (forma): informan, el auxiliar decide continuar ──
-  if(tel&&tel.length>10)avisos.push(`el teléfono "${v.telefono}" tiene MÁS de 10 dígitos — revisa si trae indicativo de más`)
   if(adId&&!/^\d{18}$/.test(adId))avisos.push(`el ad_id "${adId}" no tiene 18 dígitos`)
   // MEJORA B (8jul26): se RETIRÓ el aviso "sin ad_id (¿venta orgánica?)" — decisión de ADS: la venta
   // sin anuncio procesa y se guarda DIRECTO como orgánica, sin pedirle verificación al auxiliar.
@@ -8559,7 +8560,7 @@ function _parseLineaAsignador(linea){
     if(!ciudad)errores.push('CIUDAD')
     if(!qty||qty<1)errores.push('UNIDADES')
     if(!dept)errores.push('DPTO')
-    if(!tel||tel.length<10)errores.push('TELÉFONO de 10 dígitos — revisa este pedido · NOTA: guarda ese teléfono en la columna de envíos')
+    if(!tel||!hbTelPaisOk(tel))errores.push(`TELÉFONO de país permitido (${hbTelPaisesTxt()} dígitos)${tel?` — llegó "${tel}" con ${tel.length} dígitos`:''} · NOTA: guarda ese teléfono en la columna de envíos`) // MEJORA (19jul26): dígitos exactos por país (antes: solo <10)
     if(!producto)errores.push('PRODUCTO')
     if(!agente)errores.push('AGENTE')
     if(!idDropi)errores.push('ID_DROPI')
@@ -33330,6 +33331,16 @@ function hbReglaActiva(k){
   try{const r=window._hbCfgFull?.reglas?.[k];if(typeof r==='boolean')return r}catch(_){}
   return HB_ORIG.reglas[k]!==false
 }
+// ══ MEJORA (19jul26): 📞 PAÍSES DE TELÉFONO PERMITIDOS (Asignador) ═════════════════════════════
+// El teléfono de un pedido SOLO procesa si sus dígitos coinciden EXACTO con algún país de la lista
+// (Centro de Control → 📞 Teléfonos permitidos). Fábrica: Colombia = 10. El Asignador carga la
+// config fresca (hbLoadConfig) ANTES de parsear, así que estos getters síncronos ven lo último.
+function hbTelPaises(){
+  try{const p=window._hbCfgFull?.tel_paises;if(Array.isArray(p)&&p.length)return p}catch(_){}
+  return[{pais:'Colombia',digitos:10}]
+}
+function hbTelPaisOk(tel){const n=String(tel==null?'':tel).length;return hbTelPaises().some(p=>p.digitos===n)}
+function hbTelPaisesTxt(){return hbTelPaises().map(p=>`${p.pais}: ${p.digitos}`).join(' · ')}
 // Paleta/colores con validación de formato ARGB (8 hex). Si algo no es color válido → original.
 const _hbColorOk=c=>/^[0-9A-Fa-f]{8}$/.test(String(c||''))
 function hbCfgColor(k){const c=hbCfgVal(k);return _hbColorOk(c)?String(c).toUpperCase():HB_ORIG.valores[k]}
@@ -33370,7 +33381,8 @@ function hbDefaultConfig(){
     masivo_headers:HB_MASIVO_HEADERS.slice(),
     masivo_cols:hbMasivoColsDefault(), // MEJORA (5jul26-b): header + campo por columna, cantidad flexible
     valores:hbValoresDefault(),        // FASE 6 (6jul26) · Mejora 16: {actual,fabrica} por valor
-    reglas:{...HB_ORIG.reglas}         // FASE 6 (6jul26) · Mejora 16: switches ON/OFF (nacen todas ON)
+    reglas:{...HB_ORIG.reglas},        // FASE 6 (6jul26) · Mejora 16: switches ON/OFF (nacen todas ON)
+    tel_paises:[{pais:'Colombia',digitos:10}] // MEJORA (19jul26): 📞 países de teléfono permitidos en el Asignador
   }
 }
 async function hbLoadConfig(){
@@ -33419,6 +33431,10 @@ async function hbLoadConfig(){
         }
         if(!cfg.reglas||typeof cfg.reglas!=='object')cfg.reglas={}
         for(const k of Object.keys(HB_ORIG.reglas))if(typeof cfg.reglas[k]!=='boolean')cfg.reglas[k]=true
+        // MEJORA (19jul26): 📞 países de teléfono permitidos (Asignador) — backfill defensivo SIEMPRE.
+        // Configs guardadas antes de esta mejora nacen con la fábrica: Colombia = 10 dígitos.
+        if(!Array.isArray(cfg.tel_paises)||!cfg.tel_paises.length)cfg.tel_paises=[{pais:'Colombia',digitos:10}]
+        cfg.tel_paises=cfg.tel_paises.map(p=>({pais:String(p&&p.pais!=null?p.pais:'').trim()||'País',digitos:Math.max(1,parseInt(p&&p.digitos)||10)}))
         if(cfg.version<5)cfg.version=5
         window._hbCfgFull=cfg // caché para los getters síncronos (hbCfgVal / hbReglaActiva)
         return cfg
@@ -35351,6 +35367,27 @@ window.hbCcSwitch=async(k)=>{
   }else cfg.reglas[k]=true
   await _hbCcSave();hbRenderCfg()
 }
+// ══ MEJORA (19jul26): 📞 agregar/eliminar países de teléfono permitidos (Centro de Control) ══
+window.hbTelPaisAdd=async()=>{
+  const cfg=window._hbCfgFull;if(!cfg)return
+  const pais=String(document.getElementById('hb-telp-pais')?.value||'').trim()
+  const dig=parseInt(document.getElementById('hb-telp-dig')?.value)
+  if(!pais){alert('Escribe el nombre del país (ej: México).');return}
+  if(!isFinite(dig)||dig<1||dig>15){alert('Los dígitos deben ser un número entre 1 y 15 (ej: Colombia = 10).');return}
+  if(!Array.isArray(cfg.tel_paises))cfg.tel_paises=[]
+  const ya=cfg.tel_paises.find(p=>p.digitos===dig)
+  if(ya){alert(`Ya hay un país con ${dig} dígitos (${ya.pais}) — los teléfonos de ${dig} dígitos ya pasan. No hace falta repetirlo.`);return}
+  cfg.tel_paises.push({pais,digitos:dig})
+  await _hbCcSave();hbRenderCfg()
+}
+window.hbTelPaisDel=async(i)=>{
+  const cfg=window._hbCfgFull;if(!cfg||!Array.isArray(cfg.tel_paises))return
+  if(cfg.tel_paises.length<=1){alert('Debe quedar al menos 1 país permitido. Agrega otro antes de eliminar este.');return}
+  const p=cfg.tel_paises[i];if(!p)return
+  if(!confirm(`¿Eliminar ${p.pais} (${p.digitos} dígitos)? Los teléfonos con ${p.digitos} dígitos DEJARÁN de procesar en el Asignador.`))return
+  cfg.tel_paises.splice(i,1)
+  await _hbCcSave();hbRenderCfg()
+}
 async function hbRenderCfg(){
   const out=document.getElementById('hb-cfg-out');if(!out)return
   const cfg=await hbLoadConfig()
@@ -35431,6 +35468,18 @@ async function hbRenderCfg(){
   ${_blk('#64748b','⬛ OBLIGATORIOS Y GENERACIÓN',`
   ${_reglaHTML('obligatorios')}
   ${_reglaHTML('stock_conv')}`)}
+
+  ${_blk('#14b8a6','📞 TELÉFONOS PERMITIDOS — el Asignador solo procesa estos dígitos',`
+  <div style="font-size:12px;color:var(--muted);margin-top:8px;line-height:1.6">El teléfono de cada pedido debe tener los dígitos <b>EXACTOS</b> de alguno de estos países. Si no coincide (le sobran o le faltan), la línea <b>NO procesa</b> (error rojo) hasta corregirla. Agrega o elimina países aquí — aplica <b>de una</b> en el siguiente procesar, sin tocar código.</div>
+  <div id="hb-telp-lista" style="margin-top:8px">${hbTelPaises().map((p,i)=>`<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:6px;padding:8px 10px;border:1px solid var(--border);border-left:4px solid #14b8a6;border-radius:8px;font-size:13px">
+    <div style="flex:1;min-width:180px">🌎 <b>${hbEsc(p.pais)}</b> → <b>${p.digitos} dígitos</b></div>
+    <button class="btn-sm btn-red" onclick="hbTelPaisDel(${i})">🗑️ Eliminar</button>
+  </div>`).join('')}</div>
+  <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-top:10px">
+    <div class="fld" style="margin:0"><label>País</label><input type="text" id="hb-telp-pais" placeholder="México" style="width:170px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text)"></div>
+    <div class="fld" style="margin:0"><label>Dígitos del celular</label><input type="number" id="hb-telp-dig" min="1" max="15" placeholder="12" style="width:120px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text)"></div>
+    <button class="btn-sm btn-primary" onclick="hbTelPaisAdd()">➕ Agregar país</button>
+  </div>`)}
 
   ${_blk('#0ea5e9','🌐 VALORES DEL SISTEMA — globales de TODA la app (no solo el Constructor)',`
   <div style="font-size:12px;color:var(--muted);margin-top:8px;line-height:1.6">Estos números mandan en <b>toda NEXO</b> (Asignador, Cruce Dropi, Reporte del día, Novedades/Reclame). Cada uno se guarda solo al cambiarlo (Supabase + respaldo en este navegador) y tiene su 🔄 para volver al original del sistema. También se editan inline desde <b>Equipo → Editar usuario</b>, junto a su regla.</div>

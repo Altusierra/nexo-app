@@ -27899,7 +27899,10 @@ window.massStart=async(accountId,action,listaOverride)=>{
     return
   }
   const items=lista.map(c=>{
-    const budget=(c.daily_budget||c.lifetime_budget||0)
+    // NUEVO (20jul26 · presupuesto acumulativo): si en ESTA sesión ya se le subió el presupuesto,
+    // usar ese valor EN VIVO (override) como base — no el dato viejo de la caché/BD.
+    const _ov=(window._nexoBudgetOverride||{})[String(c.meta_id)]
+    const budget=(_ov>0?_ov:(c.daily_budget||c.lifetime_budget||0))
     return {meta_id:c.meta_id,nivel:'campaign',nombre:c.nombre,estado:c.estado,semCode:c.semCode,budget,esCBO:budget>0}
   })
   window._massState={action,accountId,items,selected:new Set(),perItem:{},filtroUrg:'all',budItems:null}
@@ -28025,7 +28028,7 @@ window.massContinue=async()=>{
       const ids=aboCamps.map(c=>c.meta_id),nomPadre={}
       for(const c of aboCamps)nomPadre[c.meta_id]=c.nombre
       const{data:adsets}=await sb.from('meta_campanas').select('meta_id,parent_id,nombre,daily_budget').in('parent_id',ids).eq('nivel','adset')
-      for(const a of (adsets||[])){const b=a.daily_budget||0;if(b>0)budItems.push({meta_id:a.meta_id,nivel:'adset',nombre:a.nombre||a.meta_id,budget:b,tipoBudget:'ABO',parentNombre:nomPadre[a.parent_id]||'',parentMetaId:a.parent_id})}
+      for(const a of (adsets||[])){const _ovA=(window._nexoBudgetOverride||{})[String(a.meta_id)];const b=(_ovA>0?_ovA:(a.daily_budget||0));if(b>0)budItems.push({meta_id:a.meta_id,nivel:'adset',nombre:a.nombre||a.meta_id,budget:b,tipoBudget:'ABO',parentNombre:nomPadre[a.parent_id]||'',parentMetaId:a.parent_id})}
     }catch(e){console.warn('[mass] adsets ABO:',e.message)}
   }
   if(!budItems.length){
@@ -28208,6 +28211,18 @@ window._massRun=async()=>{
       if(!pi||!pi.mode||nuevo<=0||nuevo===it.budget){setIc('⏭️','Sin cambio');continue}
       r=await window._massWriteRetry({action:'set_budget',node_id:it.meta_id,current_human:it.budget,mode:'manual',amount:nuevo},setIc)
       if(r.ok)window._logCambioMeta(it.meta_id,it.nivel,acc,'presupuesto',it.budget,nuevo)
+      // NUEVO (20jul26 · presupuesto acumulativo): tras aplicar con ÉXITO, el nuevo pasa a ser
+      // el ACTUAL en memoria (sin recargar): así el próximo "subir" parte del valor ya subido.
+      if(r.ok){
+        it.budget=nuevo
+        const _itSel=st.items&&st.items.find(x=>String(x.meta_id)===String(it.meta_id));if(_itSel)_itSel.budget=nuevo
+        const _pi2=st.perItem[it.meta_id];if(_pi2){_pi2.mode=null;_pi2.val=0;_pi2.nuevo=nuevo}
+        window._nexoBudgetOverride=window._nexoBudgetOverride||{};window._nexoBudgetOverride[String(it.meta_id)]=nuevo
+        try{
+          const _ba=(window._metaPort&&window._metaPort.campsActivasByAcc)||{}
+          for(const _a in _ba){for(const _c of (_ba[_a]||[])){if(String(_c.meta_id)===String(it.meta_id)){if(_c.lifetime_budget&&!_c.daily_budget)_c.lifetime_budget=nuevo;else _c.daily_budget=nuevo}}}
+        }catch(_){}
+      }
     }else{
       const status=st.action==='activar'?'ACTIVE':'PAUSED'
       r=await window._massWriteRetry({action:'set_status',node_id:it.meta_id,status},setIc)

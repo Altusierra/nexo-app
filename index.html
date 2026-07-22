@@ -26635,6 +26635,18 @@ window.modalPresupuesto=(nodeId,level,nombre,currentHuman,accountId)=>{
             }
             const st1=window._budModal
             if(st1&&st1.nodeId===nodeId&&budReal>0){st1.current=budReal;st1.nuevo=st1.nuevo||budReal;st1.notaABO=notaB;window._budRenderMain()}
+            // 🛡️ RAÍZ (22jul26): lo que Meta respondió REPARA la copia — solo si es el presupuesto
+            // PROPIO del nodo (no la suma ABO de conjuntos). Así la clasificación CBO/ABO y el chip
+            // 💰 del portafolio quedan corregidos para siempre, no solo para esta abierta.
+            if(budReal>0&&!notaB){
+              try{
+                const _rD=parseInt(jB.daily_budget)||0,_rL=parseInt(jB.lifetime_budget)||0
+                if(_rD>0||_rL>0)await sb.from('meta_campanas').update(_rD>0?{daily_budget:_rD}:{lifetime_budget:_rL}).eq('meta_id',String(nodeId))
+                window._nexoBudgetOverride=window._nexoBudgetOverride||{};window._nexoBudgetOverride[String(nodeId)]=budReal
+                const _ba=(window._metaPort&&window._metaPort.campsActivasByAcc)||{}
+                for(const _a in _ba){for(const _c of (_ba[_a]||[])){if(String(_c.meta_id)===String(nodeId)){if(_rD>0)_c.daily_budget=_rD;else if(_rL>0)_c.lifetime_budget=_rL}}}
+              }catch(_){}
+            }
           }
         }catch(_){}
       }
@@ -28105,7 +28117,45 @@ window.massContinue=async()=>{
   const st=window._massState;if(!st||!st.selected.size)return
   const selCamps=st.items.filter(it=>st.selected.has(it.meta_id))
   if(st.action!=='presupuesto'){window._massRenderConfirmEstado(selCamps);return}
-  openModal(`<div class="modal-title">⏳ Preparando...</div><div style="font-size:13px;color:var(--muted);padding:10px 0">Cargando conjuntos de las campañas ABO.</div>`)
+  openModal(`<div class="modal-title">⏳ Preparando...</div><div style="font-size:13px;color:var(--muted);padding:10px 0">Verificando con Meta si cada campaña es CBO o ABO (con su presupuesto vivo).</div>`)
+  // ── 🛡️ RAÍZ (22jul26 · ley del owner): la clasificación CBO/ABO tampoco se decide con la copia
+  // local — se le PREGUNTA A META antes de armar la lista. Presupuesto vivo en la campaña → es CBO
+  // (aunque la copia dijera ABO); sin presupuesto → ABO de verdad → se traen sus conjuntos. Lo que
+  // Meta responde REPARA la copia (esCBO + budget en memoria, portafolio y meta_campanas en BD),
+  // así queda corregida para siempre. Tolerante: si Meta no responde, se usa la clasificación
+  // local de siempre y la verificación posterior atrapa lo que falte.
+  try{
+    const _tk=await getConfig('meta_access_token')
+    if(_tk){
+      for(let i=0;i<selCamps.length;i+=50){
+        const batch=selCamps.slice(i,i+50)
+        try{
+          const r=await fetch(`${META_BASE}/?ids=${batch.map(c=>c.meta_id).join(',')}&fields=daily_budget,lifetime_budget&access_token=${_tk}`)
+          if(!r.ok)continue
+          const j=await r.json()
+          for(const c of batch){
+            const o=j&&j[c.meta_id];if(!o)continue // sin respuesta de ESTA → clasificación local
+            const rawD=parseInt(o.daily_budget)||0,rawL=parseInt(o.lifetime_budget)||0,raw=rawD||rawL
+            const eraCBO=!!c.esCBO
+            if(raw>0){
+              let off=100
+              if(c.budget>0){const rel=raw/c.budget;off=Math.abs(rel-1)<Math.abs(rel-100)?1:100}
+              c.esCBO=true;c.budget=Math.round(raw/off)
+            }else c.esCBO=false // Meta respondió SIN presupuesto → ABO de verdad
+            if(c.esCBO!==eraCBO){
+              console.warn(`[mass CBO/ABO] ${c.meta_id} estaba mal clasificada (${eraCBO?'CBO':'ABO'}→${c.esCBO?'CBO':'ABO'}) — reparada con el dato vivo de Meta`)
+              try{ // reparar la copia: BD + portafolio en memoria — la próxima vez ya nace bien
+                if(raw>0)await sb.from('meta_campanas').update(rawD>0?{daily_budget:rawD}:{lifetime_budget:rawL}).eq('meta_id',String(c.meta_id))
+                const _ba=(window._metaPort&&window._metaPort.campsActivasByAcc)||{}
+                for(const _a in _ba){for(const _c of (_ba[_a]||[])){if(String(_c.meta_id)===String(c.meta_id)){if(rawD>0)_c.daily_budget=raw;else if(rawL>0)_c.lifetime_budget=raw}}}
+                if(raw>0){window._nexoBudgetOverride=window._nexoBudgetOverride||{};window._nexoBudgetOverride[String(c.meta_id)]=c.budget}
+              }catch(_){}
+            }
+          }
+        }catch(_){}
+      }
+    }
+  }catch(_){}
   const budItems=[]
   for(const c of selCamps){if(c.esCBO)budItems.push({meta_id:c.meta_id,nivel:'campaign',nombre:c.nombre,budget:c.budget,tipoBudget:'CBO'})}
   const aboCamps=selCamps.filter(c=>!c.esCBO)
@@ -29183,7 +29233,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
         <div style="flex:1;min-width:0;cursor:pointer" onclick="viewCampDetail('${camp.meta_id}')">
           <div style="font-weight:600;font-size:12px;line-height:1.25"><span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:${camp.estado==='ACTIVE'?'#22c55e':'#1a1a1a'};border:1.5px solid ${camp.estado==='ACTIVE'?'#16a34a':'#525252'};${camp.estado==='ACTIVE'?'box-shadow:0 0 6px rgba(34,197,94,.7);':''}vertical-align:middle;margin-right:6px" title="${camp.estado==='ACTIVE'?'🟢 Activa en Meta':'⚫ Inactiva ('+(camp.estado||'desconocido')+')'}"></span><span class="nexo-hier-pill" style="background:var(--hier-camp-bg);color:var(--hier-camp);border:1px solid var(--hier-camp)">🎯 Campaña</span>${camp.nombre||camp.meta_id}${(camp.estado==='ACTIVE'&&typeof window!=='undefined'&&window._nexoEntregaByCampId&&window._nexoEntregaByCampId[String(camp.meta_id)]===false)?`<span style="margin-left:6px;font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.05);color:var(--text);border:1px solid var(--border);vertical-align:middle" title="TRAMPA: el botón de la campaña está prendido pero NINGÚN anuncio suyo está entregando → NO entrega. Abre la campaña y mira qué está apagado.${window._nexoEntregaFuente==='bd'?' · dato del último sync (Meta no respondió en vivo)':''}">${window._nexoEntregaFuente==='bd'?'🕓 ':''}🔕 NO ENTREGA</span>`:''}</div>
-          <div style="font-size:10px;color:var(--muted);margin-top:1px">${camp.objetivo||''} · ${camp.estado}${ctxCamp.esGlobal?' · <span style="color:var(--amber)">⚠️ sin producto</span>':' · <span style="color:var(--green)" title="Producto enlazado · se actualiza automáticamente si cambias el Nombre actual del producto">📦 '+ctxCamp.nombre+'</span>'}${window.metaIdChip(camp.meta_id,'campaña')}${window._cambiosHoyHTML(camp.meta_id)}<span onclick="event.stopPropagation()" style="display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center;margin-left:8px;vertical-align:middle">${camp._hasData?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();toggleCampDesglose('${camp.meta_id}','${accountId}')" style="padding:5px 10px;font-size:12px" title="Ver conjuntos y anuncios">📊 Desglose</button>`:''}${_esCBO?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();modalPresupuesto('${camp.meta_id}','campaign','${_campNomEsc}',${_campBudget},'${accountId}')" style="padding:5px 10px;font-size:12px;border-color:var(--accent);color:var(--accent)" title="Cambiar presupuesto de la campaña (CBO)">💰 $${fmt(_campBudget)}</button>`:''}<button class="btn-sm btn-outline" onclick="event.stopPropagation();modalEstado('${camp.meta_id}','campaign','${_campNomEsc}','${camp.estado||''}','${accountId}')" style="padding:5px 10px;font-size:12px;${_campActiva?'border-color:var(--amber);color:var(--amber)':'border-color:var(--green);color:var(--green)'}" title="${_campActiva?'Pausar campaña':'Activar campaña'}">${_campActiva?'⏸️ Pausar':'▶️ Activar'}</button><button class="btn-sm btn-outline" onclick="event.stopPropagation();modalDuplicar('${camp.meta_id}','campaign','${_campNomEsc}',${_campBudget},'${accountId}')" style="padding:5px 10px;font-size:12px;border-color:var(--blue);color:var(--blue)" title="Duplicar campaña">📄 Duplicar</button><button class="btn-sm btn-outline" onclick="event.stopPropagation();modalAsignarProductoCamp('${camp.meta_id}','${(camp.nombre||'').replace(/'/g,"\\'")}','${accountId}')" style="padding:5px 10px;font-size:12px;${ctxCamp.esGlobal?'border-color:var(--amber);color:var(--amber)':'border-color:var(--green);color:var(--green)'}" title="${ctxCamp.esGlobal?'⚠️ Sin producto · clic para asignar':'Producto: '+ctxCamp.nombre+' · clic para cambiar'}">${ctxCamp.esGlobal?'⚠️ Producto':'📦 Cambiar'}</button><button class="btn-sm btn-outline" onclick="event.stopPropagation();analizarConIA('campana','${camp.meta_id}','${(camp.nombre||'').replace(/'/g,"\\'")}','${desde}','${hasta}')" style="padding:5px 9px;font-size:12px" title="Analizar con IA">🤖</button></span></div></div>
+          <div style="font-size:10px;color:var(--muted);margin-top:1px">${camp.objetivo||''} · ${camp.estado}${ctxCamp.esGlobal?' · <span style="color:var(--amber)">⚠️ sin producto</span>':' · <span style="color:var(--green)" title="Producto enlazado · se actualiza automáticamente si cambias el Nombre actual del producto">📦 '+ctxCamp.nombre+'</span>'}${window.metaIdChip(camp.meta_id,'campaña')}${window._cambiosHoyHTML(camp.meta_id)}<span onclick="event.stopPropagation()" style="display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center;margin-left:8px;vertical-align:middle">${camp._hasData?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();toggleCampDesglose('${camp.meta_id}','${accountId}')" style="padding:5px 10px;font-size:12px" title="Ver conjuntos y anuncios">📊 Desglose</button>`:''}${_esCBO?`<button class="btn-sm btn-outline" onclick="event.stopPropagation();modalPresupuesto('${camp.meta_id}','campaign','${_campNomEsc}',${_campBudget},'${accountId}')" style="padding:5px 10px;font-size:12px;border-color:var(--accent);color:var(--accent)" title="Cambiar presupuesto de la campaña (CBO)">💰 $${fmt(_campBudget)}</button>`:`<button class="btn-sm btn-outline" onclick="event.stopPropagation();presupVerifYAbrir('${camp.meta_id}','${_campNomEsc}','${accountId}',this)" style="padding:5px 10px;font-size:12px;border-color:var(--muted);color:var(--muted)" title="La copia local no le ve presupuesto (¿ABO?). Clic: le pregunto a Meta — si es CBO real, abro el modal con su presupuesto vivo y reparo el dato.">💰 ¿CBO?</button>`}<button class="btn-sm btn-outline" onclick="event.stopPropagation();modalEstado('${camp.meta_id}','campaign','${_campNomEsc}','${camp.estado||''}','${accountId}')" style="padding:5px 10px;font-size:12px;${_campActiva?'border-color:var(--amber);color:var(--amber)':'border-color:var(--green);color:var(--green)'}" title="${_campActiva?'Pausar campaña':'Activar campaña'}">${_campActiva?'⏸️ Pausar':'▶️ Activar'}</button><button class="btn-sm btn-outline" onclick="event.stopPropagation();modalDuplicar('${camp.meta_id}','campaign','${_campNomEsc}',${_campBudget},'${accountId}')" style="padding:5px 10px;font-size:12px;border-color:var(--blue);color:var(--blue)" title="Duplicar campaña">📄 Duplicar</button><button class="btn-sm btn-outline" onclick="event.stopPropagation();modalAsignarProductoCamp('${camp.meta_id}','${(camp.nombre||'').replace(/'/g,"\\'")}','${accountId}')" style="padding:5px 10px;font-size:12px;${ctxCamp.esGlobal?'border-color:var(--amber);color:var(--amber)':'border-color:var(--green);color:var(--green)'}" title="${ctxCamp.esGlobal?'⚠️ Sin producto · clic para asignar':'Producto: '+ctxCamp.nombre+' · clic para cambiar'}">${ctxCamp.esGlobal?'⚠️ Producto':'📦 Cambiar'}</button><button class="btn-sm btn-outline" onclick="event.stopPropagation();analizarConIA('campana','${camp.meta_id}','${(camp.nombre||'').replace(/'/g,"\\'")}','${desde}','${hasta}')" style="padding:5px 9px;font-size:12px" title="Analizar con IA">🤖</button></span></div></div>
         <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
           ${camp._hasData&&heroVal>0?`<div class="nexo-cpa-hero"><div class="nch-lbl">${heroLbl}</div><div class="nch-val" style="color:${cpaColorCss}" title="${heroTitle}">$${fmt(heroVal)}</div></div>`:''}
           ${badgeMega||`<span class="pill ${semCls}" ${prodTooltip}>${semTxt}</span>`}
@@ -37032,6 +37082,55 @@ window.hbCantOkUndo=(fi,ri)=>{
   hbRender()
 }
 // ═══ FIN CANDADO DE CANTIDADES AL SUBIR ═══
+
+// ════════════════════════════════════════════════════════════════════════════
+// 💰🛡️ ¿CBO? — verificación al clic para campañas que la copia local cree ABO (22jul26)
+// ─────────────────────────────────────────────────────────────────────────────
+// Ley del owner: la clasificación CBO/ABO no se decide con la copia — se le
+// pregunta a Meta. Este botón aparece en la fila del portafolio cuando el dato
+// local no le ve presupuesto a la campaña. Al clic:
+//   · Meta dice que SÍ tiene presupuesto → era CBO mal clasificada: se REPARA la
+//     copia (BD meta_campanas + portafolio en memoria + override) y se abre el
+//     modal de presupuesto normal con el valor vivo.
+//   · Meta confirma que NO tiene → es ABO de verdad: se explica y se guía al
+//     desglose (los 💰 de sus conjuntos).
+//   · Meta no responde → se dice tal cual, sin adivinar.
+// ════════════════════════════════════════════════════════════════════════════
+window.presupVerifYAbrir=async(metaId,nombre,accountId,btn)=>{
+  const _txt=btn?btn.innerHTML:null
+  if(btn){btn.disabled=true;btn.innerHTML='⏳'}
+  try{
+    const tk=await getConfig('meta_access_token')
+    if(!tk){alert('❌ No hay token de Meta configurado — no puedo verificar.');return}
+    const r=await fetch(`${META_BASE}/${metaId}?fields=daily_budget,lifetime_budget&access_token=${tk}`)
+    if(!r.ok){alert('⚠️ Meta no respondió por esta campaña. Inténtalo de nuevo en un momento — no voy a adivinar su tipo.');return}
+    const j=await r.json()
+    const rawD=parseInt(j.daily_budget)||0,rawL=parseInt(j.lifetime_budget)||0,raw=rawD||rawL
+    if(raw>0){
+      // CBO real mal clasificada → reparar la copia y abrir el modal con el vivo
+      let off=100
+      const _ov=(window._nexoBudgetOverride||{})[String(metaId)]
+      if(_ov>0){const rel=raw/_ov;off=Math.abs(rel-1)<Math.abs(rel-100)?1:100}
+      else off=1 // sin referencia local: el modal de una campaña usa el crudo tal cual (comportamiento de siempre)
+      const disp=Math.round(raw/off)
+      try{
+        await sb.from('meta_campanas').update(rawD>0?{daily_budget:rawD}:{lifetime_budget:rawL}).eq('meta_id',String(metaId))
+        const _ba=(window._metaPort&&window._metaPort.campsActivasByAcc)||{}
+        for(const _a in _ba){for(const _c of (_ba[_a]||[])){if(String(_c.meta_id)===String(metaId)){if(rawD>0)_c.daily_budget=rawD;else _c.lifetime_budget=rawL}}}
+        window._nexoBudgetOverride=window._nexoBudgetOverride||{};window._nexoBudgetOverride[String(metaId)]=disp
+      }catch(_){}
+      logAction('presup_cbo_reparado',{meta_id:String(metaId),raw,fuente:'boton_cbo_portafolio'}).catch(()=>{})
+      window.modalPresupuesto(metaId,'campaign',nombre,disp,accountId) // el modal re-verifica en vivo al abrir, como siempre
+    }else{
+      alert('ℹ️ Meta confirma que esta campaña NO tiene presupuesto propio: es ABO de verdad.\n\nSu presupuesto vive en sus CONJUNTOS: abre el 📊 Desglose y usa el botón 💰 de cada conjunto.')
+    }
+  }catch(e){
+    alert('❌ '+((e&&e.message)||e))
+  }finally{
+    if(btn){btn.disabled=false;if(_txt!=null)btn.innerHTML=_txt}
+  }
+}
+// ═══ FIN ¿CBO? ═══
 
 </script>
 </body>

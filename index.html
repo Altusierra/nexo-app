@@ -33524,6 +33524,7 @@ const HB_ORIG={
     colorReservado:'FFFFC000',  // M12: fila reservada del masivo
     paletaProducto:['FFE2EFDA','FFDDEBF7','FFFFF2CC','FFFCE4D6','FFE4DFEC','FFD9E1F2'], // banda por producto (hoja + masivo, UNA sola paleta)
     colorCorreccion:'FFFFC000', // fila corregida (hoja)
+    colorCantVerif:'FFD9C2F0',  // 🟪 (22jul26) cantidad VERIFICADA en SellerChat (opción B del candado de cantidades)
     colorOferta:'FFF4CCCC'      // fila de oferta (hoja)
   },
   reglas:{ // las 14 reglas con switch — todas nacen ACTIVAS
@@ -34185,6 +34186,10 @@ window.hbOnFiles=async(inp)=>{
     window._hb.files.push(f)
   }
   hbRender()
+  // 🔢🟪 (22jul26): el candado de CANTIDADES ya no espera al GENERAR — se evalúa APENAS se sube
+  // (consulta producto_ofertas) y pinta el bloque CORRIGE AQUÍ en la tarjeta. Tolerante: si la
+  // consulta falla, no marca nada aquí y el candado del GENERAR (que sigue intacto) atrapa igual.
+  try{await hbCantChecarTodos()}catch(_){}
 }
 
 // ── 9. RENDER DE LA LISTA + PANEL DE REVISIÓN ───────────────────────────────
@@ -34311,7 +34316,7 @@ function hbRender(){
             <div style="display:flex;gap:6px;flex-wrap:wrap">
               ${res?`<button class="btn-sm" onclick="hbRepUndo(${fi},${xi})">↩️ Deshacer</button>`
                 :`<button class="btn-sm btn-green" onclick="hbRepOk(${fi},${xi})">✓ Es recompra, está bien</button>
-                  <button class="btn-sm btn-red" onclick="hbRepQuitar(${fi},${xi})">🗑️ Quitar duplicado</button>`}
+                  <span style="font-size:11px;color:var(--muted)">Si NO es recompra: corrige el Excel y súbelo de nuevo completo (la ✕ de arriba quita este Excel COMPLETO — aquí no se quitan filas sueltas).</span>`}
             </div>
           </div>`}).join('')}
       </div>`
@@ -34339,9 +34344,9 @@ function hbRender(){
     html+=`<div class="card${_mal!==undefined?' hb-card-mal':''}" style="margin-top:10px">
       <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center">
         <div style="font-family:monospace;font-size:13px;word-break:break-all">📄 ${hbEsc(f.name)}</div>
-        <button class="btn-sm btn-red" onclick="hbQuitar(${fi})">✕ Quitar</button>
+        <button class="btn-sm btn-red" onclick="hbQuitar(${fi})" title="Quita este Excel COMPLETO de la lista (todas sus filas). Aquí NO se pueden quitar filas sueltas: o se corrige, o se quita todo el Excel y se vuelve a subir.">✕ Quitar este Excel COMPLETO</button>
       </div>
-      <div style="margin-top:6px;font-size:13px">${badge}</div>${_mal?`<div class="alert alert-red" style="margin-top:8px;line-height:1.9">🔴 <b>CORRIGE AQUÍ:</b><br>${_mal}</div>`:''}${notas}${body}
+      <div style="margin-top:6px;font-size:13px">${badge}</div>${_mal?`<div class="alert alert-red" style="margin-top:8px;line-height:1.9">🔴 <b>CORRIGE AQUÍ:</b><br>${_mal}</div>`:''}${hbCantBloque(f,fi)}${notas}${body}
     </div>`
   })
   lista.innerHTML=html
@@ -34374,9 +34379,12 @@ function hbRender(){
     const nDup=st.files.filter(x=>x.estado==='duplicado').length
     const nErr=st.files.filter(x=>x.estado==='error').length // MEJORA (9jul26) · #4: también bloquean
     const nRep=st.files.reduce((a,x)=>a+((x.repetidos||[]).filter(y=>!y.resuelto).length),0)
+    // 🔢🟪 (22jul26): cantidades inválidas SIN resolver (ni corregidas ni verificadas) también bloquean
+    const nCant=st.files.reduce((a,x)=>a+hbCantPend(x).length,0)
     // MEJORA (9jul26) · #4: "lo que ves cargado = lo que se genera" — CUALQUIER archivo no-listo bloquea
-    const genBloqueado=nMal>0||nRep>0||nDup>0||nErr>0||enRev>0||enPre>0
+    const genBloqueado=nMal>0||nRep>0||nDup>0||nErr>0||enRev>0||enPre>0||nCant>0
     acc.innerHTML=listos.length?`<div class="card" style="margin-top:10px">
+      ${nCant?`<div class="alert alert-red" style="font-size:13px;margin-bottom:10px">🔢 Hay <b>${nCant} pedido(s) con una CANTIDAD que no existe</b> en las ofertas del producto — <b>no se puede generar</b>. En la tarjeta de cada Excel: corrige la cantidad (opción A) o confirma con ✅ que la verificaste en SellerChat (opción B).</div>`:''}
       ${nMal?`<div class="alert alert-red" style="font-size:13px;margin-bottom:10px">🚫 Hay ${nMal} archivo(s) con el <b>NOMBRE MAL</b> (fecha equivocada). Renómbralos con su fecha correcta y vuelve a subirlos — <b>no se puede generar</b> mientras estén aquí (o quítalos con ✕).</div>`:''}
       ${nDup?`<div class="alert alert-red" style="font-size:13px;margin-bottom:10px">🚫 ${nDup} archivo(s) <b>DUPLICADO(S)</b> — <b>no se puede generar</b> mientras estén aquí: quítalos con ✕. Si es el corregido legítimo, quita PRIMERO la copia mala y vuelve a subirlo.</div>`:''}
       ${nErr?`<div class="alert alert-red" style="font-size:13px;margin-bottom:10px">❌ Hay ${nErr} archivo(s) con <b>ERROR</b> — corrígelos y vuelve a subirlos, o quítalos con ✕. <b>No se puede generar</b> con archivos en error cargados (nada se salta en silencio).</div>`:''}
@@ -34635,10 +34643,11 @@ function hbBuildXlsx(cfg,filas){
   for(const c of PAL)fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${c}"/><bgColor indexed="64"/></patternFill></fill>`)
   fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${hbCfgColor('colorCorreccion')}"/><bgColor indexed="64"/></patternFill></fill>`) // FASE 6 · M16: ámbar configurable
   fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${hbCfgColor('colorOferta')}"/><bgColor indexed="64"/></patternFill></fill>`) // FASE 2 + M16: rosa oferta configurable
+  fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${hbCfgColor('colorCantVerif')}"/><bgColor indexed="64"/></patternFill></fill>`) // 🟪 (22jul26): morado — cantidad verificada en SellerChat
   let xfs='<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
-  for(let k=0;k<nFills+2;k++)xfs+=`<xf numFmtId="49" fontId="0" fillId="${2+k}" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/>`
+  for(let k=0;k<nFills+3;k++)xfs+=`<xf numFmtId="49" fontId="0" fillId="${2+k}" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/>`
   const styles=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="${fillsXml.length}">${fillsXml.join('')}</fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="${2+nFills+2}">${xfs}</cellXfs></styleSheet>`
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="${fillsXml.length}">${fillsXml.join('')}</fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="${2+nFills+3}">${xfs}</cellXfs></styleSheet>`
   // anchos de columna cómodos (decorativo)
   const w={A:14,B:14,C:32,D:16,E:16,F:14,G:12,H:9,I:10,J:16,K:4,L:10,M:4,N:22,O:14,P:14,Q:24,R:20,S:80}
   let colsXml='<cols>'
@@ -34756,6 +34765,7 @@ function hbArmarFilas(listos,cfg){
     const _nPal=hbCfgPaleta().length // FASE 6 · M16: mismo largo que los fills de arriba
     const bandStyle=2+(bi%_nPal)
     const AMB=2+_nPal,ROSA=AMB+1 // FASE 2: ids de estilo ámbar (corrección) y rosa (oferta)
+    const MOR=ROSA+1 // 🟪 (22jul26): morado — cantidad verificada en SellerChat (opción B)
     for(const{f,r}of b.items){
       if(r._excluida)continue // FASE 6 (6jul26) · M15.C: pedido quitado como duplicado — NO entra a la hoja
       const vals={}
@@ -34769,8 +34779,11 @@ function hbArmarFilas(listos,cfg){
       }
       if(r._transpForzada)vals['O']=hbSanear(r._transpForzada) // FASE 4 (6jul26) · Mejora 8: transportadora confirmada → columna O (viaja al Asignador vía la fórmula S)
       // FASE 2: color por fila — normal=banda producto · oferta=rosa · corregida=ámbar · oferta+corregida=MIXTA (A–O rosa / P–R ámbar)
+      // 🟪 (22jul26): cantidad VERIFICADA en SellerChat = morado en TODA la fila (identifica las
+      // unidades de más confirmadas); si además fue corregida, P–R conserva el ámbar de corrección.
       let sAO,sPR
-      if(r.corr&&f.oferta){sAO=ROSA;sPR=AMB}
+      if(r._cantVerificada){sAO=MOR;sPR=r.corr?AMB:MOR}
+      else if(r.corr&&f.oferta){sAO=ROSA;sPR=AMB}
       else if(r.corr){sAO=AMB;sPR=AMB}
       else if(f.oferta){sAO=ROSA;sPR=ROSA}
       else{sAO=bandStyle;sPR=bandStyle}
@@ -34811,6 +34824,7 @@ async function hbCantidadesInvalidas(listos){
     if(!set||!set.size)continue // producto sin ofertas registradas → no se le exige
     for(const r of f.rows){
       if(r._excluida)continue // fila quitada: no cuenta (no entra a la hoja)
+      if(r._cantVerificada)continue // 🟪 (22jul26) opción B: cantidad VERIFICADA en SellerChat — pasa con su cantidad real
       const c=parseInt(String(r.sc.cantidad==null?'':r.sc.cantidad).trim())
       if(!isFinite(c)||!set.has(c))malas.push({producto:f.producto.nombre,cant:isFinite(c)?c:'(vacía)',tel:r.tel||'—',archivo:f.name,validas:[...set].sort((a,b)=>a-b)})
     }
@@ -35151,6 +35165,7 @@ async function _hbGenerarFinal(){
         agente:f.agente,producto_id:f.producto.id,producto_nombre:f.producto.nombre,fecha_declarada:f.fechaDecl,filas:f.rows.length,
         resultado:(hbCorregidas(f).length||(f.corrPrecios&&f.corrPrecios.length))?'corregido':'ok',
         detalle:{oferta:f.oferta,correcciones:hbCorregidas(f).map(r=>r.corr),correcciones_precio:f.corrPrecios||[],
+          cantidades_confirmadas:(f.cantConfirmadas||[]), // 🟪 (22jul26) opción B: quién confirmó qué cantidad en SellerChat y cuándo
           secuencia:f.secuencia||1, // FASE 6 (6jul26) · M15.A: tanda declarada en el nombre
           telefonos:f.rows.filter(r=>!r._excluida).map(r=>String(r.tel==null?'':r.tel).replace(/\D/g,'')).filter(Boolean), // FASE 6 · M15.B: base del anti-duplicado
           repetidos_quitados:(f.repetidos||[]).filter(x=>x.resuelto==='quitar').length||undefined,
@@ -35428,6 +35443,9 @@ const HB_CC_VALORES={
   colorCorreccion:{label:'🖍️ Color de fila CORREGIDA (hoja base)',tipo:'color',regla:null,
     explica:'Cuando el auxiliar corrige la fecha o el ad_id de una venta, esa fila sale de este color en la hoja para que se note.',
     ejemplo:'Fábrica: ámbar.'},
+  colorCantVerif:{label:'🟪 Color de CANTIDAD VERIFICADA en SellerChat (hoja base)',tipo:'color',regla:null,
+    explica:'Cuando una venta trae una cantidad que NO existe en las ofertas del producto pero el auxiliar VERIFICÓ en SellerChat que el cliente sí la pidió (botón ✅ de la opción B), esa fila sale de este color para identificar las unidades de más.',
+    ejemplo:'Fábrica: morado/lila. Ámbar = corregida · morado = rara pero confirmada.'},
   colorOferta:{label:'🏷️ Color de fila de OFERTA (hoja base)',tipo:'color',regla:null,
     explica:'Las ventas que vienen de un Excel __oferta salen de este color en la hoja.',
     ejemplo:'Fábrica: rosa suave.'},
@@ -35649,6 +35667,7 @@ async function hbRenderCfg(){
     <input type="text" id="hb-cfg-orden" value="${hbEscA((cfg.orden_linea||HB_ORDEN_LINEA).join(', '))}" style="width:100%;font-family:monospace;font-size:12px;box-sizing:border-box;padding:8px"></div>
   ${hbCcValorHTML('paletaProducto')}
   ${hbCcValorHTML('colorCorreccion')}
+  ${hbCcValorHTML('colorCantVerif')}
   ${hbCcValorHTML('colorOferta')}`,true)}
 
   ${_blk('#22c55e','🟩 MASIVO DROPI — plantilla, mapeo y alertas de color',`
@@ -36895,6 +36914,124 @@ window.massBudExcluirNoVerif=()=>{
   for(const it of st.budItems)if(!it.excluida&&it.verificado===false)window.massBudExcluir(it.meta_id)
 }
 // ═══ FIN VERIFICACIÓN + BARRAS POR SEMÁFORO ═══
+
+// ════════════════════════════════════════════════════════════════════════════
+// 🔢🟪 CANDADO DE CANTIDADES AL SUBIR (22jul26) — "los errores avisan APENAS se sube"
+// ─────────────────────────────────────────────────────────────────────────────
+// Antes este candado solo saltaba al dar GENERAR. Ahora se evalúa al subir cada
+// Excel (misma fuente de verdad: producto_ofertas activo=true) y pinta en la
+// tarjeta un bloque compacto por error, con DOS salidas por pedido:
+//   A) Corregir la cantidad → fila ÁMBAR (color de corrección de siempre)
+//   B) ✅ "Verifiqué en SellerChat: el cliente SÍ la pidió" → pasa con su
+//      cantidad real, fila MORADA (colorCantVerif del Centro de Control) y queda
+//      REGISTRADO en la constancia del lote y en Actividad (quién y cuándo).
+// El candado del GENERAR sigue intacto como segundo seguro (ya salta las filas
+// verificadas). Producto sin ofertas registradas → no se le exige (regla de
+// siempre). Aquí NO existe quitar filas: o se corrige, o ✕ quita el Excel entero.
+// ════════════════════════════════════════════════════════════════════════════
+// Chequea TODOS los archivos cargados contra producto_ofertas y marca fila a fila.
+async function hbCantChecarTodos(){
+  const st=window._hb;if(!st||!st.files.length)return
+  const files=st.files.filter(f=>!['error','nombre_mal','duplicado'].includes(f.estado)&&f.producto&&f.producto.id)
+  if(!files.length)return
+  const pids=[...new Set(files.map(f=>String(f.producto.id)))]
+  const map={}
+  try{
+    const{data,error}=await sb.from('producto_ofertas').select('producto_id,cantidad').in('producto_id',pids).eq('activo',true)
+    if(error){console.warn('[hb cant subir] producto_ofertas:',error.message);return} // sin lectura → no marcar a ciegas (el GENERAR atrapa)
+    for(const o of(data||[])){const c=parseInt(o.cantidad);if(isFinite(c)){const k=String(o.producto_id);(map[k]=map[k]||new Set()).add(c)}}
+  }catch(e){console.warn('[hb cant subir]',e&&e.message);return}
+  for(const f of files){
+    const set=map[String(f.producto.id)]
+    f._cantValidas=set?[...set].sort((a,b)=>a-b):null // null = producto sin ofertas registradas → no se le exige
+    for(const r of f.rows){
+      if(!f._cantValidas||!f._cantValidas.length){r._cantMala=false;continue}
+      if(r._excluida||r._cantVerificada){r._cantMala=false;continue}
+      const c=parseInt(String(r.sc.cantidad==null?'':r.sc.cantidad).trim())
+      r._cantMala=(!isFinite(c)||!f._cantValidas.includes(c))
+    }
+  }
+  hbRender()
+}
+// Pendientes de un archivo: filas con cantidad inválida SIN resolver (ni corregida ni verificada)
+function hbCantPend(f){
+  if(!f||!Array.isArray(f.rows)||!f._cantValidas||!f._cantValidas.length)return[]
+  return f.rows.filter(r=>r._cantMala&&!r._excluida&&!r._cantVerificada)
+}
+// Bloque compacto CORRIGE AQUÍ dentro de la tarjeta del archivo — "para un tonto y un bebé":
+// qué está mal · dónde exactamente (fila + teléfono) · qué hacer (opción A o B).
+function hbCantBloque(f,fi){
+  if(!f||!f._cantValidas||!f._cantValidas.length)return''
+  const pend=hbCantPend(f)
+  const confirmadas=(f.rows||[]).map((r,ri)=>({r,ri})).filter(x=>x.r._cantVerificada)
+  if(!pend.length&&!confirmadas.length)return''
+  const validasTxt=f._cantValidas.join(', ')+'u'
+  const maxTxt=f._cantValidas[f._cantValidas.length-1]+'u'
+  let h=''
+  if(pend.length){
+    h+=`<div class="alert alert-red" style="margin-top:8px;line-height:1.8">
+      🔴 <b>CORRIGE AQUÍ — ${pend.length} pedido(s) con una CANTIDAD que NO existe</b> <span style="color:var(--muted)">(válidas: <b>${validasTxt}</b> · máxima: ${maxTxt})</span><br>
+      <span style="font-size:12px">Por cada pedido hay DOS salidas: <b>A)</b> escribe la cantidad correcta, o <b>B)</b> si verificaste en SellerChat que el cliente SÍ la pidió, dale ✅ y pasa tal cual (queda morada en la hoja y registrada).</span>`
+    for(const r of pend){
+      const ri=f.rows.indexOf(r)
+      const cRaw=String(r.sc.cantidad==null?'':r.sc.cantidad).trim()||'(vacía)'
+      h+=`<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;padding:7px 9px;background:rgba(0,0,0,.25);border-radius:8px;font-size:12.5px">
+        <span>🔢 Fila <b>${ri+2}</b> · 📞 <b>${hbEsc(r.tel||'—')}</b> ${hbTelBtn(r.tel)} · pusieron <b style="color:var(--red)">${hbEsc(cRaw)}u</b></span>
+        <span style="display:flex;gap:5px;align-items:center"><b>A)</b><input type="number" min="1" placeholder="cant." value="" onchange="hbCantCorregir(${fi},${ri},this.value)" style="width:64px;padding:5px 7px;font-size:12.5px;background:var(--card);border:1px solid var(--amber);border-radius:6px;color:var(--text)" title="Escribe la cantidad correcta (una de: ${validasTxt}) — la fila sale ÁMBAR de corregida"></span>
+        <button class="btn-sm" onclick="hbCantOk(${fi},${ri})" style="font-size:11px;padding:3px 9px;background:rgba(217,194,240,.15);border:1px solid #a78bfa;color:#c4b5fd" title="SOLO si ya lo verificaste en SellerChat. El pedido pasa con ${hbEsc(cRaw)}u, la fila sale MORADA y queda registrado quién confirmó."><b>B)</b> ✅ Verifiqué en SellerChat: SÍ pidió ${hbEsc(cRaw)}u</button>
+      </div>`
+    }
+    h+='</div>'
+  }
+  if(confirmadas.length){
+    h+=`<div style="margin-top:8px;padding:8px 10px;border:1px solid #a78bfa;border-radius:8px;background:rgba(217,194,240,.06);font-size:12px;line-height:1.7">
+      🟪 <b>${confirmadas.length} cantidad(es) VERIFICADAS en SellerChat</b> — pasan tal cual y salen moradas en la hoja:<br>
+      ${confirmadas.map(x=>`· 📞 <b>${hbEsc(x.r.tel||'—')}</b> con <b>${hbEsc(String(x.r.sc.cantidad))}u</b> <span style="color:var(--muted)">(${hbEsc((x.r._cantVerifPor||''))})</span> <button class="btn-sm" style="font-size:10px;padding:1px 7px" onclick="hbCantOkUndo(${fi},${x.ri})" title="Deshacer la confirmación: vuelve a pedir corrección">↩️ Deshacer</button>`).join('<br>')}
+    </div>`
+  }
+  return h
+}
+// Opción A: corregir la cantidad a mano → validación inmediata + fila ÁMBAR (corrección de siempre)
+window.hbCantCorregir=(fi,ri,val)=>{
+  const f=window._hb?.files[fi];const r=f&&f.rows[ri];if(!r)return
+  const v=parseInt(String(val==null?'':val).trim())
+  if(!isFinite(v)||!f._cantValidas||!f._cantValidas.includes(v)){
+    alert('❌ '+(isFinite(v)?v+'u tampoco existe':'Cantidad inválida')+'. Las válidas de este producto son: '+((f._cantValidas||[]).join(', ')||'—')+'u.\n\nSi verificaste en SellerChat que el cliente SÍ pidió esa cantidad, usa el botón B) ✅.')
+    hbRender();return
+  }
+  const antes=String(r.sc.cantidad==null?'':r.sc.cantidad).trim()
+  r.sc.cantidad=String(v)
+  r._cantMala=false
+  r.corr={...(r.corr||{}),cantidad:{de:antes,a:String(v),via:'correccion_manual'}} // → fila ÁMBAR (hbCorregidas la recoge para la constancia)
+  hbRender()
+}
+// Opción B: verificada en SellerChat → pasa con su cantidad real, fila MORADA + registro (quién y cuándo)
+window.hbCantOk=(fi,ri)=>{
+  const f=window._hb?.files[fi];const r=f&&f.rows[ri];if(!r)return
+  const cant=String(r.sc.cantidad==null?'':r.sc.cantidad).trim()
+  if(!confirm(`✅ ¿Confirmas que VERIFICASTE en SellerChat que el cliente del 📞 ${r.tel||'—'} SÍ pidió ${cant}u?\n\nEl pedido pasa con esa cantidad (aunque no exista en las ofertas de NEXO), la fila sale MORADA en la hoja y queda registrado con tu nombre.`))return
+  r._cantVerificada=true
+  r._cantMala=false
+  r._cantVerifPor=(me?.nombre||me?.username||'auxiliar')+' · '+new Date().toLocaleString('es-CO',{timeZone:'America/Bogota'})
+  f.cantConfirmadas=f.cantConfirmadas||[]
+  f.cantConfirmadas.push({tel:r.tel||null,cantidad:cant,usuario:me?.nombre||me?.username||null,usuario_id:me?.id||null,ts:new Date().toISOString(),via:'verificado_sellerchat'})
+  logAction('hb_cantidad_confirmada',{telefono:r.tel||null,cantidad:cant,producto:f.producto?.nombre||null,archivo:f.name,verificado_en:'sellerchat'}).catch(()=>{})
+  hbRender()
+}
+// Deshacer la opción B: vuelve a quedar pendiente de corrección
+window.hbCantOkUndo=(fi,ri)=>{
+  const f=window._hb?.files[fi];const r=f&&f.rows[ri];if(!r)return
+  r._cantVerificada=false
+  r._cantVerifPor=null
+  r._cantMala=true
+  if(Array.isArray(f.cantConfirmadas)){
+    const tel=r.tel||null,cant=String(r.sc.cantidad==null?'':r.sc.cantidad).trim()
+    const i=f.cantConfirmadas.findIndex(x=>x.tel===tel&&x.cantidad===cant)
+    if(i>=0)f.cantConfirmadas.splice(i,1)
+  }
+  hbRender()
+}
+// ═══ FIN CANDADO DE CANTIDADES AL SUBIR ═══
 
 </script>
 </body>

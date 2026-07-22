@@ -5021,6 +5021,7 @@ async function pageAdminProductos(c){
       <button class="btn-sm btn-primary" onclick="modalAddProducto()">➕ Agregar producto</button>
       <button class="btn-sm btn-outline" id="btn-toggle-archivados" onclick="toggleVerArchivados()" style="border-color:var(--amber);color:var(--amber)">👁️ Ver archivados</button>
       <button class="btn-sm btn-outline" id="btn-rematch-nulls" onclick="rematcharProductosNulls()" style="border-color:var(--blue);color:var(--blue)" title="Reintenta resolver producto_id para reportes que quedaron sin matchear">🔗 Re-matchear NULLs</button>
+      <button class="btn-sm btn-outline" id="btn-esc3-reparar" onclick="nxEsc3Reparar()" style="border-color:var(--purple);color:var(--purple)" title="Reparación única: detecta pedidos que estaban en P.CONF o programados y el Excel de Dropi los pisó a cancelado — primero muestra el conteo, solo repara con tu OK">🛡️ Devolver pisados al triaje</button>
     </div>
     <div id="prods-list">${productos.map(prod=>renderProdAccordion(prod,maestrosList)).join('')}</div>
     <div id="archivados-section" style="display:none;margin-top:20px;padding-top:16px;border-top:2px dashed var(--amber)">
@@ -11885,6 +11886,16 @@ async function cargarPendientesSinFecha(){
     }
     const canceladoManual=new Set()
     for(const[k,v]of Object.entries(_decision))if(v==='canc')canceladoManual.add(String(k))
+    // 🛡️ ESCUDO 3 (21jul26): pedidos cuyo stock fue liberado en Dropi (cancelado operativo) pero que
+    // siguen aquí en triaje → badge 🔓. Tolerante: si la consulta falla, la lista sale sin badges.
+    const _esc3Marca=new Set()
+    try{
+      for(let i=0;i<ids.length;i+=100){
+        const batch=ids.slice(i,i+100)
+        const{data:e3}=await sb.from('mapeo_eventos').select('mapeo_id').in('mapeo_id',batch).in('evento',['esc3_stock_liberado','esc3_reparado'])
+        for(const e of (e3||[]))_esc3Marca.add(String(e.mapeo_id))
+      }
+    }catch(_){}
     const sinFecha=pend.filter(m=>!conProg.has(m.id)&&!canceladoManual.has(String(m.id)))
     // Orden: más recientes primero
     sinFecha.sort((a,b)=>{
@@ -11926,6 +11937,8 @@ async function cargarPendientesSinFecha(){
       m.psf_ultimo_usuario=info.ultimoUsuario
       m.psf_ultimo_nivel=info.ultimoNivel
     }
+    // 🛡️ ESCUDO 3: pegar la marca a cada item para el badge 🔓
+    for(const m of sinFecha)m.psf_esc3=_esc3Marca.has(String(m.id))
     window._psfCache={items:sinFecha,limit:window._psfCache?.limit||20}
     renderPendientesSinFecha()
   }catch(e){
@@ -11962,6 +11975,8 @@ function renderPendientesSinFecha(){
       const ultFmt=m.psf_ultimo?new Date(m.psf_ultimo).toLocaleDateString('es-CO',{day:'numeric',month:'short'}):'—'
       enviosBadge=`<span class="pill" style="background:rgba(59,130,246,.12);color:var(--blue);border:1px solid var(--blue);font-size:11px">📨 ${envios} mensaje${envios===1?'':'s'} · último: ${ultFmt}${m.psf_ultimo_usuario?` · ${m.psf_ultimo_usuario}`:''}</span>`
     }
+    // 🛡️ ESCUDO 3: badge del cancelado operativo — si el cliente confirma, hay que subirlo como orden NUEVA en Dropi
+    const esc3Badge=m.psf_esc3?`<span class="pill" title="Este pedido se canceló en Dropi SOLO para liberar el stock — el cliente NO lo ha cancelado. Si confirma, súbelo a Dropi como orden NUEVA." style="background:rgba(167,139,250,.12);color:var(--purple);border:1px solid var(--purple);font-size:11px;cursor:help">🔓 stock liberado en Dropi — si confirma, súbelo como orden nueva</span>`:''
     // Botón de envío: deshabilitado si ya envió 2 hoy
     const btnEnviar=bloqueadoHoy
       ? `<button class="btn-sm" disabled style="background:var(--card2);color:var(--muted);border:1px solid var(--border);cursor:not-allowed;padding:8px 12px">⛔ Cupo diario (2/2)</button>`
@@ -11976,6 +11991,7 @@ function renderPendientesSinFecha(){
             <span class="pill" style="background:rgba(245,158,11,.12);color:var(--amber);border:1px solid var(--amber);font-size:11px">⏳ Pendiente sin fecha</span>
             ${diasBadge}
             ${enviosBadge}
+            ${esc3Badge}
           </div>
         </div>
         <div style="text-align:right;flex-shrink:0;display:flex;flex-direction:column;gap:6px;align-items:flex-end">
@@ -17065,6 +17081,13 @@ window.actualizarEstadosDropi=async()=>{
 
   msgEl.innerHTML='<span style="color:var(--blue)">Actualizando...</span>'
   let ok=0,fail=0
+  // 🛡️ ESCUDO 3 (21jul26 · ley del owner): prefetch de programaciones ACTIVAS de las órdenes que el
+  // Excel intenta cancelar — el triaje (P.Conf · programados) es territorio EXCLUSIVO del auxiliar.
+  let _esc3Prog=new Set()
+  try{
+    const _esc3Cand=cruzados.filter(r=>r.mapeo&&NX_ESC3_CANCEL.has(window._nexoNormEstado(r.estatus)||'')).map(r=>r.mapeo.id)
+    if(_esc3Cand.length)_esc3Prog=await nxEsc3Progs(_esc3Cand)
+  }catch(_){}
   for(const r of cruzados){
     // Convertir DD-MM-YYYY → YYYY-MM-DD para Supabase
     let fd=null
@@ -17076,6 +17099,13 @@ window.actualizarEstadosDropi=async()=>{
     // cancelación manual) viven en programaciones_envio y mapeo_eventos — el Excel NUNCA las toca.
     // Todo cambio queda registrado en mapeo_eventos, así que nada se pierde.
     const _estDropi=window._nexoNormEstado(r.estatus)
+    // 🛡️ ESCUDO 3 (21jul26 · ley del owner — ÚNICA excepción a la regla de oro de arriba): si el
+    // mapeo está en P.CONF (o tiene programación de envío ACTIVA) y el Excel trae CANCELADO/
+    // RECHAZADO/GUIA_ANULADA, esa cancelación es OPERATIVA (se canceló en Dropi para liberar stock),
+    // NO decisión del cliente → estado_final NO se pisa. Del triaje solo lo sacan las manos del
+    // auxiliar: ✋ cancelar o 📅 programar. Cualquier OTRO estado del Excel pasa normal (esa es la
+    // ruta de recuperación). Queda huella 'esc3_stock_liberado' en mapeo_eventos.
+    const _esc3=NX_ESC3_CANCEL.has(_estDropi||'')&&(nxEsc3EsPConf(r.mapeo)||_esc3Prog.has(String(r.mapeo.id)))
     const updatePayload={
       estado_final:_estDropi||null,
       fecha_dropi:fd,
@@ -17084,6 +17114,7 @@ window.actualizarEstadosDropi=async()=>{
       novedad_texto:r.novedad||null,
       transportadora:r.transportadora||null
     }
+    if(_esc3)delete updatePayload.estado_final // 🛡️ el estado del triaje se conserva; el resto de datos de Dropi sí entra
     // Fase 2.1 (15jul26): precio_dropi solo si viene >0 — NO pisar el snapshot/total ya guardado con
     // un vacío (mismo patrón del Seguimiento y de flete/ganancia/costo_proveedor de aquí abajo).
     if(r.total>0)updatePayload.precio_dropi=r.total
@@ -17101,6 +17132,9 @@ window.actualizarEstadosDropi=async()=>{
     if(error){fail++}
     else{
       ok++
+      // 🛡️ ESCUDO 3: huella append-only — "cancelado operativo en Dropi (stock liberado), el pedido
+      // sigue en el triaje del auxiliar". El badge 🔓 de la lista de pendientes lee este evento.
+      if(_esc3){try{await sb.from('mapeo_eventos').insert({mapeo_id:r.mapeo.id,evento:'esc3_stock_liberado',fuente:'cruce_dropi',usuario_id:me?.id||null,detalle:{estado_excel:_estDropi,estado_conservado:r.mapeo.estado_final||null,estatus_dropi:r.estatus||null,motivo:'cancelado operativo en Dropi para liberar stock — sigue en triaje; solo el auxiliar lo mueve'}})}catch(_){}}
       // Columnas extra de Dropi (guía, último movimiento, dirección, etc.). Update aparte y tolerante:
       // si esas columnas aún no existen en Supabase, este update falla en silencio y NO afecta lo demás.
       try{
@@ -18533,12 +18567,24 @@ window.procesarSeguimiento=async()=>{
 
     // Update mapeos with latest status
     let updated=0
+    // 🛡️ ESCUDO 3 (21jul26): mismo escudo del Cruce — prefetch de programaciones ACTIVAS de las
+    // órdenes que este Excel intenta cancelar. El triaje es territorio exclusivo del auxiliar.
+    let _esc3ProgSeg=new Set()
+    try{
+      const _esc3CandS=resultados.filter(r=>r.mapeo&&NX_ESC3_CANCEL.has(window._nexoNormEstado(r.estatus)||'')).map(r=>r.mapeo.id)
+      if(_esc3CandS.length)_esc3ProgSeg=await nxEsc3Progs(_esc3CandS)
+    }catch(_){}
     for(const r of resultados){
       if(r.mapeo){
         let fd=null
         if(r.fecha_dropi){const p=r.fecha_dropi.split('-');if(p.length===3)fd=`${p[2]}-${p[1]}-${p[0]}`}
         const _estSegNorm=window._nexoNormEstado(r.estatus)
         const segPayload={estado_final:_estSegNorm||null,fecha_dropi:fd||r.mapeo.fecha_dropi,nombre_cliente:r.nombre||r.mapeo.nombre_cliente,novedad_texto:r.novedad||r.mapeo.novedad_texto||null,transportadora:r.transportadora||r.mapeo.transportadora||null}
+        // 🛡️ ESCUDO 3 (21jul26 · ley del owner): P.CONF o programación activa + Excel cancela →
+        // cancelación OPERATIVA (stock liberado en Dropi), NO decisión del cliente → estado_final
+        // NO se pisa. Del triaje solo lo sacan las manos del auxiliar: ✋ cancelar o 📅 programar.
+        const _esc3Seg=NX_ESC3_CANCEL.has(_estSegNorm||'')&&(nxEsc3EsPConf(r.mapeo)||_esc3ProgSeg.has(String(r.mapeo.id)))
+        if(_esc3Seg)delete segPayload.estado_final
         // Capturar TODOS los datos de Dropi (igual que el Cruce Dropi). Solo se sobreescribe si viene >0, para no pisar un dato real con un vacío.
         if(r.cantidad>0)segPayload.cantidad=r.cantidad
         if(r.total>0)segPayload.precio_dropi=r.total
@@ -18553,6 +18599,8 @@ window.procesarSeguimiento=async()=>{
         const{error}=await sb.from('mapeos').update(segPayload).eq('id',r.mapeo.id)
         if(!error){
           updated++
+          // 🛡️ ESCUDO 3: huella append-only del cancelado operativo (stock liberado) — badge 🔓
+          if(_esc3Seg){try{await sb.from('mapeo_eventos').insert({mapeo_id:r.mapeo.id,evento:'esc3_stock_liberado',fuente:'seguimiento',usuario_id:me?.id||null,detalle:{estado_excel:_estSegNorm,estado_conservado:r.mapeo.estado_final||null,estatus_dropi:r.estatus||null,motivo:'cancelado operativo en Dropi para liberar stock — sigue en triaje; solo el auxiliar lo mueve'}})}catch(_){}}
           // Columnas extra de Dropi. Update aparte y tolerante: si aún no existen en Supabase, falla en silencio.
           try{
             const extra={}
@@ -36288,6 +36336,119 @@ function _nxSimPintar(){
 // ═══ FIN SIMULADOR ═══
 
 // ═══ FIN PESTAÑA ÓRDENES ═══
+
+// ════════════════════════════════════════════════════════════════════════════
+// 🛡️ ESCUDO 3 (21jul26 · ley del owner) — HELPERS COMPARTIDOS + REPARACIÓN ÚNICA
+// ─────────────────────────────────────────────────────────────────────────────
+// Regla en una frase: en el TRIAJE (P. Confirmación · cancelados · programados)
+// solo opera el AUXILIAR; el Excel de Dropi trae los pedidos la primera vez y
+// mueve los que ya salieron — pero NO puede sacar un pedido del triaje.
+// Un pedido en P.CONF (o con programación activa) al que el Excel le trae
+// CANCELADO/RECHAZADO/GUIA_ANULADA fue cancelado en Dropi SOLO para liberar
+// stock (operativo): estado_final se conserva y queda huella en mapeo_eventos.
+// Espejo exacto del ESCUDO 2 (cancelado a mano nunca vuelve aunque el Excel
+// lo regrese a P.CONF). Cruce y Seguimiento usan estos helpers.
+// ════════════════════════════════════════════════════════════════════════════
+const NX_ESC3_CANCEL=new Set(['CANCELADO','RECHAZADO','GUIA_ANULADA'])
+function nxEsc3EsPConf(m){ // ¿el mapeo está HOY en el triaje de P. Confirmación? (misma definición de la lista del auxiliar)
+  const ef=String((m&&m.estado_final)||'').trim().toUpperCase()
+  if(ef==='PENDIENTE CONFIRMACION')return true
+  if(!ef){const ei=String((m&&m.estado_inicial)||'').trim().toUpperCase();return ei.includes('PENDIENTE CONFIRMACION')}
+  return false
+}
+async function nxEsc3Progs(mapeoIds){ // Set<String(mapeo_id)> con programación de envío ACTIVA
+  const s=new Set()
+  try{
+    const ids=[...new Set((mapeoIds||[]).filter(Boolean))]
+    for(let i=0;i<ids.length;i+=100){
+      const b=ids.slice(i,i+100)
+      const{data}=await sb.from('programaciones_envio').select('mapeo_id').in('mapeo_id',b).eq('estado','programado')
+      for(const p of (data||[]))s.add(String(p.mapeo_id))
+    }
+  }catch(e){console.warn('[ESC3] programaciones no disponibles:',e&&e.message)}
+  return s
+}
+
+// ── 🛡️ REPARACIÓN ÚNICA: devolver al triaje lo que el Excel pisó en cruces PASADOS ──
+// Detecta por la línea de tiempo (mapeo_eventos, fuente 'dropi'/'dropi_seguimiento') los pedidos
+// que estaban en P.CONF (estado_anterior del evento) o con programación ACTIVA y fueron pisados a
+// cancelado. Respeta: (a) cancelados A MANO por el auxiliar (Escudo 2), (b) cancelados GENUINOS
+// que llegaron así por su flujo normal. Devuelve al estado_anterior EXACTO del evento — cero
+// adivinanza. Primero MUESTRA el conteo y solo ejecuta con OK explícito. Los pedidos pisados ANTES
+// de que existiera la línea de tiempo no tienen huella → zona gris, no se tocan.
+window.nxEsc3Reparar=async()=>{
+  const btn=document.getElementById('btn-esc3-reparar')
+  if(btn){btn.disabled=true;btn.innerHTML='⏳ Analizando línea de tiempo...'}
+  try{
+    // 1) Toda la línea de tiempo relevante (append-only): cambios de Dropi + decisiones manuales
+    const{data:evs,error:evErr}=await _sbFetchAll((_f,_t)=>sb.from('mapeo_eventos')
+      .select('mapeo_id,evento,fuente,detalle,created_at')
+      .in('fuente',['dropi','dropi_seguimiento','auxiliar_manual','cruce_dropi','seguimiento'])
+      .order('id',{ascending:true}).range(_f,_t))
+    if(evErr)throw evErr
+    const porMapeo={}
+    for(const e of (evs||[])){const k=String(e.mapeo_id);(porMapeo[k]=porMapeo[k]||[]).push(e)}
+    for(const k of Object.keys(porMapeo))porMapeo[k].sort((a,b)=>String(a.created_at||'').localeCompare(String(b.created_at||'')))
+    // 2) Candidatos: último evento de Dropi que pisó a cancelado, con estado_anterior=P.CONF
+    const candBase=[] // {mapeo_id, target, pisada_at, viaProg:false}
+    const candProgIds=[] // pisados desde OTRO estado_anterior → solo cuentan si tienen programación ACTIVA
+    const candProgTmp={}
+    let respetadosManual=0
+    for(const[mid,lista]of Object.entries(porMapeo)){
+      let pisada=null
+      for(const e of lista){
+        const d=e.detalle||{}
+        const nuevo=String(d.estado_nuevo||'').toUpperCase()
+        if((e.fuente==='dropi'||e.fuente==='dropi_seguimiento')&&NX_ESC3_CANCEL.has(nuevo))pisada={e,anterior:String(d.estado_anterior||'').toUpperCase()||null}
+      }
+      if(!pisada)continue
+      // Escudo 2 manda: decisión manual de cancelar DESPUÉS de la pisada (sin reactivar después) → se respeta
+      let decision=null
+      for(const e of lista){
+        if(String(e.created_at||'')<String(pisada.e.created_at||''))continue
+        if(e.evento==='reactivado')decision='ok'
+        else if(e.evento==='re_cancelado'||(e.evento==='cancelado'&&e.fuente==='auxiliar_manual'))decision='canc'
+      }
+      if(decision==='canc'){respetadosManual++;continue}
+      if(pisada.anterior==='PENDIENTE CONFIRMACION')candBase.push({mapeo_id:mid,target:'PENDIENTE CONFIRMACION',pisada_at:pisada.e.created_at})
+      else if(pisada.anterior){candProgIds.push(mid);candProgTmp[mid]={target:pisada.anterior,pisada_at:pisada.e.created_at}}
+    }
+    // 3) Los pisados desde otro estado solo se devuelven si tienen programación ACTIVA (el Excel nunca la toca)
+    const progSet=await nxEsc3Progs(candProgIds)
+    const candProg=candProgIds.filter(id=>progSet.has(String(id))).map(id=>({mapeo_id:id,...candProgTmp[id],viaProg:true}))
+    let cand=candBase.concat(candProg)
+    // 4) Verificar el estado ACTUAL: solo se repara lo que HOY sigue en cancelado (si ya se recuperó solo, no se toca)
+    const vivos=[]
+    for(let i=0;i<cand.length;i+=100){
+      const b=cand.slice(i,i+100)
+      const{data:ms}=await sb.from('mapeos').select('id,estado_final,telefono,producto').in('id',b.map(c=>c.mapeo_id))
+      const by={};for(const m of (ms||[]))by[String(m.id)]=m
+      for(const c of b){const m=by[String(c.mapeo_id)];if(m&&NX_ESC3_CANCEL.has(String(m.estado_final||'').toUpperCase()))vivos.push({...c,tel:m.telefono,prod:m.producto,pisado:m.estado_final})}
+    }
+    if(!vivos.length){
+      alert(`🛡️ Reparación — análisis terminado\n\nNo hay pedidos por devolver al triaje.\n· Respetados por decisión manual del auxiliar (Escudo 2): ${respetadosManual}\n· Los cancelados genuinos (llegaron así por su flujo normal) no se tocan.\n\nNota: los pedidos pisados ANTES de que existiera la línea de tiempo no tienen huella y no se pueden detectar sin adivinar.`)
+      return
+    }
+    // 5) MOSTRAR el conteo y pedir OK explícito antes de mover nada
+    const nP=vivos.filter(v=>!v.viaProg).length,nG=vivos.filter(v=>v.viaProg).length
+    const muestra=vivos.slice(0,8).map(v=>`  · ${v.tel||'—'} · ${v.prod||'—'} · ${v.pisado} → ${v.target}${v.viaProg?' (programado)':''}`).join('\n')
+    if(!confirm(`🛡️ REPARACIÓN ÚNICA — esto es lo que encontré:\n\n✅ Para DEVOLVER al triaje: ${vivos.length}\n   · pisados estando en P. Confirmación: ${nP}\n   · pisados con programación de envío activa: ${nG}\n⛔ Respetados (cancelados A MANO por el auxiliar): ${respetadosManual}\n⛔ Cancelados genuinos: no se tocan.\n\nEjemplos:\n${muestra}${vivos.length>8?`\n  ... y ${vivos.length-8} más`:''}\n\nCada uno vuelve a su estado EXACTO anterior (cero adivinanza) y queda huella 'esc3_reparado'.\n\n¿Ejecutar la devolución?`))return
+    let okN=0,failN=0
+    for(const v of vivos){
+      const{error}=await sb.from('mapeos').update({estado_final:v.target}).eq('id',v.mapeo_id)
+      if(error){failN++;continue}
+      okN++
+      try{await sb.from('mapeo_eventos').insert({mapeo_id:v.mapeo_id,evento:'esc3_reparado',fuente:'admin_reparacion',usuario_id:me?.id||null,detalle:{estado_pisado:v.pisado,estado_restaurado:v.target,pisada_at:v.pisada_at,via:v.viaProg?'programacion_activa':'pconf',motivo:'reparación única: el Excel lo pisó estando en triaje — devuelto; el stock sigue liberado en Dropi'}})}catch(_){}
+    }
+    logAction('esc3_reparacion',{devueltos:okN,errores:failN,respetados_manual:respetadosManual}).catch(()=>{})
+    alert(`🛡️ Reparación terminada\n\n✅ Devueltos al triaje: ${okN}${failN?`\n⚠️ Errores: ${failN}`:''}\n⛔ Respetados por decisión manual: ${respetadosManual}\n\nLos devueltos llevan el badge 🔓 "stock liberado en Dropi": si el cliente confirma, súbelo a Dropi como orden NUEVA.`)
+  }catch(e){
+    alert('❌ '+((e&&e.message)||e))
+  }finally{
+    if(btn){btn.disabled=false;btn.innerHTML='🛡️ Devolver pisados al triaje'}
+  }
+}
+// ═══ FIN ESCUDO 3 ═══
 
 </script>
 </body>

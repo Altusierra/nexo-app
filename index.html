@@ -609,6 +609,9 @@ async function loadMe(uid){
     // NUEVO (9jul26 · Mejoras 1-2): 🌐 Valores del Sistema — se cargan con la sesión (caché local +
     // Supabase). Tolerante: si falla, nxSysVal() cae a los ORIGINALES del código y nada se rompe.
     try{await nxSysLoad()}catch(_){}
+    // 📦 NUEVO (21jul26): diccionario de estados de Dropi definidos desde la pantalla (capa sobre
+    // DROPI_STATUS en la tabla config). Tolerante: si falla, NEXO sigue con los estados del código.
+    try{await nxEstadosLoad()}catch(_){}
     return true
   }catch(e){console.error('loadMe exception:',e);return false}
 }
@@ -5903,7 +5906,20 @@ window.switchProdTab=(prodId,tab)=>{
   const tResults=document.getElementById('prod-tab-results-'+prodId)
   const bConfig=document.getElementById('prod-tab-config-btn-'+prodId)
   const bResults=document.getElementById('prod-tab-results-btn-'+prodId)
+  // 📦 NUEVO (21jul26): tercera pestaña Órdenes — elementos opcionales (guardados con if) para no romper nada
+  const tOrd=document.getElementById('prod-tab-ordenes-'+prodId)
+  const bOrd=document.getElementById('prod-tab-ordenes-btn-'+prodId)
   if(!tConfig||!tResults||!bConfig||!bResults)return
+  if(tab==='ordenes'&&tOrd&&bOrd){
+    tConfig.style.display='none';tResults.style.display='none';tOrd.style.display=''
+    bConfig.style.color='var(--muted)';bConfig.style.borderBottomColor='transparent'
+    bResults.style.color='var(--muted)';bResults.style.borderBottomColor='transparent'
+    bOrd.style.color='var(--text)';bOrd.style.borderBottomColor='var(--primary)'
+    if(!tOrd.dataset.loaded){renderProdOrdenes(prodId);tOrd.dataset.loaded='1'}
+    return
+  }
+  if(tOrd)tOrd.style.display='none'
+  if(bOrd){bOrd.style.color='var(--muted)';bOrd.style.borderBottomColor='transparent'}
   if(tab==='results'){
     tConfig.style.display='none';tResults.style.display=''
     bConfig.style.color='var(--muted)';bConfig.style.borderBottomColor='transparent'
@@ -6382,6 +6398,7 @@ async function renderProdBody(id,maestrosList){
     <div style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:14px">
       <button id="prod-tab-config-btn-${id}" onclick="switchProdTab('${id}','config')" style="background:transparent;border:none;color:var(--text);padding:10px 16px;cursor:pointer;font-size:14px;font-weight:500;border-bottom:2px solid var(--primary);outline:none">⚙️ Configuración</button>
       <button id="prod-tab-results-btn-${id}" onclick="switchProdTab('${id}','results')" style="background:transparent;border:none;color:var(--muted);padding:10px 16px;cursor:pointer;font-size:14px;font-weight:500;border-bottom:2px solid transparent;outline:none">📊 Resultados</button>
+      <button id="prod-tab-ordenes-btn-${id}" onclick="switchProdTab('${id}','ordenes')" style="background:transparent;border:none;color:var(--muted);padding:10px 16px;cursor:pointer;font-size:14px;font-weight:500;border-bottom:2px solid transparent;outline:none">📦 Órdenes</button>
     </div>
     <div id="prod-tab-config-${id}">
     <div class="form-grid g2">
@@ -6507,6 +6524,9 @@ async function renderProdBody(id,maestrosList){
     </div>
     <div id="prod-tab-results-${id}" style="display:none">
       <div class="loading">Cargando resultados...</div>
+    </div>
+    <div id="prod-tab-ordenes-${id}" style="display:none">
+      <div class="loading">Cargando órdenes...</div>
     </div>
   </div>`
   renderCampanasEnlazadas(id)
@@ -35644,6 +35664,436 @@ window.hbCfgReset=async()=>{
   if(!e)hbRenderCfg()
 }
 // ═══ FIN CONSTRUCTOR DE HOJA BASE ═══
+
+// ════════════════════════════════════════════════════════════════════════════
+// 📦 PESTAÑA "ÓRDENES" POR PRODUCTO (21jul26) — "la sección que solo dice la verdad"
+// ─────────────────────────────────────────────────────────────────────────────
+// Muestra TODO el histórico de mapeos del producto, desglosado por cada ID de
+// Dropi (cada ID = un proveedor). Cuatro grupos, validados con el owner:
+//   ✅ ÓRDENES  → todo lo demás (pendiente, confirmado, en camino, novedad, entregado...)
+//   ↩️ DEVUELTAS → SOLO cat 'devuelto'. Columna propia + switch: prendido SUMA al total.
+//   ⏳ P. CONFIRMACIÓN → PENDIENTE CONFIRMACION. Columna propia + switch: prendido SUMA.
+//   ❌ CANC/RECH/ANUL → CANCELADO, RECHAZADO, GUIA_ANULADA. Solo se ven, JAMÁS suman.
+// Conteo: órdenes = dropi_order_id DISTINTOS (una orden con 2 variaciones = 1 orden,
+// se suman sus cantidades) · unidades = suma de CANTIDAD. CERO suposiciones: orden sin
+// estado, estado no clasificado, sin cantidad o ID no registrado → sección 🔎 Novedades.
+// Los switches se guardan en Supabase (tabla config) → te siguen en cualquier computador.
+// Todo es ADITIVO: no toca ninguna lógica existente.
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Diccionario de estados definidos desde la pantalla (capa sobre DROPI_STATUS) ──
+// Vive en config.clave='dropi_estados_custom'. Estructura por estado (clave en MAYÚSCULAS):
+//   {grupo:'ordenes'|'dev'|'pconf'|'cancel', cat, etapa, emoji, label, significado, override, creado}
+// Al cargar: estados NUEVOS se agregan a DROPI_STATUS · estados EXISTENTES solo se pisan
+// si llevan override:true (pasaron por el candado 🔒 de doble confirmación).
+// Si la config se borra algún día, NEXO vuelve solo al comportamiento del código.
+window._nxEstadosCustom=window._nxEstadosCustom||{}
+const NX_ESTADOS_KEY='dropi_estados_custom'
+const NX_ORD_GRUPOS={
+  ordenes:{emoji:'✅',nombre:'Órdenes (suma al total)',pill:'pill-blue',color:'var(--blue)'},
+  dev:{emoji:'↩️',nombre:'Devuelta',pill:'pill-red',color:'var(--red)'},
+  pconf:{emoji:'⏳',nombre:'Pendiente confirmación',pill:'pill-amber',color:'var(--amber)'},
+  cancel:{emoji:'❌',nombre:'Cancelada / Rechazada / Anulada',pill:'pill-red',color:'var(--red)'},
+}
+// Tramos del viaje → cat interna (misma familia de DROPI_STATUS.cat que ya usa todo NEXO)
+const NX_ORD_TRAMOS={
+  nace:{n:'1. Nace la orden (pendiente/confirmada)',cat:'pendiente'},
+  proceso:{n:'2. Alistando en bodega (en proceso)',cat:'en_proceso'},
+  camino:{n:'3. De camino (en tránsito)',cat:'en_transito'},
+  bodega:{n:'4. En bodega / reclame en oficina',cat:'en_bodega'},
+  novedad:{n:'5. Novedad (problema de entrega)',cat:'novedad'},
+  novedad_ok:{n:'6. Novedad resuelta',cat:'novedad_ok'},
+  entregado:{n:'7. Entregado',cat:'entregado'},
+  cancelado:{n:'8. Cancelado / nunca salió',cat:'cancelado'},
+  devuelto:{n:'9. Devuelto',cat:'devuelto'},
+}
+async function nxEstadosLoad(){
+  // 1º caché local (rápido) → 2º Supabase. Tolerante: si todo falla, queda vacío (legacy).
+  let obj=null
+  try{const raw=localStorage.getItem('nx_estados_custom');if(raw){const o=JSON.parse(raw);if(o&&typeof o==='object'&&!Array.isArray(o))obj=o}}catch(_){}
+  try{
+    const raw=await getConfig(NX_ESTADOS_KEY)
+    if(raw){const o=JSON.parse(raw);if(o&&typeof o==='object'&&!Array.isArray(o)){obj=o;try{localStorage.setItem('nx_estados_custom',JSON.stringify(o))}catch(_){}}}
+  }catch(e){console.warn('[ESTADOS] lectura config falló:',e&&e.message)}
+  window._nxEstadosCustom=obj||{}
+  nxEstadosAplicar()
+}
+window.nxEstadosLoad=nxEstadosLoad
+function nxEstadosAplicar(){
+  // Aplica la capa sobre DROPI_STATUS: nuevos se AGREGAN, existentes solo con override:true.
+  try{
+    for(const[k,v]of Object.entries(window._nxEstadosCustom||{})){
+      if(!k||!v||typeof v!=='object')continue
+      const g=NX_ORD_GRUPOS[v.grupo]||NX_ORD_GRUPOS.ordenes
+      const rec={cat:v.cat||'en_transito',emoji:v.emoji||g.emoji,pill:g.pill,label:v.label||k}
+      if(!DROPI_STATUS[k])DROPI_STATUS[k]=rec
+      else if(v.override===true)Object.assign(DROPI_STATUS[k],rec)
+    }
+  }catch(e){console.warn('[ESTADOS] aplicar falló:',e&&e.message)}
+}
+// Etapa del semáforo para estados custom: envoltura ADITIVA — los conocidos siguen igual.
+try{
+  const _etapaOrigFn=window._etapaDeEstado
+  if(typeof _etapaOrigFn==='function'){
+    window._etapaDeEstado=(s)=>{
+      const r=_etapaOrigFn(s)
+      if(r)return r
+      const c=window._nxEstadosCustom&&window._nxEstadosCustom[(s||'').toString().trim().toUpperCase()]
+      return (c&&c.etapa)||null
+    }
+  }
+}catch(_){}
+
+// ── Clasificación canónica de un estado en los 4 grupos de la pestaña ──
+window._nxGrupoDeEstado=(ef)=>{
+  const e=String(ef||'').trim().toUpperCase()
+  if(!e)return 'sin_estado'
+  const c=window._nxEstadosCustom&&window._nxEstadosCustom[e]
+  if(c&&NX_ORD_GRUPOS[c.grupo])return c.grupo
+  if(e==='CANCELADO'||e==='RECHAZADO'||e==='GUIA_ANULADA')return 'cancel'
+  if(e==='PENDIENTE CONFIRMACION')return 'pconf'
+  const ds=DROPI_STATUS[e]
+  if(!ds)return 'desconocido'
+  if(ds.cat==='devuelto')return 'dev'
+  if(ds.cat==='cancelado')return 'cancel'
+  return 'ordenes'
+}
+
+// ── Switches (↩️ Devueltas · ⏳ P. Conf) — POR PRODUCTO, sincronizados en Supabase ──
+// config.clave='ordenes_switches_v1' → {prodId:{dev:0|1,pconf:0|1}} + caché localStorage.
+window._nxOrdSw=window._nxOrdSw||null
+async function nxOrdSwLoad(){
+  if(window._nxOrdSw)return window._nxOrdSw
+  let obj={}
+  try{const raw=localStorage.getItem('nx_ord_sw');if(raw){const o=JSON.parse(raw);if(o&&typeof o==='object')obj=o}}catch(_){}
+  try{
+    const raw=await getConfig('ordenes_switches_v1')
+    if(raw){const o=JSON.parse(raw);if(o&&typeof o==='object'&&!Array.isArray(o)){obj=o;try{localStorage.setItem('nx_ord_sw',JSON.stringify(o))}catch(_){}}}
+  }catch(e){console.warn('[ORD_SW] lectura falló:',e&&e.message)}
+  window._nxOrdSw=obj
+  return obj
+}
+async function nxOrdSwSave(){
+  const js=JSON.stringify(window._nxOrdSw||{})
+  try{localStorage.setItem('nx_ord_sw',js)}catch(_){}
+  try{
+    const{error}=await sb.from('config').upsert({clave:'ordenes_switches_v1',valor:js,updated_at:new Date().toISOString()},{onConflict:'clave'})
+    if(error)console.warn('[ORD_SW] guardado nube falló:',error.message)
+  }catch(e){console.warn('[ORD_SW] guardado nube falló:',e&&e.message)}
+}
+window.nxOrdSwToggle=async(prodId,cual)=>{
+  window._nxOrdSw=window._nxOrdSw||{}
+  const s=window._nxOrdSw[prodId]=window._nxOrdSw[prodId]||{dev:0,pconf:0}
+  s[cual]=s[cual]?0:1
+  nxOrdSwSave().catch(()=>{})
+  // Re-render desde los datos ya calculados (sin volver a consultar la BD)
+  const D=window._nxOrdData&&window._nxOrdData[prodId]
+  if(D)_nxOrdPintar(prodId,D)
+}
+
+// ── Render principal de la pestaña 📦 Órdenes ──
+window._nxOrdData=window._nxOrdData||{} // caché por producto para re-pintar al mover switches
+async function renderProdOrdenes(prodId){
+  const cont=document.getElementById('prod-tab-ordenes-'+prodId)
+  if(!cont)return
+  cont.innerHTML='<div class="loading">Cargando órdenes (todo el histórico)...</div>'
+  const prod=(productos||[]).find(p=>p.id===prodId)
+  if(!prod){cont.innerHTML='<div class="alert alert-red">Producto no encontrado en memoria.</div>';return}
+  try{
+    await nxOrdSwLoad()
+    // 1) TODOS los IDs de Dropi del producto, con su etiqueta (cada ID = un proveedor)
+    const idsInfo={} // {dropi_id: {tipo:'vigente'|'archivado'|'paralelo'|'tambien', hasta}}
+    const _idVig=String(prod.dropi_id||'').trim()
+    if(_idVig)idsInfo[_idVig]={tipo:'vigente'}
+    try{
+      const{data:hist}=await sb.from('producto_dropi_ids').select('dropi_id,vigente_desde,vigente_hasta').eq('producto_id',prodId)
+      for(const r of (hist||[])){
+        const k=String(r.dropi_id||'').trim()
+        if(!k||idsInfo[k])continue
+        idsInfo[k]={tipo:'archivado',hasta:r.vigente_hasta?String(r.vigente_hasta).slice(0,10):null}
+      }
+    }catch(_){}
+    for(const r of (window._dceCache||[])){
+      if(r.producto_id!==prodId)continue
+      const k=String(r.dropi_id||'').trim()
+      if(k&&!idsInfo[k])idsInfo[k]={tipo:'paralelo'}
+    }
+    try{
+      const m=window._nxSysCfg&&window._nxSysCfg.idsAsignador
+      if(m&&typeof m==='object')for(const[k,v]of Object.entries(m)){if(v&&v.p===prodId&&!idsInfo[String(k).trim()])idsInfo[String(k).trim()]={tipo:'tambien'}}
+    }catch(_){}
+    const idList=Object.keys(idsInfo)
+    // 2) TODOS los mapeos del producto (sin filtro de fecha) — dos fuentes, deduplicadas:
+    //    q1: por producto_id (con respaldo por nombre+aliases si la columna faltara)
+    //    q2: por producto_id_dropi ∈ idList (atrapa órdenes casadas por ID aunque el nombre difiera)
+    const COLS='id,dropi_order_id,telefono,fecha,fecha_dropi,cantidad,estado_final,estado_inicial,producto,producto_id_dropi'
+    const byId={}
+    let _r1=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select(COLS).eq('producto_id',prodId).order('id',{ascending:true}).range(_f,_t))
+    if(_r1.error){
+      // Respaldo 1: sin la columna producto_id_dropi
+      _r1=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('id,dropi_order_id,telefono,fecha,fecha_dropi,cantidad,estado_final,estado_inicial,producto').eq('producto_id',prodId).order('id',{ascending:true}).range(_f,_t))
+    }
+    if(_r1.error){
+      // Respaldo 2: si mapeos.producto_id no existiera → por nombre canónico + aliases
+      const _noms=[prod.nombre].concat(Array.isArray(prod.aliases)?prod.aliases:[]).filter(Boolean)
+      _r1=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('id,dropi_order_id,telefono,fecha,fecha_dropi,cantidad,estado_final,estado_inicial,producto').in('producto',_noms).order('id',{ascending:true}).range(_f,_t))
+    }
+    for(const m of (_r1.data||[]))byId[m.id]=m
+    if(idList.length){
+      try{
+        for(let i=0;i<idList.length;i+=50){
+          const batch=idList.slice(i,i+50)
+          const _r2=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select(COLS).in('producto_id_dropi',batch).order('id',{ascending:true}).range(_f,_t))
+          if(_r2.error)break // columna aún no existe → q1 basta (legacy)
+          for(const m of (_r2.data||[]))if(!byId[m.id])byId[m.id]=m
+        }
+      }catch(_){}
+    }
+    const mapeos=Object.values(byId)
+    // 3) Agrupar por ID de Dropi → por orden (dropi_order_id distintos) → clasificar en 4 grupos
+    const S0=()=>({ordN:0,ordU:0,ordSC:0,devN:0,devU:0,devSC:0,pcN:0,pcU:0,pcSC:0,caN:0,caU:0,caSC:0,fueraN:0})
+    const porId={} // clave del bucket: dropi_id conocido · '__noreg_<id>' · '__sinid'
+    const nov={sin_estado:[],desconocido:[],sin_cantidad:[],no_registrado:[]}
+    const estadosDesconocidos=new Set()
+    // por-orden: una orden (dropi_order_id) con 2 variaciones = 1 orden, cantidades sumadas
+    const ordenes={} // {bucket+'|'+orderKey: {bucket,grupo,filas:[],q:0,qOk:true}}
+    for(const m of mapeos){
+      const pidD=String(m.producto_id_dropi||'').trim()
+      let bucket,noReg=false
+      if(!pidD)bucket='__sinid'
+      else if(idsInfo[pidD])bucket=pidD
+      else{bucket='__noreg_'+pidD;noReg=true}
+      const okey=String(m.dropi_order_id||'').trim()||('m'+m.id)
+      const k=bucket+'|'+okey
+      if(!ordenes[k])ordenes[k]={bucket,pidD,noReg,okey,grupo:null,filas:[],q:0,qOk:true}
+      const O=ordenes[k]
+      O.filas.push(m)
+      const g=window._nxGrupoDeEstado(m.estado_final)
+      if(!O.grupo)O.grupo=g
+      const qn=Number(m.cantidad)
+      if(isFinite(qn)&&qn>0)O.q+=qn
+      else O.qOk=false
+    }
+    for(const O of Object.values(ordenes)){
+      if(!porId[O.bucket])porId[O.bucket]=S0()
+      const S=porId[O.bucket]
+      const m0=O.filas[0]
+      const _ident={oid:String(m0.dropi_order_id||'').trim()||('mapeo #'+m0.id),tel:m0.telefono||'—',fecha:m0.fecha_dropi||m0.fecha||'—',estado:m0.estado_final||'(sin estado)'}
+      if(O.noReg)nov.no_registrado.push({..._ident,pidD:O.pidD})
+      // ⚠️ CERO SUPOSICIONES: sin estado o estado no clasificado → fuera del conteo + Novedades
+      if(O.grupo==='sin_estado'){S.fueraN++;nov.sin_estado.push(_ident);continue}
+      if(O.grupo==='desconocido'){S.fueraN++;estadosDesconocidos.add(_ident.estado);nov.desconocido.push(_ident);continue}
+      if(!O.qOk)nov.sin_cantidad.push(_ident) // la orden es real: cuenta como 1 orden, unidades en duda
+      const u=O.qOk?O.q:0
+      if(O.grupo==='dev'){S.devN++;S.devU+=u;if(!O.qOk)S.devSC++}
+      else if(O.grupo==='pconf'){S.pcN++;S.pcU+=u;if(!O.qOk)S.pcSC++}
+      else if(O.grupo==='cancel'){S.caN++;S.caU+=u;if(!O.qOk)S.caSC++}
+      else{S.ordN++;S.ordU+=u;if(!O.qOk)S.ordSC++}
+    }
+    window._nxOrdData[prodId]={porId,idsInfo,nov,estadosDesconocidos:[...estadosDesconocidos],totalMapeos:mapeos.length}
+    _nxOrdPintar(prodId,window._nxOrdData[prodId])
+  }catch(e){
+    cont.innerHTML=`<div class="alert alert-red">❌ ${(e&&e.message)||e}</div>`
+  }
+}
+window.renderProdOrdenes=renderProdOrdenes
+
+// Pinta la pestaña desde los datos ya calculados (los switches re-pintan sin re-consultar)
+function _nxOrdPintar(prodId,D){
+  const cont=document.getElementById('prod-tab-ordenes-'+prodId)
+  if(!cont||!D)return
+  const sw=(window._nxOrdSw&&window._nxOrdSw[prodId])||{dev:0,pconf:0}
+  const _e=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  const et=(k)=>{
+    const i=D.idsInfo[k]
+    if(!i)return{tx:'⚠️ No registrado',c:'var(--amber)',o:5}
+    if(i.tipo==='vigente')return{tx:'🟢 Vigente',c:'var(--green)',o:0}
+    if(i.tipo==='archivado')return{tx:'🗄️ Archivado'+(i.hasta?' (hasta '+i.hasta.split('-').reverse().join('/')+')':''),c:'var(--muted)',o:2}
+    if(i.tipo==='paralelo')return{tx:'🔗 Paralelo',c:'var(--purple)',o:1}
+    if(i.tipo==='tambien')return{tx:'✅ Aceptar también',c:'var(--green)',o:1}
+    return{tx:'',c:'var(--muted)',o:3}
+  }
+  // TOTAL general + filas (IDs conocidos primero, luego no registrados, luego sin ID)
+  const T={ordN:0,ordU:0,ordSC:0,devN:0,devU:0,devSC:0,pcN:0,pcU:0,pcSC:0,caN:0,caU:0,caSC:0,fueraN:0}
+  const filas=Object.keys(D.porId).map(k=>{
+    const S=D.porId[k]
+    for(const c of Object.keys(T))T[c]+=S[c]||0
+    let label,tag
+    if(k==='__sinid'){label='— Sin ID de Dropi en la orden';tag={tx:'🕳️ Se llenará con el botón de sincronizar (próxima sesión)',c:'var(--muted)',o:9}}
+    else if(k.startsWith('__noreg_')){label=k.slice(8);tag=et(label)}
+    else{label=k;tag=et(k)}
+    return{k,label,tag,S}
+  }).sort((a,b)=>(a.tag.o-b.tag.o)||((b.S.ordN)-(a.S.ordN)))
+  // Total mostrado = ✅ Órdenes + (switches prendidos)
+  const totN=T.ordN+(sw.dev?T.devN:0)+(sw.pconf?T.pcN:0)
+  const totU=T.ordU+(sw.dev?T.devU:0)+(sw.pconf?T.pcU:0)
+  const totSC=T.ordSC+(sw.dev?T.devSC:0)+(sw.pconf?T.pcSC:0)
+  const _inc=[]
+  if(sw.dev)_inc.push(`incluye ↩️ ${T.devN} devueltas`)
+  if(sw.pconf)_inc.push(`incluye ⏳ ${T.pcN} p. confirmación`)
+  const _cel=(n,u,sc,col,dim)=>`<td style="text-align:center;padding:8px 8px;font-variant-numeric:tabular-nums;${dim?'opacity:.55;':''}">
+    <div style="font-size:15px;font-weight:700;color:${n>0?col:'var(--subtle)'}">${n}</div>
+    <div style="font-size:10px;color:var(--muted)">${u} u${sc?` <span title="${sc} orden(es) sin cantidad — las unidades reales pueden ser más. Revisa 🔎 Novedades." style="color:var(--amber);cursor:help">⚠️+${sc}?</span>`:''}</div></td>`
+  const _swBtn=(cual,on)=>`<button onclick="nxOrdSwToggle('${prodId}','${cual}')" title="${on?'Prendido: SUMA al total de órdenes. Click para apagar.':'Apagado: se ve pero NO suma. Click para prender.'}" style="cursor:pointer;border-radius:999px;border:1px solid ${on?'var(--green)':'var(--border)'};background:${on?'rgba(34,197,94,.15)':'var(--card2)'};color:${on?'var(--green)':'var(--muted)'};font-size:10px;font-weight:700;padding:2px 9px">${on?'SUMA ✓':'NO SUMA'}</button>`
+  const _chip=(emoji,nom,n,u,sc,col,swHtml)=>`<div style="display:flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:8px 12px">
+    <span style="font-size:15px">${emoji}</span>
+    <div><div style="font-size:11px;color:var(--muted)">${nom}</div>
+    <div style="font-size:14px;font-weight:700;color:${col}">${n} <span style="font-size:11px;font-weight:400;color:var(--muted)">órd · ${u} u${sc?` <span title="${sc} sin cantidad" style="color:var(--amber);cursor:help">⚠️+${sc}?</span>`:''}</span></div></div>
+    ${swHtml||''}</div>`
+  const head=`
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch;margin-bottom:12px">
+      <div style="background:linear-gradient(0deg,rgba(56,139,222,.10),rgba(56,139,222,.10)),var(--card);border:1px solid var(--blue);border-radius:12px;padding:12px 18px;min-width:220px">
+        <div style="font-size:11px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase">✅ Órdenes · todo el histórico</div>
+        <div style="font-size:26px;font-weight:800;color:var(--blue);font-variant-numeric:tabular-nums">${totN} <span style="font-size:15px;font-weight:600;color:var(--text)">órdenes</span></div>
+        <div style="font-size:13px;color:var(--text);font-variant-numeric:tabular-nums">${totU} unidades${totSC?` <span title="${totSC} orden(es) sin cantidad dentro del total — las unidades reales pueden ser más" style="color:var(--amber);cursor:help">⚠️ +${totSC} sin cantidad</span>`:''}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">${_inc.length?_inc.join(' · '):'solo el grupo ✅ (switches apagados)'}${totN>0?` · ${(totU/Math.max(1,totN-totSC)).toFixed(2)} u/orden`:''}</div>
+      </div>
+      ${_chip('↩️','Devueltas',T.devN,T.devU,T.devSC,'var(--red)',_swBtn('dev',!!sw.dev))}
+      ${_chip('⏳','Pendiente confirmación',T.pcN,T.pcU,T.pcSC,'var(--amber)',_swBtn('pconf',!!sw.pconf))}
+      ${_chip('❌','Canc / Rech / Anuladas',T.caN,T.caU,T.caSC,'var(--red)','<span style="font-size:9px;color:var(--muted)">nunca suman</span>')}
+      ${T.fueraN?`<div style="display:flex;align-items:center;gap:8px;background:rgba(239,68,68,.08);border:1px solid var(--red);border-radius:10px;padding:8px 12px"><span style="font-size:15px">🔎</span><div style="font-size:12px;color:var(--red);font-weight:700">${T.fueraN} orden(es) FUERA del conteo<div style="font-size:10px;font-weight:400;color:var(--muted)">sin estado o estado sin clasificar — mira Novedades abajo</div></div></div>`:''}
+    </div>`
+  const _th=(t,col)=>`<th style="text-align:center;padding:7px 6px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:${col||'var(--muted)'}">${t}</th>`
+  const body=filas.map((f,i)=>{
+    const S=f.S
+    const rowTot=S.ordN+(sw.dev?S.devN:0)+(sw.pconf?S.pcN:0)
+    const rowTotU=S.ordU+(sw.dev?S.devU:0)+(sw.pconf?S.pcU:0)
+    const rowTotSC=S.ordSC+(sw.dev?S.devSC:0)+(sw.pconf?S.pcSC:0)
+    return`<tr style="border-bottom:1px solid var(--border);background:${i%2===0?'rgba(255,255,255,.02)':'transparent'}">
+      <td style="text-align:left;padding:8px 10px"><div style="font-family:monospace;font-weight:700;font-size:13px;color:var(--text)">${_e(f.label)}</div><div style="font-size:10px;color:${f.tag.c}">${f.tag.tx}</div></td>
+      ${_cel(S.ordN,S.ordU,S.ordSC,'var(--blue)')}
+      ${_cel(S.devN,S.devU,S.devSC,'var(--red)',!sw.dev)}
+      ${_cel(S.pcN,S.pcU,S.pcSC,'var(--amber)',!sw.pconf)}
+      ${_cel(S.caN,S.caU,S.caSC,'var(--red)',true)}
+      <td style="text-align:center;padding:8px 8px;font-variant-numeric:tabular-nums;background:linear-gradient(0deg,rgba(56,139,222,.10),rgba(56,139,222,.10)),transparent"><div style="font-size:15px;font-weight:800;color:var(--blue)">${rowTot}</div><div style="font-size:10px;color:var(--muted)">${rowTotU} u${rowTotSC?` <span style="color:var(--amber)">⚠️+${rowTotSC}?</span>`:''}</div></td>
+    </tr>`
+  }).join('')
+  const foot=`<tr style="border-top:2px solid var(--border)">
+    <td style="text-align:left;padding:9px 10px;font-weight:800;color:var(--text)">TOTAL</td>
+    ${_cel(T.ordN,T.ordU,T.ordSC,'var(--blue)')}
+    ${_cel(T.devN,T.devU,T.devSC,'var(--red)',!sw.dev)}
+    ${_cel(T.pcN,T.pcU,T.pcSC,'var(--amber)',!sw.pconf)}
+    ${_cel(T.caN,T.caU,T.caSC,'var(--red)',true)}
+    <td style="text-align:center;padding:9px 8px;background:linear-gradient(0deg,rgba(56,139,222,.14),rgba(56,139,222,.14)),transparent"><div style="font-size:16px;font-weight:800;color:var(--blue)">${totN}</div><div style="font-size:10px;color:var(--muted)">${totU} u${totSC?` <span style="color:var(--amber)">⚠️+${totSC}?</span>`:''}</div></td>
+  </tr>`
+  const tabla=filas.length?`<div class="table-wrap" style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;min-width:640px">
+    <thead><tr style="border-bottom:1px solid var(--border)">${_th('ID de Dropi (proveedor)')}${_th('✅ Órdenes','var(--blue)')}${_th('↩️ Devueltas','var(--red)')}${_th('⏳ P. Conf.','var(--amber)')}${_th('❌ Canc/Rech/Anul','var(--red)')}${_th('Σ Total del ID','var(--blue)')}</tr></thead>
+    <tbody>${body}</tbody><tfoot>${foot}</tfoot></table></div>
+    <div style="font-size:10px;color:var(--subtle);margin-top:6px;line-height:1.6">💡 Órdenes = IDs de orden de Dropi DISTINTOS (una orden con 2 variaciones = 1 orden, cantidades sumadas) · unidades = suma de CANTIDAD · sin filtro de fecha: todo el histórico. Las columnas atenuadas no están sumando al total.</div>`
+    :'<div class="alert alert-blue">Este producto aún no tiene órdenes en mapeos.</div>'
+  // 🔎 NOVEDADES — cero suposiciones: todo lo raro, con identificador y su enlace para arreglar
+  const nv=D.nov
+  const _lst=(arr,extra)=>arr.slice(0,30).map(x=>`<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:5px 8px;border-bottom:1px dashed var(--border);font-size:11px">
+      <span style="font-family:monospace;font-weight:700">${_e(x.oid)}</span><span>📞 ${_e(x.tel)}</span><span>📅 ${_e(x.fecha)}</span><span style="color:var(--muted)">${_e(x.estado)}</span>${extra?extra(x):''}
+    </div>`).join('')+(arr.length>30?`<div style="font-size:10px;color:var(--muted);padding:5px 8px">… y ${arr.length-30} más</div>`:'')
+  let novH=''
+  if(nv.desconocido.length)novH+=`<div style="margin-top:8px"><div style="font-size:12px;font-weight:700;color:var(--red)">❓ Estado que NEXO no tiene clasificado — ${nv.desconocido.length} orden(es) FUERA del conteo</div>
+    <div style="font-size:11px;color:var(--muted);margin:3px 0">Estados: ${D.estadosDesconocidos.map(s=>`<code>${_e(s)}</code> <button class="btn-sm" style="font-size:10px;padding:1px 8px;background:rgba(56,139,222,.12);border:1px solid var(--blue);color:var(--blue)" onclick="modalEstadoNuevo('${_e(s).replace(/'/g,'')}','${prodId}')">➕ Clasificarlo ahora</button>`).join(' · ')}</div>${_lst(nv.desconocido)}</div>`
+  if(nv.sin_estado.length)novH+=`<div style="margin-top:8px"><div style="font-size:12px;font-weight:700;color:var(--red)">🕳️ Orden SIN estado — ${nv.sin_estado.length} FUERA del conteo</div>
+    <div style="font-size:11px;color:var(--muted);margin:3px 0">Vuelve a subir el Excel de Dropi de esas fechas en el Cruce para que traigan su estado real.</div>${_lst(nv.sin_estado)}</div>`
+  if(nv.sin_cantidad.length)novH+=`<div style="margin-top:8px"><div style="font-size:12px;font-weight:700;color:var(--amber)">🔢 Orden SIN cantidad — ${nv.sin_cantidad.length} (cuentan como 1 orden, unidades en duda)</div>
+    <div style="font-size:11px;color:var(--muted);margin:3px 0">Verifica en Dropi. Pista: en el Excel, PRECIO PROVEEDOR X CANTIDAD ÷ PRECIO PROVEEDOR = las unidades reales.</div>${_lst(nv.sin_cantidad)}</div>`
+  if(nv.no_registrado.length)novH+=`<div style="margin-top:8px"><div style="font-size:12px;font-weight:700;color:var(--amber)">🆔 ID de producto NO registrado — ${nv.no_registrado.length} orden(es)</div>
+    <div style="font-size:11px;color:var(--muted);margin:3px 0">Estas órdenes traen un PRODUCTO ID que no está en el 📜 Historial de IDs de este producto. <button class="btn-sm" style="font-size:10px;padding:1px 8px;background:rgba(245,158,11,.12);border:1px solid var(--amber);color:var(--amber)" onclick="verHistorialDropiIds('${prodId}')">🔧 Abrir Historial de IDs</button></div>${_lst(nv.no_registrado,x=>`<span style="font-family:monospace;color:var(--amber)">ID ${_e(x.pidD)}</span>`)}</div>`
+  const novBox=novH
+    ?`<div style="margin-top:14px;border:1px solid var(--amber);border-radius:10px;padding:10px 12px;background:rgba(245,158,11,.05)"><div style="font-size:13px;font-weight:800">🔎 Novedades — esto necesita tu ojo (cero suposiciones)</div>${novH}</div>`
+    :`<div class="alert alert-green" style="margin-top:14px">✅ Todo cuadra: todas las órdenes traen estado clasificado, cantidad e ID registrado.</div>`
+  cont.innerHTML=`<div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <div style="font-size:12px;color:var(--muted)">📦 <b>Órdenes por proveedor (ID de Dropi)</b> · ${D.totalMapeos} fila(s) de mapeos leídas · sin filtro de fecha</div>
+      <div style="display:flex;gap:6px">
+        <button class="btn-sm btn-outline" style="font-size:11px" onclick="modalEstadoNuevo('','${prodId}')">🆕 Estados de Dropi</button>
+        <button class="btn-sm btn-outline" style="font-size:11px" onclick="delete window._nxOrdData['${prodId}'];renderProdOrdenes('${prodId}')">🔄 Recargar</button>
+      </div>
+    </div>
+    ${head}${tabla}${novBox}
+  </div>`
+}
+
+// ── MODAL: 🆕 Diccionario de estados de Dropi (agregar / candado para modificar) ──
+window.modalEstadoNuevo=(prefill,prodId)=>{
+  closeModal()
+  const div=document.createElement('div')
+  div.id='user-modal';div.className='modal-bg'
+  const _opG=Object.entries(NX_ORD_GRUPOS).map(([k,v])=>`<option value="${k}">${v.emoji} ${v.nombre}</option>`).join('')
+  const _opT=Object.entries(NX_ORD_TRAMOS).map(([k,v])=>`<option value="${k}">${v.n}</option>`).join('')
+  const _custom=window._nxEstadosCustom||{}
+  const _listaCustom=Object.keys(_custom).length
+    ?Object.entries(_custom).map(([k,v])=>`<div style="display:flex;gap:8px;align-items:center;padding:4px 8px;border-bottom:1px dashed var(--border);font-size:11px"><span>${v.emoji||''}</span><b style="font-family:monospace">${k}</b><span style="color:var(--muted)">${(NX_ORD_GRUPOS[v.grupo]||{}).emoji||''} ${(NX_ORD_GRUPOS[v.grupo]||{}).nombre||v.grupo}</span>${v.override?'<span style="color:var(--amber);font-size:10px">🔒 modificó uno del código</span>':''}</div>`).join('')
+    :'<div style="font-size:11px;color:var(--muted);padding:4px 8px">Todavía no has agregado estados desde la pantalla.</div>'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:560px">
+    <div class="modal-title">🆕 Estados de Dropi</div>
+    <div class="modal-sub">Cuando Dropi saque un estado nuevo, agrégalo aquí y TODO NEXO lo entiende al instante — sin tocar código. Queda guardado para todos los computadores.</div>
+    <div class="form-grid g2" style="margin-top:12px">
+      <div class="fld"><label>Nombre EXACTO como viene de Dropi</label><input type="text" id="est-nombre" value="${(prefill||'').replace(/"/g,'')}" placeholder="Ej: EN PUNTO DE RECOGIDA" style="font-family:monospace;text-transform:uppercase"></div>
+      <div class="fld"><label>Emoji + nombre corto</label><div style="display:flex;gap:6px"><input type="text" id="est-emoji" value="🚚" style="max-width:52px;text-align:center"><input type="text" id="est-label" placeholder="Ej: Punto de recogida"></div></div>
+      <div class="fld"><label>¿A cuál de los 4 grupos va? (¿esto se asume como venta?)</label><select id="est-grupo">${_opG}</select></div>
+      <div class="fld"><label>¿En qué tramo del viaje está?</label><select id="est-tramo">${_opT}</select></div>
+    </div>
+    <div class="fld" style="margin-top:8px"><label>¿Qué significa, en cristiano?</label><input type="text" id="est-sig" placeholder="Ej: el paquete está esperando en un punto físico a que el cliente lo recoja"></div>
+    <div id="est-candado" style="display:none;margin-top:10px;padding:10px;border:2px solid var(--red);border-radius:8px;background:rgba(239,68,68,.06);font-size:12px;line-height:1.6">
+      🔒 <b>Este estado YA EXISTE en el código de NEXO.</b> Si lo modificas, cambias cómo lo clasifican <b>TODAS</b> las pantallas (Cruce, Seguimiento, Reportes, Portafolio, esta pestaña). Los números históricos se re-leerán con la nueva regla.<br>
+      Para confirmar que entiendes, escribe <b>MODIFICAR</b>: <input type="text" id="est-conf" style="max-width:140px;font-family:monospace" placeholder="MODIFICAR">
+    </div>
+    <div id="est-msg" style="margin-top:8px"></div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button>
+      <button class="btn-sm btn-primary" onclick="guardarEstadoCustom('${prodId||''}')">💾 Guardar estado</button>
+    </div>
+    <div class="divider"></div>
+    <div style="font-size:12px;font-weight:700;margin-bottom:4px">📋 Estados agregados desde la pantalla</div>
+    <div style="max-height:150px;overflow:auto">${_listaCustom}</div>
+  </div>`
+  div.onclick=closeModal
+  document.body.appendChild(div)
+  // El candado 🔒 aparece solo si el nombre choca con un estado del código
+  const _inp=document.getElementById('est-nombre')
+  const _chk=()=>{
+    // Candado 🔒 solo si el estado nació en el CÓDIGO (uno agregado desde la pantalla se re-edita libre)
+    const n=(_inp.value||'').trim().toUpperCase()
+    const c=window._nxEstadosCustom&&window._nxEstadosCustom[n]
+    const esBase=!!DROPI_STATUS[n]&&(!c||c.override===true)
+    document.getElementById('est-candado').style.display=(n&&esBase)?'block':'none'
+  }
+  _inp.addEventListener('input',_chk);_chk()
+}
+window.guardarEstadoCustom=async(prodId)=>{
+  const msg=document.getElementById('est-msg')
+  const nombre=((document.getElementById('est-nombre')||{}).value||'').trim().toUpperCase()
+  const grupo=(document.getElementById('est-grupo')||{}).value||'ordenes'
+  const tramo=(document.getElementById('est-tramo')||{}).value||'camino'
+  const emoji=((document.getElementById('est-emoji')||{}).value||'').trim()||((NX_ORD_GRUPOS[grupo]||{}).emoji||'🚚')
+  const label=((document.getElementById('est-label')||{}).value||'').trim()||nombre
+  const sig=((document.getElementById('est-sig')||{}).value||'').trim()
+  if(!nombre){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">Escribe el nombre del estado tal cual viene de Dropi.</div>';return}
+  const c=window._nxEstadosCustom&&window._nxEstadosCustom[nombre]
+  const esBase=!!DROPI_STATUS[nombre]&&(!c||c.override===true)
+  let override=false
+  if(esBase){
+    // 🔒 CANDADO — doble confirmación para modificar un estado que nació en el código
+    const conf=((document.getElementById('est-conf')||{}).value||'').trim().toUpperCase()
+    if(conf!=='MODIFICAR'){if(msg)msg.innerHTML='<div class="alert alert-red" style="font-size:11px">🔒 Ese estado ya existe en el código. Escribe MODIFICAR en el candado rojo para confirmar.</div>';return}
+    if(!confirm(`🔒 ÚLTIMA CONFIRMACIÓN\n\nVas a MODIFICAR el estado "${nombre}" que ya funciona en todo NEXO.\nNueva clasificación: ${(NX_ORD_GRUPOS[grupo]||{}).nombre}\n\n¿Seguro que entiendes lo que cambia y quieres continuar?`))return
+    override=true
+  }
+  const rec={grupo,cat:(NX_ORD_TRAMOS[tramo]||{}).cat||'en_transito',etapa:tramo,emoji,label,significado:sig,override,creado:new Date().toISOString()}
+  const nuevo={...(window._nxEstadosCustom||{}),[nombre]:rec}
+  const js=JSON.stringify(nuevo)
+  try{
+    const{error}=await sb.from('config').upsert({clave:NX_ESTADOS_KEY,valor:js,updated_at:new Date().toISOString()},{onConflict:'clave'})
+    if(error)throw error
+    // Verificación de ida y vuelta — un RLS puede "aceptar" sin escribir
+    const eco=await getConfig(NX_ESTADOS_KEY)
+    if(eco!==js)throw new Error('la nube no devolvió lo guardado (¿RLS de la tabla config?)')
+    window._nxEstadosCustom=nuevo
+    try{localStorage.setItem('nx_estados_custom',js)}catch(_){}
+    nxEstadosAplicar()
+    logAction('estado_dropi_custom',{estado:nombre,grupo,tramo,override}).catch(()=>{})
+    if(msg)msg.innerHTML=`<div class="alert alert-green" style="font-size:11px">✅ Guardado. "${nombre}" → ${(NX_ORD_GRUPOS[grupo]||{}).emoji} ${(NX_ORD_GRUPOS[grupo]||{}).nombre}. Todo NEXO ya lo entiende.</div>`
+    if(prodId){delete window._nxOrdData[prodId];renderProdOrdenes(prodId)}
+  }catch(e){if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">❌ ${(e&&e.message)||e}</div>`}
+}
+// ═══ FIN PESTAÑA ÓRDENES ═══
 
 </script>
 </body>

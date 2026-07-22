@@ -36002,6 +36002,7 @@ function _nxOrdPintar(prodId,D){
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
       <div style="font-size:12px;color:var(--muted)">📦 <b>Órdenes por proveedor (ID de Dropi)</b> · ${D.totalMapeos} fila(s) de mapeos leídas · sin filtro de fecha</div>
       <div style="display:flex;gap:6px">
+        <button class="btn-sm btn-outline" style="font-size:11px;border-color:var(--purple);color:var(--purple)" onclick="nxSimAbrir('${prodId}')">🧪 Simular Excel</button>
         <button class="btn-sm btn-outline" style="font-size:11px" onclick="modalEstadoNuevo('','${prodId}')">🆕 Estados de Dropi</button>
         <button class="btn-sm btn-outline" style="font-size:11px" onclick="delete window._nxOrdData['${prodId}'];renderProdOrdenes('${prodId}')">🔄 Recargar</button>
       </div>
@@ -36093,6 +36094,199 @@ window.guardarEstadoCustom=async(prodId)=>{
     if(prodId){delete window._nxOrdData[prodId];renderProdOrdenes(prodId)}
   }catch(e){if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">❌ ${(e&&e.message)||e}</div>`}
 }
+// ── 🧪 SIMULADOR DE EXCEL DE DROPI (21jul26-b) ──────────────────────────────
+// Sube el Excel (xlsx o csv) TAL CUAL sale de Dropi y lo analiza AL INSTANTE, sin
+// pasar por el Cruce ni tocar la base de datos: agrupa por PRODUCTO ID (el
+// identificador manda, NO el nombre), clasifica cada orden en los MISMOS 4 grupos
+// de la pestaña Órdenes (misma función _nxGrupoDeEstado → cero divergencia de
+// cifras) y lo muestra en una ventana emergente que SOLO se cierra con la ✕ y se
+// puede minimizar a una barrita flotante. Todo aditivo, solo lectura.
+window._nxSimData=null // {porId:{pid:{S,nombre}}, nov, estadosDesc:[], filas, archivo, sw:{dev,pconf}}
+window.nxSimAbrir=(prodId)=>{
+  // input de archivo efímero (no vive en el DOM permanente)
+  const inp=document.createElement('input')
+  inp.type='file';inp.accept='.xlsx,.xls,.csv'
+  inp.onchange=async()=>{
+    const f=inp.files&&inp.files[0]
+    if(!f)return
+    try{
+      const buf=await f.arrayBuffer()
+      const wb=XLSX.read(buf,{type:'array'})
+      const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''})
+      if(!rows.length){alert('El archivo no trae filas.');return}
+      window._nxSimData=_nxSimCalc(rows,f.name)
+      _nxSimPintar()
+    }catch(e){alert('❌ No se pudo leer el archivo: '+((e&&e.message)||e))}
+  }
+  inp.click()
+}
+// El MISMO conteo de la pestaña: órdenes = ID de orden DISTINTOS · unidades = suma
+// de CANTIDAD · una orden con 2 filas (variaciones) = 1 orden con cantidades sumadas.
+function _nxSimCalc(rows,archivo){
+  const _g=s=>String(s==null?'':s).trim()
+  const S0=()=>({ordN:0,ordU:0,ordSC:0,devN:0,devU:0,devSC:0,pcN:0,pcU:0,pcSC:0,caN:0,caU:0,caSC:0,fueraN:0})
+  const ordenes={} // pid+'|'+idOrden
+  const nov={sin_estado:[],desconocido:[],sin_cantidad:[],sin_pid:[]}
+  const estadosDesc=new Set()
+  let filas=0
+  for(const r of rows){
+    const idOrden=_g(r['ID'])
+    const pid=_g(r['PRODUCTO ID'])
+    const est=_g(r['ESTATUS'])
+    if(!idOrden&&!est&&!pid)continue // fila totalmente vacía del Excel
+    filas++
+    const bucket=pid||'__sinpid'
+    const k=bucket+'|'+(idOrden||('f'+filas))
+    if(!ordenes[k])ordenes[k]={pid:bucket,idOrden:idOrden||'(sin ID)',grupo:null,q:0,qOk:true,nombre:_g(r['PRODUCTO']),tel:_g(r['TELÉFONO']||r['TELEFONO']),fecha:_g(r['FECHA']),estado:est||'(sin estado)'}
+    const O=ordenes[k]
+    if(!O.grupo)O.grupo=window._nxGrupoDeEstado(est)
+    const qn=Number(String(r['CANTIDAD']).replace(',','.'))
+    if(isFinite(qn)&&qn>0)O.q+=qn;else O.qOk=false
+    if(!pid&&nov.sin_pid.length<200)nov.sin_pid.push({oid:idOrden||'—',tel:O.tel||'—',fecha:O.fecha||'—',estado:O.estado})
+  }
+  const porId={}
+  for(const O of Object.values(ordenes)){
+    if(!porId[O.pid])porId[O.pid]={S:S0(),nombre:O.nombre}
+    const P=porId[O.pid];if(!P.nombre&&O.nombre)P.nombre=O.nombre
+    const S=P.S
+    const _id={oid:O.idOrden,tel:O.tel||'—',fecha:O.fecha||'—',estado:O.estado}
+    if(O.grupo==='sin_estado'){S.fueraN++;nov.sin_estado.push(_id);continue}
+    if(O.grupo==='desconocido'){S.fueraN++;estadosDesc.add(O.estado);nov.desconocido.push(_id);continue}
+    if(!O.qOk)nov.sin_cantidad.push(_id)
+    const u=O.qOk?O.q:0
+    if(O.grupo==='dev'){S.devN++;S.devU+=u;if(!O.qOk)S.devSC++}
+    else if(O.grupo==='pconf'){S.pcN++;S.pcU+=u;if(!O.qOk)S.pcSC++}
+    else if(O.grupo==='cancel'){S.caN++;S.caU+=u;if(!O.qOk)S.caSC++}
+    else{S.ordN++;S.ordU+=u;if(!O.qOk)S.ordSC++}
+  }
+  return{porId,nov,estadosDesc:[...estadosDesc],filas,archivo,sw:{dev:0,pconf:0},min:false}
+}
+window.nxSimSw=(cual)=>{const D=window._nxSimData;if(!D)return;D.sw[cual]=D.sw[cual]?0:1;_nxSimPintar()}
+window.nxSimMin=()=>{const D=window._nxSimData;if(!D)return;D.min=!D.min;_nxSimPintar()}
+window.nxSimCerrar=()=>{const el=document.getElementById('nx-sim-modal');if(el)el.remove();window._nxSimData=null}
+function _nxSimPintar(){
+  const D=window._nxSimData
+  if(!D)return
+  let el=document.getElementById('nx-sim-modal')
+  if(!el){el=document.createElement('div');el.id='nx-sim-modal';document.body.appendChild(el)}
+  const _e=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  // ── minimizado: barrita flotante abajo a la derecha ──
+  if(D.min){
+    let tN=0,tU=0
+    for(const P of Object.values(D.porId)){tN+=P.S.ordN+(D.sw.dev?P.S.devN:0)+(D.sw.pconf?P.S.pcN:0);tU+=P.S.ordU+(D.sw.dev?P.S.devU:0)+(D.sw.pconf?P.S.pcU:0)}
+    el.innerHTML=`<div style="position:fixed;bottom:16px;right:16px;z-index:99998;background:var(--card);border:1px solid var(--purple);border-radius:12px;padding:8px 12px;display:flex;gap:10px;align-items:center;box-shadow:0 8px 30px rgba(0,0,0,.5);font-size:12px">
+      <span>🧪 <b>${tN}</b> órd · ${tU} u</span>
+      <button onclick="nxSimMin()" title="Restaurar" style="cursor:pointer;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:2px 8px;font-size:11px">▢</button>
+      <button onclick="nxSimCerrar()" title="Cerrar" style="cursor:pointer;background:rgba(239,68,68,.12);border:1px solid var(--red);color:var(--red);border-radius:6px;padding:2px 8px;font-size:11px">✕</button>
+    </div>`
+    return
+  }
+  // ── ventana completa: MISMA estructura visual de la pestaña Órdenes ──
+  const sw=D.sw
+  const T={ordN:0,ordU:0,ordSC:0,devN:0,devU:0,devSC:0,pcN:0,pcU:0,pcSC:0,caN:0,caU:0,caSC:0,fueraN:0}
+  const filas=Object.keys(D.porId).map(pid=>{
+    const P=D.porId[pid],S=P.S
+    for(const c of Object.keys(T))T[c]+=S[c]||0
+    // etiqueta: ¿a qué producto de NEXO pertenece este PRODUCTO ID? (el ID manda, no el nombre)
+    let tag={tx:'⚠️ No registrado en NEXO',c:'var(--amber)',o:5}
+    if(pid==='__sinpid')tag={tx:'🕳️ Filas sin PRODUCTO ID en el Excel',c:'var(--red)',o:9}
+    else{
+      try{
+        const pr=(typeof resolveProdByDropiId==='function')?resolveProdByDropiId(pid):null
+        if(pr)tag={tx:'📦 '+(pr.nombre||'producto de NEXO'),c:'var(--green)',o:String(pr.dropi_id||'').trim()===pid?0:1}
+      }catch(_){}
+    }
+    return{pid,label:pid==='__sinpid'?'— Sin PRODUCTO ID':pid,nombre:P.nombre,tag,S}
+  }).sort((a,b)=>(a.tag.o-b.tag.o)||((b.S.ordN)-(a.S.ordN)))
+  const totN=T.ordN+(sw.dev?T.devN:0)+(sw.pconf?T.pcN:0)
+  const totU=T.ordU+(sw.dev?T.devU:0)+(sw.pconf?T.pcU:0)
+  const totSC=T.ordSC+(sw.dev?T.devSC:0)+(sw.pconf?T.pcSC:0)
+  const _inc=[]
+  if(sw.dev)_inc.push(`incluye ↩️ ${T.devN} devueltas`)
+  if(sw.pconf)_inc.push(`incluye ⏳ ${T.pcN} p. confirmación`)
+  const _cel=(n,u,sc,col,dim)=>`<td style="text-align:center;padding:8px 8px;font-variant-numeric:tabular-nums;${dim?'opacity:.55;':''}">
+    <div style="font-size:14px;font-weight:700;color:${n>0?col:'var(--subtle)'}">${n}</div>
+    <div style="font-size:10px;color:var(--muted)">${u} u${sc?` <span title="${sc} orden(es) sin cantidad" style="color:var(--amber);cursor:help">⚠️+${sc}?</span>`:''}</div></td>`
+  const _swBtn=(cual,on)=>`<button onclick="nxSimSw('${cual}')" title="${on?'Prendido: SUMA al total. Click para apagar.':'Apagado: se ve pero NO suma. Click para prender.'}" style="cursor:pointer;border-radius:999px;border:1px solid ${on?'var(--green)':'var(--border)'};background:${on?'rgba(34,197,94,.15)':'var(--card2)'};color:${on?'var(--green)':'var(--muted)'};font-size:10px;font-weight:700;padding:2px 9px">${on?'SUMA ✓':'NO SUMA'}</button>`
+  const _chip=(emoji,nom,n,u,sc,col,swHtml)=>`<div style="display:flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:8px 12px">
+    <span style="font-size:15px">${emoji}</span>
+    <div><div style="font-size:11px;color:var(--muted)">${nom}</div>
+    <div style="font-size:13px;font-weight:700;color:${col}">${n} <span style="font-size:11px;font-weight:400;color:var(--muted)">órd · ${u} u${sc?` <span title="${sc} sin cantidad" style="color:var(--amber);cursor:help">⚠️+${sc}?</span>`:''}</span></div></div>
+    ${swHtml||''}</div>`
+  const _th=(t,col)=>`<th style="text-align:center;padding:7px 6px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:${col||'var(--muted)'}">${t}</th>`
+  const body=filas.map((f,i)=>{
+    const S=f.S
+    const rN=S.ordN+(sw.dev?S.devN:0)+(sw.pconf?S.pcN:0)
+    const rU=S.ordU+(sw.dev?S.devU:0)+(sw.pconf?S.pcU:0)
+    const rSC=S.ordSC+(sw.dev?S.devSC:0)+(sw.pconf?S.pcSC:0)
+    return`<tr style="border-bottom:1px solid var(--border);background:${i%2===0?'rgba(255,255,255,.02)':'transparent'}">
+      <td style="text-align:left;padding:8px 10px"><div style="font-family:monospace;font-weight:700;font-size:13px;color:var(--text)">${_e(f.label)}</div><div style="font-size:10px;color:${f.tag.c}">${_e(f.tag.tx)}</div>${f.nombre?`<div style="font-size:10px;color:var(--muted)">Excel: ${_e(f.nombre)}</div>`:''}</td>
+      ${_cel(S.ordN,S.ordU,S.ordSC,'var(--blue)')}
+      ${_cel(S.devN,S.devU,S.devSC,'var(--red)',!sw.dev)}
+      ${_cel(S.pcN,S.pcU,S.pcSC,'var(--amber)',!sw.pconf)}
+      ${_cel(S.caN,S.caU,S.caSC,'var(--red)',true)}
+      <td style="text-align:center;padding:8px 8px;font-variant-numeric:tabular-nums;background:linear-gradient(0deg,rgba(167,139,250,.10),rgba(167,139,250,.10)),transparent"><div style="font-size:14px;font-weight:800;color:var(--purple)">${rN}</div><div style="font-size:10px;color:var(--muted)">${rU} u${rSC?` <span style="color:var(--amber)">⚠️+${rSC}?</span>`:''}</div></td>
+    </tr>`
+  }).join('')
+  const foot=`<tr style="border-top:2px solid var(--border)">
+    <td style="text-align:left;padding:9px 10px;font-weight:800;color:var(--text)">TOTAL</td>
+    ${_cel(T.ordN,T.ordU,T.ordSC,'var(--blue)')}
+    ${_cel(T.devN,T.devU,T.devSC,'var(--red)',!sw.dev)}
+    ${_cel(T.pcN,T.pcU,T.pcSC,'var(--amber)',!sw.pconf)}
+    ${_cel(T.caN,T.caU,T.caSC,'var(--red)',true)}
+    <td style="text-align:center;padding:9px 8px;background:linear-gradient(0deg,rgba(167,139,250,.14),rgba(167,139,250,.14)),transparent"><div style="font-size:15px;font-weight:800;color:var(--purple)">${totN}</div><div style="font-size:10px;color:var(--muted)">${totU} u${totSC?` <span style="color:var(--amber)">⚠️+${totSC}?</span>`:''}</div></td>
+  </tr>`
+  const nv=D.nov
+  const _lst=(arr,max)=>arr.slice(0,max||20).map(x=>`<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:4px 8px;border-bottom:1px dashed var(--border);font-size:11px">
+      <span style="font-family:monospace;font-weight:700">${_e(x.oid)}</span><span>📞 ${_e(x.tel)}</span><span>📅 ${_e(x.fecha)}</span><span style="color:var(--muted)">${_e(x.estado)}</span>
+    </div>`).join('')+(arr.length>(max||20)?`<div style="font-size:10px;color:var(--muted);padding:4px 8px">… y ${arr.length-(max||20)} más</div>`:'')
+  let novH=''
+  if(nv.desconocido.length)novH+=`<div style="margin-top:8px"><div style="font-size:12px;font-weight:700;color:var(--red)">❓ Estado que NEXO no tiene clasificado — ${nv.desconocido.length} orden(es) FUERA del conteo</div>
+    <div style="font-size:11px;color:var(--muted);margin:3px 0">Estados: ${D.estadosDesc.map(s=>`<code>${_e(s)}</code> <button class="btn-sm" style="font-size:10px;padding:1px 8px;background:rgba(56,139,222,.12);border:1px solid var(--blue);color:var(--blue)" onclick="modalEstadoNuevo('${_e(s).replace(/'/g,'')}','')">➕ Clasificarlo ahora</button>`).join(' · ')}</div>${_lst(nv.desconocido)}</div>`
+  if(nv.sin_estado.length)novH+=`<div style="margin-top:8px"><div style="font-size:12px;font-weight:700;color:var(--red)">🕳️ Orden SIN estado — ${nv.sin_estado.length} FUERA del conteo</div>${_lst(nv.sin_estado)}</div>`
+  if(nv.sin_cantidad.length)novH+=`<div style="margin-top:8px"><div style="font-size:12px;font-weight:700;color:var(--amber)">🔢 Orden SIN cantidad — ${nv.sin_cantidad.length} (cuentan como 1 orden, unidades en duda)</div>
+    <div style="font-size:11px;color:var(--muted);margin:3px 0">Pista del propio Excel: PRECIO PROVEEDOR X CANTIDAD ÷ PRECIO PROVEEDOR = las unidades reales.</div>${_lst(nv.sin_cantidad)}</div>`
+  if(nv.sin_pid.length)novH+=`<div style="margin-top:8px"><div style="font-size:12px;font-weight:700;color:var(--red)">🆔 Filas SIN PRODUCTO ID — ${nv.sin_pid.length}</div>${_lst(nv.sin_pid)}</div>`
+  const novBox=novH
+    ?`<div style="margin-top:12px;border:1px solid var(--amber);border-radius:10px;padding:10px 12px;background:rgba(245,158,11,.05)"><div style="font-size:13px;font-weight:800">🔎 Novedades del archivo</div>${novH}</div>`
+    :`<div class="alert alert-green" style="margin-top:12px">✅ Todo cuadra: todas las órdenes del archivo traen estado clasificado, cantidad y PRODUCTO ID.</div>`
+  // ⚠️ SIN fondo clickeable para cerrar: SOLO la ✕ cierra (pedido del owner). — minimiza.
+  el.innerHTML=`<div style="position:fixed;inset:0;z-index:99997;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:18px">
+    <div style="background:var(--card);border:1px solid var(--purple);border-radius:14px;max-width:920px;width:100%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 10px 40px rgba(0,0,0,.6)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border)">
+        <div>
+          <div style="font-size:15px;font-weight:800">🧪 Simulador · análisis del Excel de Dropi</div>
+          <div style="font-size:11px;color:var(--muted)">📄 ${_e(D.archivo)} · ${D.filas} fila(s) · agrupado por PRODUCTO ID (el identificador manda, no el nombre) · solo lectura — NO toca la base de datos</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          <button onclick="nxSimMin()" title="Minimizar" style="cursor:pointer;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:4px 12px;font-size:13px;font-weight:700">—</button>
+          <button onclick="nxSimCerrar()" title="Cerrar" style="cursor:pointer;background:rgba(239,68,68,.12);border:1px solid var(--red);color:var(--red);border-radius:8px;padding:4px 12px;font-size:13px;font-weight:700">✕</button>
+        </div>
+      </div>
+      <div style="padding:14px 16px;overflow:auto">
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:stretch;margin-bottom:12px">
+          <div style="background:linear-gradient(0deg,rgba(167,139,250,.10),rgba(167,139,250,.10)),var(--card);border:1px solid var(--purple);border-radius:12px;padding:10px 16px;min-width:200px">
+            <div style="font-size:11px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase">✅ Órdenes del archivo</div>
+            <div style="font-size:24px;font-weight:800;color:var(--purple);font-variant-numeric:tabular-nums">${totN} <span style="font-size:14px;font-weight:600;color:var(--text)">órdenes</span></div>
+            <div style="font-size:13px;color:var(--text)">${totU} unidades${totSC?` <span title="${totSC} sin cantidad" style="color:var(--amber);cursor:help">⚠️ +${totSC} sin cantidad</span>`:''}</div>
+            <div style="font-size:10px;color:var(--muted);margin-top:2px">${_inc.length?_inc.join(' · '):'solo el grupo ✅ (switches apagados)'}${totN>0?` · ${(totU/Math.max(1,totN-totSC)).toFixed(2)} u/orden`:''}</div>
+          </div>
+          ${_chip('↩️','Devueltas',T.devN,T.devU,T.devSC,'var(--red)',_swBtn('dev',!!sw.dev))}
+          ${_chip('⏳','Pendiente confirmación',T.pcN,T.pcU,T.pcSC,'var(--amber)',_swBtn('pconf',!!sw.pconf))}
+          ${_chip('❌','Canc / Rech / Anuladas',T.caN,T.caU,T.caSC,'var(--red)','<span style="font-size:9px;color:var(--muted)">nunca suman</span>')}
+          ${T.fueraN?`<div style="display:flex;align-items:center;gap:8px;background:rgba(239,68,68,.08);border:1px solid var(--red);border-radius:10px;padding:8px 12px"><span style="font-size:15px">🔎</span><div style="font-size:12px;color:var(--red);font-weight:700">${T.fueraN} FUERA del conteo<div style="font-size:10px;font-weight:400;color:var(--muted)">sin estado o sin clasificar</div></div></div>`:''}
+        </div>
+        <div class="table-wrap" style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;min-width:620px">
+          <thead><tr style="border-bottom:1px solid var(--border)">${_th('PRODUCTO ID (proveedor)')}${_th('✅ Órdenes','var(--blue)')}${_th('↩️ Devueltas','var(--red)')}${_th('⏳ P. Conf.','var(--amber)')}${_th('❌ Canc/Rech/Anul','var(--red)')}${_th('Σ Total del ID','var(--purple)')}</tr></thead>
+          <tbody>${body}</tbody><tfoot>${foot}</tfoot></table></div>
+        <div style="font-size:10px;color:var(--subtle);margin-top:6px;line-height:1.6">💡 Órdenes = IDs de orden DISTINTOS del archivo (una orden con 2 variaciones = 1 orden, cantidades sumadas) · unidades = suma de CANTIDAD · mismas reglas de la pestaña 📦 Órdenes.</div>
+        ${novBox}
+      </div>
+    </div>
+  </div>`
+}
+// ═══ FIN SIMULADOR ═══
+
 // ═══ FIN PESTAÑA ÓRDENES ═══
 
 </script>

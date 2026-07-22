@@ -28121,9 +28121,14 @@ window.massContinue=async()=>{
     openModal(`<div class="modal-title">Nada para cambiar</div><div style="font-size:13px;color:var(--muted);padding:10px 0">Las marcadas no tienen presupuesto editable (¿ABO sin conjuntos con presupuesto?).</div><div style="display:flex;justify-content:flex-end"><button class="btn-sm btn-outline" onclick="_massRenderSelect()">⬅️ Atrás</button></div>`)
     return
   }
-  st.budItems=budItems
-  for(const it of budItems){if(!st.perItem[it.meta_id])st.perItem[it.meta_id]={mode:null,val:0,nuevo:it.budget}}
-  window._massRenderBudget(budItems)
+  // 🆔 (22jul26 · ley del owner): el ID es ÚNICO — cada campaña/conjunto entra UNA sola vez a la
+  // lista, por construcción. Si llegara repetido, se avisa en pantalla (nada pasa mudo).
+  const _vistos=new Set(),_unicos=[],_repes=[]
+  for(const it of budItems){const k=String(it.meta_id);if(_vistos.has(k)){_repes.push(k);continue}_vistos.add(k);_unicos.push(it)}
+  if(_repes.length)alert('⚠️ '+_repes.length+' elemento(s) venían repetidos en la lista y se dejaron UNA sola vez: '+_repes.slice(0,5).join(', ')+(_repes.length>5?'…':''))
+  st.budItems=_unicos
+  for(const it of _unicos){if(!st.perItem[it.meta_id])st.perItem[it.meta_id]={mode:null,val:0,nuevo:it.budget}}
+  window._massRenderBudget(_unicos)
 }
 window._massRenderConfirmEstado=(sel)=>{
   const st=window._massState;const act=st.action==='activar'
@@ -28146,17 +28151,18 @@ window._massRenderBudget=(sel)=>{
   // Semáforo por meta_id (de la selección original). Para ABO (conjunto) usa el del padre.
   const semByMeta={};for(const x of (st.items||[]))semByMeta[x.meta_id]=x.semCode
   const bp=(id,pct,col,txt)=>`<button class="btn-sm btn-outline" onclick="massBud('${id}',${pct})" style="padding:5px 10px;font-size:12px;border-color:var(--${col});color:var(--${col})">${txt}</button>`
-  const card=(it)=>{
+  const card=(it,gid)=>{
+    it._grp=gid // 🚦 grupo (semáforo/sección) al que pertenece — lo usan las barras por grupo
     const pi=st.perItem[it.meta_id]||{nuevo:it.budget}
     const semCode=semByMeta[it.meta_id]||semByMeta[it.parentMetaId]||''
     const badge=semCode?window.nexoBadgeMega(semCode,'sm',false):''
     const _srch=_normProd(String(it.meta_id)+' '+(it.nombre||''))
-    return `<div class="massbud-item" data-search="${_srch}" style="border:1px solid var(--border);border-radius:8px;padding:11px;margin-bottom:8px">
+    return `<div class="massbud-item" data-search="${_srch}" data-grp="${gid}" id="massbud-card-${it.meta_id}" style="border:1px solid var(--border);border-radius:8px;padding:11px;margin-bottom:8px">
       <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:2px">
         <div style="flex:1;min-width:0;font-size:14px;color:var(--text);font-weight:600;white-space:normal;word-break:break-word;line-height:1.3">${it.nivel==='campaign'?'🎯':'📦'} ${it.nombre} <span style="font-size:11px;color:var(--muted)">${it.tipoBudget}</span></div>
         ${badge}
       </div>
-      <div style="font-size:12px;color:var(--muted);margin:5px 0">Actual: $${fmt(it.budget)} · <span id="massbud-spend-${it.meta_id}" style="color:var(--amber)">Gastado: ⏳…</span></div>
+      <div style="font-size:12px;color:var(--muted);margin:5px 0"><span id="massbud-act-${it.meta_id}">Actual: <span style="color:var(--amber)">⏳ verificando con Meta…</span></span> · <span id="massbud-spend-${it.meta_id}" style="color:var(--amber)">Gastado: ⏳…</span> <span id="massbud-verif-${it.meta_id}"></span></div>
       <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:7px">
         ${bp(it.meta_id,20,'green','+20%')}${bp(it.meta_id,30,'green','+30%')}${bp(it.meta_id,40,'green','+40%')}${bp(it.meta_id,50,'green','+50%')}${bp(it.meta_id,70,'green','+70%')}${bp(it.meta_id,100,'purple','×2')}${bp(it.meta_id,200,'purple','×3')}${bp(it.meta_id,-20,'red','-20%')}${bp(it.meta_id,-30,'red','-30%')}${bp(it.meta_id,-40,'red','-40%')}${bp(it.meta_id,-50,'red','-50%')}${bp(it.meta_id,-70,'red','-70%')}
       </div>
@@ -28168,28 +28174,64 @@ window._massRenderBudget=(sel)=>{
       <div id="massbud-pv-${it.meta_id}" style="font-size:14px;color:var(--muted)">Nuevo: <strong style="color:var(--text)">$${fmt(pi.nuevo)}</strong></div>
     </div>`
   }
+  // ── 🚦 (22jul26 · ley del owner): SIN barra global — una barra POR SEMÁFORO. Las CBO van
+  // agrupadas por su semáforo; cada campaña ABO va en SECCIÓN PROPIA (con su nombre) y adentro
+  // sus conjuntos agrupados por semáforo. Cada barra lleva LOS MISMOS 12 botones + 3 campos de
+  // siempre — solo cambian el color del borde y del título según el semáforo. Cada barra le
+  // aplica SOLO a las tarjetas visibles de su grupo (respeta el buscador).
+  const _wSemG=c=>({fuego:1,escalar:2,precaucion:3,esperar:4,sin_ventas:4,stop:5,prender_ya:5}[c]||6)
+  const SEMBAR={fuego:['🟣 DOBLAR','var(--purple)'],escalar:['🟢 ESCALAR','var(--green)'],precaucion:['🟡 CUIDADO','var(--amber)'],stop:['🔴 APAGAR','var(--red)'],prender_ya:['🛑 PRENDER YA','var(--red)'],esperar:['⏳ ESPERAR','var(--muted)'],sin_ventas:['⏳ ESPERAR','var(--muted)'],'':['▫️ SIN SEMÁFORO','var(--muted)']}
+  const _semDe=it=>semByMeta[it.meta_id]||semByMeta[it.parentMetaId]||''
+  const _gid=s=>String(s).replace(/[^a-zA-Z0-9_-]/g,'')
+  const barGrupo=(gid,sem,n)=>{
+    const[lbl,col]=SEMBAR[sem]||SEMBAR['']
+    const btns=[[20,'green','+20%'],[30,'green','+30%'],[40,'green','+40%'],[50,'green','+50%'],[70,'green','+70%'],[100,'purple','×2'],[200,'purple','×3'],[-20,'red','-20%'],[-30,'red','-30%'],[-40,'red','-40%'],[-50,'red','-50%'],[-70,'red','-70%']]
+      .map(([p,c,t])=>`<button class="btn-sm btn-outline" onclick="massBudGrupo('${gid}',${p})" title="Pone ${t} a las ${n} tarjeta(s) visibles de ${lbl}" style="padding:5px 10px;font-size:12px;border-color:var(--${c});color:var(--${c})">${t}</button>`).join('')
+    return`<div style="border:2px solid ${col};border-radius:8px;padding:8px 10px;margin:10px 0 8px">
+      <div style="font-size:12px;color:${col};font-weight:800;margin-bottom:6px">⚡ Aplicar a las <span class="massbud-grpn" data-grp="${gid}">${n}</span> de ${lbl}:</div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap">${btns}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:7px">
+        <input id="massbud-g-${gid}-subir" type="number" inputmode="numeric" placeholder="+ subir $" oninput="massBudGrupoInput('${gid}','subir',this.value)" style="width:110px;padding:7px 9px;font-size:13px;background:var(--card);border:1px solid var(--green);border-radius:6px;color:var(--text)">
+        <input id="massbud-g-${gid}-bajar" type="number" inputmode="numeric" placeholder="- bajar $" oninput="massBudGrupoInput('${gid}','bajar',this.value)" style="width:110px;padding:7px 9px;font-size:13px;background:var(--card);border:1px solid var(--red);border-radius:6px;color:var(--text)">
+        <input id="massbud-g-${gid}-exacto" type="number" inputmode="numeric" placeholder="= exacto $" oninput="massBudGrupoInput('${gid}','exacto',this.value)" style="width:110px;padding:7px 9px;font-size:13px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+      </div>
+    </div>`
+  }
+  const _agrupa=(arr)=>{ // → [[sem, items]] ordenado de mejor a peor semáforo
+    const g={};for(const it of arr){const s=_semDe(it);(g[s]=g[s]||[]).push(it)}
+    return Object.entries(g).sort((a,b)=>_wSemG(a[0])-_wSemG(b[0]))
+  }
+  let listaHtml=''
+  const cbo=sel.filter(it=>it.tipoBudget==='CBO')
+  for(const[sem,items]of _agrupa(cbo)){
+    const gid=_gid('cbo-'+(sem||'na'))
+    listaHtml+=`<div class="massbud-grpwrap">${barGrupo(gid,sem,items.length)}${items.map(it=>card(it,gid)).join('')}</div>`
+  }
+  const aboPorCamp={}
+  for(const it of sel.filter(x=>x.tipoBudget==='ABO')){const k=String(it.parentMetaId||'?');(aboPorCamp[k]=aboPorCamp[k]||[]).push(it)}
+  for(const[pid,items]of Object.entries(aboPorCamp)){
+    let inner=''
+    for(const[sem,grp]of _agrupa(items)){
+      const gid=_gid('abo-'+pid+'-'+(sem||'na'))
+      inner+=`<div class="massbud-grpwrap">${barGrupo(gid,sem,grp.length)}${grp.map(it=>card(it,gid)).join('')}</div>`
+    }
+    listaHtml+=`<div class="massbud-abosec" style="border:2px dashed var(--accent);border-radius:10px;padding:8px 10px;margin:14px 0 8px">
+      <div style="font-size:12px;font-weight:800;color:var(--accent);letter-spacing:.03em">🧩 CAMPAÑA ABO — ${items[0].parentNombre||pid} <span style="font-weight:400;color:var(--muted)">(sus conjuntos, cada uno con su presupuesto)</span></div>
+      ${inner}</div>`
+  }
   openModal(`
     <div class="modal-title">💰 Presupuesto a ${sel.length} en lote</div>
-    <div style="font-size:13px;color:var(--muted);margin-bottom:8px">Ponle a cada una su monto. Cada tarjeta es independiente.</div>
-    <div style="border:1px solid var(--accent);border-radius:8px;padding:8px 10px;margin-bottom:8px">
-      <div style="font-size:12px;color:var(--accent);font-weight:700;margin-bottom:6px">⚡ Aplicar a TODAS de una (las que se ven en la lista):</div>
-      <div style="display:flex;gap:5px;flex-wrap:wrap">
-        ${[[20,'green','+20%'],[30,'green','+30%'],[40,'green','+40%'],[50,'green','+50%'],[70,'green','+70%'],[100,'purple','×2'],[200,'purple','×3'],[-20,'red','-20%'],[-30,'red','-30%'],[-40,'red','-40%'],[-50,'red','-50%'],[-70,'red','-70%']].map(([p,c,t])=>`<button class="btn-sm btn-outline" onclick="massBudTodas(${p})" title="Pone ${t} a TODAS las tarjetas visibles con un solo clic" style="padding:5px 10px;font-size:12px;border-color:var(--${c});color:var(--${c})">${t}</button>`).join('')}
-      </div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:7px">
-        <input id="massbud-todas-subir" type="number" inputmode="numeric" placeholder="+ subir $" oninput="massBudTodasInput('subir',this.value)" title="Sube este monto en $ a TODAS las tarjetas visibles" style="width:110px;padding:7px 9px;font-size:13px;background:var(--card);border:1px solid var(--green);border-radius:6px;color:var(--text)">
-        <input id="massbud-todas-bajar" type="number" inputmode="numeric" placeholder="- bajar $" oninput="massBudTodasInput('bajar',this.value)" title="Baja este monto en $ a TODAS las tarjetas visibles" style="width:110px;padding:7px 9px;font-size:13px;background:var(--card);border:1px solid var(--red);border-radius:6px;color:var(--text)">
-        <input id="massbud-todas-exacto" type="number" inputmode="numeric" placeholder="= exacto $" oninput="massBudTodasInput('exacto',this.value)" title="Pone este presupuesto EXACTO a TODAS las tarjetas visibles" style="width:110px;padding:7px 9px;font-size:13px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text)">
-      </div>
-    </div>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:8px">Cada semáforo lleva su propia barra (misma escala, distinta decisión). Cada tarjeta sigue siendo independiente.</div>
+    <div id="massbud-verifbar"><div style="border:1px solid var(--amber);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12px;color:var(--amber)">⏳ Verificando los presupuestos REALES con Meta (los mismos que ves en el administrador de anuncios)… El botón de aplicar se habilita al terminar.</div></div>
     <input id="massbud-search" type="text" placeholder="🔎 Buscar por ID o nombre..." oninput="massBudBuscar()" autocomplete="off" style="width:100%;padding:8px 10px;margin-bottom:8px;background:var(--card);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:12px;outline:none">
-    <div id="massbud-list" style="max-height:52vh;overflow-y:auto;margin-bottom:10px">${sel.map(card).join('')}<div id="massbud-noresult" style="display:none;color:var(--muted);font-size:12px;padding:10px">Ninguna campaña coincide con esa búsqueda.</div></div>
+    <div id="massbud-list" style="max-height:52vh;overflow-y:auto;margin-bottom:10px">${listaHtml}<div id="massbud-noresult" style="display:none;color:var(--muted);font-size:12px;padding:10px">Ninguna campaña coincide con esa búsqueda.</div></div>
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button class="btn-sm btn-outline" onclick="_massRenderSelect()">⬅️ Atrás</button>
-      <button class="btn-sm btn-blue" onclick="massApplyAll()">✅ Aplicar todos los cambios (${sel.length})</button>
+      <button class="btn-sm btn-blue" id="massbud-apply" onclick="massApplyAll()" disabled style="opacity:.55">⏳ Verificando presupuestos…</button>
     </div>
   `)
   window._massBudCargarGastos(sel)
+  window._massBudVerificar(false) // 🛡️ raíz: nada se aplica sobre un número sin verificar
 }
 window._massBudCargarGastos=async(sel)=>{
   // Trae el gasto EN VIVO desde Meta API por nodo, para el rango seleccionado en Meta Ads (#meta-desde/#meta-hasta).
@@ -28218,6 +28260,17 @@ window.massBudBuscar=()=>{
   let visibles=0
   items.forEach(it=>{const match=!q||(it.dataset.search||'').includes(q);it.style.display=match?'block':'none';if(match)visibles++})
   const nr=document.getElementById('massbud-noresult');if(nr)nr.style.display=(items.length>0&&visibles===0)?'block':'none'
+  // 🚦 (22jul26): las barras por semáforo y las secciones ABO se esconden si el buscador deja
+  // su grupo sin tarjetas, y el conteo "Aplicar a las N" se refresca con las visibles.
+  document.querySelectorAll('#massbud-list .massbud-grpwrap').forEach(w=>{
+    const vis=[...w.querySelectorAll('.massbud-item')].filter(c=>c.style.display!=='none').length
+    w.style.display=vis>0?'block':'none'
+    const n=w.querySelector('.massbud-grpn');if(n)n.textContent=vis
+  })
+  document.querySelectorAll('#massbud-list .massbud-abosec').forEach(s=>{
+    const vis=[...s.querySelectorAll('.massbud-item')].filter(c=>c.style.display!=='none').length
+    s.style.display=vis>0?'block':'none'
+  })
 }
 window._massItem=(metaId)=>{
   const st=window._massState;if(!st)return null
@@ -28227,6 +28280,18 @@ window._massRecalcItem=(metaId)=>{
   const st=window._massState;if(!st)return
   const it=window._massItem(metaId);if(!it)return
   const pi=st.perItem[metaId]||(st.perItem[metaId]={mode:null,val:0,nuevo:it.budget})
+  // 🛡️ (22jul26 · raíz): con la verificación activa, la vista previa SOLO se pinta con el número
+  // ya confirmado por Meta. La intención (%, ×2, monto) queda guardada y se recalcula al verificar.
+  if(st.verifActiva&&it.verificado!==true){
+    const pv0=document.getElementById('massbud-pv-'+metaId)
+    if(pv0){
+      const _lbl=pi.mode==='pct'?((pi.val>0?'+':'')+pi.val+'%'):(pi.mode?pi.mode+' $'+fmt(pi.val||0):null)
+      pv0.innerHTML=it.verificado===false
+        ?`Nuevo: <strong style="color:var(--red)">— no verificada (Meta no respondió)</strong>`
+        :`Nuevo: <strong style="color:var(--amber)">⏳ esperando verificación</strong>${_lbl?` <span style="font-size:9px;color:var(--muted)">(elegiste ${_lbl})</span>`:''}`
+    }
+    return
+  }
   let nuevo=it.budget
   if(pi.mode==='pct')nuevo=Math.round(it.budget*(1+(pi.val||0)/100))
   else if(pi.mode==='subir')nuevo=Math.round(it.budget+(pi.val||0))
@@ -28253,7 +28318,9 @@ window.massBudInput=(metaId,which,raw)=>{
 }
 window.massApplyAll=()=>{
   const st=window._massState;if(!st)return
-  const sel=st.action==='presupuesto'?(st.budItems||[]):st.items.filter(it=>st.selected.has(it.meta_id))
+  const sel0=st.action==='presupuesto'?(st.budItems||[]):st.items.filter(it=>st.selected.has(it.meta_id))
+  // 🛡️ (22jul26 · raíz): en presupuesto solo entran las VERIFICADAS con Meta y no excluidas
+  const sel=st.action==='presupuesto'?sel0.filter(it=>it.verificado===true&&!it.excluida):sel0
   if(!sel.length)return
   const accionTxt=st.action==='activar'?'ACTIVAR':(st.action==='pausar'?'PAUSAR':'cambiar el PRESUPUESTO de')
   openModal(`
@@ -28280,7 +28347,9 @@ window._massWriteRetry=async(payload,setIc)=>{
 }
 window._massRun=async()=>{
   const st=window._massState;if(!st)return
-  const sel=st.action==='presupuesto'?(st.budItems||[]):st.items.filter(it=>st.selected.has(it.meta_id))
+  const sel0=st.action==='presupuesto'?(st.budItems||[]):st.items.filter(it=>st.selected.has(it.meta_id))
+  // 🛡️ (22jul26 · raíz): solo se ejecuta sobre lo VERIFICADO con Meta y no excluido
+  const sel=st.action==='presupuesto'?sel0.filter(it=>it.verificado===true&&!it.excluida):sel0
   const acc=st.accountId
   const html=sel.map(it=>`<div id="massrun-${it.meta_id}" style="display:flex;align-items:center;gap:9px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:13px"><span style="width:18px">⏳</span><span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${it.nivel==='campaign'?'🎯':'📦'} ${it.nombre}</span></div>`).join('')
   openModal(`
@@ -28299,20 +28368,43 @@ window._massRun=async()=>{
     let r
     if(st.action==='presupuesto'){
       const pi=st.perItem[it.meta_id];const nuevo=pi?pi.nuevo:it.budget
-      if(!pi||!pi.mode||nuevo<=0||nuevo===it.budget){setIc('⏭️','Sin cambio');continue}
-      r=await window._massWriteRetry({action:'set_budget',node_id:it.meta_id,current_human:it.budget,mode:'manual',amount:nuevo},setIc)
-      if(r.ok)window._logCambioMeta(it.meta_id,it.nivel,acc,'presupuesto',it.budget,nuevo)
+      if(!pi||!pi.mode){setIc('⏭️','Sin cambio');continue}
+      // ── 🛡️ RAÍZ (22jul26 · ley del owner: "el presupuesto tiene UN solo dueño y es Meta") ──
+      // ESCALAR (%, ×2, ×3) ya NO manda un monto calculado con el número local: manda la INTENCIÓN
+      // (mode:'pct') y la Edge Function la aplica sobre el presupuesto VIVO que lee de Meta en ese
+      // instante. Aunque la pantalla estuviera vieja, el resultado sale correcto — el error
+      // "el nuevo presupuesto es igual al actual" por dato local desactualizado queda IMPOSIBLE
+      // por construcción. Los montos en $ (subir/bajar/exacto) sí van como monto: ahí TÚ fijas el
+      // número. La verdad de lo aplicado vuelve de Meta (human_new) — nunca de nuestra cuenta.
+      if(pi.mode==='pct'){
+        if(!pi.val){setIc('⏭️','Sin cambio');continue}
+        r=await window._massWriteRetry({action:'set_budget',node_id:it.meta_id,current_human:it.budget,mode:'pct',pct:pi.val},setIc)
+      }else{
+        if(nuevo<=0){setIc('⏭️','Sin cambio');continue}
+        if(nuevo===it.budget){setIc('⏭️','Ya está en ese valor');continue}
+        r=await window._massWriteRetry({action:'set_budget',node_id:it.meta_id,current_human:it.budget,mode:'manual',amount:nuevo},setIc)
+        // "igual al actual" con monto exacto NO es un error: Meta ya está en ese valor. Sin ❌.
+        if(r&&!r.ok&&String(r.error||'').toLowerCase().includes('igual al actual')){setIc('⏭️','Ya estaba en ese valor en Meta');continue}
+      }
+      const _aplicado=(r&&r.ok&&Number(r.human_new)>0)?Number(r.human_new):nuevo // la VERDAD de Meta
+      if(r.ok)window._logCambioMeta(it.meta_id,it.nivel,acc,'presupuesto',(r&&Number(r.human_current)>0)?Number(r.human_current):it.budget,_aplicado)
       // NUEVO (20jul26 · presupuesto acumulativo): tras aplicar con ÉXITO, el nuevo pasa a ser
       // el ACTUAL en memoria (sin recargar): así el próximo "subir" parte del valor ya subido.
+      // 🛡️ (22jul26): el valor que se guarda es el que META RESPONDIÓ (human_new) — el mismo
+      // que ves en el administrador de anuncios — y también se persiste en meta_campanas (BD)
+      // con el campo y valor crudo exactos que devuelve la Edge Function.
       if(r.ok){
-        it.budget=nuevo
-        const _itSel=st.items&&st.items.find(x=>String(x.meta_id)===String(it.meta_id));if(_itSel)_itSel.budget=nuevo
-        const _pi2=st.perItem[it.meta_id];if(_pi2){_pi2.mode=null;_pi2.val=0;_pi2.nuevo=nuevo}
-        window._nexoBudgetOverride=window._nexoBudgetOverride||{};window._nexoBudgetOverride[String(it.meta_id)]=nuevo
+        it.budget=_aplicado
+        it.verificado=true
+        const _itSel=st.items&&st.items.find(x=>String(x.meta_id)===String(it.meta_id));if(_itSel)_itSel.budget=_aplicado
+        const _pi2=st.perItem[it.meta_id];if(_pi2){_pi2.mode=null;_pi2.val=0;_pi2.nuevo=_aplicado}
+        window._nexoBudgetOverride=window._nexoBudgetOverride||{};window._nexoBudgetOverride[String(it.meta_id)]=_aplicado
         try{
           const _ba=(window._metaPort&&window._metaPort.campsActivasByAcc)||{}
-          for(const _a in _ba){for(const _c of (_ba[_a]||[])){if(String(_c.meta_id)===String(it.meta_id)){if(_c.lifetime_budget&&!_c.daily_budget)_c.lifetime_budget=nuevo;else _c.daily_budget=nuevo}}}
+          for(const _a in _ba){for(const _c of (_ba[_a]||[])){if(String(_c.meta_id)===String(it.meta_id)){if(_c.lifetime_budget&&!_c.daily_budget)_c.lifetime_budget=_aplicado;else _c.daily_budget=_aplicado}}}
         }catch(_){}
+        if(r.campo&&Number(r.raw_new)>0){try{await sb.from('meta_campanas').update({[r.campo]:Number(r.raw_new)}).eq('meta_id',String(it.meta_id))}catch(_){}}
+        if(row&&Number(r.human_new)>0){const _pvEl=document.getElementById('massbud-pv-'+it.meta_id);if(_pvEl)_pvEl.innerHTML=`Nuevo: <strong style="color:var(--green)">$${fmt(_aplicado)}</strong> <span style="font-size:9px;color:var(--muted)">(confirmado por Meta)</span>`}
       }
     }else{
       const status=st.action==='activar'?'ACTIVE':'PAUSED'
@@ -36668,6 +36760,141 @@ window.fragBajarGuardado=async(iso,nombre)=>{
   }catch(e){alert('❌ No se pudo descargar: '+((e&&e.message)||e))}
 }
 // ═══ FIN FRAGMENTADOR DROPI MASIVO ═══
+
+// ════════════════════════════════════════════════════════════════════════════
+// 💰🛡️ VERIFICACIÓN EN VIVO + BARRAS POR SEMÁFORO del presupuesto en lote (22jul26)
+// ─────────────────────────────────────────────────────────────────────────────
+// Ley del owner: "el presupuesto tiene UN solo dueño y es Meta".
+// · Al abrir el modal se leen los presupuestos VIVOS de Meta en lotes de 50
+//   (?ids= — mismo dato que muestra el administrador de anuncios). El "Actual"
+//   de cada tarjeta y la vista previa "Nuevo" SOLO se pintan con ese número.
+// · El botón APLICAR queda bloqueado hasta terminar la verificación.
+// · Las que Meta NO respondió quedan marcadas, NO se pueden aplicar, y arriba
+//   sale la barra con 🔄 Reintentar solo esas y ✖️ Quitarlas — sin salir del
+//   modal. Cada tarjeta no verificada trae además su propia ✖️.
+// · Las barras por grupo (massBudGrupo/massBudGrupoInput) reusan massBud y
+//   massBudInput tarjeta por tarjeta: cero lógica nueva de cálculo.
+// Todo aditivo — massBudTodas/massBudTodasInput quedan intactas (sin uso).
+// ════════════════════════════════════════════════════════════════════════════
+// ── Barras por grupo: aplican SOLO a las tarjetas visibles de SU grupo ──
+window.massBudGrupo=(gid,pct)=>{
+  const st=window._massState;if(!st||!st.budItems)return
+  for(const it of st.budItems){
+    if(it._grp!==gid)continue
+    const card=document.getElementById('massbud-card-'+it.meta_id)
+    if(card&&card.style.display==='none')continue
+    window.massBud(it.meta_id,pct)
+  }
+}
+window.massBudGrupoInput=(gid,which,raw)=>{
+  const st=window._massState;if(!st||!st.budItems)return
+  for(const otro of ['subir','bajar','exacto']){
+    if(otro===which)continue
+    const inp=document.getElementById('massbud-g-'+gid+'-'+otro);if(inp)inp.value=''
+  }
+  for(const it of st.budItems){
+    if(it._grp!==gid)continue
+    const card=document.getElementById('massbud-card-'+it.meta_id)
+    if(card&&card.style.display==='none')continue
+    window.massBudInput(it.meta_id,which,raw)
+  }
+}
+// ── Verificación en vivo (lotes de 50 vía ?ids=) ──
+window._massBudVerificar=async(soloFallidas)=>{
+  const st=window._massState;if(!st||!st.budItems||!st.budItems.length)return
+  st.verifActiva=true
+  const pend=st.budItems.filter(it=>!it.excluida&&(soloFallidas?it.verificado===false:it.verificado!==true))
+  if(!pend.length){window._massVerifUI();return}
+  for(const it of pend){
+    it.verificado=undefined
+    const a=document.getElementById('massbud-act-'+it.meta_id)
+    if(a)a.innerHTML='Actual: <span style="color:var(--amber)">⏳ verificando con Meta…</span>'
+    const v=document.getElementById('massbud-verif-'+it.meta_id);if(v)v.innerHTML=''
+  }
+  window._massVerifUI()
+  let token=null
+  try{token=await getConfig('meta_access_token')}catch(_){}
+  if(token){
+    for(let i=0;i<pend.length;i+=50){
+      const batch=pend.slice(i,i+50)
+      try{
+        const ids=batch.map(x=>x.meta_id).join(',')
+        const r=await fetch(`${META_BASE}/?ids=${ids}&fields=daily_budget,lifetime_budget&access_token=${token}`)
+        const j=r.ok?await r.json():null
+        for(const it of batch){
+          const o=j&&j[it.meta_id]
+          const raw=o?(parseInt(o.daily_budget)||parseInt(o.lifetime_budget)||0):0
+          if(raw>0){
+            // Derivar la escala igual que la Edge Function: crudo vs el valor conocido → ÷1 o ÷100
+            let off=100
+            if(it.budget>0){const rel=raw/it.budget;off=Math.abs(rel-1)<Math.abs(rel-100)?1:100}
+            it.budget=Math.round(raw/off)
+            it.verificado=true
+          }else it.verificado=false
+        }
+      }catch(_){for(const it of batch)it.verificado=false}
+    }
+  }else{for(const it of pend)it.verificado=false}
+  // Pintar el resultado en cada tarjeta (el MISMO número del administrador de anuncios)
+  for(const it of pend){
+    const a=document.getElementById('massbud-act-'+it.meta_id)
+    const v=document.getElementById('massbud-verif-'+it.meta_id)
+    const cardEl=document.getElementById('massbud-card-'+it.meta_id)
+    if(it.verificado===true){
+      if(a)a.innerHTML=`Actual (verificado con Meta): <strong style="color:var(--text)">$${fmt(it.budget)}</strong>`
+      if(v)v.innerHTML='<span style="color:var(--green);font-size:10px">✅ verificado</span>'
+      if(cardEl)cardEl.style.borderColor='var(--border)'
+    }else{
+      if(a)a.innerHTML='Actual: <span style="color:var(--red)">—</span>'
+      if(v)v.innerHTML=`<span style="color:var(--red);font-size:10px;font-weight:700">⚠️ No verificada — Meta no respondió</span> <button class="btn-sm" onclick="massBudExcluir('${it.meta_id}')" title="Quitarla de esta corrida (queda atenuada como excluida)" style="font-size:10px;padding:1px 8px;background:rgba(239,68,68,.12);border:1px solid var(--red);color:var(--red)">✖️ Quitar</button>`
+      if(cardEl)cardEl.style.borderColor='var(--red)'
+    }
+    window._massRecalcItem(it.meta_id) // recalcula la vista previa con el número ya verificado
+  }
+  window._massVerifUI()
+}
+// ── Estado del botón APLICAR + barra de no verificadas ──
+window._massVerifUI=()=>{
+  const st=window._massState;if(!st||!st.budItems)return
+  const verificando=st.budItems.filter(it=>!it.excluida&&it.verificado===undefined).length
+  const noVerif=st.budItems.filter(it=>!it.excluida&&it.verificado===false).length
+  const listas=st.budItems.filter(it=>it.verificado===true&&!it.excluida).length
+  const excl=st.budItems.filter(it=>it.excluida).length
+  const btn=document.getElementById('massbud-apply')
+  if(btn){
+    if(verificando>0){btn.disabled=true;btn.style.opacity='.55';btn.textContent='⏳ Verificando presupuestos…'}
+    else if(noVerif>0){btn.disabled=true;btn.style.opacity='.55';btn.textContent=`🚫 ${noVerif} sin verificar — reintenta o quítalas`}
+    else if(!listas){btn.disabled=true;btn.style.opacity='.55';btn.textContent='🚫 Nada verificado para aplicar'}
+    else{btn.disabled=false;btn.style.opacity='1';btn.textContent=`✅ Aplicar todos los cambios (${listas})`}
+  }
+  const bar=document.getElementById('massbud-verifbar')
+  if(bar){
+    if(verificando>0)bar.innerHTML='<div style="border:1px solid var(--amber);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12px;color:var(--amber)">⏳ Verificando los presupuestos REALES con Meta (los mismos del administrador de anuncios)…</div>'
+    else if(noVerif>0)bar.innerHTML=`<div style="border:2px solid var(--red);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12px">
+      <span style="color:var(--red);font-weight:700">⚠️ ${noVerif} sin verificar</span> <span style="color:var(--muted)">· ${listas} verificadas listas${excl?` · ${excl} excluidas`:''}. Las no verificadas NO se pueden aplicar.</span>
+      <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+        <button class="btn-sm btn-outline" style="border-color:var(--amber);color:var(--amber)" onclick="_massBudVerificar(true)">🔄 Reintentar solo las no verificadas (${noVerif})</button>
+        <button class="btn-sm btn-outline" style="border-color:var(--red);color:var(--red)" onclick="massBudExcluirNoVerif()">✖️ Quitar las no verificadas (${noVerif})</button>
+      </div></div>`
+    else bar.innerHTML=`<div style="border:1px solid var(--green);border-radius:8px;padding:6px 10px;margin-bottom:8px;font-size:12px;color:var(--green)">✅ ${listas} presupuesto(s) verificados con Meta${excl?` <span style="color:var(--muted)">· ${excl} excluida(s)</span>`:''}. Lo que ves es lo que hay en el administrador de anuncios.</div>`
+  }
+}
+// ── Excluir de la corrida (queda atenuada y marcada — no desaparece) ──
+window.massBudExcluir=(metaId)=>{
+  const st=window._massState;if(!st)return
+  const it=(st.budItems||[]).find(x=>String(x.meta_id)===String(metaId));if(!it)return
+  it.excluida=true
+  const cardEl=document.getElementById('massbud-card-'+metaId)
+  if(cardEl){cardEl.style.opacity='.4';cardEl.style.borderColor='var(--border)'}
+  const v=document.getElementById('massbud-verif-'+metaId)
+  if(v)v.innerHTML='<span style="color:var(--muted);font-size:10px;font-weight:700">🚫 EXCLUIDA de esta corrida</span>'
+  window._massVerifUI()
+}
+window.massBudExcluirNoVerif=()=>{
+  const st=window._massState;if(!st||!st.budItems)return
+  for(const it of st.budItems)if(!it.excluida&&it.verificado===false)window.massBudExcluir(it.meta_id)
+}
+// ═══ FIN VERIFICACIÓN + BARRAS POR SEMÁFORO ═══
 
 </script>
 </body>

@@ -9383,6 +9383,7 @@ window.descargarMasivoDropiXlsx=async()=>{
   const _nrmEst=s=>String(s==null?'':s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()
   const _ROJOS=['cancelado','cancelada','anulado'],_NARANJAS=['reservado','reservada']
   let _nRojas=0,_nNaranjas=0
+  const _noUbicadas=[] // 🔴 (22jul26): {fila del Excel, lo que escribió el cliente, cuál falló}
   gruposM.forEach((g,bi)=>{
     for(const f of g.items){
       const r=f.raw||{}
@@ -9390,7 +9391,21 @@ window.descargarMasivoDropiXlsx=async()=>{
       const _est=_nrmEst(r.estado)
       const alerta=hbReglaActiva('resaltado_masivo')?(_ROJOS.includes(_est)?'rojo':(_NARANJAS.includes(_est)?'naranja':null)):null // FASE 6 · M16 regla 14: switch
       if(alerta==='rojo')_nRojas++;else if(alerta==='naranja')_nNaranjas++
-      filasM.push({vals:_cols.map(c=>_cl(hbMasivoValor(c.campo,f,r,emoji))),band:bi,alerta})
+      // 🔴🟢 (22jul26 · ley del owner): ciudad/depto NO ubicados van TAL CUAL entraron con SU CELDA
+      // en rojo; la pareja que SÍ se ubicó va en verde (solo cuando la otra quedó roja). El resto
+      // de la fila conserva su banda/alerta de siempre. Además se recolectan para el aviso de arriba.
+      let _celdas=null
+      const _ciuNo=f.ciudadDropi==='—',_depNo=f.deptoDropi==='—'
+      if(_ciuNo||_depNo){
+        const _nPalM=hbCfgPaleta().length,_ROJO_CEL=2+_nPalM+2,_VERDE_CEL=2+_nPalM+3
+        _celdas={}
+        _cols.forEach((c,i)=>{
+          if(c.campo==='ciudad')_celdas[i]=_ciuNo?_ROJO_CEL:_VERDE_CEL
+          else if(c.campo==='departamento')_celdas[i]=_depNo?_ROJO_CEL:_VERDE_CEL
+        })
+        _noUbicadas.push({fila:filasM.length+2,ciudadRaw:String(r.ciudad||'').trim()||'(vacía)',deptRaw:String(r.dept||'').trim()||'(vacío)',tel:r.tel||'',ciuNo:_ciuNo,depNo:_depNo})
+      }
+      filasM.push({vals:_cols.map(c=>_cl(hbMasivoValor(c.campo,f,r,emoji))),band:bi,alerta,celdas:_celdas})
     }
   })
   const anchos=_cols.map(c=>c.campo==='direccion_emoji'?42:(c.campo==='nombre'||c.campo==='apellido'||c.campo==='ciudad'||c.campo==='departamento'?18:14))
@@ -9401,8 +9416,11 @@ window.descargarMasivoDropiXlsx=async()=>{
   document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},2000)
   const _huerf=_cols.filter(c=>c.campo==='sin_asignar').map(c=>c.header||'(sin nombre)')
   const msg=document.getElementById('asign-msg')
-  if(msg)msg.innerHTML='<div class="alert alert-green">📥 Masivo Dropi descargado como Excel ('+filasM.length+' pedidos · '+gruposM.length+' producto(s) con su color'+((_nRojas||_nNaranjas)?' · 🔴 '+_nRojas+' cancelado(s) · 🟠 '+_nNaranjas+' reservado(s) resaltados':'')+') — súbelo directo a Dropi</div>'+(_huerf.length?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);margin-top:6px;font-size:12.5px">⚠️ La plantilla tiene ${_huerf.length} columna(s) <strong>SIN ASIGNAR</strong> (${_huerf.map(h=>String(h).replace(/</g,'&lt;')).join(', ')}) — salieron <strong>VACÍAS</strong>. Por favor informa al administrador para que les asigne un dato en el Dashboard.</div>`:'')
-  logAction('masivo_dropi_xlsx',{pedidos:filasM.length,productos:gruposM.length}).catch(()=>{})
+  // 🔴 (22jul26): aviso ARRIBA — cuántas sin ubicar, en qué FILA del Excel descargado están, qué
+  // escribió el cliente, y qué pasó con la pareja. Nada sale vacío ni mudo.
+  const _noUbiHtml=_noUbicadas.length?`<div class="alert alert-red" style="margin-bottom:6px;line-height:1.9">🔴 <b>${_noUbicadas.length} pedido(s) con ciudad/departamento SIN UBICAR</b> — van en el Excel <b>tal cual los escribió el cliente</b>, con su celda en ROJO (la pareja que sí se ubicó va en VERDE). <b>Corrígelos en Dropi antes de subir:</b><br>${_noUbicadas.map(x=>`→ Fila <b>${x.fila}</b>${x.tel?` · 📞 ${String(x.tel).replace(/[<>]/g,'')}`:''}: ${x.ciuNo?`ciudad "<b>${String(x.ciudadRaw).replace(/[<>]/g,'')}</b>" 🔴 NO se ubicó`:`ciudad ✅ ubicada 🟢`} · ${x.depNo?`depto "<b>${String(x.deptRaw).replace(/[<>]/g,'')}</b>" 🔴 NO se ubicó`:`depto ✅ ubicado 🟢`}`).join('<br>')}</div>`:''
+  if(msg)msg.innerHTML=_noUbiHtml+'<div class="alert alert-green">📥 Masivo Dropi descargado como Excel ('+filasM.length+' pedidos · '+gruposM.length+' producto(s) con su color'+((_nRojas||_nNaranjas)?' · 🔴 '+_nRojas+' cancelado(s) · 🟠 '+_nNaranjas+' reservado(s) resaltados':'')+') — súbelo directo a Dropi</div>'+(_huerf.length?`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);margin-top:6px;font-size:12.5px">⚠️ La plantilla tiene ${_huerf.length} columna(s) <strong>SIN ASIGNAR</strong> (${_huerf.map(h=>String(h).replace(/</g,'&lt;')).join(', ')}) — salieron <strong>VACÍAS</strong>. Por favor informa al administrador para que les asigne un dato en el Dashboard.</div>`:'')
+  logAction('masivo_dropi_xlsx',{pedidos:filasM.length,productos:gruposM.length,no_ubicadas:_noUbicadas.length}).catch(()=>{})
 }
 
 window.copiarCSVAsignador=()=>{
@@ -33542,8 +33560,8 @@ function hbMasivoValor(campo,f,r,emoji){
     case'nombre':return r.nombre||''
     case'apellido':return r.apellido||''
     case'direccion_emoji':return emoji+(r.direccion||'')
-    case'departamento':return f.deptoDropi==='—'?'':f.deptoDropi
-    case'ciudad':return f.ciudadDropi==='—'?'':f.ciudadDropi
+    case'departamento':return f.deptoDropi==='—'?String(r.dept==null?'':r.dept):f.deptoDropi // 🔴 (22jul26): no ubicado → TAL CUAL entró (ya no vacío)
+    case'ciudad':return f.ciudadDropi==='—'?String(r.ciudad==null?'':r.ciudad):f.ciudadDropi // 🔴 (22jul26): no ubicada → TAL CUAL entró (ya no vacía)
     case'telefono':return r.tel||''
     case'id_dropi':return r.idDropi||''
     case'cantidad':return r.qty!=null?String(r.qty):''
@@ -33572,6 +33590,8 @@ const HB_ORIG={
     estadoUmbralPct:50,         // M11: % de celdas con token para sugerir la columna
     colorCancelado:'FFFF6B6B',  // M12: fila cancelada del masivo
     colorReservado:'FFFFC000',  // M12: fila reservada del masivo
+    colorNoUbicada:'FFFF8A80',  // 🔴 (22jul26): CELDA de ciudad/depto que el Asignador NO ubicó (va tal cual entró)
+    colorUbicada:'FFC6EFCE',    // 🟢 (22jul26): CELDA pareja que SÍ se ubicó (solo cuando la otra quedó roja)
     paletaProducto:['FFE2EFDA','FFDDEBF7','FFFFF2CC','FFFCE4D6','FFE4DFEC','FFD9E1F2'], // banda por producto (hoja + masivo, UNA sola paleta)
     colorCorreccion:'FFFFC000', // fila corregida (hoja)
     colorCantVerif:'FFD9C2F0',  // 🟪 (22jul26) cantidad VERIFICADA en SellerChat (opción B del candado de cantidades)
@@ -34760,10 +34780,12 @@ function hbBuildMasivoXlsx(headers,filasM,anchos){
   for(const c of PAL)fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${c}"/><bgColor indexed="64"/></patternFill></fill>`)
   fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${hbCfgColor('colorCancelado')}"/><bgColor indexed="64"/></patternFill></fill>`)    // FASE 5 · M12 + M16: rojo configurable
   fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${hbCfgColor('colorReservado')}"/><bgColor indexed="64"/></patternFill></fill>`) // FASE 5 · M12 + M16: naranja configurable
+  fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${hbCfgColor('colorNoUbicada')}"/><bgColor indexed="64"/></patternFill></fill>`) // 🔴 (22jul26): CELDA ciudad/depto NO ubicada
+  fillsXml.push(`<fill><patternFill patternType="solid"><fgColor rgb="${hbCfgColor('colorUbicada')}"/><bgColor indexed="64"/></patternFill></fill>`)   // 🟢 (22jul26): CELDA pareja SÍ ubicada
   let xfs='<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
-  for(let k=0;k<nFills+2;k++)xfs+=`<xf numFmtId="49" fontId="0" fillId="${2+k}" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/>`
+  for(let k=0;k<nFills+4;k++)xfs+=`<xf numFmtId="49" fontId="0" fillId="${2+k}" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/>`
   const styles=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="${fillsXml.length}">${fillsXml.join('')}</fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="${2+nFills+2}">${xfs}</cellXfs></styleSheet>`
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="${fillsXml.length}">${fillsXml.join('')}</fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="${2+nFills+4}">${xfs}</cellXfs></styleSheet>`
   let colsXml='<cols>'
   headers.forEach((h,i)=>{colsXml+=`<col min="${i+1}" max="${i+1}" width="${(anchos&&anchos[i])||16}" customWidth="1"/>`})
   colsXml+='</cols>'
@@ -34776,8 +34798,11 @@ function hbBuildMasivoXlsx(headers,filasM,anchos){
     const s=fm.alerta==='rojo'?(2+nFills):(fm.alerta==='naranja'?(2+nFills+1):(2+((fm.band||0)%nFills)))
     sheet+=`<row r="${rN}">`
     fm.vals.forEach((v,i)=>{
-      if(v!=null&&v!=='')sheet+=`<c r="${hbColL(i)}${rN}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${hbEsc(v)}</t></is></c>`
-      else sheet+=`<c r="${hbColL(i)}${rN}" s="${s}"/>` // vacía pero con banda de color
+      // 🔴🟢 (22jul26): color POR CELDA (fm.celdas={colIdx:styleId}) pisa el de la fila — lo usan
+      // ciudad/depto no ubicadas (rojo) y su pareja ubicada (verde). Sin fm.celdas: igual que siempre.
+      const sc=(fm.celdas&&fm.celdas[i]!=null)?fm.celdas[i]:s
+      if(v!=null&&v!=='')sheet+=`<c r="${hbColL(i)}${rN}" s="${sc}" t="inlineStr"><is><t xml:space="preserve">${hbEsc(v)}</t></is></c>`
+      else sheet+=`<c r="${hbColL(i)}${rN}" s="${sc}"/>` // vacía pero con banda de color
     })
     sheet+='</row>'
   })
@@ -35505,6 +35530,12 @@ const HB_CC_VALORES={
   colorReservado:{label:'🟠 Color de pedido RESERVADO (Excel del masivo)',tipo:'color',regla:'resaltado_masivo',
     explica:'Igual que el rojo, pero para pedidos reservados.',
     ejemplo:'Fábrica: naranja.'},
+  colorNoUbicada:{label:'🔴 Color de CELDA de ciudad/depto NO UBICADA (Excel del masivo)',tipo:'color',regla:null,
+    explica:'Cuando el Asignador NO logra ubicar la ciudad o el departamento, esa celda ya no sale vacía: sale TAL CUAL la escribió el cliente y pintada de este color, para corregirla en Dropi antes de subir.',
+    ejemplo:'Fábrica: rojo claro. Solo se pinta LA CELDA, no la fila entera.'},
+  colorUbicada:{label:'🟢 Color de CELDA pareja SÍ UBICADA (Excel del masivo)',tipo:'color',regla:null,
+    explica:'Cuando una de las dos celdas (ciudad/depto) quedó roja por no ubicarse, su pareja que SÍ se ubicó se pinta de este color — de un vistazo se ve "esta sí, esta no". Las filas donde ambas se ubicaron van con su banda normal.',
+    ejemplo:'Fábrica: verde claro.'},
   nombreMalPiso:{label:'📉 Mínimo de pedidos para revisar el nombre',tipo:'num',regla:'nombre_mal',
     explica:'Si el Excel tiene MENOS pedidos que este número, NO se evalúa si el nombre está mal — solo se revisan una a una las fechas raras.',
     ejemplo:'Con 5: un Excel de 4 pedidos (3 con otra fecha) NO se bloquea; va a revisión fila por fila.'},
@@ -35732,7 +35763,9 @@ async function hbRenderCfg(){
   <div id="hb-cfg-mgrid">${hbCfgMasivoGridHTML(cfg.masivo_cols||hbMasivoColsDefault())}</div>
   ${_reglaHTML('resaltado_masivo')}
   ${hbCcValorHTML('colorCancelado')}
-  ${hbCcValorHTML('colorReservado')}`)}
+  ${hbCcValorHTML('colorReservado')}
+  ${hbCcValorHTML('colorNoUbicada')}
+  ${hbCcValorHTML('colorUbicada')}`)}
 
   ${_blk('#14b8a6','✂️ FRAGMENTADOR DROPI MASIVO',`
   <div style="font-size:12px;color:var(--muted);margin-top:8px">La sección ✂️ Fragmentar Dropi Masivo (menú del auxiliar) corta el Excel masivo en partes para subirlas a Dropi. Este es su único valor editable.</div>

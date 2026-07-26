@@ -17898,6 +17898,21 @@ const _WA_TPL_MAP={novedades:['novedades'],reclame:['reclame'],reservado:['confi
 const _WA_TPL_EJ={NOMBRE:'María',PRODUCTO:'Colágeno Premium',CANTIDAD:'2 unidades',GUIA:'014117806991',CIUDAD:'Bogotá',TRANSPORTADORA:'ENVIA',CARRIER:'ENVIA',TOTAL:'$120.000',FECHA:'28 de julio',FECHA_ENVIO:'28 de julio',DIRECCION:'Cra 10 #20-30'}
 const _waTplSlug=(s)=>String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'')
 
+// Fuente de textos por sección: novedades vive en novedades_protocolos (campo msg);
+// las demás en app_mensajes. Devuelve [{etiqueta, texto}].
+async function _waTplFuente(seccion){
+  if(seccion==='novedades'){
+    const{data,error}=await sb.from('novedades_protocolos').select('idx,tipo,msg,activo').order('idx')
+    if(error)throw error
+    return(data||[]).filter(r=>r.activo!==false&&String(r.msg||'').trim()).map(r=>({etiqueta:r.tipo||('novedad_'+r.idx),texto:r.msg}))
+  }
+  const secsApp=_WA_TPL_MAP[seccion]||[]
+  if(!secsApp.length)return[]
+  const{data,error}=await sb.from('app_mensajes').select('seccion,idx,etiqueta,texto,activo').in('seccion',secsApp).order('seccion').order('idx')
+  if(error)throw error
+  return(data||[]).filter(t=>t.activo!==false).map(t=>({etiqueta:t.etiqueta||('variante_'+t.idx),texto:t.texto}))
+}
+
 // [NOMBRE] → {{1}} en orden de aparición (repetidos usan el mismo número)
 function _waTplConvertir(texto){
   const vars=[],ejemplos=[]
@@ -17921,13 +17936,12 @@ window.cargarWaPlantillasCard=async()=>{
   const secsApp=_WA_TPL_MAP[n.seccion]||[]
   el.innerHTML='<div class="loading">Cargando textos...</div>'
   try{
-    const{data:tpls,error:e1}=await sb.from('app_mensajes').select('seccion,idx,etiqueta,texto,activo').in('seccion',secsApp).order('seccion').order('idx')
-    if(e1)throw e1
+    const fuente=await _waTplFuente(n.seccion)
     const{data:ya}=await sb.from('wa_plantillas').select('nombre,estado').eq('waba_id',n.waba_id)
     const yaMap={};(ya||[]).forEach(p=>yaMap[p.nombre]=p.estado)
-    const items=(tpls||[]).filter(t=>t.activo!==false).map(t=>{
+    const items=fuente.map(t=>{
       const conv=_waTplConvertir(t.texto)
-      const nombre=('nexo_'+n.seccion+'_'+_waTplSlug(t.etiqueta||('variante_'+t.idx))+'_v1').slice(0,512)
+      const nombre=('nexo_'+n.seccion+'_'+_waTplSlug(t.etiqueta)+'_v1').slice(0,512)
       return{...t,conv,nombre,estadoMeta:yaMap[nombre]||null}
     })
     window._waTplState={numeroId,items}
@@ -18120,12 +18134,11 @@ window.waCargarPlantillas=async(numeroId)=>{
     const{data:ya}=await sb.from('wa_plantillas').select('nombre,lang,estado,seccion').eq('waba_id',n.waba_id)
     const yaMap={};(ya||[]).forEach(p=>yaMap[p.nombre]=p)
     // 3) Tus textos de la sección → convertidos, con su estado si ya se enviaron
-    const secsApp=_WA_TPL_MAP[n.seccion]||[]
-    const{data:txts}=await sb.from('app_mensajes').select('seccion,idx,etiqueta,texto,activo').in('seccion',secsApp).order('seccion').order('idx')
+    const fuente=await _waTplFuente(n.seccion)
     const items=[]
-    ;(txts||[]).filter(t=>t.activo!==false).forEach(t=>{
+    fuente.forEach(t=>{
       const conv=_waTplConvertir(t.texto)
-      const nombre=('nexo_'+n.seccion+'_'+_waTplSlug(t.etiqueta||('variante_'+t.idx))+'_v1').slice(0,512)
+      const nombre=('nexo_'+n.seccion+'_'+_waTplSlug(t.etiqueta)+'_v1').slice(0,512)
       const meta=yaMap[nombre]
       items.push({origen:'texto',nombre,lang:'es',estado:meta?meta.estado:null,conv,etiqueta:t.etiqueta})
     })

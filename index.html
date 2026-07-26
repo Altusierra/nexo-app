@@ -38529,7 +38529,7 @@ async function _wchCargar(){
     let tels=new Set(),secDe={} // tel → seccion del último envío
     if(sec==='entrantes'){
       // Entrantes = origen 'cliente' (permanente). En vista fecha: con actividad ese día.
-      let q=sb.from('conversaciones').select('id,telefono,nombre,ultimo_msg_en,ultimo_msg_dir,ventana_24h_hasta,no_leidos,requiere_reintro,etiqueta,etiqueta_en,origen').eq('origen','cliente').order('ultimo_msg_en',{ascending:false}).limit(400)
+      let q=sb.from('conversaciones').select('id,telefono,nombre,ultimo_msg_en,ultimo_msg_dir,ventana_24h_hasta,no_leidos,requiere_reintro,etiqueta,etiqueta_en,origen,wa_numero_id').eq('origen','cliente').order('ultimo_msg_en',{ascending:false}).limit(400)
       if(fecha)q=q.gte('ultimo_msg_en',fecha+'T00:00:00-05:00').lte('ultimo_msg_en',fecha+'T23:59:59-05:00')
       const{data,error}=await q
       if(error)throw error
@@ -38542,7 +38542,7 @@ async function _wchCargar(){
       // 2) En vista HOY se suma lo VIVO de días previos que pertenece a esta sección
       let vivas=[]
       if(!fecha){
-        const{data:conVida,error:e2}=await sb.from('conversaciones').select('id,telefono,nombre,ultimo_msg_en,ultimo_msg_dir,ventana_24h_hasta,no_leidos,requiere_reintro,etiqueta,etiqueta_en,origen').or('ultimo_msg_dir.eq.in,etiqueta.not.is.null').neq('origen','cliente').order('ultimo_msg_en',{ascending:false}).limit(400)
+        const{data:conVida,error:e2}=await sb.from('conversaciones').select('id,telefono,nombre,ultimo_msg_en,ultimo_msg_dir,ventana_24h_hasta,no_leidos,requiere_reintro,etiqueta,etiqueta_en,origen,wa_numero_id').or('ultimo_msg_dir.eq.in,etiqueta.not.is.null').neq('origen','cliente').order('ultimo_msg_en',{ascending:false}).limit(400)
         if(e2)throw e2
         vivas=conVida||[]
         const telsVivas=vivas.map(c=>c.telefono).filter(t=>!tels.has(t))
@@ -38558,7 +38558,7 @@ async function _wchCargar(){
       let base=[]
       const telArr=[...tels]
       for(let i=0;i<telArr.length;i+=150){
-        const{data:cs,error:e3}=await sb.from('conversaciones').select('id,telefono,nombre,ultimo_msg_en,ultimo_msg_dir,ventana_24h_hasta,no_leidos,requiere_reintro,etiqueta,etiqueta_en,origen').in('telefono',telArr.slice(i,i+150))
+        const{data:cs,error:e3}=await sb.from('conversaciones').select('id,telefono,nombre,ultimo_msg_en,ultimo_msg_dir,ventana_24h_hasta,no_leidos,requiere_reintro,etiqueta,etiqueta_en,origen,wa_numero_id').in('telefono',telArr.slice(i,i+150))
         if(e3)throw e3
         base=base.concat(cs||[])
       }
@@ -39020,15 +39020,20 @@ async function _wchSugerencias(convId,c){
 }
 
 // ── ENVÍO POR API (wa-send abierta a auxiliares en send_text/send_template) ──
-async function _wchNumeroDe(sec){
+async function _wchNumeroDe(sec,conv){
   const st=window._wchState
   if(!st.numsCache){
     const{data}=await sb.from('wa_numeros').select('id,seccion,secciones,estado,modo,phone_number_id').eq('estado','activo').eq('modo','api')
     st.numsCache=data||[]
   }
+  // Un PNID de verdad es solo dígitos: descarta los marcadores de relleno (REEMPLAZAR_...)
+  const valido=(x)=>x&&x.phone_number_id&&/^\d{6,}$/.test(String(x.phone_number_id))
+  // 1º el número por donde el cliente YA habla (se responde por el mismo canal)
+  if(conv&&conv.wa_numero_id){const n0=st.numsCache.find(x=>x.id===conv.wa_numero_id);if(valido(n0))return n0}
+  // 2º el número asignado a la sección · 3º cualquiera válido
   const s=sec==='entrantes'?null:sec
-  let n=s?st.numsCache.find(x=>(Array.isArray(x.secciones)&&x.secciones.includes(s))||x.seccion===s):null
-  if(!n)n=st.numsCache.find(x=>x.phone_number_id)
+  let n=s?st.numsCache.find(x=>((Array.isArray(x.secciones)&&x.secciones.includes(s))||x.seccion===s)&&valido(x)):null
+  if(!n)n=st.numsCache.find(valido)
   return n||null
 }
 // El error REAL de una Edge Function non-2xx viaja en el cuerpo de la respuesta
@@ -39045,7 +39050,7 @@ window._wchEnviarTexto=async function(convId,tel){
   const inp=document.getElementById('wch-envio-'+convId),out=document.getElementById('wch-enviomsg-'+convId)
   const texto=(inp&&inp.value||'').trim()
   if(!texto)return
-  const num=await _wchNumeroDe(window._wchState.sec)
+  const num=await _wchNumeroDe(window._wchState.sec,window._wchState.convs.find(x=>x.id===convId))
   if(!num){if(out)out.innerHTML='<span style="color:#ef4444">No hay número API activo para esta sección.</span>';return}
   if(out)out.innerHTML='<span style="color:var(--muted)">Enviando…</span>'
   try{
@@ -39065,7 +39070,7 @@ window._wchEnviarTexto=async function(convId,tel){
 }
 window._wchEnviarTpl=async function(convId,tel,nombreTpl,esReintro){
   const out=document.getElementById('wch-enviomsg-'+convId)
-  const num=await _wchNumeroDe(window._wchState.sec)
+  const num=await _wchNumeroDe(window._wchState.sec,window._wchState.convs.find(x=>x.id===convId))
   if(!num){if(out)out.innerHTML='<span style="color:#ef4444">No hay número API activo para esta sección.</span>';return}
   const c=window._wchState.convs.find(x=>x.id===convId)
   let parametros

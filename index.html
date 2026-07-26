@@ -17621,6 +17621,14 @@ async function cargarTextosAdmin(){
   const _icono={confirmacion:'📅',psf:'⏳',cancelados:'🔴',reclame:'📦'}
   const esc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
   const escAttr=(s)=>esc(s).replace(/"/g,'&quot;')
+  // Chip multi-portafolio: estados por WABA + circulitos por número
+  await _waChipCargar()
+  const _waSecDe={confirmacion:'reservado',psf:'reservado',cancelados:'cancelados',reclame:'reclame'}
+  const _waChipTpl=(sec,etiqueta,idx,texto)=>{
+    if(typeof _waTplSlug!=='function')return ''
+    const nombre='nexo_'+(_waSecDe[sec]||sec)+'_'+_waTplSlug(etiqueta||('variante_'+idx))+'_v1'
+    return _waChipMulti(nombre,texto)
+  }
   try{
     const{data:cfg,error:e1}=await sb.from('app_mensajes_config').select('*')
     const{data:tpls,error:e2}=await sb.from('app_mensajes').select('*').order('seccion',{ascending:true}).order('idx',{ascending:true})
@@ -17653,6 +17661,7 @@ async function cargarTextosAdmin(){
             <label style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px;white-space:nowrap"><input type="checkbox" id="txt-${sec}-${p.idx}-ac" ${p.activo===false?'':'checked'}> activo</label>
           </div>
           <textarea id="txt-${sec}-${p.idx}-tx" style="width:100%;min-height:130px;padding:10px;font-family:monospace;font-size:12px;line-height:1.5;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);resize:vertical;box-sizing:border-box">${esc(p.texto)}</textarea>
+          ${_waChipTpl(sec,p.etiqueta,p.idx,p.texto)}
           <div style="display:flex;gap:6px;margin-top:8px">
             <button class="btn-sm btn-primary" onclick="txtGuardarPlantilla('${sec}',${p.idx})">💾 Guardar</button>
             <button class="btn-sm btn-red" onclick="txtEliminarPlantilla('${sec}',${p.idx})">🗑️ Eliminar</button>
@@ -18273,6 +18282,60 @@ async function waEncolarNovedadesAuto(items){
   finally{window._waEncolando=false}
 }
 
+// ── 📄 CHIP MULTI-PORTAFOLIO de plantillas (usado en Textos y Novedades) ──
+// La aprobación es POR WABA (portafolio). Verde global = aprobada en al menos uno.
+// Circulitos = estado de esa plantilla en el WABA de cada número API activo.
+window._waChipData={estados:{},numeros:[]}
+async function _waChipCargar(){
+  try{
+    const[{data:tpls},{data:nums}]=await Promise.all([
+      sb.from('wa_plantillas').select('nombre,estado,waba_id'),
+      sb.from('wa_numeros').select('id,etiqueta,display,waba_id,phone_number_id').eq('modo','api').eq('estado','activo')
+    ])
+    const est={};(tpls||[]).forEach(t=>{(est[t.nombre]=est[t.nombre]||{})[t.waba_id]=t.estado})
+    window._waChipData={estados:est,numeros:(nums||[]).filter(n=>n.phone_number_id&&n.waba_id)}
+  }catch(_){window._waChipData={estados:{},numeros:[]}}
+}
+window._waTplTextos=window._waTplTextos||{}
+function _waChipMulti(nombre,texto){
+  window._waTplTextos[nombre]=texto||''
+  const porWaba=(window._waChipData.estados||{})[nombre]||{}
+  const nums=window._waChipData.numeros||[]
+  const vals=Object.values(porWaba)
+  const global=vals.includes('APPROVED')?'APPROVED':vals.includes('PENDING')?'PENDING':vals.includes('REJECTED')?'REJECTED':null
+  const chipG=global==='APPROVED'?'<span style="color:var(--green);font-weight:700">🟢 aprobada en Meta</span>'
+    :global==='PENDING'?'<span style="color:var(--amber);font-weight:700">⏳ en revisión de Meta</span>'
+    :global==='REJECTED'?'<span style="color:var(--red);font-weight:700">🔴 rechazada por Meta</span>'
+    :'<span style="color:var(--amber);font-weight:700">🟡 sin enviar a aprobación</span>'
+  // circulitos por número: estado de la plantilla en SU portafolio
+  const bolas=nums.map(n=>{
+    const e=porWaba[n.waba_id]
+    const c=e==='APPROVED'?'var(--green)':e==='PENDING'?'#f59e0b':e==='REJECTED'?'var(--red)':'#f59e0b'
+    const t=e==='APPROVED'?'aprobada en este portafolio':e==='PENDING'?'en revisión en este portafolio':e==='REJECTED'?'rechazada en este portafolio':'NO enviada en este portafolio'
+    const falta=e!=='APPROVED'&&e!=='PENDING'
+    return `<span style="display:inline-flex;align-items:center;gap:3px;border:1px solid ${c};border-radius:20px;padding:1px 8px;font-size:10px" title="${_waEsc(n.etiqueta)} (${_waEsc(n.display||'')}): ${t}">
+      <span style="width:8px;height:8px;border-radius:50%;background:${c};display:inline-block"></span>${_waEsc(n.etiqueta)}
+      ${falta?`<button onclick="waTplReenviar('${_waEsc(nombre)}','${n.id}')" style="border:none;background:none;color:${c};cursor:pointer;font-size:10px;padding:0 0 0 2px;font-weight:800" title="Enviar a aprobación en este portafolio (ya sabemos que Meta la aprueba)">↻ reenviar</button>`:''}
+    </span>`
+  }).join(' ')
+  return `<div style="font-size:10.5px;margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--muted)">📄 <code style="background:rgba(255,255,255,.06);padding:1px 6px;border-radius:5px;color:var(--text)">${nombre}</code> · ${chipG} ${bolas?'· '+bolas:''}</div>`
+}
+// Reenvía la plantilla a aprobación en el portafolio del número elegido
+window.waTplReenviar=async(nombre,numeroId)=>{
+  const texto=window._waTplTextos[nombre]
+  if(!texto){waToast('❌ No tengo el texto de esa plantilla. Recarga la página.','error');return}
+  if(!confirm('¿Enviar "'+nombre+'" a aprobación en el portafolio de este número?'))return
+  const conv=_waTplConvertir(texto)
+  const seccion=(nombre.split('_')[1]||null)
+  const r=await _waSend({action:'create_template',numero_id:numeroId,nombre,cuerpo_meta:conv.cuerpo,ejemplos:conv.ejemplos,variables:conv.vars,seccion})
+  if(!r.ok){waToast('❌ '+_waEsc(r.error),'error');return}
+  waToast('✅ "'+_waEsc(nombre)+'" enviada a aprobación en ese portafolio. Estado: '+_waEsc((r.data&&r.data.estado)||'PENDING'),'ok')
+  logAction('wa_plantilla_reenviada',{nombre,numeroId}).catch(()=>{})
+  await _waChipCargar()
+  try{if(typeof cargarTextosAdmin==='function')cargarTextosAdmin()}catch(_){}
+  try{if(typeof cargarNovedadesAdmin==='function')cargarNovedadesAdmin()}catch(_){}
+}
+
 // ── ▶️ DESPACHO MANUAL GENÉRICO (reclame / cancelados / reservado) ──
 // Encola el pedido con la plantilla aprobada de la sección y lo dispara ya.
 window.waDespacharItem=async(seccion,raw)=>{
@@ -18678,6 +18741,13 @@ async function cargarNovedadesAdmin(){
   if(!el)return
   const esc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
   const escAttr=(s)=>esc(s).replace(/"/g,'&quot;')
+  // Chip multi-portafolio (estados por WABA + circulitos por número)
+  await _waChipCargar()
+  const _nvChipTpl=(tipo,idx,texto)=>{
+    if(typeof _waTplSlug!=='function')return ''
+    const nombre='nexo_novedades_'+_waTplSlug(tipo||('novedad_'+idx))+'_v1'
+    return _waChipMulti(nombre,texto)
+  }
   let rows, sembrado
   try{
     const{data,error}=await sb.from('novedades_protocolos').select('*').order('idx',{ascending:true})
@@ -18705,6 +18775,7 @@ async function cargarNovedadesAdmin(){
       <textarea id="nvp-${r.idx}-ex" placeholder="Si aparece alguna de estas palabras, NO se usa este tipo" style="${tx};min-height:40px">${esc(r.excluir||'')}</textarea>
       <label style="${lbl}">💬 Mensaje al cliente</label>
       <textarea id="nvp-${r.idx}-msg" style="${tx};min-height:108px">${esc(r.msg)}</textarea>
+      ${_nvChipTpl(r.tipo,r.idx,r.msg)}
       <label style="${lbl}">📋 Protocolo de respuesta (interno)</label>
       <textarea id="nvp-${r.idx}-resp" style="${tx};min-height:92px">${esc(r.resp)}</textarea>
       <div style="display:flex;gap:6px;margin-top:10px">

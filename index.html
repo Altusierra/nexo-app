@@ -11729,6 +11729,7 @@ async function cargarPendientesConfirmacion(){
     else if(filtro==='vencidos')filtrados=enriched.filter(i=>i.dias_falta!=null&&i.dias_falta<0)
     filtrados.sort((a,b)=>(a.dias_falta-b.dias_falta)||(a.envios_hoy-b.envios_hoy))
     window._confCache={items:filtrados,fechaActiva:hoyStr}
+    try{waEncolarSeccionAuto('reservado',filtrados)}catch(_){}
     renderPendientesConfirmacion(filtrados,filtro)
   }catch(e){
     el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
@@ -11962,6 +11963,7 @@ async function cargarPendientesSinFecha(){
     // 🛡️ ESCUDO 3: pegar la marca a cada item para el badge 🔓
     for(const m of sinFecha)m.psf_esc3=_esc3Marca.has(String(m.id))
     window._psfCache={items:sinFecha,limit:window._psfCache?.limit||20}
+    try{waEncolarSeccionAuto('reservado',sinFecha)}catch(_){}
     renderPendientesSinFecha()
   }catch(e){
     el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
@@ -12104,6 +12106,7 @@ async function cargarCancelados(){
     }
     lista.sort((a,b)=>String(b.fecha||b.created_at||'').localeCompare(String(a.fecha||a.created_at||'')))
     window._cancCache={items:lista,limit:window._cancCache?.limit||20}
+    try{waEncolarSeccionAuto('cancelados',lista)}catch(_){}
     renderCancelados()
   }catch(e){el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`}
 }
@@ -13269,6 +13272,8 @@ async function cargarNovedadesPorFecha(){
     if(_seq!==window._novFechaSeq)return // 🚪 H3: llegó una carga más nueva — esta NO pinta ni toca el cache
     window._novCache={fechaActiva:fecha,items:enriched,reporteId:rep.id}
     renderNovedadesContent(rep,enriched)
+    // 🤖 MOTOR: si Novedades tiene Auto ON, encola solo (no bloquea la UI; el cron despacha)
+    try{waEncolarNovedadesAuto(enriched)}catch(_){}
   }catch(e){
     if(_seq===window._novFechaSeq)el.innerHTML=`<div class="alert alert-red">Error cargando: ${e.message}</div>` // 🎟️ portero también en el error
   }
@@ -14664,6 +14669,7 @@ async function cargarReclamePorFecha(){
 
     if(_seq!==window._recFechaSeq)return // 🚪 H3: llegó una carga más nueva — esta NO pinta ni toca el cache
     window._reclameCache={fechaActiva:fecha,items:enriched,reporteId:rep.id,arrastrados}
+    try{waEncolarSeccionAuto('reclame',enriched)}catch(_){}
     renderReclameContent(rep,enriched,arrastrados)
   }catch(e){
     if(_seq===window._recFechaSeq)el.innerHTML=`<div class="alert alert-red">Error cargando: ${e.message}</div>` // 🎟️ portero también en el error
@@ -17814,7 +17820,9 @@ function renderWaNumeros(){
   const estadoChip=(e)=>e==='activo'?'<span style="color:var(--green);font-weight:700">🟢 activo</span>':e==='bloqueado'?'<span style="color:var(--red);font-weight:700">🔴 bloqueado</span>':'<span style="color:var(--muted);font-weight:700">😴 dormido</span>'
   el.innerHTML=nums.map(n=>{
     const appOpts=apps.map(a=>`<option value="${a.id}" ${a.id===n.wa_app_id?'selected':''}>${_waEsc(a.etiqueta)}</option>`).join('')
-    const secOpts=_WA_SECCIONES.map(s=>`<option value="${s.v}" ${(n.seccion||'')===s.v?'selected':''}>${s.t}</option>`).join('')
+    const secsDe=(x)=>Array.isArray(x.secciones)&&x.secciones.length?x.secciones:(x.seccion?[x.seccion]:[])
+    const misSecs=secsDe(n)
+    const secChecks=['novedades','reclame','reservado','cancelados'].map(s=>`<label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;white-space:nowrap"><input type="checkbox" id="wan-se-${n.id}-${s}" ${misSecs.includes(s)?'checked':''}>${(typeof _WA_SEC_LBL!=='undefined'&&_WA_SEC_LBL[s])||s}</label>`).join('')
     return `<div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px">
         <div style="font-weight:800;font-size:13px">${n.modo==='respaldo'?'🛟':'📱'} ${_waEsc(n.etiqueta)} <span style="font-weight:400;color:var(--muted)">· ${_waEsc(n.display||'sin número')}</span></div>
@@ -17823,7 +17831,7 @@ function renderWaNumeros(){
       <div class="form-grid g3" style="margin-bottom:8px">
         <div class="fld"><label>Etiqueta</label><input id="wan-et-${n.id}" value="${_waEsc(n.etiqueta)}"></div>
         <div class="fld"><label>Número visible</label><input id="wan-di-${n.id}" value="${_waEsc(n.display||'')}" placeholder="+57 300 ..."></div>
-        <div class="fld"><label>Sección asignada</label><select id="wan-se-${n.id}">${secOpts}</select></div>
+        <div class="fld"><label>Secciones asignadas (elige una o varias)</label><div style="display:flex;gap:10px;flex-wrap:wrap;padding:8px 4px">${secChecks}</div></div>
       </div>
       <div class="form-grid g3" style="margin-bottom:8px">
         <div class="fld"><label>Phone Number ID</label><input id="wan-pn-${n.id}" value="${_waEsc(n.phone_number_id||'')}" placeholder="de Meta" ${n.modo==='respaldo'?'disabled':''}></div>
@@ -17936,33 +17944,38 @@ window.waGuardarNumero=async(id)=>{
   const g=(p)=>document.getElementById(p+id)?.value?.trim()||''
   const modo=g('wan-mo-')||'api'
   const estado=g('wan-es-')||'activo'
-  const seccion=g('wan-se-')||null
+  const secciones=['novedades','reclame','reservado','cancelados'].filter(s=>document.getElementById('wan-se-'+id+'-'+s)?.checked)
+  const seccion=secciones[0]||null // compatibilidad: la primera queda como principal
   const upd={
-    etiqueta:g('wan-et-'),display:g('wan-di-')||null,seccion,modo,estado,
+    etiqueta:g('wan-et-'),display:g('wan-di-')||null,seccion,secciones,modo,estado,
     phone_number_id:g('wan-pn-')||null,waba_id:g('wan-wb-')||null,
     wa_app_id:g('wan-ap-')||null,actualizado_en:new Date().toISOString()
   }
-  if(!upd.etiqueta){if(msg)msg.innerHTML='<div class="alert alert-red">La etiqueta es obligatoria.</div>';return}
-  if(modo==='api'&&estado==='activo'&&seccion&&(!upd.phone_number_id||!upd.wa_app_id)){
-    if(msg)msg.innerHTML='<div class="alert alert-amber">Un número API activo con sección necesita Phone Number ID y App. Complétalos o déjalo dormido.</div>';return
+  if(!upd.etiqueta){waToast('❌ La etiqueta es obligatoria.','error');return}
+  if(modo==='api'&&estado==='activo'&&secciones.length&&(!upd.phone_number_id||!upd.wa_app_id)){
+    waToast('⚠️ Un número API activo con secciones necesita Phone Number ID y App. Complétalos o déjalo dormido.','aviso');return
   }
-  let liberado=null
+  let liberados=[]
   try{
-    if(seccion&&estado==='activo'){
-      const{data:ocupa}=await sb.from('wa_numeros').select('id,etiqueta').eq('seccion',seccion).eq('modo',modo).eq('estado','activo').neq('id',id)
-      for(const o of (ocupa||[])){
-        const{error:eLib}=await sb.from('wa_numeros').update({seccion:null,actualizado_en:new Date().toISOString()}).eq('id',o.id)
-        if(eLib)throw eLib
-        liberado=o.etiqueta
+    // Liberar cada sección elegida de OTROS números activos del mismo modo
+    if(secciones.length&&estado==='activo'){
+      const{data:otros}=await sb.from('wa_numeros').select('id,etiqueta,seccion,secciones').eq('modo',modo).eq('estado','activo').neq('id',id)
+      for(const o of (otros||[])){
+        const oSecs=Array.isArray(o.secciones)&&o.secciones.length?o.secciones:(o.seccion?[o.seccion]:[])
+        const quedan=oSecs.filter(s=>!secciones.includes(s))
+        if(quedan.length!==oSecs.length){
+          const{error:eLib}=await sb.from('wa_numeros').update({secciones:quedan,seccion:quedan[0]||null,actualizado_en:new Date().toISOString()}).eq('id',o.id)
+          if(eLib)throw eLib
+          liberados.push(o.etiqueta)
+        }
       }
     }
     const{data:updN,error}=await sb.from('wa_numeros').update(upd).eq('id',id).select('id')
     if(error)throw error
     if(!updN||!updN.length)throw new Error('La base de datos no aceptó el cambio (0 filas). Revisa permisos.')
   }catch(e){waToast('❌ Número NO guardado: '+_waEsc(e.message),'error');if(msg)msg.innerHTML=`<div class="alert alert-red">${_waEsc(e.message)}</div>`;return}
-  waToast('✅ Número guardado.'+(liberado?' "'+_waEsc(liberado)+'" quedó liberado.':''),'ok')
-  if(msg)msg.innerHTML=`<div class="alert alert-green">✅ Número guardado.${liberado?` "${_waEsc(liberado)}" quedó liberado (banco de reemplazo).`:''}</div>`
-  logAction('wa_numero_guardado',{id,seccion,modo,estado,libero:liberado}).catch(()=>{})
+  waToast('✅ Número guardado ('+(secciones.length?secciones.join(', '):'sin sección')+').'+(liberados.length?' Liberado(s): '+liberados.map(_waEsc).join(', ')+'.':''),'ok')
+  logAction('wa_numero_guardado',{id,secciones,modo,estado,libero:liberados}).catch(()=>{})
   cargarWaMensajeria()
 }
 
@@ -18130,6 +18143,114 @@ window.waTplEnviarTodas=async()=>{
   if(out)out.innerHTML=`<div class="alert ${fallo?'alert-amber':'alert-green'}">✅ ${ok} enviada(s)${fallo?` · ❌ ${fallo} fallaron:<br><span style="font-size:11px">${errores.map(_waEsc).join('<br>')}</span>`:''}</div>`
   logAction('wa_plantillas_masivo',{ok,fallo}).catch(()=>{})
   cargarWaPlantillasCard()
+}
+
+// ── 🤖 ENCOLADOR AUTOMÁTICO (4 secciones) ──
+// Normaliza items de cualquier sección al formato que entiende _waValorReal
+function _waNormItem(m){
+  return{
+    id:m.id||m.mapeo_id||m.mapeoId||null,
+    tel:m.tel||m.telefono||'',
+    nombre:m.nombre||m.nombre_cliente||'',
+    producto:m.producto||'',cantidad:m.cantidad,
+    ciudad:m.ciudad||'',carrier:m.carrier||m.transportadora||'',
+    guia:m.guia||'',precio_dropi:m.precio_dropi,abono:m.abono
+  }
+}
+// Encolador para reclame/cancelados/reservado: usa la plantilla APROBADA de la
+// sección (las marcadas 🤖 si está Por tipo; si no, la primera aprobada) y arma
+// los parámetros con wa_plantillas.variables (los tags guardados al crearla).
+async function waEncolarSeccionAuto(seccion,itemsRaw){
+  if(window._waEncolando)return
+  window._waEncolando=true
+  try{
+    const cfg=await _waSecCfgLoad()
+    const c=cfg&&cfg[seccion]
+    if(!c||(!c.auto_on&&!c.por_plantilla))return
+    let q=sb.from('wa_plantillas').select('nombre,variables').eq('seccion',seccion).eq('estado','APPROVED')
+    if(c.por_plantilla&&!c.auto_on)q=q.eq('auto_on',true)
+    const{data:tpls}=await q.order('nombre')
+    if(!tpls||!tpls.length)return
+    const hoyKey=new Date().toISOString().slice(0,10)
+    if(!window._waEncoladoHoy||window._waEncoladoHoy.dia!==hoyKey)window._waEncoladoHoy={dia:hoyKey,set:new Set()}
+    let encolados=0,i=0
+    for(const raw of (itemsRaw||[])){
+      if(raw.resol?.accion==='resuelta'||raw.resuelta||raw.confirmado)continue
+      const m=_waNormItem(raw)
+      const telLimpio=String(m.tel||'').replace(/\D/g,'')
+      if(telLimpio.length<10)continue
+      const tpl=tpls[i%tpls.length];i++ // rota entre las plantillas habilitadas
+      const clave=telLimpio+'|'+tpl.nombre
+      if(window._waEncoladoHoy.set.has(clave))continue
+      const vars=Array.isArray(tpl.variables)?tpl.variables:[]
+      const parametros=vars.map(tag=>_waValorReal(tag,m))
+      const telFull=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+      const{error}=await sb.from('envios_cola').insert({
+        mapeo_id:m.id,telefono:telFull,nombre:m.nombre||null,
+        seccion,tipo:null,plantilla:tpl.nombre,parametros,origen:'cruce'
+      })
+      window._waEncoladoHoy.set.add(clave)
+      if(!error)encolados++
+      else if(error.code!=='23505')console.warn('[encolador '+seccion+']',error.message)
+    }
+    if(encolados>0){
+      waToast('🤖 '+encolados+' pedido(s) de '+seccion+' encolados para envío automático.','ok')
+      logAction('wa_encolado_auto',{seccion,encolados}).catch(()=>{})
+    }
+  }catch(e){console.error('[encolador '+seccion+']',e)}
+  finally{window._waEncolando=false}
+}
+
+// ── 🤖 ENCOLADOR AUTOMÁTICO (novedades: por tipo/keywords) ──
+// Corre cuando la lista de novedades queda cargada. SOLO actúa si el switch
+// 🤖 Auto de Novedades está ON (o Por tipo con plantillas en auto). Encola las
+// pendientes sin resolver; el índice único de la BD frena duplicados del día,
+// y wa-dispatch (cron) valida plantilla aprobada, número y switches al enviar.
+window._waEncolando=false
+async function waEncolarNovedadesAuto(items){
+  if(window._waEncolando)return
+  window._waEncolando=true
+  try{
+    const cfg=await _waSecCfgLoad()
+    const c=cfg&&cfg.novedades
+    if(!c||(!c.auto_on&&!c.por_plantilla))return // switch apagado = no pasa nada
+    // Si es Por tipo: solo los tipos cuya plantilla tiene auto_on
+    let autoTpls=null
+    if(c.por_plantilla&&!c.auto_on){
+      const{data}=await sb.from('wa_plantillas').select('nombre').eq('seccion','novedades').eq('auto_on',true)
+      autoTpls=new Set((data||[]).map(p=>p.nombre))
+      if(!autoTpls.size)return
+    }
+    const hoyKey=new Date().toISOString().slice(0,10)
+    if(!window._waEncoladoHoy||window._waEncoladoHoy.dia!==hoyKey)window._waEncoladoHoy={dia:hoyKey,set:new Set()}
+    let encolados=0
+    for(const m of (items||[])){
+      if(m.resol?.accion==='resuelta')continue
+      const proto=NOV_PROTO[m.cat.idx]
+      if(!proto||!proto.msg)continue
+      const telLimpio=String(m.tel||'').replace(/\D/g,'')
+      if(telLimpio.length<10)continue
+      const plantilla=('nexo_novedades_'+_waTplSlug(m.cat.tipo)+'_v1').slice(0,512)
+      if(autoTpls&&!autoTpls.has(plantilla))continue
+      const clave=telLimpio+'|'+plantilla
+      if(window._waEncoladoHoy.set.has(clave))continue // ya intentado en esta sesión
+      const conv=_waTplConvertir(proto.msg)
+      const parametros=conv.vars.map(tag=>_waValorReal(tag,m))
+      const telFull=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+      const{error}=await sb.from('envios_cola').insert({
+        mapeo_id:m.id||m.mapeoId||null,telefono:telFull,nombre:m.nombre||null,
+        seccion:'novedades',tipo:m.cat.tipo,plantilla,parametros,origen:'cruce'
+      })
+      window._waEncoladoHoy.set.add(clave)
+      if(!error)encolados++
+      else if(error.code!=='23505')console.warn('[encolador]',error.message) // 23505 = ya estaba hoy, normal
+    }
+    if(encolados>0){
+      waToast('🤖 '+encolados+' novedad(es) encoladas para envío automático. El sistema las despacha en los próximos 5 min.','ok')
+      logAction('wa_encolado_auto',{encolados}).catch(()=>{})
+    }
+  }catch(e){console.error('[encolador]',e)}
+  finally{window._waEncolando=false}
 }
 
 // ── ⚙️ Modos de envío por sección ──

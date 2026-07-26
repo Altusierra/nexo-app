@@ -17662,6 +17662,14 @@ async function pageAdminMensajeria(c){
       <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Una sección solo puede tener UN número activo por modo. Al asignar una sección ocupada, el número anterior se libera solo (pasa al banco de reemplazo).</div>
       <div id="wam-numeros"><div class="loading">Cargando...</div></div>
     </div>
+    <div class="card" style="margin-bottom:18px">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">
+        <div style="font-size:15px;font-weight:800">📋 Plantillas para aprobar en Meta</div>
+        <select id="wam-tpl-numero" onchange="cargarWaPlantillasCard()" style="min-width:200px;font-size:12px"><option value="">— Elige un número —</option></select>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Toma los textos de <strong>Textos / Mensajes</strong> de la sección de ese número, los convierte al formato de Meta y los manda a aprobación. Nombre: nexo_{sección}_{variante}_v1.</div>
+      <div id="wam-tpl-lista"><div style="color:var(--muted);font-size:12px">Elige un número arriba para ver sus plantillas.</div></div>
+    </div>
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">
         <div style="font-size:15px;font-weight:800">🔑 Apps / Portafolios de Meta</div>
@@ -17685,6 +17693,13 @@ async function cargarWaMensajeria(){
     if(eA||eN){const m=(eA||eN).message;elN.innerHTML=`<div class="alert alert-red">${_waEsc(m)}</div>`;elA.innerHTML='';return}
     window._waState={apps:apps||[],nums:nums||[]}
     renderWaNumeros();renderWaApps()
+    // Selector de la card Plantillas: solo números API con phone_number_id y sección
+    const selT=document.getElementById('wam-tpl-numero')
+    if(selT){
+      const prev=selT.value
+      selT.innerHTML='<option value="">— Elige un número —</option>'+(nums||[]).filter(n=>n.modo==='api'&&n.phone_number_id&&n.seccion).map(n=>`<option value="${n.id}" ${n.id===prev?'selected':''}>${_waEsc(n.etiqueta)} (${_waEsc(n.seccion)})</option>`).join('')
+      if(prev&&selT.value===prev)cargarWaPlantillasCard()
+    }
   }catch(e){elN.innerHTML=`<div class="alert alert-red">${_waEsc(e.message)}</div>`}
 }
 
@@ -17875,6 +17890,122 @@ window.waCopiar=(txt,btn)=>{
   navigator.clipboard.writeText(txt).then(()=>{
     if(btn){const o=btn.textContent;btn.textContent='✅ Copiado';setTimeout(()=>btn.textContent=o,1500)}
   }).catch(()=>{alert('No se pudo copiar. Selecciona el texto y copia manual.')})
+}
+
+// ── PLANTILLAS: convertir textos de app_mensajes al formato Meta y aprobar ──
+// wa_seccion → secciones de app_mensajes que le corresponden
+const _WA_TPL_MAP={novedades:['novedades'],reclame:['reclame'],reservado:['confirmacion','psf'],cancelados:['cancelados']}
+const _WA_TPL_EJ={NOMBRE:'María',PRODUCTO:'Colágeno Premium',CANTIDAD:'2 unidades',GUIA:'014117806991',CIUDAD:'Bogotá',TRANSPORTADORA:'ENVIA',CARRIER:'ENVIA',TOTAL:'$120.000',FECHA:'28 de julio',FECHA_ENVIO:'28 de julio',DIRECCION:'Cra 10 #20-30'}
+const _waTplSlug=(s)=>String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'')
+
+// [NOMBRE] → {{1}} en orden de aparición (repetidos usan el mismo número)
+function _waTplConvertir(texto){
+  const vars=[],ejemplos=[]
+  const cuerpo=String(texto||'').replace(/\[([A-ZÁÉÍÓÚÑ_]+)\]/g,(_,tag)=>{
+    let i=vars.indexOf(tag)
+    if(i<0){vars.push(tag);ejemplos.push(_WA_TPL_EJ[tag]||'ejemplo');i=vars.length-1}
+    return '{{'+(i+1)+'}}'
+  })
+  let vista=cuerpo
+  ejemplos.forEach((e,i)=>{vista=vista.split('{{'+(i+1)+'}}').join(e)})
+  return{cuerpo,vars,ejemplos,vista}
+}
+
+window.cargarWaPlantillasCard=async()=>{
+  const el=document.getElementById('wam-tpl-lista')
+  const numeroId=document.getElementById('wam-tpl-numero')?.value
+  if(!el)return
+  if(!numeroId){el.innerHTML='<div style="color:var(--muted);font-size:12px">Elige un número arriba.</div>';return}
+  const n=((window._waState||{}).nums||[]).find(x=>x.id===numeroId)
+  if(!n){el.innerHTML='<div class="alert alert-red">Número no encontrado.</div>';return}
+  const secsApp=_WA_TPL_MAP[n.seccion]||[]
+  el.innerHTML='<div class="loading">Cargando textos...</div>'
+  try{
+    const{data:tpls,error:e1}=await sb.from('app_mensajes').select('seccion,idx,etiqueta,texto,activo').in('seccion',secsApp).order('seccion').order('idx')
+    if(e1)throw e1
+    const{data:ya}=await sb.from('wa_plantillas').select('nombre,estado').eq('waba_id',n.waba_id)
+    const yaMap={};(ya||[]).forEach(p=>yaMap[p.nombre]=p.estado)
+    const items=(tpls||[]).filter(t=>t.activo!==false).map(t=>{
+      const conv=_waTplConvertir(t.texto)
+      const nombre=('nexo_'+n.seccion+'_'+_waTplSlug(t.etiqueta||('variante_'+t.idx))+'_v1').slice(0,512)
+      return{...t,conv,nombre,estadoMeta:yaMap[nombre]||null}
+    })
+    window._waTplState={numeroId,items}
+    if(!items.length){el.innerHTML=`<div class="alert alert-amber">No hay textos activos en Textos/Mensajes para la sección "${_waEsc(n.seccion)}" (busqué en: ${secsApp.join(', ')||'—'}).</div>`;return}
+    const chip=(e)=>e==='APPROVED'?'<span style="color:var(--green);font-weight:700">✅ aprobada</span>':e==='PENDING'?'<span style="color:var(--amber);font-weight:700">⏳ en revisión</span>':e==='REJECTED'?'<span style="color:var(--red);font-weight:700">❌ rechazada</span>':'<span style="color:var(--muted)">— sin enviar</span>'
+    el.innerHTML=items.map((it,idx)=>{
+      const bloqueado=it.estadoMeta==='APPROVED'||it.estadoMeta==='PENDING'
+      return `<div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+          <div style="display:flex;align-items:center;gap:8px;cursor:pointer;flex:1;min-width:200px" onclick="waTplToggle(${idx})">
+            <span id="wa-tpl-chev-${idx}" style="font-size:10px;color:var(--muted)">▸</span>
+            <div>
+              <div style="font-weight:700;font-size:12.5px">${_waEsc(it.nombre)}</div>
+              <div style="font-size:10.5px;color:var(--muted)">${_waEsc(it.etiqueta||'')} · ${it.conv.vars.length} variable(s) · ${chip(it.estadoMeta)}</div>
+            </div>
+          </div>
+          <button class="btn btn-sm" ${bloqueado?'disabled style="opacity:.4"':''} onclick="waTplEnviar(${idx})">📨 Enviar a aprobación</button>
+        </div>
+        <div id="wa-tpl-det-${idx}" style="display:none;margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+          <div style="font-size:10.5px;font-weight:800;color:var(--muted);margin-bottom:4px">TEXTO ORIGINAL (Textos/Mensajes)</div>
+          <div style="font-size:12px;white-space:pre-wrap;background:rgba(255,255,255,.03);border-radius:8px;padding:8px 10px;margin-bottom:10px">${_waEsc(it.texto)}</div>
+          <div style="font-size:10.5px;font-weight:800;color:var(--muted);margin-bottom:4px">FORMATO META (lo que se envía a aprobación)</div>
+          <div style="font-size:12px;white-space:pre-wrap;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.3);border-radius:8px;padding:8px 10px;margin-bottom:10px">${_waEsc(it.conv.cuerpo)}</div>
+          <div style="font-size:10.5px;font-weight:800;color:var(--muted);margin-bottom:4px">👁️ ASÍ LE LLEGA AL CLIENTE (con datos de ejemplo)</div>
+          <div style="font-size:12px;white-space:pre-wrap;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.3);border-radius:8px;padding:8px 10px">${_waEsc(it.conv.vista)}</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:6px">Variables: ${it.conv.vars.map((v,i)=>'{{'+(i+1)+'}}='+_waEsc(v)).join(' · ')||'ninguna'}</div>
+        </div>
+      </div>`
+    }).join('')+`
+    <div style="display:flex;justify-content:flex-end;margin-top:12px">
+      <button class="btn" onclick="waTplEnviarTodas()">📨 Enviar TODAS a aprobación</button>
+    </div>
+    <div id="wa-tpl-msg" style="margin-top:10px"></div>`
+  }catch(e){el.innerHTML=`<div class="alert alert-red">${_waEsc(e.message)}</div>`}
+}
+
+window.waTplToggle=(idx)=>{
+  const d=document.getElementById('wa-tpl-det-'+idx)
+  const c=document.getElementById('wa-tpl-chev-'+idx)
+  if(!d)return
+  const abierto=d.style.display!=='none'
+  d.style.display=abierto?'none':'block'
+  if(c)c.textContent=abierto?'▸':'▾'
+}
+
+window.waTplEnviar=async(idx)=>{
+  const st=window._waTplState||{}
+  const it=(st.items||[])[idx]
+  const out=document.getElementById('wa-tpl-msg')
+  if(!it)return
+  if(!confirm(`¿Enviar "${it.nombre}" a aprobación de Meta?\n\nUna vez enviada, el texto no se puede editar hasta que Meta responda.`))return
+  if(out)out.innerHTML='<div style="color:var(--muted);font-size:12px">Enviando a Meta...</div>'
+  const n=((window._waState||{}).nums||[]).find(x=>x.id===st.numeroId)
+  const r=await _waSend({action:'create_template',numero_id:st.numeroId,nombre:it.nombre,cuerpo_meta:it.conv.cuerpo,ejemplos:it.conv.ejemplos,variables:it.conv.vars,seccion:n?n.seccion:null})
+  if(!r.ok){if(out)out.innerHTML=`<div class="alert alert-red">❌ ${_waEsc(it.nombre)}: ${_waEsc(r.error)}</div>`;return}
+  if(out)out.innerHTML=`<div class="alert alert-green">✅ "${_waEsc(it.nombre)}" enviada. Estado: ${_waEsc((r.data&&r.data.estado)||'PENDING')}.</div>`
+  logAction('wa_plantilla_enviada',{nombre:it.nombre}).catch(()=>{})
+  cargarWaPlantillasCard()
+}
+
+window.waTplEnviarTodas=async()=>{
+  const st=window._waTplState||{}
+  const out=document.getElementById('wa-tpl-msg')
+  const pendientes=(st.items||[]).filter(it=>it.estadoMeta!=='APPROVED'&&it.estadoMeta!=='PENDING')
+  if(!pendientes.length){if(out)out.innerHTML='<div class="alert alert-amber">No hay plantillas por enviar (todas están aprobadas o en revisión).</div>';return}
+  if(!confirm(`¿Enviar ${pendientes.length} plantilla(s) a aprobación de Meta?`))return
+  const n=((window._waState||{}).nums||[]).find(x=>x.id===st.numeroId)
+  let ok=0,fallo=0,errores=[]
+  for(const it of pendientes){
+    if(out)out.innerHTML=`<div style="color:var(--muted);font-size:12px">Enviando ${ok+fallo+1}/${pendientes.length}: ${_waEsc(it.nombre)}...</div>`
+    const r=await _waSend({action:'create_template',numero_id:st.numeroId,nombre:it.nombre,cuerpo_meta:it.conv.cuerpo,ejemplos:it.conv.ejemplos,variables:it.conv.vars,seccion:n?n.seccion:null})
+    if(r.ok)ok++
+    else{fallo++;errores.push(it.nombre+': '+r.error)}
+    await new Promise(res=>setTimeout(res,800)) // no saturar la API de Meta
+  }
+  if(out)out.innerHTML=`<div class="alert ${fallo?'alert-amber':'alert-green'}">✅ ${ok} enviada(s)${fallo?` · ❌ ${fallo} fallaron:<br><span style="font-size:11px">${errores.map(_waEsc).join('<br>')}</span>`:''}</div>`
+  logAction('wa_plantillas_masivo',{ok,fallo}).catch(()=>{})
+  cargarWaPlantillasCard()
 }
 
 // ── Visor de prueba: muestra en vivo lo que entra por un número ──

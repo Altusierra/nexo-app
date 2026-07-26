@@ -832,6 +832,7 @@ const NAV={
     {id:'admin-gastos-fijos',icon:'📌',label:'Gastos Fijos'},
     {id:'admin-usuarios',icon:'👥',label:'Equipo'},
     {id:'admin-textos',icon:'📝',label:'Textos / Mensajes'},
+    {id:'admin-mensajeria',icon:'💬',label:'Mensajería'}, // NUEVO (26jul26): números API WhatsApp + apps Meta
     {id:'admin-actividad',icon:'🕒',label:'Actividad'},
   ],
   trafficker:[
@@ -942,6 +943,7 @@ function render(page){
     'admin-usuarios':pageAdminUsuarios,
     'admin-actividad':pageAdminActividad,
     'admin-textos':pageAdminTextos,
+    'admin-mensajeria':pageAdminMensajeria, // NUEVO (26jul26): Mensajería WhatsApp API
     'aux-hoy':pageAuxHoy,
     'aux-hojabase':pageAuxHojaBase, // NUEVO (4jul26): Constructor de Hoja Base
     'aux-asignador':pageAuxAsignador,
@@ -17632,6 +17634,213 @@ window.txtAgregarVariante=async(sec)=>{
   if(msg)msg.innerHTML='<div class="alert alert-green">✅ Variante agregada. Edítala y dale Guardar.</div>'
   logAction('textos_variante_agregada',{sec,idx:nuevoIdx}).catch(()=>{})
   cargarTextosAdmin()
+}
+
+// ── ADMIN · MENSAJERÍA (WhatsApp Cloud API: apps + números) ──
+// NUEVO (26jul26): gestiona wa_apps (portafolios Meta, token/secret write-only)
+// y wa_numeros (pool de números asignables a secciones). FASE 0: solo config.
+// SEGURIDAD: token y app_secret NO tienen GRANT de SELECT — el front jamás los
+// lee; solo los ESCRIBE. Por eso wa_apps se consulta con columnas explícitas.
+const _WA_SECCIONES=[
+  {v:'',t:'— Sin asignar (banco de reemplazo) —'},
+  {v:'novedades',t:'⚠️ Novedades'},
+  {v:'reclame',t:'📦 Reclame en oficina'},
+  {v:'reservado',t:'🔍 Confirmar / recuperar'},
+  {v:'cancelados',t:'🔴 Cancelados'},
+]
+const _waEsc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+
+async function pageAdminMensajeria(c){
+  c.innerHTML=`<div class="page-title">💬 Mensajería</div>
+    <div class="page-sub">Números de WhatsApp API y apps de Meta. Asigna cada número a una sección; si se bloquea uno, asigna otro y el flujo sigue sin que el auxiliar se entere.</div>
+    <div id="wam-msg" style="margin-bottom:12px"></div>
+    <div class="card" style="margin-bottom:18px">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">
+        <div style="font-size:15px;font-weight:800">📱 Números</div>
+        <button class="btn btn-sm" onclick="waAgregarNumero()">➕ Agregar número</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Una sección solo puede tener UN número activo por modo. Al asignar una sección ocupada, el número anterior se libera solo (pasa al banco de reemplazo).</div>
+      <div id="wam-numeros"><div class="loading">Cargando...</div></div>
+    </div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">
+        <div style="font-size:15px;font-weight:800">🔑 Apps / Portafolios de Meta</div>
+        <button class="btn btn-sm" onclick="waAgregarApp()">➕ Agregar app</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">El Token y el App Secret son de solo-escritura: se guardan pero nunca se muestran. Deja el campo vacío para conservar el valor actual.</div>
+      <div id="wam-apps"><div class="loading">Cargando...</div></div>
+    </div>`
+  cargarWaMensajeria()
+}
+
+async function cargarWaMensajeria(){
+  const elN=document.getElementById('wam-numeros')
+  const elA=document.getElementById('wam-apps')
+  if(!elN||!elA)return
+  try{
+    // wa_apps: columnas EXPLÍCITAS (token/secret no tienen GRANT de SELECT — select('*') fallaría)
+    const{data:apps,error:eA}=await sb.from('wa_apps').select('id,etiqueta,app_id,verify_token,estado,notas').order('etiqueta')
+    const{data:nums,error:eN}=await sb.from('wa_numeros').select('*').order('orden')
+    if(eA||eN){const m=(eA||eN).message;elN.innerHTML=`<div class="alert alert-red">${_waEsc(m)}</div>`;elA.innerHTML='';return}
+    window._waState={apps:apps||[],nums:nums||[]}
+    renderWaNumeros();renderWaApps()
+  }catch(e){elN.innerHTML=`<div class="alert alert-red">${_waEsc(e.message)}</div>`}
+}
+
+function renderWaNumeros(){
+  const el=document.getElementById('wam-numeros')
+  if(!el)return
+  const{apps,nums}=window._waState||{apps:[],nums:[]}
+  if(!nums.length){el.innerHTML='<div style="color:var(--muted);font-size:12px">No hay números. Agrega el primero.</div>';return}
+  const estadoChip=(e)=>e==='activo'?'<span style="color:var(--green);font-weight:700">🟢 activo</span>':e==='bloqueado'?'<span style="color:var(--red);font-weight:700">🔴 bloqueado</span>':'<span style="color:var(--muted);font-weight:700">😴 dormido</span>'
+  el.innerHTML=nums.map(n=>{
+    const appOpts=apps.map(a=>`<option value="${a.id}" ${a.id===n.wa_app_id?'selected':''}>${_waEsc(a.etiqueta)}</option>`).join('')
+    const secOpts=_WA_SECCIONES.map(s=>`<option value="${s.v}" ${(n.seccion||'')===s.v?'selected':''}>${s.t}</option>`).join('')
+    return `<div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+        <div style="font-weight:800;font-size:13px">${n.modo==='respaldo'?'🛟':'📱'} ${_waEsc(n.etiqueta)} <span style="font-weight:400;color:var(--muted)">· ${_waEsc(n.display||'sin número')}</span></div>
+        <div style="font-size:11.5px">${estadoChip(n.estado)}</div>
+      </div>
+      <div class="form-grid g3" style="margin-bottom:8px">
+        <div class="fld"><label>Etiqueta</label><input id="wan-et-${n.id}" value="${_waEsc(n.etiqueta)}"></div>
+        <div class="fld"><label>Número visible</label><input id="wan-di-${n.id}" value="${_waEsc(n.display||'')}" placeholder="+57 300 ..."></div>
+        <div class="fld"><label>Sección asignada</label><select id="wan-se-${n.id}">${secOpts}</select></div>
+      </div>
+      <div class="form-grid g3" style="margin-bottom:8px">
+        <div class="fld"><label>Phone Number ID</label><input id="wan-pn-${n.id}" value="${_waEsc(n.phone_number_id||'')}" placeholder="de Meta" ${n.modo==='respaldo'?'disabled':''}></div>
+        <div class="fld"><label>WABA ID</label><input id="wan-wb-${n.id}" value="${_waEsc(n.waba_id||'')}" ${n.modo==='respaldo'?'disabled':''}></div>
+        <div class="fld"><label>App / Portafolio</label><select id="wan-ap-${n.id}" ${n.modo==='respaldo'?'disabled':''}><option value="">—</option>${appOpts}</select></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <div class="fld" style="margin:0"><label>Modo</label><select id="wan-mo-${n.id}"><option value="api" ${n.modo==='api'?'selected':''}>API (automático)</option><option value="respaldo" ${n.modo==='respaldo'?'selected':''}>Respaldo (WhatsApp normal)</option></select></div>
+        <div class="fld" style="margin:0"><label>Estado</label><select id="wan-es-${n.id}"><option value="activo" ${n.estado==='activo'?'selected':''}>Activo</option><option value="bloqueado" ${n.estado==='bloqueado'?'selected':''}>Bloqueado</option><option value="dormido" ${n.estado==='dormido'?'selected':''}>Dormido</option></select></div>
+        <div style="flex:1"></div>
+        <button class="btn btn-sm" onclick="waGuardarNumero('${n.id}')">💾 Guardar</button>
+        <button class="btn btn-sm" style="border-color:var(--red);color:var(--red)" onclick="waEliminarNumero('${n.id}')">🗑️</button>
+      </div>
+    </div>`
+  }).join('')
+}
+
+function renderWaApps(){
+  const el=document.getElementById('wam-apps')
+  if(!el)return
+  const{apps}=window._waState||{apps:[]}
+  if(!apps.length){el.innerHTML='<div style="color:var(--muted);font-size:12px">No hay apps. Agrega la primera.</div>';return}
+  el.innerHTML=apps.map(a=>`<div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px">
+    <div style="font-weight:800;font-size:13px;margin-bottom:10px">🔑 ${_waEsc(a.etiqueta)} ${a.estado!=='activo'?'<span style="color:var(--muted);font-weight:400">(inactiva)</span>':''}</div>
+    <div class="form-grid g3" style="margin-bottom:8px">
+      <div class="fld"><label>Etiqueta</label><input id="waa-et-${a.id}" value="${_waEsc(a.etiqueta)}"></div>
+      <div class="fld"><label>App ID</label><input id="waa-ai-${a.id}" value="${_waEsc(a.app_id||'')}"></div>
+      <div class="fld"><label>Verify Token (webhook)</label><input id="waa-vt-${a.id}" value="${_waEsc(a.verify_token||'')}"></div>
+    </div>
+    <div class="form-grid g2" style="margin-bottom:8px">
+      <div class="fld"><label>Token permanente 🔒</label><input type="password" id="waa-tk-${a.id}" value="" placeholder="•••••••• (vacío = no cambiar)" autocomplete="new-password"></div>
+      <div class="fld"><label>App Secret 🔒</label><input type="password" id="waa-sc-${a.id}" value="" placeholder="•••••••• (vacío = no cambiar)" autocomplete="new-password"></div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <div class="fld" style="margin:0"><label>Estado</label><select id="waa-es-${a.id}"><option value="activo" ${a.estado==='activo'?'selected':''}>Activa</option><option value="inactivo" ${a.estado!=='activo'?'selected':''}>Inactiva</option></select></div>
+      <div style="flex:1"></div>
+      <button class="btn btn-sm" onclick="waVerificarApp('${a.id}')">🔎 Verificar token</button>
+      <button class="btn btn-sm" onclick="waGuardarApp('${a.id}')">💾 Guardar</button>
+    </div>
+    <div id="waa-ver-${a.id}" style="margin-top:8px"></div>
+  </div>`).join('')
+}
+
+// Verifica el token ESCRITO en el campo contra Graph (GET /me). No lee el guardado
+// (no se puede: write-only). Si el campo está vacío, avisa.
+window.waVerificarApp=async(id)=>{
+  const out=document.getElementById('waa-ver-'+id)
+  const tk=(document.getElementById('waa-tk-'+id)?.value||'').trim()
+  if(!out)return
+  if(!tk){out.innerHTML='<div class="alert alert-amber">Escribe el token en el campo para poder verificarlo. El guardado no se puede leer (es de solo-escritura).</div>';return}
+  out.innerHTML='<div style="color:var(--muted);font-size:12px">Verificando contra Meta...</div>'
+  try{
+    const r=await fetch('https://graph.facebook.com/v21.0/me?access_token='+encodeURIComponent(tk))
+    const j=await r.json()
+    if(r.ok&&j.id){out.innerHTML=`<div class="alert alert-green">✅ Token válido. Identidad: ${_waEsc(j.name||j.id)}. Ahora dale 💾 Guardar.</div>`}
+    else{out.innerHTML=`<div class="alert alert-red">❌ Meta rechazó el token: ${_waEsc(j.error?.message||'error desconocido')}</div>`}
+  }catch(e){out.innerHTML=`<div class="alert alert-red">Error de red: ${_waEsc(e.message)}</div>`}
+}
+
+window.waGuardarApp=async(id)=>{
+  const msg=document.getElementById('wam-msg')
+  const g=(p)=>document.getElementById(p+id)?.value?.trim()||''
+  const upd={etiqueta:g('waa-et-'),app_id:g('waa-ai-'),verify_token:g('waa-vt-'),estado:g('waa-es-')||'activo',actualizado_en:new Date().toISOString()}
+  if(!upd.etiqueta){if(msg)msg.innerHTML='<div class="alert alert-red">La etiqueta es obligatoria.</div>';return}
+  const tk=g('waa-tk-'),sc=g('waa-sc-')
+  if(tk)upd.token=tk         // vacío = conservar el actual
+  if(sc)upd.app_secret=sc
+  const{error}=await sb.from('wa_apps').update(upd).eq('id',id)
+  if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${_waEsc(error.message)}</div>`;return}
+  if(msg)msg.innerHTML=`<div class="alert alert-green">✅ App guardada${tk?' (token actualizado)':''}${sc?' (secret actualizado)':''}.</div>`
+  logAction('wa_app_guardada',{id,token_cambiado:!!tk,secret_cambiado:!!sc}).catch(()=>{})
+  cargarWaMensajeria()
+}
+
+window.waAgregarApp=async()=>{
+  const msg=document.getElementById('wam-msg')
+  const{error}=await sb.from('wa_apps').insert({etiqueta:'Nueva app',app_id:'PENDIENTE',verify_token:'nexo_wa_'+Math.random().toString(36).slice(2,10),estado:'activo'})
+  if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${_waEsc(error.message)}</div>`;return}
+  logAction('wa_app_creada',{}).catch(()=>{})
+  cargarWaMensajeria()
+}
+
+// Guardar número. Si la sección elegida ya la tiene OTRO número activo del mismo
+// modo, ese otro se LIBERA solo (seccion=null) — pedido de ADS: reemplazo en 2 clics.
+window.waGuardarNumero=async(id)=>{
+  const msg=document.getElementById('wam-msg')
+  const g=(p)=>document.getElementById(p+id)?.value?.trim()||''
+  const modo=g('wan-mo-')||'api'
+  const estado=g('wan-es-')||'activo'
+  const seccion=g('wan-se-')||null
+  const upd={
+    etiqueta:g('wan-et-'),display:g('wan-di-')||null,seccion,modo,estado,
+    phone_number_id:g('wan-pn-')||null,waba_id:g('wan-wb-')||null,
+    wa_app_id:g('wan-ap-')||null,actualizado_en:new Date().toISOString()
+  }
+  if(!upd.etiqueta){if(msg)msg.innerHTML='<div class="alert alert-red">La etiqueta es obligatoria.</div>';return}
+  if(modo==='api'&&estado==='activo'&&seccion&&(!upd.phone_number_id||!upd.wa_app_id)){
+    if(msg)msg.innerHTML='<div class="alert alert-amber">Un número API activo con sección necesita Phone Number ID y App. Complétalos o déjalo dormido.</div>';return
+  }
+  let liberado=null
+  try{
+    if(seccion&&estado==='activo'){
+      const{data:ocupa}=await sb.from('wa_numeros').select('id,etiqueta').eq('seccion',seccion).eq('modo',modo).eq('estado','activo').neq('id',id)
+      for(const o of (ocupa||[])){
+        const{error:eLib}=await sb.from('wa_numeros').update({seccion:null,actualizado_en:new Date().toISOString()}).eq('id',o.id)
+        if(eLib)throw eLib
+        liberado=o.etiqueta
+      }
+    }
+    const{error}=await sb.from('wa_numeros').update(upd).eq('id',id)
+    if(error)throw error
+  }catch(e){if(msg)msg.innerHTML=`<div class="alert alert-red">${_waEsc(e.message)}</div>`;return}
+  if(msg)msg.innerHTML=`<div class="alert alert-green">✅ Número guardado.${liberado?` "${_waEsc(liberado)}" quedó liberado (banco de reemplazo).`:''}</div>`
+  logAction('wa_numero_guardado',{id,seccion,modo,estado,libero:liberado}).catch(()=>{})
+  cargarWaMensajeria()
+}
+
+window.waAgregarNumero=async()=>{
+  const msg=document.getElementById('wam-msg')
+  const{nums}=window._waState||{nums:[]}
+  const orden=nums.length?Math.max(...nums.map(n=>n.orden||0))+1:1
+  const{error}=await sb.from('wa_numeros').insert({etiqueta:'Nuevo número',modo:'respaldo',estado:'dormido',orden})
+  if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${_waEsc(error.message)}</div>`;return}
+  logAction('wa_numero_creado',{}).catch(()=>{})
+  cargarWaMensajeria()
+}
+
+window.waEliminarNumero=async(id)=>{
+  const msg=document.getElementById('wam-msg')
+  const n=((window._waState||{}).nums||[]).find(x=>x.id===id)
+  if(!confirm(`¿Eliminar el número "${n?n.etiqueta:''}"? Si solo dejó de funcionar, mejor márcalo como Bloqueado (conserva su rastro en el historial).`))return
+  const{error}=await sb.from('wa_numeros').delete().eq('id',id)
+  if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${_waEsc(error.message)}</div>`;return}
+  if(msg)msg.innerHTML='<div class="alert alert-green">✅ Número eliminado.</div>'
+  logAction('wa_numero_eliminado',{id}).catch(()=>{})
+  cargarWaMensajeria()
 }
 
 // ── ADMIN · NOVEDADES (protocolos editables, tabla novedades_protocolos) ──

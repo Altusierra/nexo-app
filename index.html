@@ -38670,9 +38670,13 @@ function _wchDockRender(){
   if(!dock){
     dock=document.createElement('div')
     dock.id='wch-dock'
-    dock.style.cssText='position:fixed;z-index:9950;display:flex;flex-direction:column;gap:6px;top:4vh;right:'+(Math.min(440,window.innerWidth-24)+22)+'px'
     document.body.appendChild(dock)
   }
+  try{ // pegado al borde derecho de la pila de conversaciones, a la altura de su cabecera
+    const _d0=document.getElementById('wch-chat-'+abiertos[abiertos.length-1])
+    const _r0=_d0?_d0.getBoundingClientRect():null
+    dock.style.cssText='position:fixed;z-index:9950;display:flex;flex-direction:column;gap:6px;'+(_r0?('left:'+Math.min(_r0.right+8,window.innerWidth-70)+'px;top:'+_r0.top+'px'):'right:8px;top:4vh')
+  }catch(_){dock.style.cssText='position:fixed;z-index:9950;display:flex;flex-direction:column;gap:6px;right:8px;top:4vh'}
   st.chatMeta=st.chatMeta||{}
   dock.innerHTML=abiertos.map((id,i)=>{
     const c=st.convs.find(x=>x.id===id)
@@ -38724,18 +38728,24 @@ window._wchEmojiPoner=function(convId,e){
   i.focus();try{i.selectionStart=i.selectionEnd=s+e.length}catch(_){}
   _wchBtnModo(convId)
 }
-// ── 🎤 GRABAR AUDIO y ➕ ADJUNTAR: el botón verde alterna como en el celular ──
+// ── 🎤 GRABAR AUDIO y ➕ ADJUNTAR: como en el celular ──
+// Flujo: 🎤 graba (con segundos corriendo y 🗑 para cancelar) → ⏹ para →
+// queda el audio LISTO con reproductor: 🗑 Eliminar o ➤ Enviar. Nada sale solo.
 window._wchBtnModo=function(convId){
   const i=document.getElementById('wch-envio-'+convId),b=document.getElementById('wch-btnenv-'+convId)
   if(!i||!b)return
   const st=window._wchState
-  if(st.rec&&st.rec.convId===convId)return // grabando: el botón es ⏹
+  if(st.rec&&st.rec.convId===convId)return // grabando o con audio listo: el botón lo maneja el flujo
   b.textContent=i.value.trim()?'➤':'🎤'
+  b.style.background='#00a884'
 }
 window._wchEnviarOMic=function(convId,tel){
   const i=document.getElementById('wch-envio-'+convId)
   const st=window._wchState
-  if(st.rec&&st.rec.convId===convId){_wchGrabarParar(true);return} // ⏹ = parar y ENVIAR
+  if(st.rec&&st.rec.convId===convId){
+    if(st.rec.fase==='grabando'){_wchGrabarParar();return} // ⏹ = parar y dejar LISTO
+    if(st.rec.fase==='listo'){_wchAudioEnviar(convId,tel);return} // ➤ = enviar el audio listo
+  }
   if(i&&i.value.trim()){_wchEnviarTexto(convId,tel);return}
   _wchGrabarIniciar(convId,tel)
 }
@@ -38749,26 +38759,67 @@ window._wchGrabarIniciar=async function(convId,tel){
     const rec=new MediaRecorder(stream,mimeType?{mimeType}:undefined)
     const chunks=[]
     rec.ondataavailable=(e)=>{if(e.data&&e.data.size)chunks.push(e.data)}
-    rec.onstop=async()=>{
+    rec.onstop=()=>{
       stream.getTracks().forEach(t=>t.stop())
-      const st=window._wchState;const info=st.rec;st.rec=null
-      const b=document.getElementById('wch-btnenv-'+convId);if(b){b.textContent='🎤';b.style.background='#00a884'}
-      if(!info||!info.enviar){if(out)out.innerHTML='<span style="color:var(--muted)">Grabación descartada.</span>';return}
+      const st=window._wchState
+      if(!st.rec||st.rec.convId!==convId)return
+      if(st.rec.timer){clearInterval(st.rec.timer);st.rec.timer=null}
+      if(st.rec.fase==='cancelado'){st.rec=null;_wchBtnModo(convId);if(out)out.innerHTML='<span style="color:var(--muted)">🗑 Grabación eliminada.</span>';return}
       const blob=new Blob(chunks,{type:rec.mimeType||'audio/webm'})
-      if(blob.size>8*1024*1024){if(out)out.innerHTML='<span style="color:#ef4444">El audio pesa más de 8MB.</span>';return}
-      await _wchEnviarMedia(convId,tel,blob,(rec.mimeType||'audio/webm').split(';')[0],'nota_de_voz','audio')
+      st.rec.fase='listo';st.rec.blob=blob;st.rec.mime=(rec.mimeType||'audio/webm').split(';')[0];st.rec.tel=tel
+      const b=document.getElementById('wch-btnenv-'+convId);if(b){b.textContent='➤';b.style.background='#00a884'}
+      const seg=Math.max(1,Math.round((Date.now()-st.rec.t0)/1000))
+      let url='';try{url=URL.createObjectURL(blob)}catch(_){}
+      if(out)out.innerHTML='<span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+        +'<button class="btn-sm btn-red" style="font-size:11px" onclick="_wchAudioEliminar(\''+convId+'\')">🗑 Eliminar</button>'
+        +(url?'<audio controls src="'+url+'" style="height:30px;max-width:190px"></audio>':'')
+        +'<span style="color:var(--muted);font-size:11px">'+seg+'s</span>'
+        +'<button class="btn-sm btn-primary" style="font-size:11px;background:#00a884;border-color:#00a884" onclick="_wchAudioEnviar(\''+convId+'\',\''+tel+'\')">➤ Enviar</button>'
+        +'</span>'
     }
-    window._wchState.rec={convId,rec,enviar:false}
+    window._wchState.rec={convId,rec,fase:'grabando',t0:Date.now(),timer:null}
     rec.start()
     const b=document.getElementById('wch-btnenv-'+convId);if(b){b.textContent='⏹';b.style.background='#ef4444'}
-    if(out)out.innerHTML='<span style="color:#ef4444">● Grabando… toca ⏹ para ENVIAR · <a href="#" onclick="_wchGrabarParar(false);return false" style="color:var(--muted)">cancelar</a></span>'
+    const pintarSeg=()=>{
+      const st=window._wchState;if(!st.rec||st.rec.fase!=='grabando')return
+      const s=Math.floor((Date.now()-st.rec.t0)/1000)
+      const mm=Math.floor(s/60),ss=('0'+(s%60)).slice(-2)
+      if(out)out.innerHTML='<span style="display:flex;gap:9px;align-items:center">'
+        +'<button class="btn-sm btn-red" style="font-size:11px" onclick="_wchGrabarCancelar(\''+convId+'\')">🗑</button>'
+        +'<span style="color:#ef4444;font-weight:800">●</span><span style="font-weight:800">'+mm+':'+ss+'</span>'
+        +'<span style="color:var(--muted);font-size:11px">grabando… toca ⏹ para terminar</span>'
+        +'</span>'
+    }
+    pintarSeg()
+    window._wchState.rec.timer=setInterval(pintarSeg,300)
   }catch(e){if(out)out.innerHTML='<span style="color:#ef4444">No pude usar el micrófono: '+_wchEsc(e.message||String(e))+' (revisa el permiso del navegador)</span>'}
 }
-window._wchGrabarParar=function(enviar){
+window._wchGrabarParar=function(){
+  const st=window._wchState
+  if(!st.rec||st.rec.fase!=='grabando')return
+  try{st.rec.rec.stop()}catch(_){}
+}
+window._wchGrabarCancelar=function(convId){
   const st=window._wchState
   if(!st.rec)return
-  st.rec.enviar=!!enviar
+  st.rec.fase='cancelado'
   try{st.rec.rec.stop()}catch(_){}
+}
+window._wchAudioEliminar=function(convId){
+  const st=window._wchState
+  const out=document.getElementById('wch-enviomsg-'+convId)
+  st.rec=null
+  _wchBtnModo(convId)
+  if(out)out.innerHTML='<span style="color:var(--muted)">🗑 Audio eliminado. No se envió.</span>'
+}
+window._wchAudioEnviar=async function(convId,tel){
+  const st=window._wchState
+  if(!st.rec||st.rec.fase!=='listo'||!st.rec.blob)return
+  const blob=st.rec.blob,mime=st.rec.mime
+  st.rec=null
+  _wchBtnModo(convId)
+  if(blob.size>8*1024*1024){const out=document.getElementById('wch-enviomsg-'+convId);if(out)out.innerHTML='<span style="color:#ef4444">El audio pesa más de 8MB.</span>';return}
+  await _wchEnviarMedia(convId,tel,blob,mime,'nota_de_voz','audio')
 }
 window._wchArchivoElegido=async function(convId,tel,inp){
   const f=inp.files&&inp.files[0];inp.value=''
@@ -39057,7 +39108,13 @@ window._wchChatAbrir=async function(convId){
   const div=document.createElement('div')
   div.id='wch-chat-'+convId
   const anchoCh=Math.min(440,window.innerWidth-24) // todas las conversaciones APILADAS en el mismo sitio; el dock lateral las cambia
-  div.style.cssText='position:fixed;z-index:'+(++window._wchZ)+';width:'+anchoCh+'px;height:min(86vh,720px);right:16px;top:4vh'
+  _wchM1Izquierda() // primero el Centro se acomoda a la izquierda...
+  let _posCh='right:16px;top:4vh'
+  try{ // ...y la conversación se pega a su ladito derecho (como una sola unidad)
+    const _m1=document.getElementById('wch-modal')
+    if(_m1){const _r=_m1.getBoundingClientRect();_posCh='left:'+Math.min(_r.right+12,window.innerWidth-anchoCh-8)+'px;top:'+Math.max(8,_r.top)+'px'}
+  }catch(_){}
+  div.style.cssText='position:fixed;z-index:'+(++window._wchZ)+';width:'+anchoCh+'px;height:min(86vh,720px);'+_posCh
   const tel=c?_wchTel(c.telefono):''
   const etqs=_wchEtqsDe(st.sec)
   const etqActual=c&&c.etiqueta&&c.etiqueta!==WCH_SELLO_WAME?c.etiqueta:''
@@ -39100,7 +39157,6 @@ window._wchChatAbrir=async function(convId){
   div.addEventListener('pointerdown',()=>_wchAlFrente(div))
   document.body.appendChild(div)
   _wchDrag(div,div.querySelector('#wch-ch-head-'+convId)) // se cierra SOLO con ✕
-  _wchM1Izquierda() // el Centro se corre a la izquierda; la conversación queda a la derecha
   _wchChatActivar(convId)
   _wchVentanaPintar(convId,c)
   _wchSugerencias(convId,c)
@@ -39133,7 +39189,7 @@ function _wchVentanaPintar(convId,c){
 }
 async function _wchHiloPintar(convId){
   const el=document.getElementById('wch-hilo-'+convId);if(!el)return
-  const{data,error}=await sb.from('mensajes').select('id,direccion,tipo,cuerpo,plantilla,estado,ts,usuario_id,media_path,media_mime').eq('conversacion_id',convId).order('ts',{ascending:false}).limit(40)
+  const{data,error}=await sb.from('mensajes').select('id,direccion,tipo,cuerpo,plantilla,estado,ts,usuario_id,media_path,media_mime,error_detalle').eq('conversacion_id',convId).order('ts',{ascending:false}).limit(40)
   if(error){el.innerHTML=`<div class="alert alert-red">${_wchEsc(error.message)}</div>`;return}
   const msgs=(data||[]).slice().reverse()
   try{ // ¿el cliente escribió mientras esta ventana está detrás? → puntico verde en el dock
@@ -39155,8 +39211,8 @@ async function _wchHiloPintar(convId){
       media=`<div id="${mid}" style="margin-top:4px"><button class="btn-sm btn-outline" onclick="_wchMedia('${_wchEsc(m.media_path)}','${_wchEsc(m.media_mime||'')}','${mid}')" style="font-size:10.5px">📎 Ver adjunto</button></div>`
     }
     return `<div class="wch-msg" data-txt="${_wchEsc((m.cuerpo||'').toLowerCase())}" style="display:flex;${lado?'':'justify-content:flex-end;'}margin-bottom:7px">
-      <div style="max-width:82%;background:${lado?'rgba(255,255,255,.06)':'rgba(34,197,94,.14)'};border:1px solid var(--border);border-radius:10px;padding:7px 10px">
-        <div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">${lado?'📥 Cliente':'📤 '+(m.usuario_id?'Humano':'Auto')}${m.plantilla?' · 📋':''} · ${hora}${m.estado?' · '+_wchEsc(m.estado):''}</div>
+      <div style="max-width:82%;background:${lado?'#202c33':'#005c4b'};border:none;border-radius:10px;padding:7px 10px;color:#e9edef">
+        <div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">${lado?'📥 Cliente':'📤 '+(m.usuario_id?'Humano':'Auto')}${m.plantilla?' · 📋':''} · ${hora}${m.estado?' · '+(m.estado==='failed'?'<span style="color:#ef4444">failed'+(m.error_detalle?' — '+_wchEsc(m.error_detalle):'')+'</span>':_wchEsc(m.estado)):''}</div>
         <div style="font-size:12.5px;white-space:pre-wrap">${cuerpo||(media?'':'<em style="color:var(--muted)">['+_wchEsc(m.tipo)+']</em>')}</div>${media}
       </div></div>`
   }).join('')

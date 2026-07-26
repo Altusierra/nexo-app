@@ -17716,6 +17716,7 @@ function renderWaNumeros(){
         <div class="fld" style="margin:0"><label>Modo</label><select id="wan-mo-${n.id}"><option value="api" ${n.modo==='api'?'selected':''}>API (automático)</option><option value="respaldo" ${n.modo==='respaldo'?'selected':''}>Respaldo (WhatsApp normal)</option></select></div>
         <div class="fld" style="margin:0"><label>Estado</label><select id="wan-es-${n.id}"><option value="activo" ${n.estado==='activo'?'selected':''}>Activo</option><option value="bloqueado" ${n.estado==='bloqueado'?'selected':''}>Bloqueado</option><option value="dormido" ${n.estado==='dormido'?'selected':''}>Dormido</option></select></div>
         <div style="flex:1"></div>
+        <button class="btn btn-sm" onclick="waProbarNumero('${n.id}')">🧪 Probar recepción</button>
         <button class="btn btn-sm" onclick="waGuardarNumero('${n.id}')">💾 Guardar</button>
         <button class="btn btn-sm" style="border-color:var(--red);color:var(--red)" onclick="waEliminarNumero('${n.id}')">🗑️</button>
       </div>
@@ -17874,6 +17875,56 @@ window.waCopiar=(txt,btn)=>{
   navigator.clipboard.writeText(txt).then(()=>{
     if(btn){const o=btn.textContent;btn.textContent='✅ Copiado';setTimeout(()=>btn.textContent=o,1500)}
   }).catch(()=>{alert('No se pudo copiar. Selecciona el texto y copia manual.')})
+}
+
+// ── Visor de prueba: muestra en vivo lo que entra por un número ──
+// Refresca cada 3s consultando la tabla mensajes (lo que guardó el webhook).
+window._waProbarTimer=null
+window.waProbarNumero=(numeroId)=>{
+  const n=((window._waState||{}).nums||[]).find(x=>x.id===numeroId)
+  if(!n||!n.phone_number_id){alert('Este número no tiene Phone Number ID. Guárdalo primero.');return}
+  const prev=document.getElementById('wa-probar-modal');if(prev)prev.remove()
+  if(window._waProbarTimer){clearInterval(window._waProbarTimer);window._waProbarTimer=null}
+  const div=document.createElement('div')
+  div.id='wa-probar-modal'
+  div.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9998;display:flex;align-items:center;justify-content:center;padding:16px'
+  div.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;max-width:560px;width:100%;max-height:80vh;display:flex;flex-direction:column">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border-bottom:1px solid var(--border)">
+      <div style="font-weight:800">🧪 Prueba de recepción — ${_waEsc(n.etiqueta)} (${_waEsc(n.display||'')})</div>
+      <button class="btn btn-sm" onclick="waProbarCerrar()">✕ Cerrar</button>
+    </div>
+    <div style="padding:10px 16px;font-size:11.5px;color:var(--muted);border-bottom:1px solid var(--border)">
+      Escríbele a <strong style="color:var(--text)">${_waEsc(n.display||'este número')}</strong> desde tu WhatsApp. Lo que llegue aparece aquí solo (se refresca cada 3 segundos).
+    </div>
+    <div id="wa-probar-lista" style="overflow-y:auto;padding:12px 16px;flex:1"><div class="loading">Esperando mensajes...</div></div>
+  </div>`
+  document.body.appendChild(div)
+  const pintar=async()=>{
+    const el=document.getElementById('wa-probar-lista');if(!el)return
+    const{data,error}=await sb.from('mensajes')
+      .select('direccion,tipo,cuerpo,ts,estado,conversaciones(telefono,nombre)')
+      .eq('phone_number_id',n.phone_number_id)
+      .order('ts',{ascending:false}).limit(20)
+    if(error){el.innerHTML=`<div class="alert alert-red">${_waEsc(error.message)}</div>`;return}
+    if(!data||!data.length){el.innerHTML='<div style="color:var(--muted);font-size:12px;text-align:center;padding:20px">📭 Todavía nada. Envía un mensaje desde tu celular y espera unos segundos.</div>';return}
+    el.innerHTML=data.map(m=>{
+      const quien=m.conversaciones?(m.conversaciones.nombre||m.conversaciones.telefono):'—'
+      const hora=new Date(m.ts).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit',second:'2-digit'})
+      const lado=m.direccion==='in'
+      return `<div style="display:flex;${lado?'':'justify-content:flex-end;'}margin-bottom:8px">
+        <div style="max-width:80%;background:${lado?'rgba(255,255,255,.06)':'rgba(34,197,94,.15)'};border:1px solid var(--border);border-radius:10px;padding:8px 10px">
+          <div style="font-size:10px;color:var(--muted);margin-bottom:2px">${lado?'📥 '+_waEsc(quien):'📤 Enviado'} · ${hora}${m.estado?' · '+_waEsc(m.estado):''}</div>
+          <div style="font-size:12.5px;white-space:pre-wrap">${m.cuerpo?_waEsc(m.cuerpo):'<em style="color:var(--muted)">['+_waEsc(m.tipo)+']</em>'}</div>
+        </div>
+      </div>`
+    }).join('')
+  }
+  pintar()
+  window._waProbarTimer=setInterval(pintar,3000)
+}
+window.waProbarCerrar=()=>{
+  if(window._waProbarTimer){clearInterval(window._waProbarTimer);window._waProbarTimer=null}
+  const m=document.getElementById('wa-probar-modal');if(m)m.remove()
 }
 
 window.waEliminarNumero=async(id)=>{

@@ -17897,6 +17897,21 @@ window.waProbarNumero=(numeroId)=>{
       Escríbele a <strong style="color:var(--text)">${_waEsc(n.display||'este número')}</strong> desde tu WhatsApp. Lo que llegue aparece aquí solo (se refresca cada 3 segundos).
     </div>
     <div id="wa-probar-lista" style="overflow-y:auto;padding:12px 16px;flex:1"><div class="loading">Esperando mensajes...</div></div>
+    <div style="border-top:1px solid var(--border);padding:10px 16px">
+      <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
+        <input id="wa-probar-tel" placeholder="Teléfono destino (10 dígitos)" style="flex:1;min-width:160px;font-size:12px">
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
+        <input id="wa-probar-txt" placeholder="Mensaje de texto (requiere ventana 24h abierta)" style="flex:1;min-width:200px;font-size:12px" onkeydown="if(event.key==='Enter')waEnviarTexto('${numeroId}')">
+        <button class="btn btn-sm" onclick="waEnviarTexto('${numeroId}')">📤 Enviar texto</button>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <select id="wa-probar-tpl" style="flex:1;min-width:200px;font-size:12px"><option value="">— Cargar plantillas aprobadas —</option></select>
+        <button class="btn btn-sm" onclick="waCargarPlantillas('${numeroId}')">🔄</button>
+        <button class="btn btn-sm" onclick="waEnviarPlantilla('${numeroId}')">📨 Enviar plantilla</button>
+      </div>
+      <div id="wa-probar-msg" style="margin-top:8px"></div>
+    </div>
   </div>`
   document.body.appendChild(div)
   const pintar=async()=>{
@@ -17925,6 +17940,59 @@ window.waProbarNumero=(numeroId)=>{
 window.waProbarCerrar=()=>{
   if(window._waProbarTimer){clearInterval(window._waProbarTimer);window._waProbarTimer=null}
   const m=document.getElementById('wa-probar-modal');if(m)m.remove()
+}
+
+// ── Envío de prueba: pasa por la Edge Function wa-send (el token nunca toca el navegador) ──
+async function _waSend(body){
+  const out=document.getElementById('wa-probar-msg')
+  try{
+    const{data,error}=await sb.functions.invoke('wa-send',{body})
+    if(error){
+      let m=error.message
+      try{const b=await error.context?.json?.();if(b?.error)m=b.error}catch(_){}
+      return{ok:false,error:m}
+    }
+    if(data?.error)return{ok:false,error:data.error}
+    return{ok:true,data}
+  }catch(e){return{ok:false,error:e.message}}
+}
+
+window.waEnviarTexto=async(numeroId)=>{
+  const out=document.getElementById('wa-probar-msg')
+  const tel=(document.getElementById('wa-probar-tel')?.value||'').trim()
+  const txt=(document.getElementById('wa-probar-txt')?.value||'').trim()
+  if(!tel||!txt){if(out)out.innerHTML='<div class="alert alert-amber">Escribe teléfono y mensaje.</div>';return}
+  if(out)out.innerHTML='<div style="color:var(--muted);font-size:12px">Enviando...</div>'
+  const r=await _waSend({action:'send_text',numero_id:numeroId,telefono:tel,texto:txt})
+  if(!r.ok){if(out)out.innerHTML=`<div class="alert alert-red">❌ ${_waEsc(r.error)}${/re-engagement|24|window/i.test(r.error||'')?'<br><span style="font-size:11px">La ventana de 24h está cerrada: el cliente debe escribir primero, o usa una plantilla.</span>':''}</div>`;return}
+  if(out)out.innerHTML='<div class="alert alert-green">✅ Enviado.</div>'
+  const c=document.getElementById('wa-probar-txt');if(c)c.value=''
+  logAction('wa_prueba_texto',{numero_id:numeroId,tel}).catch(()=>{})
+}
+
+window.waCargarPlantillas=async(numeroId)=>{
+  const sel=document.getElementById('wa-probar-tpl')
+  const out=document.getElementById('wa-probar-msg')
+  if(!sel)return
+  sel.innerHTML='<option value="">Cargando...</option>'
+  const r=await _waSend({action:'list_templates',numero_id:numeroId})
+  if(!r.ok){sel.innerHTML='<option value="">— Error —</option>';if(out)out.innerHTML=`<div class="alert alert-red">${_waEsc(r.error)}</div>`;return}
+  const tpls=(r.data&&r.data.templates)||[]
+  if(!tpls.length){sel.innerHTML='<option value="">— Sin plantillas aprobadas aún —</option>';return}
+  sel.innerHTML='<option value="">— Elige plantilla —</option>'+tpls.map(t=>`<option value="${_waEsc(t.name)}|${_waEsc(t.language)}">${_waEsc(t.name)} (${_waEsc(t.language)} · ${_waEsc(t.category)})</option>`).join('')
+}
+
+window.waEnviarPlantilla=async(numeroId)=>{
+  const out=document.getElementById('wa-probar-msg')
+  const tel=(document.getElementById('wa-probar-tel')?.value||'').trim()
+  const v=(document.getElementById('wa-probar-tpl')?.value||'')
+  if(!tel||!v){if(out)out.innerHTML='<div class="alert alert-amber">Escribe el teléfono y elige una plantilla (🔄 para cargarlas).</div>';return}
+  const[nombre,lang]=v.split('|')
+  if(out)out.innerHTML='<div style="color:var(--muted);font-size:12px">Enviando plantilla...</div>'
+  const r=await _waSend({action:'send_template',numero_id:numeroId,telefono:tel,template_name:nombre,lang:lang||'es'})
+  if(!r.ok){if(out)out.innerHTML=`<div class="alert alert-red">❌ ${_waEsc(r.error)}</div>`;return}
+  if(out)out.innerHTML='<div class="alert alert-green">✅ Plantilla enviada.</div>'
+  logAction('wa_prueba_plantilla',{numero_id:numeroId,tel,plantilla:nombre}).catch(()=>{})
 }
 
 window.waEliminarNumero=async(id)=>{

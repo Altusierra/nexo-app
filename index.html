@@ -18037,10 +18037,10 @@ window.waProbarNumero=(numeroId)=>{
         <button class="btn btn-sm" onclick="waEnviarTexto('${numeroId}')">📤 Enviar texto</button>
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-        <select id="wa-probar-tpl" style="flex:1;min-width:200px;font-size:12px"><option value="">— Cargar plantillas aprobadas —</option></select>
+        <select id="wa-probar-tpl" style="flex:1;min-width:200px;font-size:12px" onchange="waProbarSelChange('${numeroId}')"><option value="">— Cargar plantillas (🔄) —</option></select>
         <button class="btn btn-sm" onclick="waCargarPlantillas('${numeroId}')">🔄</button>
-        <button class="btn btn-sm" onclick="waEnviarPlantilla('${numeroId}')">📨 Enviar plantilla</button>
       </div>
+      <div id="wa-probar-tpl-det" style="margin-top:8px"></div>
       <div id="wa-probar-msg" style="margin-top:8px"></div>
     </div>
   </div>`
@@ -18101,22 +18101,107 @@ window.waEnviarTexto=async(numeroId)=>{
   logAction('wa_prueba_texto',{numero_id:numeroId,tel}).catch(()=>{})
 }
 
+// ── Plantillas en el visor: SEMÁFORO ──
+// 🟢 aprobada en Meta · 🔴 rechazada · 🟡 tus textos aún sin enviar a aprobación
 window.waCargarPlantillas=async(numeroId)=>{
   const sel=document.getElementById('wa-probar-tpl')
   const out=document.getElementById('wa-probar-msg')
+  const det=document.getElementById('wa-probar-tpl-det')
   if(!sel)return
+  if(det)det.innerHTML=''
   sel.innerHTML='<option value="">Sincronizando con Meta...</option>'
-  // 1) Sincroniza TODAS las plantillas del WABA a la tabla (asigna sección por el nombre)
+  const n=((window._waState||{}).nums||[]).find(x=>x.id===numeroId)
+  if(!n){sel.innerHTML='<option value="">— Error —</option>';return}
+  // 1) Sincronizar estados reales desde Meta
   const s=await _waSend({action:'sync_templates',numero_id:numeroId})
   if(!s.ok){sel.innerHTML='<option value="">— Error —</option>';if(out)out.innerHTML=`<div class="alert alert-red">${_waEsc(s.error)}</div>`;return}
-  // 2) Carga solo las APROBADAS de la sección de ESTE número
-  const r=await _waSend({action:'list_templates',numero_id:numeroId})
-  if(!r.ok){sel.innerHTML='<option value="">— Error —</option>';if(out)out.innerHTML=`<div class="alert alert-red">${_waEsc(r.error)}</div>`;return}
-  const tpls=(r.data&&r.data.templates)||[]
-  const fSec=r.data&&r.data.filtrado_por
-  if(!tpls.length){sel.innerHTML='<option value="">— Sin plantillas aprobadas'+(fSec?' de la sección '+fSec:'')+' —</option>';if(out)out.innerHTML=`<div class="alert alert-amber">Sincronizadas ${s.data&&s.data.total||0} plantillas, pero ninguna aprobada corresponde a esta sección. Revisa la asignación en wa_plantillas.</div>`;return}
-  sel.innerHTML='<option value="">— Elige plantilla'+(fSec?' ('+fSec+')':'')+' —</option>'+tpls.map(t=>`<option value="${_waEsc(t.name)}|${_waEsc(t.language)}">${_waEsc(t.name)} (${_waEsc(t.language)} · ${_waEsc(t.category)})</option>`).join('')
-  if(out)out.innerHTML=`<div class="alert alert-green">✅ ${s.data&&s.data.total||0} sincronizadas · ${tpls.length} aprobadas de esta sección.</div>`
+  try{
+    // 2) Estados en wa_plantillas de este WABA
+    const{data:ya}=await sb.from('wa_plantillas').select('nombre,lang,estado,seccion').eq('waba_id',n.waba_id)
+    const yaMap={};(ya||[]).forEach(p=>yaMap[p.nombre]=p)
+    // 3) Tus textos de la sección → convertidos, con su estado si ya se enviaron
+    const secsApp=_WA_TPL_MAP[n.seccion]||[]
+    const{data:txts}=await sb.from('app_mensajes').select('seccion,idx,etiqueta,texto,activo').in('seccion',secsApp).order('seccion').order('idx')
+    const items=[]
+    ;(txts||[]).filter(t=>t.activo!==false).forEach(t=>{
+      const conv=_waTplConvertir(t.texto)
+      const nombre=('nexo_'+n.seccion+'_'+_waTplSlug(t.etiqueta||('variante_'+t.idx))+'_v1').slice(0,512)
+      const meta=yaMap[nombre]
+      items.push({origen:'texto',nombre,lang:'es',estado:meta?meta.estado:null,conv,etiqueta:t.etiqueta})
+    })
+    // 4) Plantillas de Meta de esta sección que NO nacen de tus textos (las viejas)
+    ;(ya||[]).filter(p=>p.estado==='APPROVED'&&p.seccion===n.seccion&&!items.some(i=>i.nombre===p.nombre)).forEach(p=>{
+      items.push({origen:'meta',nombre:p.nombre,lang:p.lang,estado:'APPROVED',conv:null,etiqueta:null})
+    })
+    window._waProbarTpls={items}
+    if(!items.length){sel.innerHTML='<option value="">— Nada para esta sección —</option>';return}
+    const semaforo=(e)=>e==='APPROVED'?'🟢':e==='REJECTED'?'🔴':e==='PENDING'?'⏳':'🟡'
+    sel.innerHTML='<option value="">— Elige plantilla ('+_waEsc(n.seccion)+') —</option>'+items.map((it,i)=>`<option value="${i}">${semaforo(it.estado)} ${_waEsc(it.nombre)}${it.origen==='meta'?' (externa)':''}</option>`).join('')
+    if(out)out.innerHTML=`<div class="alert alert-green">✅ ${items.length} plantilla(s): 🟢 aprobadas · ⏳ en revisión · 🔴 rechazadas · 🟡 sin enviar a aprobación.</div>`
+  }catch(e){sel.innerHTML='<option value="">— Error —</option>';if(out)out.innerHTML=`<div class="alert alert-red">${_waEsc(e.message)}</div>`}
+}
+
+// Panel al seleccionar: vista previa + acciones según el semáforo
+window.waProbarSelChange=(numeroId)=>{
+  const det=document.getElementById('wa-probar-tpl-det')
+  const v=document.getElementById('wa-probar-tpl')?.value
+  if(!det)return
+  if(v===''||v==null){det.innerHTML='';return}
+  const it=((window._waProbarTpls||{}).items||[])[Number(v)]
+  if(!it){det.innerHTML='';return}
+  const vista=it.conv?it.conv.vista:null
+  const esVerde=it.estado==='APPROVED'
+  const esPend=it.estado==='PENDING'
+  det.innerHTML=`<div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 12px">
+    <div style="font-size:10.5px;font-weight:800;color:var(--muted);margin-bottom:4px">👁️ ASÍ LE LLEGA AL CLIENTE</div>
+    ${vista?`<div style="font-size:12px;white-space:pre-wrap;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.3);border-radius:8px;padding:8px 10px;margin-bottom:8px">${_waEsc(vista)}</div>`:`<div style="font-size:11.5px;color:var(--muted);margin-bottom:8px"><em>Texto no disponible (plantilla creada fuera de Nexo). Solo se puede enviar como plantilla.</em></div>`}
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      ${esVerde?`<button class="btn btn-sm" onclick="waProbarEnviarReal('${numeroId}',${Number(v)})">🟢 Enviar plantilla (sirve a cualquier número)</button>`:''}
+      ${!esVerde&&!esPend&&vista?`<button class="btn btn-sm" onclick="waProbarEnviarComoTexto('${numeroId}',${Number(v)})">🟡 Probar como texto (solo si te escribió en 24h)</button>`:''}
+      ${!esVerde&&!esPend&&it.origen==='texto'?`<button class="btn btn-sm" onclick="waProbarAprobar('${numeroId}',${Number(v)})">📤 Enviar a aprobación</button>`:''}
+      ${esPend?'<span style="font-size:11.5px;color:var(--amber);font-weight:700">⏳ En revisión de Meta — espera el resultado.</span>':''}
+      ${it.estado==='REJECTED'?'<span style="font-size:11.5px;color:var(--red);font-weight:700">🔴 Rechazada — corrige el texto en Textos/Mensajes y crea la v2.</span>':''}
+    </div>
+  </div>`
+}
+
+window.waProbarEnviarReal=async(numeroId,i)=>{
+  const out=document.getElementById('wa-probar-msg')
+  const tel=(document.getElementById('wa-probar-tel')?.value||'').trim()
+  const it=((window._waProbarTpls||{}).items||[])[i]
+  if(!tel||!it){if(out)out.innerHTML='<div class="alert alert-amber">Escribe el teléfono destino.</div>';return}
+  if(out)out.innerHTML='<div style="color:var(--muted);font-size:12px">Enviando plantilla...</div>'
+  const params=it.conv?it.conv.ejemplos:[]
+  const r=await _waSend({action:'send_template',numero_id:numeroId,telefono:tel,template_name:it.nombre,lang:it.lang||'es',parametros:params})
+  if(!r.ok){if(out)out.innerHTML=`<div class="alert alert-red">❌ ${_waEsc(r.error)}</div>`;return}
+  if(out)out.innerHTML='<div class="alert alert-green">✅ Plantilla enviada'+(params.length?' (con datos de ejemplo)':'')+'.</div>'
+  logAction('wa_prueba_plantilla',{tel,plantilla:it.nombre}).catch(()=>{})
+}
+
+window.waProbarEnviarComoTexto=async(numeroId,i)=>{
+  const out=document.getElementById('wa-probar-msg')
+  const tel=(document.getElementById('wa-probar-tel')?.value||'').trim()
+  const it=((window._waProbarTpls||{}).items||[])[i]
+  if(!tel||!it||!it.conv){if(out)out.innerHTML='<div class="alert alert-amber">Escribe el teléfono destino.</div>';return}
+  if(out)out.innerHTML='<div style="color:var(--muted);font-size:12px">Enviando como texto...</div>'
+  const r=await _waSend({action:'send_text',numero_id:numeroId,telefono:tel,texto:it.conv.vista})
+  if(!r.ok){if(out)out.innerHTML=`<div class="alert alert-red">❌ ${_waEsc(r.error)}${/re-engagement|24|window/i.test(r.error||'')?'<br><span style="font-size:11px">Ese número no te ha escrito en las últimas 24h. Solo una plantilla 🟢 puede llegarle.</span>':''}</div>`;return}
+  if(out)out.innerHTML='<div class="alert alert-green">✅ Enviado como texto (con datos de ejemplo).</div>'
+  logAction('wa_prueba_texto_tpl',{tel,plantilla:it.nombre}).catch(()=>{})
+}
+
+window.waProbarAprobar=async(numeroId,i)=>{
+  const out=document.getElementById('wa-probar-msg')
+  const it=((window._waProbarTpls||{}).items||[])[i]
+  if(!it||!it.conv)return
+  if(!confirm(`¿Enviar "${it.nombre}" a aprobación de Meta?`))return
+  if(out)out.innerHTML='<div style="color:var(--muted);font-size:12px">Enviando a aprobación...</div>'
+  const n=((window._waState||{}).nums||[]).find(x=>x.id===numeroId)
+  const r=await _waSend({action:'create_template',numero_id:numeroId,nombre:it.nombre,cuerpo_meta:it.conv.cuerpo,ejemplos:it.conv.ejemplos,variables:it.conv.vars,seccion:n?n.seccion:null})
+  if(!r.ok){if(out)out.innerHTML=`<div class="alert alert-red">❌ ${_waEsc(r.error)}</div>`;return}
+  if(out)out.innerHTML=`<div class="alert alert-green">✅ Enviada a aprobación. Estado: ${_waEsc((r.data&&r.data.estado)||'PENDING')}. Dale 🔄 en un rato para ver si ya está 🟢.</div>`
+  logAction('wa_plantilla_enviada',{nombre:it.nombre}).catch(()=>{})
+  waCargarPlantillas(numeroId)
 }
 
 window.waEnviarPlantilla=async(numeroId)=>{

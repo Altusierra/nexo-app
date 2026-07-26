@@ -14136,7 +14136,9 @@ function _colaRender(){
         </div>
       </div>
 
-      <button style="width:100%;padding:16px;border:none;border-radius:10px;background:#25D366;color:#fff;font-weight:800;font-size:16px;cursor:pointer;margin-bottom:10px" onclick="_colaAbrirWa()">💬 Abrir WhatsApp${cuentaEnvios>0?` · 📨 ${cuentaEnvios} enviado${cuentaEnvios>1?'s':''}`:''}</button>
+      ${(window._waSecCfgCache===undefined)?(function(){window._waSecCfgCache=null;_waSecCfgLoad().then(()=>{try{_colaRender()}catch(_){}});return ''})():''}
+      ${(!window._waSecCfgCache||window._waSecCfgCache.novedades?.manual_on!==false)?`<button style="width:100%;padding:16px;border:none;border-radius:10px;background:#25D366;color:#fff;font-weight:800;font-size:16px;cursor:pointer;margin-bottom:10px" onclick="_colaAbrirWa()">💬 Abrir WhatsApp${cuentaEnvios>0?` · 📨 ${cuentaEnvios} enviado${cuentaEnvios>1?'s':''}`:''}</button>`:''}
+      ${(window._waSecCfgCache&&(window._waSecCfgCache.novedades?.despacho_on||window._waSecCfgCache.novedades?.por_plantilla))?`<button style="width:100%;padding:16px;border:none;border-radius:10px;background:linear-gradient(90deg,#7c5cff,#5b8def);color:#fff;font-weight:800;font-size:16px;cursor:pointer;margin-bottom:10px" onclick="_colaDespachar()">▶️ Despachar por API</button>`:''}
 
       <button style="width:100%;padding:14px;border:1px solid var(--accent);border-radius:10px;background:rgba(124,92,255,.12);color:var(--accent);font-weight:700;font-size:15px;cursor:pointer;margin-bottom:10px" onclick="_colaRegistrarIntento()">📞 Registrar intento</button>
 
@@ -14157,6 +14159,82 @@ function _colaRender(){
       </div>
       <div style="margin-top:14px;text-align:center"><button class="btn-sm btn-outline" onclick="_colaConfirmarCerrar()" style="border-color:var(--red);color:var(--red)">✖️ Salir</button></div>
     </div>`
+}
+
+// ── MOTOR DE ENVÍOS: helpers de despacho ──
+// Config de switches por sección (cache en memoria; null = cargando, undefined = nunca pedida)
+async function _waSecCfgLoad(){
+  try{
+    const{data}=await sb.from('wa_secciones_config').select('*')
+    const map={};(data||[]).forEach(r=>map[r.seccion]=r)
+    window._waSecCfgCache=map
+  }catch(_){window._waSecCfgCache={}}
+  return window._waSecCfgCache
+}
+// Valor real de cada variable según el pedido (espejo de _colaArmarMensaje)
+function _waValorReal(tag,m){
+  const prodNom=(typeof resolveProdName==='function'?(resolveProdName(m.producto)||{}).nombre:null)||m.producto||'su pedido'
+  const _tot=(typeof _cancTotal==='function')?_cancTotal(m):null
+  const _sal=(typeof _cancSaldo==='function')?_cancSaldo(m):null
+  switch(tag){
+    case 'NOMBRE':return m.nombre||'cliente'
+    case 'PRODUCTO':return prodNom
+    case 'CARRIER':return m.carrier||'ENVÍA / INTERRAPIDÍSIMO'
+    case 'TRANSPORTADORA':return m.carrier||'la transportadora'
+    case 'CANTIDAD':return m.cantidad?`${m.cantidad} unidad${m.cantidad>1?'es':''}`:'tu pedido'
+    case 'CIUDAD':return m.ciudad||'tu ciudad'
+    case 'GUIA':return m.guia||'tu guía'
+    case 'TOTAL':return _tot!=null?('$'+fmt(_tot)):'el total'
+    case 'SALDO':return _sal!=null?('$'+fmt(_sal)):'el saldo'
+    default:return '—'
+  }
+}
+// Despacha la novedad ACTUAL de la cola por Cloud API (plantilla aprobada)
+window._colaDespachar=async()=>{
+  const st=window._colaState
+  const m=st&&st.items[st.idx]
+  if(!m)return
+  const proto=NOV_PROTO[m.cat.idx]
+  if(!proto||!proto.msg){alert('Esta novedad no tiene protocolo con mensaje. No hay plantilla que despachar.');return}
+  const plantilla=('nexo_novedades_'+_waTplSlug(m.cat.tipo)+'_v1').slice(0,512)
+  const conv=_waTplConvertir(proto.msg)
+  const parametros=conv.vars.map(tag=>_waValorReal(tag,m))
+  const telLimpio=String(m.tel||'').replace(/\D/g,'')
+  const telFull=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  if(telLimpio.length<10){alert('Teléfono inválido.');return}
+  if(!confirm(`▶️ Despachar por API:\n\nPlantilla: ${plantilla}\nA: ${m.nombre||''} (${telFull})\n\n¿Enviar?`))return
+  try{
+    // 1) Encolar (el índice único frena duplicados del mismo día)
+    const{data:fila,error}=await sb.from('envios_cola').insert({
+      mapeo_id:m.mapeoId||m.mapeo_id||null,telefono:telFull,nombre:m.nombre||null,
+      seccion:'novedades',tipo:m.cat.tipo,plantilla,parametros,
+      origen:'despacho_manual',usuario_id:me?.id||null
+    }).select('id').single()
+    if(error){
+      if(error.code==='23505'){alert('⚠️ Esta plantilla ya se envió HOY a este pedido. No se duplica.');return}
+      throw error
+    }
+    // 2) Despachar ya
+    const{data:res,error:eF}=await sb.functions.invoke('wa-dispatch',{body:{envio_id:fila.id}})
+    if(eF||!res||!res.ok){
+      const det=(res&&res.resultado&&res.resultado.motivo)||(eF&&eF.message)||'falló'
+      alert('❌ No se pudo enviar: '+det+(String(det).includes('sin_plantilla')?'\n\nLa plantilla aún no está APROBADA en Meta. Apruébala en Mensajería.':''))
+      return
+    }
+    // 3) Registrar contactada (igual que Abrir WhatsApp)
+    if(!m.contact)m.contact={cuando:new Date().toISOString(),usuario:me?.nombre||''}
+    m.contactCount=(m.contactCount||0)+1
+    m.waCount=(m.waCount||0)+1
+    st.contactadasEnSesion++
+    _colaRender()
+    try{
+      await sb.from('novedades_resoluciones').insert({
+        telefono:m.tel,orden_id:m.orden_id||null,accion:'contactada',motivo:'Despacho API: '+plantilla,
+        usuario_id:me?.id||null,usuario_nombre:me?.nombre||null
+      })
+      logAction('novedad_despachada_api',{tel:m.tel,plantilla}).catch(()=>{})
+    }catch(e){console.error('registro contactada:',e)}
+  }catch(e){alert('❌ Error: '+e.message)}
 }
 
 window._colaAbrirWa=async()=>{
@@ -17663,6 +17741,18 @@ async function pageAdminMensajeria(c){
       <div id="wam-numeros"><div class="loading">Cargando...</div></div>
     </div>
     <div class="card" style="margin-bottom:18px">
+      <div style="font-size:15px;font-weight:800;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">⚙️ Modos de envío por sección</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">🤖 Automático: el sistema envía solo cada 5 min (interno). ▶️ Despachar: el auxiliar ve un botón que envía por API. 📱 Manual: el auxiliar ve el botón de WhatsApp de siempre. 🔀 Por tipo: cada plantilla manda con sus propios switches.</div>
+      <div id="wam-modos"><div class="loading">Cargando...</div></div>
+    </div>
+    <div class="card" style="margin-bottom:18px">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">
+        <div style="font-size:15px;font-weight:800">📬 Cola de envíos</div>
+        <button class="btn btn-sm" onclick="cargarWaCola()">🔄 Actualizar</button>
+      </div>
+      <div id="wam-cola"><div class="loading">Cargando...</div></div>
+    </div>
+    <div class="card" style="margin-bottom:18px">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">
         <div style="font-size:15px;font-weight:800">📋 Plantillas para aprobar en Meta</div>
         <select id="wam-tpl-numero" onchange="cargarWaPlantillasCard()" style="min-width:200px;font-size:12px"><option value="">— Elige un número —</option></select>
@@ -17680,6 +17770,8 @@ async function pageAdminMensajeria(c){
       <div id="wam-webhook"></div>
     </div>`
   cargarWaMensajeria()
+  cargarWaModos()
+  cargarWaCola()
 }
 
 async function cargarWaMensajeria(){
@@ -18023,6 +18115,71 @@ window.waTplEnviarTodas=async()=>{
   if(out)out.innerHTML=`<div class="alert ${fallo?'alert-amber':'alert-green'}">✅ ${ok} enviada(s)${fallo?` · ❌ ${fallo} fallaron:<br><span style="font-size:11px">${errores.map(_waEsc).join('<br>')}</span>`:''}</div>`
   logAction('wa_plantillas_masivo',{ok,fallo}).catch(()=>{})
   cargarWaPlantillasCard()
+}
+
+// ── ⚙️ Modos de envío por sección ──
+const _WA_SEC_LBL={novedades:'⚠️ Novedades',reclame:'📦 Reclame',reservado:'🔍 Confirmar/recuperar',cancelados:'🔴 Cancelados'}
+async function cargarWaModos(){
+  const el=document.getElementById('wam-modos')
+  if(!el)return
+  try{
+    const{data,error}=await sb.from('wa_secciones_config').select('*').order('seccion')
+    if(error)throw error
+    const sw=(id,on,lbl)=>`<label style="display:flex;align-items:center;gap:5px;font-size:11.5px;cursor:pointer;white-space:nowrap"><input type="checkbox" id="${id}" ${on?'checked':''}>${lbl}</label>`
+    el.innerHTML=(data||[]).map(c=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:9px 12px;margin-bottom:6px">
+      <div style="font-weight:700;font-size:12.5px;min-width:150px">${_WA_SEC_LBL[c.seccion]||c.seccion}</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center">
+        ${sw('wam-'+c.seccion+'-auto',c.auto_on,'🤖 Auto')}
+        ${sw('wam-'+c.seccion+'-desp',c.despacho_on,'▶️ Despachar')}
+        ${sw('wam-'+c.seccion+'-man',c.manual_on,'📱 Manual')}
+        ${sw('wam-'+c.seccion+'-pp',c.por_plantilla,'🔀 Por tipo')}
+        <button class="btn btn-sm" onclick="waGuardarModo('${c.seccion}')">💾</button>
+      </div>
+    </div>`).join('')
+  }catch(e){el.innerHTML=`<div class="alert alert-red">${_waEsc(e.message)}</div>`}
+}
+window.waGuardarModo=async(sec)=>{
+  const msg=document.getElementById('wam-msg')
+  const g=(s)=>!!document.getElementById('wam-'+sec+'-'+s)?.checked
+  const upd={auto_on:g('auto'),despacho_on:g('desp'),manual_on:g('man'),por_plantilla:g('pp')}
+  const{error}=await sb.from('wa_secciones_config').update(upd).eq('seccion',sec)
+  if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${_waEsc(error.message)}</div>`;return}
+  window._waSecCfgCache=undefined // los modales del auxiliar recargan la config
+  if(msg)msg.innerHTML=`<div class="alert alert-green">✅ Modo de ${sec} guardado. ${upd.auto_on?'🤖 El cron enviará solo cada 5 min.':''} El auxiliar debe recargar para ver el cambio de botones.</div>`
+  logAction('wa_modo_guardado',{sec,...upd}).catch(()=>{})
+}
+
+// ── 📬 Cola de envíos ──
+async function cargarWaCola(){
+  const el=document.getElementById('wam-cola')
+  if(!el)return
+  try{
+    const hoyBog=new Date(new Date().toLocaleString('en-US',{timeZone:'America/Bogota'})).toISOString().slice(0,10)
+    const{data,error}=await sb.from('envios_cola').select('*').eq('fecha',hoyBog).order('creado_en',{ascending:false}).limit(200)
+    if(error)throw error
+    const rows=data||[]
+    const cnt=(e)=>rows.filter(r=>r.estado===e).length
+    const chip=(e)=>({pendiente:'🕓',sin_plantilla:'⚠️',enviado:'✅',fallido:'❌',cancelado:'🚫'})[e]||e
+    el.innerHTML=`<div class="cards-row c4" style="margin-bottom:12px">
+      <div class="card" style="border-left:3px solid var(--green)"><div class="card-label">✅ Enviados hoy</div><div class="card-val" style="color:var(--green)">${cnt('enviado')}</div></div>
+      <div class="card" style="border-left:3px solid var(--blue)"><div class="card-label">🕓 Pendientes</div><div class="card-val" style="color:var(--blue)">${cnt('pendiente')}</div></div>
+      <div class="card" style="border-left:3px solid var(--amber)"><div class="card-label">⚠️ Sin plantilla</div><div class="card-val" style="color:var(--amber)">${cnt('sin_plantilla')}</div></div>
+      <div class="card" style="border-left:3px solid var(--red)"><div class="card-label">❌ Fallidos</div><div class="card-val" style="color:var(--red)">${cnt('fallido')}</div></div>
+    </div>
+    ${cnt('sin_plantilla')>0?`<div class="alert alert-amber" style="margin-bottom:10px">⚠️ Hay envíos esperando plantilla. Créala en Textos, apruébala en la card de Plantillas, y se reintentan solos.</div>`:''}
+    ${rows.length?`<div style="max-height:280px;overflow-y:auto">${rows.slice(0,30).map(r=>`
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:11.5px;border-bottom:1px solid var(--border);padding:6px 2px;flex-wrap:wrap">
+        <div style="flex:1;min-width:180px">${chip(r.estado)} <strong>${_waEsc(r.nombre||r.telefono)}</strong> · ${_waEsc(r.plantilla||'—')}</div>
+        <div style="color:var(--muted)">${_waEsc(r.seccion)} · ${r.origen==='cruce'?'🤖':'👤'} ${r.enviado_en?new Date(r.enviado_en).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}):''}</div>
+        ${r.estado==='fallido'?`<button class="btn btn-sm" onclick="waColaReintentar('${r.id}')">↻</button>`:''}
+        ${r.error_detalle?`<div style="width:100%;color:var(--red);font-size:10.5px">${_waEsc(r.error_detalle)}</div>`:''}
+      </div>`).join('')}</div>`:'<div style="color:var(--muted);font-size:12px">Sin envíos hoy. La cola se llena al despachar desde las secciones del auxiliar.</div>'}`
+  }catch(e){el.innerHTML=`<div class="alert alert-red">${_waEsc(e.message)}</div>`}
+}
+window.waColaReintentar=async(id)=>{
+  const{error}=await sb.from('envios_cola').update({estado:'pendiente',error_detalle:null}).eq('id',id)
+  if(!error){const{data:res}=await sb.functions.invoke('wa-dispatch',{body:{envio_id:id}}).catch(()=>({}))}
+  cargarWaCola()
 }
 
 // ── Visor de prueba: muestra en vivo lo que entra por un número ──

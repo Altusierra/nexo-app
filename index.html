@@ -18141,16 +18141,20 @@ async function cargarWaModos(){
     const{data,error}=await sb.from('wa_secciones_config').select('*').order('seccion')
     if(error)throw error
     const sw=(id,on,lbl)=>`<label style="display:flex;align-items:center;gap:5px;font-size:11.5px;cursor:pointer;white-space:nowrap"><input type="checkbox" id="${id}" ${on?'checked':''}>${lbl}</label>`
-    el.innerHTML=(data||[]).map(c=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:9px 12px;margin-bottom:6px">
-      <div style="font-weight:700;font-size:12.5px;min-width:150px">${_WA_SEC_LBL[c.seccion]||c.seccion}</div>
-      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center">
-        ${sw('wam-'+c.seccion+'-auto',c.auto_on,'🤖 Auto')}
-        ${sw('wam-'+c.seccion+'-desp',c.despacho_on,'▶️ Despachar')}
-        ${sw('wam-'+c.seccion+'-man',c.manual_on,'📱 Manual')}
-        ${sw('wam-'+c.seccion+'-pp',c.por_plantilla,'🔀 Por tipo')}
-        <button class="btn btn-sm" onclick="waGuardarModo('${c.seccion}')">💾</button>
+    el.innerHTML=(data||[]).map(c=>`<div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:9px 12px;margin-bottom:6px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="font-weight:700;font-size:12.5px;min-width:150px">${_WA_SEC_LBL[c.seccion]||c.seccion}</div>
+        <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center">
+          ${sw('wam-'+c.seccion+'-auto',c.auto_on,'🤖 Auto')}
+          ${sw('wam-'+c.seccion+'-desp',c.despacho_on,'▶️ Despachar')}
+          ${sw('wam-'+c.seccion+'-man',c.manual_on,'📱 Manual')}
+          <label style="display:flex;align-items:center;gap:5px;font-size:11.5px;cursor:pointer;white-space:nowrap"><input type="checkbox" id="wam-${c.seccion}-pp" ${c.por_plantilla?'checked':''} onchange="waTogglePorTipo('${c.seccion}')">🔀 Por tipo</label>
+          <button class="btn btn-sm" onclick="waGuardarModo('${c.seccion}')">💾</button>
+        </div>
       </div>
+      <div id="wam-pt-${c.seccion}" style="display:${c.por_plantilla?'block':'none'};margin-top:10px;border-top:1px solid var(--border);padding-top:10px"></div>
     </div>`).join('')
+    ;(data||[]).forEach(c=>{if(c.por_plantilla)waCargarPorTipo(c.seccion)})
   }catch(e){el.innerHTML=`<div class="alert alert-red">${_waEsc(e.message)}</div>`}
 }
 window.waGuardarModo=async(sec)=>{
@@ -18162,6 +18166,47 @@ window.waGuardarModo=async(sec)=>{
   window._waSecCfgCache=undefined // los modales del auxiliar recargan la config
   waToast('✅ Modo de '+_waEsc(sec)+' guardado.'+(upd.auto_on?' 🤖 El cron enviará solo.':''),'ok')
   logAction('wa_modo_guardado',{sec,...upd}).catch(()=>{})
+}
+
+// ── 🔀 Por tipo: cada plantilla con sus propios switches y su sección ──
+window.waTogglePorTipo=(sec)=>{
+  const d=document.getElementById('wam-pt-'+sec)
+  const on=!!document.getElementById('wam-'+sec+'-pp')?.checked
+  if(!d)return
+  d.style.display=on?'block':'none'
+  if(on&&!d.innerHTML.trim())waCargarPorTipo(sec)
+}
+async function waCargarPorTipo(sec){
+  const d=document.getElementById('wam-pt-'+sec)
+  if(!d)return
+  d.innerHTML='<div style="font-size:11px;color:var(--muted)">Cargando plantillas...</div>'
+  try{
+    const{data,error}=await sb.from('wa_plantillas').select('id,nombre,estado,seccion,auto_on,despacho_on,manual_on').eq('seccion',sec).order('nombre')
+    if(error)throw error
+    if(!data||!data.length){d.innerHTML='<div style="font-size:11px;color:var(--muted)">No hay plantillas asignadas a esta sección. Sincronízalas con 🔄 en el visor de pruebas, o cambia la sección de alguna desde otra fila.</div>';return}
+    const sem=(e)=>e==='APPROVED'?'🟢':e==='REJECTED'?'🔴':e==='PENDING'?'⏳':'🟡'
+    const secOpts=(cur)=>['novedades','reclame','reservado','cancelados'].map(s=>`<option value="${s}" ${s===cur?'selected':''}>${_WA_SEC_LBL[s]||s}</option>`).join('')
+    d.innerHTML=`<div style="font-size:10.5px;color:var(--muted);margin-bottom:6px">Cada plantilla decide por su cuenta. Puedes cambiar a qué sección pertenece.</div>`+data.map(p=>`
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;padding:5px 0;border-bottom:1px solid var(--border)">
+        <div style="flex:1;min-width:190px;font-size:11.5px">${sem(p.estado)} ${_waEsc(p.nombre)}</div>
+        <select id="wapt-${p.id}-sec" style="font-size:11px;padding:3px 6px">${secOpts(p.seccion)}</select>
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer"><input type="checkbox" id="wapt-${p.id}-auto" ${p.auto_on?'checked':''}>🤖</label>
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer"><input type="checkbox" id="wapt-${p.id}-desp" ${p.despacho_on!==false?'checked':''}>▶️</label>
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer"><input type="checkbox" id="wapt-${p.id}-man" ${p.manual_on!==false?'checked':''}>📱</label>
+        <button class="btn btn-sm" onclick="waGuardarPorTipo('${p.id}','${sec}')">💾</button>
+      </div>`).join('')
+  }catch(e){d.innerHTML=`<div class="alert alert-red">${_waEsc(e.message)}</div>`}
+}
+window.waGuardarPorTipo=async(id,secActual)=>{
+  const g=(s)=>!!document.getElementById('wapt-'+id+'-'+s)?.checked
+  const nuevaSec=document.getElementById('wapt-'+id+'-sec')?.value||secActual
+  const upd={auto_on:g('auto'),despacho_on:g('desp'),manual_on:g('man'),seccion:nuevaSec}
+  const{data,error}=await sb.from('wa_plantillas').update(upd).eq('id',id).select('id,nombre')
+  if(error){waToast('❌ NO se guardó: '+_waEsc(error.message),'error');return}
+  if(!data||!data.length){waToast('❌ NO se guardó: la base de datos no aceptó el cambio (0 filas). Revisa permisos.','error');return}
+  waToast('✅ '+_waEsc(data[0].nombre)+' guardada.'+(nuevaSec!==secActual?' Movida a '+_waEsc(nuevaSec)+'.':''),'ok')
+  logAction('wa_plantilla_modo',{id,...upd}).catch(()=>{})
+  if(nuevaSec!==secActual){waCargarPorTipo(secActual);waCargarPorTipo(nuevaSec)}
 }
 
 // ── 📬 Cola de envíos ──

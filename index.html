@@ -769,6 +769,7 @@ function showApp(){
   navigate(_pageInicio)
   renderImpersonateBar()
   if(rol==='auxiliar')setTimeout(()=>{try{auxRefreshCounts()}catch(e){}},0)
+  if(rol==='auxiliar'||rol==='admin')setTimeout(()=>{try{window._wchPillInit&&window._wchPillInit()}catch(e){}},0) // 💬 Centro de Chats (26jul26)
 }
 
 function syncMobRole(){
@@ -1659,7 +1660,11 @@ const NX_SYS_ORIG={
   limiteDiasAtras:{v:4,min:1,max:60,label:'⏳ Límite de días atrás (Asignador y Cruce Dropi)',mod:'Asignador · Cruce Dropi',
     explica:'Hasta cuántos días atrás puede tener fecha una orden para cargarla SIN modo histórico. Manda en el Asignador (fecha de la venta) y en el Cruce Dropi (fecha de subida). El modo histórico por usuario sigue quitando todo límite.'},
   arrastreDias:{v:14,min:1,max:60,label:'📦 Días de arrastre (Novedades y Reclame)',mod:'Novedades · Reclame',
-    explica:'Cuántos días atrás se buscan pedidos NO resueltos para arrastrarlos al lote de hoy (y para calcular el "✓ Hecho hoy" del auxiliar).'}
+    explica:'Cuántos días atrás se buscan pedidos NO resueltos para arrastrarlos al lote de hoy (y para calcular el "✓ Hecho hoy" del auxiliar).'},
+  ccDiasSinResp:{v:2,min:1,max:30,label:'💬 Días visibles sin respuesta (Centro de Chats)',mod:'Centro de Chats',
+    explica:'Cuántos días se muestran en la vista de HOY las conversaciones DISPARADAS que el cliente no ha respondido. Después se OCULTAN (no se borran): el selector de fecha las trae siempre.'},
+  ccHorasAlerta:{v:4,min:1,max:72,label:'💬 Horas para alarma de respondió-sin-atender (Centro de Chats)',mod:'Centro de Chats',
+    explica:'Si un cliente respondió y pasan más de estas horas sin que un humano le conteste, el chip 🆕 se marca con ⚠️.'}
 }
 window._nxSysCfg=window._nxSysCfg||{} // overrides vigentes {clave:número}
 function nxSysVal(k){ // getter único: override válido → original del sistema
@@ -17788,6 +17793,11 @@ async function pageAdminMensajeria(c){
       <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Toma los textos de <strong>Textos / Mensajes</strong> de la sección de ese número, los convierte al formato de Meta y los manda a aprobación. Nombre: nexo_{sección}_{variante}_v1.</div>
       <div id="wam-tpl-lista"><div style="color:var(--muted);font-size:12px">Elige un número arriba para ver sus plantillas.</div></div>
     </div>
+    <div class="card" style="margin-bottom:18px">
+      <div style="font-size:15px;font-weight:800;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">🏷 Etiquetas del Centro de Chats (tubería)</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">La tubería que ve el auxiliar: rieles automáticos (los mueve el sistema) + tus etiquetas globales + extras por sección. Cada etiqueta vive por su ID: renombrar nunca altera datos ni métricas.</div>
+      <div id="wam-etiquetas"><div class="loading">Cargando...</div></div>
+    </div>
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">
         <div style="font-size:15px;font-weight:800">🔑 Apps / Portafolios de Meta</div>
@@ -17800,6 +17810,7 @@ async function pageAdminMensajeria(c){
   cargarWaMensajeria()
   cargarWaModos()
   cargarWaCola()
+  try{window._wchEditorRender&&window._wchEditorRender()}catch(e){console.warn('editor etiquetas:',e)} // 🏷 (26jul26)
 }
 
 async function cargarWaMensajeria(){
@@ -38394,6 +38405,770 @@ try{if(hbTrabajoPendiente())history.pushState({hbGuard:1},'',location.href)}catc
   }
 })()
 // ═══ FIN VENTANA DE ENVÍOS + GUARDIA ═══
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 💬 CENTRO DE CHATS (26jul26) — hilo WhatsApp dentro de NEXO, por secciones.
+// Píldora flotante → Modal 1 (pestañas + tubería de etiquetas + lista) →
+// Modal 2 (conversación + etiqueta + sugerencias + envío API / wa.me).
+// PRINCIPIOS: el evento más reciente manda · etiquetas por ID inmutable ·
+// estados automáticos DERIVADOS (nunca guardados) · scroll con memoria.
+// Persistencia: catálogo en config 'cc_etiquetas' (canal de siempre, con
+// verificación de ida y vuelta) · etiqueta por conversación en la columna
+// conversaciones.etiqueta (id) + etiqueta_en (ts) + origen ('cliente'|'nexo').
+// ═══════════════════════════════════════════════════════════════════════════
+;(function(){
+'use strict'
+
+// ── Rieles automáticos: clave interna FIJA (la usa la lógica) + decorado editable ──
+const WCH_RIELES_DEF={
+  disparada:{n:'Disparada',e:'📤',c:'#64748b'},
+  respondio:{n:'Respondió',e:'🆕',c:'#f59e0b'},
+  atendida:{n:'Atendida',e:'🟣',c:'#a855f7'},
+  wame:{n:'Por wa.me',e:'📲',c:'#0ea5e9'}
+}
+const WCH_SELLO_WAME='~wame' // valor especial en conversaciones.etiqueta (sello, no id de catálogo)
+const WCH_SECS=[
+  {k:'novedades',n:'Novedades',e:'🔔'},
+  {k:'reservado',n:'Pend. Conf.',e:'⏳'},
+  {k:'cancelados',n:'Cancelados',e:'❌'},
+  {k:'reclame',n:'Reclame',e:'📢'},
+  {k:'entrantes',n:'Entrantes',e:'📥'}
+]
+const WCH_CAT_DEF=()=>({v:1,rieles:JSON.parse(JSON.stringify(WCH_RIELES_DEF)),
+  globales:[{id:'g_final',n:'Finalizado',e:'🟢',c:'#22c55e',cierre:true,arch:false}],
+  secciones:{novedades:[],reservado:[],cancelados:[],reclame:[],entrantes:[]}})
+
+// ── Estado en memoria ──
+window._wchState=window._wchState||{
+  cat:null,           // catálogo de etiquetas (config)
+  sec:'novedades',    // pestaña activa
+  fecha:null,         // filtro de fecha (null = HOY, vista viva)
+  filtroEtq:null,     // chip de la franja seleccionado (clave riel o id manual)
+  busca:'',
+  convs:[],           // conversaciones enriquecidas de la sección activa
+  scroll:{},          // memoria de scroll de la franja por sección
+  timer:null,         // refresco de contadores del Modal 1
+  chatTimers:{},      // intervalos de los Modal 2 abiertos {convId:timer}
+  numsCache:null      // wa_numeros activos api (para enviar)
+}
+
+const _wchEsc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+const _wchTel=(t)=>{const d=String(t||'').replace(/\D/g,'');if(!d)return '';return d.startsWith('57')?d:('57'+d)}
+const _wchTelCorto=(t)=>{const d=String(t||'').replace(/\D/g,'');return d.startsWith('57')&&d.length>10?d.slice(2):d}
+const _wchId=(pref)=>pref+'_'+Math.random().toString(36).slice(2,8)+Date.now().toString(36).slice(-3)
+const _wchHoy=()=>new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
+const _wchHrs=(iso)=>{if(!iso)return null;const ms=Date.now()-new Date(iso).getTime();return ms/36e5}
+const _wchHace=(iso)=>{const h=_wchHrs(iso);if(h==null)return '';if(h<1)return Math.max(1,Math.round(h*60))+'m';if(h<48)return Math.round(h)+'h';return Math.round(h/24)+'d'}
+
+// ── CATÁLOGO de etiquetas (config 'cc_etiquetas', guardado con eco de verificación) ──
+async function _wchCatLoad(force){
+  const st=window._wchState
+  if(st.cat&&!force)return st.cat
+  let cat=null
+  try{const raw=await getConfig('cc_etiquetas');if(raw){const o=JSON.parse(raw);if(o&&o.v)cat=o}}catch(_){}
+  if(!cat)cat=WCH_CAT_DEF()
+  // Sanea: rieles siempre completos (si el guardado viejo no tiene alguno, se repone del default)
+  for(const k of Object.keys(WCH_RIELES_DEF)){if(!cat.rieles[k])cat.rieles[k]=JSON.parse(JSON.stringify(WCH_RIELES_DEF[k]))}
+  for(const s of WCH_SECS){if(!cat.secciones[s.k])cat.secciones[s.k]=[]}
+  st.cat=cat
+  return cat
+}
+async function _wchCatSave(){
+  const st=window._wchState
+  const js=JSON.stringify(st.cat)
+  const{error}=await sb.from('config').upsert({clave:'cc_etiquetas',valor:js,updated_at:new Date().toISOString()},{onConflict:'clave'})
+  if(error)return {ok:false,msg:error.message}
+  // Verificación de ida y vuelta (la lección RLS: un upsert puede "aceptar" sin escribir)
+  let eco=null;try{eco=await getConfig('cc_etiquetas')}catch(_){}
+  if(eco!==js)return {ok:false,msg:'la nube no devolvió lo guardado (¿RLS en config para cc_etiquetas?)'}
+  return {ok:true}
+}
+// Todas las etiquetas manuales visibles para una sección: globales primero, luego propias
+function _wchEtqsDe(sec){
+  const cat=window._wchState.cat;if(!cat)return []
+  const g=(cat.globales||[]).filter(x=>!x.arch)
+  const p=((cat.secciones||{})[sec]||[]).filter(x=>!x.arch)
+  return [...g.map(x=>({...x,ambito:'g'})),...p.map(x=>({...x,ambito:'s'}))]
+}
+function _wchEtqPorId(id){
+  const cat=window._wchState.cat;if(!cat||!id)return null
+  const g=(cat.globales||[]).find(x=>x.id===id);if(g)return g
+  for(const s of WCH_SECS){const f=((cat.secciones||{})[s.k]||[]).find(x=>x.id===id);if(f)return f}
+  return null
+}
+
+// ── DERIVACIÓN DE ESTADO — el evento más reciente manda ──
+// c: {etiqueta, etiqueta_en, ultimo_msg_en, ultimo_msg_dir, _lastOutHum, _tieneEnvio}
+// Devuelve {tipo:'riel'|'manual', clave|id, ts}
+function _wchDerivar(c){
+  const tEtq=c.etiqueta?(c.etiqueta_en?new Date(c.etiqueta_en).getTime():0):null
+  const tMsg=c.ultimo_msg_en?new Date(c.ultimo_msg_en).getTime():null
+  // La etiqueta (manual o sello 📲) manda SOLO si es el evento más reciente
+  if(c.etiqueta&&(tMsg==null||tEtq>=tMsg)){
+    if(c.etiqueta===WCH_SELLO_WAME)return {tipo:'riel',clave:'wame',ts:c.etiqueta_en}
+    return {tipo:'manual',id:c.etiqueta,ts:c.etiqueta_en}
+  }
+  if(c.ultimo_msg_dir==='in')return {tipo:'riel',clave:'respondio',ts:c.ultimo_msg_en}
+  if(c.ultimo_msg_dir==='out'){
+    // salió el último mensaje: ¿humano (atendida) o automático (sigue disparada)?
+    if(c._lastOutHum)return {tipo:'riel',clave:'atendida',ts:c.ultimo_msg_en}
+    return {tipo:'riel',clave:'disparada',ts:c.ultimo_msg_en}
+  }
+  return {tipo:'riel',clave:'disparada',ts:null} // encolada/sin mensajes aún
+}
+
+// ── CARGA DE DATOS de la sección activa ──
+// Vista HOY (fecha=null): disparos de hoy + todo lo VIVO (🆕/🟣/📲/manual sin cierre) de días previos.
+// Vista FECHA: todo lo que SE MOVIÓ ese día (envío o mensaje), incluyendo ocultos.
+async function _wchCargar(){
+  const st=window._wchState
+  await _wchCatLoad()
+  const sec=st.sec,fecha=st.fecha // null = hoy/vivo
+  const diaSel=fecha||_wchHoy()
+  try{
+    let tels=new Set(),secDe={} // tel → seccion del último envío
+    if(sec==='entrantes'){
+      // Entrantes = origen 'cliente' (permanente). En vista fecha: con actividad ese día.
+      let q=sb.from('conversaciones').select('id,telefono,nombre,ultimo_msg_en,ultimo_msg_dir,ventana_24h_hasta,no_leidos,requiere_reintro,etiqueta,etiqueta_en,origen').eq('origen','cliente').order('ultimo_msg_en',{ascending:false}).limit(400)
+      if(fecha)q=q.gte('ultimo_msg_en',fecha+'T00:00:00-05:00').lte('ultimo_msg_en',fecha+'T23:59:59-05:00')
+      const{data,error}=await q
+      if(error)throw error
+      st.convs=await _wchEnriquecer(data||[],{})
+    }else{
+      // 1) Envíos de la sección del día seleccionado
+      const{data:envs,error:e1}=await sb.from('envios_cola').select('telefono,seccion,fecha').eq('seccion',sec).eq('fecha',diaSel).limit(1500)
+      if(e1)throw e1
+      for(const ev of(envs||[])){const t=_wchTel(ev.telefono);if(t){tels.add(t);secDe[t]=ev.seccion}}
+      // 2) En vista HOY se suma lo VIVO de días previos que pertenece a esta sección
+      let vivas=[]
+      if(!fecha){
+        const{data:conVida,error:e2}=await sb.from('conversaciones').select('id,telefono,nombre,ultimo_msg_en,ultimo_msg_dir,ventana_24h_hasta,no_leidos,requiere_reintro,etiqueta,etiqueta_en,origen').or('ultimo_msg_dir.eq.in,etiqueta.not.is.null').neq('origen','cliente').order('ultimo_msg_en',{ascending:false}).limit(400)
+        if(e2)throw e2
+        vivas=conVida||[]
+        const telsVivas=vivas.map(c=>c.telefono).filter(t=>!tels.has(t))
+        if(telsVivas.length){ // ¿de qué sección es cada viva? → su último envío
+          for(let i=0;i<telsVivas.length;i+=150){
+            const lote=telsVivas.slice(i,i+150)
+            const{data:evs}=await sb.from('envios_cola').select('telefono,seccion,creado_en').in('telefono',lote).order('creado_en',{ascending:false}).limit(1000)
+            for(const ev of(evs||[])){const t=_wchTel(ev.telefono);if(!(t in secDe))secDe[t]=ev.seccion}
+          }
+        }
+      }
+      // 3) Conversaciones de los teléfonos del día
+      let base=[]
+      const telArr=[...tels]
+      for(let i=0;i<telArr.length;i+=150){
+        const{data:cs,error:e3}=await sb.from('conversaciones').select('id,telefono,nombre,ultimo_msg_en,ultimo_msg_dir,ventana_24h_hasta,no_leidos,requiere_reintro,etiqueta,etiqueta_en,origen').in('telefono',telArr.slice(i,i+150))
+        if(e3)throw e3
+        base=base.concat(cs||[])
+      }
+      const yaIds=new Set(base.map(c=>c.id))
+      // Encolados hoy que aún no tienen conversación (fila sintética: estado 📤)
+      const telsCon=new Set(base.map(c=>c.telefono))
+      for(const t of telArr){if(!telsCon.has(t))base.push({id:null,telefono:t,_sinConv:true,_tieneEnvio:true})}
+      if(!fecha){for(const c of vivas){if(!yaIds.has(c.id)&&secDe[c.telefono]===sec){base.push(c);yaIds.add(c.id)}}}
+      for(const c of base){if(tels.has(c.telefono))c._tieneEnvio=true;c._sec=secDe[c.telefono]||sec}
+      st.convs=await _wchEnriquecer(base,secDe)
+    }
+  }catch(e){
+    console.error('[wch cargar]',e)
+    st.convs=[];st._err=e&&e.message||String(e)
+    return
+  }
+  st._err=null
+  _wchAplicarVista()
+}
+// Completa _lastOutHum (¿el último saliente fue humano?) y deriva estado + visibilidad
+async function _wchEnriquecer(convs,secDe){
+  const ids=convs.filter(c=>c.id).map(c=>c.id)
+  const lastOut={}
+  for(let i=0;i<ids.length;i+=150){
+    const{data:outs}=await sb.from('mensajes').select('conversacion_id,ts,usuario_id').in('conversacion_id',ids.slice(i,i+150)).eq('direccion','out').order('ts',{ascending:false}).limit(1200)
+    for(const m of(outs||[])){if(!(m.conversacion_id in lastOut))lastOut[m.conversacion_id]=m}
+  }
+  for(const c of convs){
+    const lo=c.id?lastOut[c.id]:null
+    c._lastOutHum=!!(lo&&lo.usuario_id)
+    c._est=_wchDerivar(c)
+  }
+  return convs
+}
+// Filtra según vista (hoy = vivo; fecha = archivo del día) + chip + búsqueda, y ordena por urgencia
+function _wchAplicarVista(){
+  const st=window._wchState
+  const diasOcultar=nxSysVal('ccDiasSinResp')||2
+  let lista=st.convs.slice()
+  if(!st.fecha){ // vista HOY: ocultar 📤 viejos y cierres
+    lista=lista.filter(c=>{
+      const e=c._est
+      if(e.tipo==='manual'){const et=_wchEtqPorId(e.id);return !(et&&et.cierre)}
+      if(e.clave==='disparada'){const h=_wchHrs(e.ts);return h==null||h<diasOcultar*24}
+      return true
+    })
+  }
+  if(st.filtroEtq){
+    lista=lista.filter(c=>c._est.tipo==='manual'?c._est.id===st.filtroEtq:c._est.clave===st.filtroEtq)
+  }
+  const b=(st.busca||'').trim().toLowerCase()
+  if(b)lista=lista.filter(c=>(c.telefono||'').includes(b.replace(/\D/g,''))&&b.replace(/\D/g,'')||String(c.nombre||'').toLowerCase().includes(b)||(c.telefono||'').includes(b))
+  const peso={respondio:0,atendida:1,wame:1,disparada:3}
+  lista.sort((a,b2)=>{
+    const pa=a._est.tipo==='manual'?2:peso[a._est.clave],pb=b2._est.tipo==='manual'?2:peso[b2._est.clave]
+    if(pa!==pb)return pa-pb
+    return new Date(b2.ultimo_msg_en||0)-new Date(a.ultimo_msg_en||0)
+  })
+  st.vista=lista
+}
+
+// ── PÍLDORA FLOTANTE ──
+window._wchPillInit=function(){
+  if(document.getElementById('wch-pill'))return
+  const d=document.createElement('div')
+  d.id='wch-pill'
+  d.style.cssText='position:fixed;left:14px;bottom:14px;z-index:9000;background:linear-gradient(135deg,#166534,#22c55e);color:#fff;border:none;border-radius:999px;padding:10px 16px;font-weight:800;font-size:13px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.4);display:flex;align-items:center;gap:7px;user-select:none'
+  d.innerHTML='💬 Chats <span id="wch-pill-badge" style="display:none;background:#ef4444;border-radius:999px;min-width:19px;height:19px;line-height:19px;text-align:center;font-size:11px;padding:0 4px"></span>'
+  d.onclick=()=>window._wchAbrir()
+  document.body.appendChild(d)
+  _wchPillBadge()
+  setInterval(_wchPillBadge,60000)
+}
+async function _wchPillBadge(){
+  try{
+    const{count}=await sb.from('conversaciones').select('id',{count:'exact',head:true}).gt('no_leidos',0)
+    const el=document.getElementById('wch-pill-badge');if(!el)return
+    if(count>0){el.style.display='inline-block';el.textContent=count>99?'99+':count}else el.style.display='none'
+  }catch(_){}
+}
+
+// ── MODAL 1 — Centro de Chats ──
+window._wchAbrir=async function(){
+  const prev=document.getElementById('wch-modal');if(prev)prev.remove()
+  const st=window._wchState
+  st.fecha=null;st.filtroEtq=null;st.busca=''
+  const div=document.createElement('div')
+  div.id='wch-modal'
+  div.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9100;display:flex;align-items:center;justify-content:center;padding:12px'
+  div.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;max-width:760px;width:100%;height:min(88vh,760px);display:flex;flex-direction:column;overflow:hidden">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);gap:8px">
+      <div style="font-weight:800;font-size:15px">💬 Centro de Chats</div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <input type="date" id="wch-fecha" style="font-size:12px;padding:5px 8px" title="Ver lo que se movió un día (trae también lo oculto)" onchange="_wchFechaCambio(this.value)">
+        <button class="btn-sm btn-outline" id="wch-hoy-btn" onclick="_wchFechaCambio('')" title="Volver a la vista viva de HOY" style="display:none">⭐ Hoy</button>
+        <button class="btn-sm btn-outline" onclick="_wchRecargar()">🔄</button>
+        <button class="btn btn-sm" onclick="_wchCerrar()">✕ Cerrar</button>
+      </div>
+    </div>
+    <div id="wch-tabs" style="display:flex;gap:6px;padding:9px 14px 0;flex-wrap:wrap"></div>
+    <div style="padding:8px 14px 4px;position:relative">
+      <div id="wch-franja" style="display:flex;gap:6px;overflow-x:auto;padding-bottom:6px;scrollbar-width:none" onscroll="_wchScrollGuardar(this)" onwheel="if(Math.abs(event.deltaY)>Math.abs(event.deltaX)){this.scrollLeft+=event.deltaY;event.preventDefault()}"></div>
+      <div id="wch-franja-bar" style="height:6px;border-radius:4px;background:rgba(255,255,255,.06);position:relative;cursor:pointer"><div id="wch-franja-thumb" style="position:absolute;top:0;height:6px;border-radius:4px;background:rgba(168,85,247,.55);min-width:24px"></div></div>
+    </div>
+    <div style="display:flex;gap:6px;padding:6px 14px">
+      <input id="wch-busca" placeholder="Buscar número o nombre…" style="flex:1;font-size:12.5px;padding:7px 10px" oninput="_wchBuscaCambio(this.value)">
+      <button class="btn-sm btn-outline" onclick="_wchPegar()" title="Pega lo del portapapeles y busca">📋 Pegar</button>
+    </div>
+    <div id="wch-lista" style="flex:1;overflow-y:auto;padding:6px 14px 14px"><div class="loading">Cargando…</div></div>
+  </div>`
+  div.onclick=(e)=>{if(e.target===div)window._wchCerrar()}
+  document.body.appendChild(div)
+  await _wchCatLoad()
+  _wchTabsRender()
+  await _wchRecargar()
+  if(st.timer)clearInterval(st.timer)
+  st.timer=setInterval(()=>{_wchRecargar(true)},60000) // refresco suave: contadores en el sitio
+}
+window._wchCerrar=function(){
+  const st=window._wchState
+  if(st.timer){clearInterval(st.timer);st.timer=null}
+  for(const k of Object.keys(st.chatTimers)){clearInterval(st.chatTimers[k]);delete st.chatTimers[k]}
+  document.querySelectorAll('[id^="wch-chat-"]').forEach(x=>x.remove())
+  const m=document.getElementById('wch-modal');if(m)m.remove()
+}
+window._wchFechaCambio=function(v){
+  const st=window._wchState
+  st.fecha=v||null;st.filtroEtq=null
+  const btn=document.getElementById('wch-hoy-btn');if(btn)btn.style.display=st.fecha?'':'none'
+  const inp=document.getElementById('wch-fecha');if(inp&&!st.fecha)inp.value=''
+  _wchRecargar()
+}
+window._wchBuscaCambio=function(v){window._wchState.busca=v;_wchAplicarVista();_wchListaRender();_wchFranjaContadores()}
+window._wchPegar=async function(){
+  try{const t=await navigator.clipboard.readText();const inp=document.getElementById('wch-busca');if(inp){inp.value=t.trim();_wchBuscaCambio(inp.value)}}
+  catch(_){alert('No pude leer el portapapeles. Pega con Ctrl+V en el buscador.')}
+}
+window._wchTabCambio=function(sec){
+  const st=window._wchState
+  st.sec=sec;st.filtroEtq=null
+  _wchTabsRender();_wchRecargar()
+}
+window._wchRecargar=async function(suave){
+  await _wchCargar()
+  if(!suave){_wchFranjaRender()}
+  _wchAplicarVista()
+  _wchListaRender()
+  _wchFranjaContadores()
+  _wchTabsBadges()
+}
+function _wchTabsRender(){
+  const el=document.getElementById('wch-tabs');if(!el)return
+  const st=window._wchState
+  el.innerHTML=WCH_SECS.map(s=>`<button onclick="_wchTabCambio('${s.k}')" style="border:1px solid ${st.sec===s.k?'var(--primary)':'var(--border)'};background:${st.sec===s.k?'rgba(168,85,247,.18)':'var(--card2)'};color:var(--text);border-radius:999px;padding:5px 12px;font-size:12px;font-weight:700;cursor:pointer;display:flex;gap:5px;align-items:center">${s.e} ${s.n} <span id="wch-tabbadge-${s.k}" style="display:none;background:#ef4444;color:#fff;border-radius:999px;min-width:17px;height:17px;line-height:17px;font-size:10px;text-align:center;padding:0 3px"></span></button>`).join('')
+  _wchTabsBadges()
+}
+async function _wchTabsBadges(){
+  // No leídos por sección (aprox: por conversaciones con no_leidos, mapeadas por su último envío)
+  try{
+    const{data:cs}=await sb.from('conversaciones').select('telefono,no_leidos,origen').gt('no_leidos',0).limit(300)
+    const tot={novedades:0,reservado:0,cancelados:0,reclame:0,entrantes:0}
+    const tels=[],deTel={}
+    for(const c of(cs||[])){if(c.origen==='cliente')tot.entrantes+=c.no_leidos;else{tels.push(c.telefono);deTel[c.telefono]=c.no_leidos}}
+    for(let i=0;i<tels.length;i+=150){
+      const{data:evs}=await sb.from('envios_cola').select('telefono,seccion,creado_en').in('telefono',tels.slice(i,i+150)).order('creado_en',{ascending:false}).limit(1000)
+      const visto=new Set()
+      for(const ev of(evs||[])){const t=_wchTel(ev.telefono);if(visto.has(t))continue;visto.add(t);if(tot[ev.seccion]!=null)tot[ev.seccion]+=deTel[t]||0}
+    }
+    for(const s of WCH_SECS){const b=document.getElementById('wch-tabbadge-'+s.k);if(!b)continue;const v=tot[s.k]||0;if(v>0){b.style.display='inline-block';b.textContent=v>99?'99+':v}else b.style.display='none'}
+  }catch(_){}
+}
+
+// ── FRANJA (tubería) — se construye UNA vez por sección; contadores se actualizan EN EL SITIO ──
+function _wchChipsOrden(){
+  const st=window._wchState,cat=st.cat
+  const rieles=['disparada','respondio','atendida','wame'].map(k=>({tipo:'riel',clave:k,...cat.rieles[k]}))
+  const manuales=_wchEtqsDe(st.sec).map(x=>({tipo:'manual',id:x.id,n:x.n,e:x.e,c:x.c,cierre:x.cierre,ambito:x.ambito}))
+  return [...rieles,...manuales]
+}
+function _wchFranjaRender(){
+  const el=document.getElementById('wch-franja');if(!el)return
+  const st=window._wchState
+  const chips=_wchChipsOrden()
+  let html='',sep=false
+  for(const ch of chips){
+    if(ch.tipo==='manual'&&!sep){html+='<span style="color:var(--muted);align-self:center;font-size:11px">·</span>';sep=true}
+    const key=ch.tipo==='riel'?ch.clave:ch.id
+    const activo=st.filtroEtq===key
+    const estilo=ch.tipo==='riel'
+      ?`background:${activo?ch.c:'rgba(255,255,255,.05)'};border:1px solid ${ch.c};${activo?'color:#fff;':''}`
+      :`background:${activo?(ch.c||'#666'):'transparent'};border:1px ${ch.ambito==='s'?'dashed':'solid'} ${ch.c||'#666'};${activo?'color:#fff;':''}`
+    html+=`<button data-wchip="${key}" onclick="_wchChipClick('${key}')" title="${_wchEsc(ch.n)}" style="${estilo}flex:0 0 auto;border-radius:999px;padding:4px 10px;font-size:11.5px;font-weight:700;color:var(--text);cursor:pointer;display:flex;gap:4px;align-items:center;max-width:170px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${ch.e||''} ${_wchEsc(ch.n)} <span data-wchn="${key}" style="opacity:.85">0</span><span data-wcha="${key}" style="display:none">⚠️</span></button>`
+  }
+  el.innerHTML=html
+  // restaurar scroll memorizado de la sección
+  el.scrollLeft=st.scroll[st.sec]||0
+  _wchBarraSync()
+  el.addEventListener('scroll',_wchBarraSync)
+  const bar=document.getElementById('wch-franja-bar')
+  if(bar&&!bar._wired){bar._wired=true;bar.onmousedown=(ev)=>{
+    const mover=(e)=>{const r=bar.getBoundingClientRect();const p=Math.min(1,Math.max(0,(e.clientX-r.left)/r.width));el.scrollLeft=p*(el.scrollWidth-el.clientWidth)}
+    mover(ev)
+    const up=()=>{document.removeEventListener('mousemove',mover);document.removeEventListener('mouseup',up)}
+    document.addEventListener('mousemove',mover);document.addEventListener('mouseup',up)
+  }}
+}
+window._wchScrollGuardar=function(el){window._wchState.scroll[window._wchState.sec]=el.scrollLeft;_wchBarraSync()}
+function _wchBarraSync(){
+  const el=document.getElementById('wch-franja'),th=document.getElementById('wch-franja-thumb');if(!el||!th)return
+  const w=el.clientWidth/Math.max(1,el.scrollWidth)
+  th.style.width=(w*100)+'%'
+  th.style.left=(el.scrollLeft/Math.max(1,el.scrollWidth)*100)+'%'
+  const bar=document.getElementById('wch-franja-bar');if(bar)bar.style.display=w>=0.999?'none':''
+}
+window._wchChipClick=function(key){
+  const st=window._wchState
+  st.filtroEtq=st.filtroEtq===key?null:key
+  const el=document.getElementById('wch-franja');const sl=el?el.scrollLeft:0
+  _wchFranjaRender() // repinta selección
+  if(el)document.getElementById('wch-franja').scrollLeft=sl // sin saltos
+  _wchAplicarVista();_wchListaRender();_wchFranjaContadores()
+}
+// Contadores EN EL SITIO (sin repintar la franja → el scroll no se pierde jamás)
+function _wchFranjaContadores(){
+  const st=window._wchState
+  const horasAlerta=nxSysVal('ccHorasAlerta')||4
+  const tot={},alerta={}
+  for(const c of st.convs){
+    const e=c._est,key=e.tipo==='manual'?e.id:e.clave
+    tot[key]=(tot[key]||0)+1
+    if(e.clave==='respondio'){const h=_wchHrs(e.ts);if(h!=null&&h>=horasAlerta)alerta[key]=true}
+  }
+  document.querySelectorAll('[data-wchn]').forEach(sp=>{sp.textContent=tot[sp.getAttribute('data-wchn')]||0})
+  document.querySelectorAll('[data-wcha]').forEach(sp=>{sp.style.display=alerta[sp.getAttribute('data-wcha')]?'':'none'})
+}
+
+// ── LISTA de conversaciones ──
+function _wchListaRender(){
+  const el=document.getElementById('wch-lista');if(!el)return
+  const st=window._wchState
+  if(st._err){el.innerHTML=`<div class="alert alert-red">${_wchEsc(st._err)}</div>`;return}
+  const lista=st.vista||[]
+  if(!lista.length){el.innerHTML='<div style="color:var(--muted);font-size:12.5px;text-align:center;padding:26px">📭 Nada por aquí'+(st.fecha?' ese día':' hoy')+'.</div>';return}
+  el.innerHTML=lista.map(c=>{
+    const e=c._est
+    let chip=''
+    if(e.tipo==='manual'){const et=_wchEtqPorId(e.id);chip=et?`<span style="border:1px solid ${et.c||'#666'};color:${et.c||'var(--text)'};border-radius:999px;padding:1px 8px;font-size:10.5px;font-weight:700">${et.e||''} ${_wchEsc(et.n)}${et.arch?' 🔒':''}</span>`:`<span style="color:var(--muted);font-size:10.5px">🔒 etiqueta archivada</span>`}
+    else{const r=st.cat.rieles[e.clave];const alerta=e.clave==='respondio'&&_wchHrs(e.ts)>=(nxSysVal('ccHorasAlerta')||4);chip=`<span style="background:${r.c}22;border:1px solid ${r.c};color:var(--text);border-radius:999px;padding:1px 8px;font-size:10.5px;font-weight:700">${r.e} ${_wchEsc(r.n)}${alerta?' ⚠️':''}</span>`}
+    const tel=_wchTel(c.telefono)
+    const reintro=c.requiere_reintro?`<span style="background:rgba(245,158,11,.15);border:1px solid #f59e0b;color:#f59e0b;border-radius:6px;padding:1px 6px;font-size:10px;font-weight:700">🔄 Número cambió</span>`:''
+    const noL=c.no_leidos>0?`<span style="background:#ef4444;color:#fff;border-radius:999px;min-width:17px;height:17px;line-height:17px;font-size:10px;text-align:center;padding:0 3px;font-weight:800">${c.no_leidos}</span>`:''
+    return `<div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:9px 11px;margin-bottom:7px">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
+        <div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap;min-width:0">
+          <strong style="font-size:12.5px">${_wchEsc(c.nombre||'Sin nombre')}</strong>
+          <span style="font-size:11.5px;color:var(--muted)">${_wchEsc(_wchTelCorto(tel))}</span>
+          <button onclick="navigator.clipboard.writeText('${_wchTelCorto(tel)}');this.textContent='✅';setTimeout(()=>this.textContent='📋',900)" title="Copiar número" style="background:none;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;padding:1px 5px;color:var(--text)">📋</button>
+          ${noL}${chip}${reintro}
+        </div>
+        <div style="font-size:10.5px;color:var(--muted)">${c.ultimo_msg_en?('hace '+_wchHace(c.ultimo_msg_en)):(c._sinConv?'encolado, sin conversación aún':'')}</div>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:7px;flex-wrap:wrap">
+        ${c.id?`<button class="btn-sm btn-primary" onclick="_wchChatAbrir('${c.id}')">👁 Ver conversación</button>`:`<span style="font-size:11px;color:var(--muted);align-self:center">El hilo aparece cuando salga o entre el primer mensaje.</span>`}
+        <button class="btn-sm btn-outline" onclick="_wchWaMe('${c.id||''}','${tel}',true)" title="Abre WhatsApp con el protocolo de la sección copiado">📱 WhatsApp</button>
+        <button class="btn-sm btn-outline" onclick="_wchWaMe('${c.id||''}','${tel}',false)" title="Abre el chat limpio para llamar">📞 Llamar</button>
+      </div>
+    </div>`
+  }).join('')
+}
+
+// 📱 wa.me / 📞 llamar — abre y estampa el sello 📲 (queda superado por cualquier mensaje posterior)
+window._wchWaMe=async function(convId,tel,conTexto){
+  let url='https://wa.me/'+tel
+  if(conTexto){
+    try{
+      const st=window._wchState
+      const secTxt={novedades:'novedades',reservado:'confirmacion',cancelados:'cancelados',reclame:'reclame',entrantes:'confirmacion'}[st.sec]||'confirmacion'
+      const{data:tx}=await sb.from('app_mensajes').select('texto').eq('seccion',secTxt).neq('activo',false).order('idx').limit(1)
+      const conv=st.convs.find(c=>c.id===convId)
+      let msg=(tx&&tx[0]&&tx[0].texto)||''
+      if(msg){msg=msg.replace(/\[NOMBRE\]/g,(conv&&conv.nombre)||'').trim();navigator.clipboard.writeText(msg).catch(()=>{});url+='?text='+encodeURIComponent(msg)}
+    }catch(_){}
+  }
+  window.open(url,'_blank','noopener')
+  if(convId){
+    try{
+      const{data,error}=await sb.from('conversaciones').update({etiqueta:WCH_SELLO_WAME,etiqueta_en:new Date().toISOString()}).eq('id',convId).select('id')
+      if(error||!data||!data.length)console.warn('[wch] sello wa.me no se guardó',error&&error.message)
+      else{const c=window._wchState.convs.find(x=>x.id===convId);if(c){c.etiqueta=WCH_SELLO_WAME;c.etiqueta_en=new Date().toISOString();c._est=_wchDerivar(c);_wchAplicarVista();_wchListaRender();_wchFranjaContadores()}}
+    }catch(_){}
+  }
+}
+
+// ── MODAL 2 — la conversación ──
+window._wchChatAbrir=async function(convId){
+  const st=window._wchState
+  const c=st.convs.find(x=>x.id===convId)
+  const prev=document.getElementById('wch-chat-'+convId);if(prev){prev.style.zIndex=9200+Object.keys(st.chatTimers).length;return}
+  const div=document.createElement('div')
+  div.id='wch-chat-'+convId
+  div.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:'+(9200+Object.keys(st.chatTimers).length)+';display:flex;align-items:center;justify-content:center;padding:12px'
+  const tel=c?_wchTel(c.telefono):''
+  const etqs=_wchEtqsDe(st.sec)
+  const etqActual=c&&c.etiqueta&&c.etiqueta!==WCH_SELLO_WAME?c.etiqueta:''
+  div.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;max-width:600px;width:100%;height:min(86vh,700px);display:flex;flex-direction:column;overflow:hidden">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:11px 14px;border-bottom:1px solid var(--border);gap:8px;flex-wrap:wrap">
+      <div style="min-width:0">
+        <div style="font-weight:800;font-size:13.5px">${_wchEsc((c&&c.nombre)||'Conversación')} <span style="color:var(--muted);font-weight:400;font-size:11.5px">${_wchEsc(_wchTelCorto(tel))}</span>
+          <button onclick="navigator.clipboard.writeText('${_wchTelCorto(tel)}');this.textContent='✅';setTimeout(()=>this.textContent='📋',900)" style="background:none;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;padding:1px 5px;color:var(--text)">📋</button>
+        </div>
+        <div id="wch-vent-${convId}" style="font-size:10.5px;margin-top:2px"></div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <select id="wch-etq-${convId}" onchange="_wchEtiquetar('${convId}',this.value)" style="font-size:11.5px;padding:4px 6px;max-width:180px">
+          <option value="">— Etiqueta —</option>
+          ${etqs.map(x=>`<option value="${x.id}" ${x.id===etqActual?'selected':''}>${x.e||''} ${_wchEsc(x.n)}${x.cierre?' (cierra)':''}</option>`).join('')}
+          ${etqActual?`<option value="~quitar">✖ Quitar etiqueta</option>`:''}
+        </select>
+        <button class="btn btn-sm" onclick="_wchChatCerrar('${convId}')">✕</button>
+      </div>
+    </div>
+    <div style="padding:6px 14px 0"><input id="wch-chatbusca-${convId}" placeholder="Buscar en la conversación…" style="width:100%;font-size:12px;padding:6px 9px;box-sizing:border-box" oninput="_wchChatFiltrar('${convId}',this.value)"></div>
+    <div id="wch-sug-${convId}" style="padding:6px 14px 0"></div>
+    <div id="wch-hilo-${convId}" style="flex:1;overflow-y:auto;padding:10px 14px"><div class="loading">Cargando…</div></div>
+    <div style="border-top:1px solid var(--border);padding:9px 14px">
+      <div style="display:flex;gap:6px">
+        <input id="wch-envio-${convId}" placeholder="Escribe y envía por API (solo con ventana 🟢)…" style="flex:1;font-size:12.5px;padding:7px 10px" onkeydown="if(event.key==='Enter')_wchEnviarTexto('${convId}','${tel}')">
+        <button class="btn-sm btn-primary" onclick="_wchEnviarTexto('${convId}','${tel}')">📤</button>
+        <button class="btn-sm btn-outline" onclick="_wchWaMe('${convId}','${tel}',true)" title="WhatsApp con protocolo">📱</button>
+        <button class="btn-sm btn-outline" onclick="_wchWaMe('${convId}','${tel}',false)" title="Abrir para llamar">📞</button>
+      </div>
+      <div id="wch-enviomsg-${convId}" style="margin-top:6px;font-size:11px"></div>
+    </div>
+  </div>`
+  div.onclick=(e)=>{if(e.target===div)window._wchChatCerrar(convId)}
+  document.body.appendChild(div)
+  _wchVentanaPintar(convId,c)
+  _wchSugerencias(convId,c)
+  const pintar=()=>_wchHiloPintar(convId)
+  await pintar()
+  st.chatTimers[convId]=setInterval(pintar,3000)
+  // Abrir el hilo = visto → no_leidos a 0 (con verificación; si falla, solo queda el log)
+  try{
+    const{data,error}=await sb.from('conversaciones').update({no_leidos:0}).eq('id',convId).select('id')
+    if(!error&&data&&data.length){const cc=st.convs.find(x=>x.id===convId);if(cc)cc.no_leidos=0;_wchListaRender();_wchPillBadge();_wchTabsBadges()}
+  }catch(_){}
+}
+window._wchChatCerrar=function(convId){
+  const st=window._wchState
+  if(st.chatTimers[convId]){clearInterval(st.chatTimers[convId]);delete st.chatTimers[convId]}
+  const d=document.getElementById('wch-chat-'+convId);if(d)d.remove()
+}
+function _wchVentanaPintar(convId,c){
+  const el=document.getElementById('wch-vent-'+convId);if(!el)return
+  const h=c&&c.ventana_24h_hasta?_wchHrs(c.ventana_24h_hasta):null
+  if(h!=null&&h<0){ // aún no vence (hasta en el futuro → horas negativas respecto a ahora)
+    const falta=-h,hh=Math.floor(falta),mm=Math.round((falta-hh)*60)
+    el.innerHTML=`<span style="color:#22c55e;font-weight:700">🟢 Ventana abierta — quedan ${hh}h ${mm}m (texto libre permitido)</span>`
+  }else{
+    el.innerHTML=`<span style="color:#f59e0b;font-weight:700">🔒 Fuera de ventana — solo plantillas aprobadas</span>`
+  }
+}
+async function _wchHiloPintar(convId){
+  const el=document.getElementById('wch-hilo-'+convId);if(!el)return
+  const{data,error}=await sb.from('mensajes').select('id,direccion,tipo,cuerpo,plantilla,estado,ts,usuario_id,media_path,media_mime').eq('conversacion_id',convId).order('ts',{ascending:false}).limit(40)
+  if(error){el.innerHTML=`<div class="alert alert-red">${_wchEsc(error.message)}</div>`;return}
+  const msgs=(data||[]).slice().reverse()
+  if(!msgs.length){el.innerHTML='<div style="color:var(--muted);font-size:12px;text-align:center;padding:20px">Sin mensajes todavía.</div>';return}
+  const abajo=el.scrollHeight-el.scrollTop-el.clientHeight<40
+  el.innerHTML=msgs.map(m=>{
+    const lado=m.direccion==='in'
+    const hora=new Date(m.ts).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
+    let cuerpo=m.cuerpo?_wchEsc(m.cuerpo):''
+    let media=''
+    if(m.media_path){
+      const mid='wchm_'+m.id
+      media=`<div id="${mid}" style="margin-top:4px"><button class="btn-sm btn-outline" onclick="_wchMedia('${_wchEsc(m.media_path)}','${_wchEsc(m.media_mime||'')}','${mid}')" style="font-size:10.5px">📎 Ver adjunto</button></div>`
+    }
+    return `<div class="wch-msg" data-txt="${_wchEsc((m.cuerpo||'').toLowerCase())}" style="display:flex;${lado?'':'justify-content:flex-end;'}margin-bottom:7px">
+      <div style="max-width:82%;background:${lado?'rgba(255,255,255,.06)':'rgba(34,197,94,.14)'};border:1px solid var(--border);border-radius:10px;padding:7px 10px">
+        <div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">${lado?'📥 Cliente':'📤 '+(m.usuario_id?'Humano':'Auto')}${m.plantilla?' · 📋':''} · ${hora}${m.estado?' · '+_wchEsc(m.estado):''}</div>
+        <div style="font-size:12.5px;white-space:pre-wrap">${cuerpo||(media?'':'<em style="color:var(--muted)">['+_wchEsc(m.tipo)+']</em>')}</div>${media}
+      </div></div>`
+  }).join('')
+  const b=(document.getElementById('wch-chatbusca-'+convId)||{}).value||''
+  if(b)_wchChatFiltrar(convId,b)
+  if(abajo)el.scrollTop=el.scrollHeight
+}
+window._wchChatFiltrar=function(convId,q){
+  const el=document.getElementById('wch-hilo-'+convId);if(!el)return
+  const b=(q||'').trim().toLowerCase()
+  el.querySelectorAll('.wch-msg').forEach(d=>{d.style.display=!b||d.getAttribute('data-txt').includes(b)?'':'none'})
+}
+// Adjuntos: la media YA está en el bucket wa-media (el webhook la bajó a tiempo) → signed URL de 5 min
+window._wchMedia=async function(path,mime,contId){
+  const cont=document.getElementById(contId);if(!cont)return
+  try{
+    const{data,error}=await sb.storage.from('wa-media').createSignedUrl(path,300)
+    if(error||!data||!data.signedUrl)throw new Error(error&&error.message||'sin URL')
+    const url=data.signedUrl
+    if((mime||'').startsWith('image/'))cont.innerHTML=`<a href="${url}" target="_blank" rel="noopener"><img src="${url}" style="max-width:200px;max-height:200px;border-radius:8px;border:1px solid var(--border)"></a>`
+    else if((mime||'').startsWith('audio/'))cont.innerHTML=`<audio controls src="${url}" style="max-width:230px;height:32px"></audio>`
+    else cont.innerHTML=`<a href="${url}" target="_blank" rel="noopener" class="btn-sm btn-outline" style="font-size:10.5px">⬇️ Abrir adjunto</a>`
+  }catch(e){cont.innerHTML=`<span style="color:#ef4444;font-size:10.5px">No pude abrir el adjunto: ${_wchEsc(e.message)}</span>`}
+}
+
+// ── ETIQUETAR (movimiento en vivo + reversa si el guardado silencioso falla) ──
+window._wchEtiquetar=async function(convId,val){
+  const st=window._wchState
+  const c=st.convs.find(x=>x.id===convId)
+  const antes=c?{etiqueta:c.etiqueta,etiqueta_en:c.etiqueta_en}:null
+  const nueva=val==='~quitar'||!val?null:val
+  const patch=nueva?{etiqueta:nueva,etiqueta_en:new Date().toISOString()}:{etiqueta:null,etiqueta_en:null}
+  if(c){Object.assign(c,patch);c._est=_wchDerivar(c);_wchAplicarVista();_wchListaRender();_wchFranjaContadores()}
+  try{
+    const{data,error}=await sb.from('conversaciones').update(patch).eq('id',convId).select('id')
+    if(error||!data||!data.length)throw new Error(error&&error.message||'la base no confirmó el cambio (¿RLS?)')
+  }catch(e){
+    if(c&&antes){Object.assign(c,antes);c._est=_wchDerivar(c);_wchAplicarVista();_wchListaRender();_wchFranjaContadores()}
+    alert('❌ La etiqueta NO se guardó: '+e.message)
+  }
+}
+
+// ── SUGERENCIAS al abrir el chat: reintro → plantilla Meta (+24h) → texto de Textos (–24h) ──
+async function _wchSugerencias(convId,c){
+  const el=document.getElementById('wch-sug-'+convId);if(!el)return
+  const st=window._wchState
+  const abierta=c&&c.ventana_24h_hasta&&_wchHrs(c.ventana_24h_hasta)<0
+  let html=''
+  try{
+    if(c&&c.requiere_reintro){
+      const{data:re}=await sb.from('wa_plantillas').select('nombre,variables').ilike('nombre','nexo_reintro%').eq('estado','APPROVED').limit(3)
+      if(re&&re.length){
+        html+=`<div style="background:rgba(245,158,11,.1);border:1px solid #f59e0b;border-radius:8px;padding:7px 9px;margin-bottom:6px">
+          <div style="font-size:10.5px;color:#f59e0b;font-weight:800;margin-bottom:4px">🔄 Número cambió — saluda de nuevo primero:</div>
+          ${re.map(t=>`<button class="btn-sm btn-outline" style="font-size:10.5px;margin-right:4px" onclick="_wchEnviarTpl('${convId}','${_wchTel(c.telefono)}','${_wchEsc(t.nombre)}',true)">📨 ${_wchEsc(t.nombre)}</button>`).join('')}
+        </div>`
+      }else{
+        html+=`<div style="background:rgba(245,158,11,.1);border:1px solid #f59e0b;border-radius:8px;padding:7px 9px;margin-bottom:6px;font-size:10.5px;color:#f59e0b">🔄 <strong>Número cambió</strong> — saluda de nuevo. (No hay plantilla nexo_reintro APROBADA todavía; usa 📱 y preséntate primero.)</div>`
+      }
+    }
+    if(!abierta){
+      const secTpl=st.sec==='entrantes'?null:st.sec
+      let q=sb.from('wa_plantillas').select('nombre,variables').eq('estado','APPROVED').limit(4)
+      if(secTpl)q=q.eq('seccion',secTpl)
+      const{data:tpls}=await q
+      if(tpls&&tpls.length){
+        html+=`<div style="font-size:10.5px;color:var(--muted);margin-bottom:3px">🔒 Fuera de ventana — envía una plantilla aprobada:</div><div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px">${tpls.map(t=>`<button class="btn-sm btn-outline" style="font-size:10.5px" onclick="_wchEnviarTpl('${convId}','${_wchTel(c&&c.telefono)}','${_wchEsc(t.nombre)}')">📋 ${_wchEsc(t.nombre)}</button>`).join('')}</div>`
+      }
+    }else{
+      const secTxt={novedades:'novedades',reservado:'confirmacion',cancelados:'cancelados',reclame:'reclame',entrantes:'confirmacion'}[st.sec]||'confirmacion'
+      const{data:txs}=await sb.from('app_mensajes').select('etiqueta,texto').eq('seccion',secTxt).neq('activo',false).order('idx').limit(3)
+      if(txs&&txs.length){
+        html+=`<div style="font-size:10.5px;color:var(--muted);margin-bottom:3px">🟢 Ventana abierta — un clic pega el texto abajo (edítalo y envía):</div><div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px">${txs.map((t,i)=>`<button class="btn-sm btn-outline" style="font-size:10.5px" data-wchtx="${_wchEsc(t.texto)}" onclick="var inp=document.getElementById('wch-envio-${convId}');inp.value=this.getAttribute('data-wchtx').replace(/\\[NOMBRE\\]/g,'${_wchEsc((c&&c.nombre)||'')}');inp.focus()">✏️ ${_wchEsc(t.etiqueta||('Texto '+(i+1)))}</button>`).join('')}</div>`
+      }
+    }
+  }catch(e){console.warn('[wch sugerencias]',e)}
+  el.innerHTML=html
+}
+
+// ── ENVÍO POR API (wa-send abierta a auxiliares en send_text/send_template) ──
+async function _wchNumeroDe(sec){
+  const st=window._wchState
+  if(!st.numsCache){
+    const{data}=await sb.from('wa_numeros').select('id,seccion,secciones,estado,modo,phone_number_id').eq('estado','activo').eq('modo','api')
+    st.numsCache=data||[]
+  }
+  const s=sec==='entrantes'?null:sec
+  let n=s?st.numsCache.find(x=>(Array.isArray(x.secciones)&&x.secciones.includes(s))||x.seccion===s):null
+  if(!n)n=st.numsCache.find(x=>x.phone_number_id)
+  return n||null
+}
+window._wchEnviarTexto=async function(convId,tel){
+  const inp=document.getElementById('wch-envio-'+convId),out=document.getElementById('wch-enviomsg-'+convId)
+  const texto=(inp&&inp.value||'').trim()
+  if(!texto)return
+  const num=await _wchNumeroDe(window._wchState.sec)
+  if(!num){if(out)out.innerHTML='<span style="color:#ef4444">No hay número API activo para esta sección.</span>';return}
+  if(out)out.innerHTML='<span style="color:var(--muted)">Enviando…</span>'
+  try{
+    const{data:res,error}=await sb.functions.invoke('wa-send',{body:{action:'send_text',numero_id:num.id,telefono:tel,texto}})
+    if(error||!res||!res.ok)throw new Error((res&&res.error)||(error&&error.message)||'falló')
+    if(inp)inp.value=''
+    if(out)out.innerHTML='<span style="color:#22c55e">✅ Enviado</span>'
+    _wchHiloPintar(convId)
+    const c=window._wchState.convs.find(x=>x.id===convId)
+    if(c){c.ultimo_msg_en=new Date().toISOString();c.ultimo_msg_dir='out';c._lastOutHum=true;c._est=_wchDerivar(c);_wchAplicarVista();_wchListaRender();_wchFranjaContadores()}
+  }catch(e){
+    let m=e.message||String(e)
+    if(/24|window|ventana/i.test(m))m+=' — la ventana de 24h está cerrada: usa una plantilla.'
+    if(/Solo admin/i.test(m))m+=' — hay que desplegar la wa-send actualizada (entregada con este cambio).'
+    if(out)out.innerHTML='<span style="color:#ef4444">❌ '+_wchEsc(m)+'</span>'
+  }
+}
+window._wchEnviarTpl=async function(convId,tel,nombreTpl,esReintro){
+  const out=document.getElementById('wch-enviomsg-'+convId)
+  const num=await _wchNumeroDe(window._wchState.sec)
+  if(!num){if(out)out.innerHTML='<span style="color:#ef4444">No hay número API activo para esta sección.</span>';return}
+  const c=window._wchState.convs.find(x=>x.id===convId)
+  let parametros
+  try{
+    const{data:tp}=await sb.from('wa_plantillas').select('variables').eq('nombre',nombreTpl).limit(1)
+    const vars=(tp&&tp[0]&&Array.isArray(tp[0].variables))?tp[0].variables:[]
+    parametros=vars.map(tag=>{
+      if(tag==='[NOMBRE]')return (c&&c.nombre)||'cliente'
+      const v=prompt('Valor para '+tag+' de la plantilla '+nombreTpl+':')
+      return v==null?'':v
+    })
+  }catch(_){parametros=[]}
+  if(!confirm('📨 Enviar plantilla:\n\n'+nombreTpl+'\nA: '+((c&&c.nombre)||'')+' ('+tel+')\n\n¿Enviar?'))return
+  if(out)out.innerHTML='<span style="color:var(--muted)">Enviando plantilla…</span>'
+  try{
+    const{data:res,error}=await sb.functions.invoke('wa-send',{body:{action:'send_template',numero_id:num.id,telefono:tel,template_name:nombreTpl,parametros}})
+    if(error||!res||!res.ok)throw new Error((res&&res.error)||(error&&error.message)||'falló')
+    if(out)out.innerHTML='<span style="color:#22c55e">✅ Plantilla enviada</span>'
+    if(esReintro&&convId){ // reintro cumplida → apagar bandera y resetear ventana heredada del número viejo
+      try{await sb.from('conversaciones').update({requiere_reintro:false,ventana_24h_hasta:null}).eq('id',convId).select('id')}catch(_){}
+      if(c){c.requiere_reintro=false;c.ventana_24h_hasta=null;_wchSugerencias(convId,c);_wchVentanaPintar(convId,c)}
+      _wchListaRender()
+    }
+    _wchHiloPintar(convId)
+    if(c){c.ultimo_msg_en=new Date().toISOString();c.ultimo_msg_dir='out';c._lastOutHum=true;c._est=_wchDerivar(c);_wchAplicarVista();_wchListaRender();_wchFranjaContadores()}
+  }catch(e){if(out)out.innerHTML='<span style="color:#ef4444">❌ '+_wchEsc(e.message||String(e))+'</span>'}
+}
+
+// ── 🏷 EDITOR DE TUBERÍA (card en Mensajería, solo admin) ──
+window._wchEditorRender=async function(){
+  const el=document.getElementById('wam-etiquetas');if(!el)return
+  const cat=await _wchCatLoad(true)
+  const tab=window._wchEdTab||'g'
+  const tabs=[['g','🌐 Globales'],...WCH_SECS.map(s=>[s.k,s.e+' '+s.n])]
+  let html=`<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px">${tabs.map(([k,n])=>`<button class="btn-sm ${tab===k?'btn-primary':'btn-outline'}" style="font-size:11px" onclick="window._wchEdTab='${k}';_wchEditorRender()">${n}</button>`).join('')}</div>`
+  if(tab==='g'){
+    html+=`<div style="font-size:11px;color:var(--muted);margin-bottom:8px">Los 4 <strong>rieles automáticos</strong> los mueve el sistema (orden fijo, solo cambias nombre/emoji/color). Las <strong>globales</strong> aparecen en TODAS las secciones; muévelas con ⬆️⬇️. Renombrar nunca toca los datos: cada etiqueta vive por su ID.</div>`
+    html+=Object.keys(WCH_RIELES_DEF).map(k=>{const r=cat.rieles[k];return `<div style="display:flex;gap:6px;align-items:center;background:var(--card2);border:1px solid ${r.c};border-radius:8px;padding:6px 9px;margin-bottom:5px">
+      <span style="font-size:10px;color:var(--muted);width:52px">riel fijo</span>
+      <input value="${_wchEsc(r.e)}" style="width:36px;text-align:center;font-size:12px" onchange="_wchEdRiel('${k}','e',this.value)">
+      <input value="${_wchEsc(r.n)}" style="flex:1;font-size:12px" onchange="_wchEdRiel('${k}','n',this.value)">
+      <input type="color" value="${r.c}" style="width:32px;height:26px;border:none;background:none;cursor:pointer" onchange="_wchEdRiel('${k}','c',this.value)">
+    </div>`}).join('')
+    html+=_wchEdLista(cat.globales,'g')
+  }else{
+    html+=`<div style="font-size:11px;color:var(--muted);margin-bottom:8px">Etiquetas SOLO de esta sección (aparecen después de las globales, con borde punteado).</div>`
+    html+=_wchEdLista(cat.secciones[tab]||[],tab)
+  }
+  html+=`<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center">
+    <button class="btn-sm btn-primary" onclick="_wchEdAgregar('${tab}')">➕ Nueva etiqueta</button>
+    <span id="wch-ed-msg" style="font-size:11px"></span>
+  </div>`
+  el.innerHTML=html
+}
+function _wchEdLista(arr,ambito){
+  const vivas=arr.filter(x=>!x.arch)
+  if(!vivas.length)return '<div style="font-size:11px;color:var(--muted);padding:6px 0">Sin etiquetas aún.</div>'
+  return vivas.map((x,i)=>`<div style="display:flex;gap:6px;align-items:center;background:var(--card2);border:1px dashed var(--border);border-radius:8px;padding:6px 9px;margin-bottom:5px">
+    <span style="display:flex;flex-direction:column;gap:1px">
+      <button style="background:none;border:none;cursor:pointer;font-size:9px;color:var(--muted);padding:0" ${i===0?'disabled':''} onclick="_wchEdMover('${ambito}','${x.id}',-1)">⬆️</button>
+      <button style="background:none;border:none;cursor:pointer;font-size:9px;color:var(--muted);padding:0" ${i===vivas.length-1?'disabled':''} onclick="_wchEdMover('${ambito}','${x.id}',1)">⬇️</button>
+    </span>
+    <input value="${_wchEsc(x.e||'')}" style="width:36px;text-align:center;font-size:12px" onchange="_wchEdCampo('${ambito}','${x.id}','e',this.value)">
+    <input value="${_wchEsc(x.n)}" style="flex:1;font-size:12px" onchange="_wchEdCampo('${ambito}','${x.id}','n',this.value)">
+    <input type="color" value="${x.c||'#888888'}" style="width:32px;height:26px;border:none;background:none;cursor:pointer" onchange="_wchEdCampo('${ambito}','${x.id}','c',this.value)">
+    <label style="font-size:10px;color:var(--muted);display:flex;gap:3px;align-items:center;white-space:nowrap" title="Al ponerla, la conversación sale de la vista por defecto"><input type="checkbox" ${x.cierre?'checked':''} onchange="_wchEdCampo('${ambito}','${x.id}','cierre',this.checked)"> cierra</label>
+    <button class="btn-sm btn-red" style="font-size:10px;padding:2px 7px" onclick="_wchEdBorrar('${ambito}','${x.id}')">🗑️</button>
+  </div>`).join('')
+}
+function _wchEdArr(ambito){const cat=window._wchState.cat;return ambito==='g'?cat.globales:cat.secciones[ambito]}
+window._wchEdRiel=async function(k,campo,v){window._wchState.cat.rieles[k][campo]=v;await _wchEdGuardar()}
+window._wchEdCampo=async function(ambito,id,campo,v){const x=_wchEdArr(ambito).find(y=>y.id===id);if(!x)return;x[campo]=v;await _wchEdGuardar()}
+window._wchEdMover=async function(ambito,id,dir){
+  const arr=_wchEdArr(ambito),vivas=arr.filter(x=>!x.arch)
+  const i=vivas.findIndex(x=>x.id===id),j=i+dir
+  if(i<0||j<0||j>=vivas.length)return
+  const ia=arr.indexOf(vivas[i]),ja=arr.indexOf(vivas[j])
+  ;[arr[ia],arr[ja]]=[arr[ja],arr[ia]]
+  await _wchEdGuardar();_wchEditorRender()
+}
+window._wchEdAgregar=async function(ambito){
+  const n=prompt('Nombre de la nueva etiqueta:');if(!n)return
+  _wchEdArr(ambito==='g'?'g':ambito).push({id:_wchId(ambito==='g'?'g':'s'),n:n.trim(),e:'🏷️',c:'#8b5cf6',cierre:false,arch:false})
+  await _wchEdGuardar();_wchEditorRender()
+}
+window._wchEdBorrar=async function(ambito,id){
+  // ID inmutable: nunca se destruye — se ARCHIVA. Si hay conversaciones puestas, se ofrece moverlas.
+  let cnt=0
+  try{const{count}=await sb.from('conversaciones').select('id',{count:'exact',head:true}).eq('etiqueta',id);cnt=count||0}catch(_){}
+  const x=_wchEdArr(ambito).find(y=>y.id===id);if(!x)return
+  if(cnt>0){
+    const otras=_wchEtqsDe(ambito==='g'?'novedades':ambito).filter(y=>y.id!==id)
+    const op=prompt(`⚠️ "${x.n}" tiene ${cnt} conversación(es).\n\n¿A cuál etiqueta las muevo? Escribe el número, o 0 para dejarlas SIN etiqueta (vuelven al riel automático):\n\n0) Sin etiqueta\n${otras.map((o,i)=>(i+1)+') '+o.n).join('\n')}`)
+    if(op==null)return
+    const idx=parseInt(op)
+    const destino=idx>0&&otras[idx-1]?otras[idx-1].id:null
+    const patch=destino?{etiqueta:destino,etiqueta_en:new Date().toISOString()}:{etiqueta:null,etiqueta_en:null}
+    const{data,error}=await sb.from('conversaciones').update(patch).eq('etiqueta',id).select('id')
+    if(error){alert('❌ No pude mover las conversaciones: '+error.message);return}
+    if(!data||data.length!==cnt)console.warn('[wch] movidas',data&&data.length,'de',cnt)
+  }else if(!confirm(`¿Archivar la etiqueta "${x.n}"? (No se destruye: lo histórico la seguirá mostrando con 🔒)`))return
+  x.arch=true
+  await _wchEdGuardar();_wchEditorRender()
+}
+async function _wchEdGuardar(){
+  const r=await _wchCatSave()
+  const m=document.getElementById('wch-ed-msg')
+  if(m)m.innerHTML=r.ok?'<span style="color:#22c55e">✅ Guardado y verificado</span>':'<span style="color:#ef4444">❌ NO se guardó: '+_wchEsc(r.msg)+'</span>'
+  if(!r.ok)await _wchCatLoad(true) // recarga lo real de la nube para no mostrar un catálogo que miente
+}
+
+})()
+// ═══ FIN CENTRO DE CHATS ═══
 
 </script>
 </body>

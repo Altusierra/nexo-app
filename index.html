@@ -17669,6 +17669,7 @@ async function pageAdminMensajeria(c){
       </div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:10px">El Token y el App Secret son de solo-escritura: se guardan pero nunca se muestran. Deja el campo vacío para conservar el valor actual.</div>
       <div id="wam-apps"><div class="loading">Cargando...</div></div>
+      <div id="wam-webhook"></div>
     </div>`
   cargarWaMensajeria()
 }
@@ -17726,24 +17727,29 @@ function renderWaApps(){
   const el=document.getElementById('wam-apps')
   if(!el)return
   const{apps}=window._waState||{apps:[]}
+  // Bloque FIJO del webhook (igual para todas las apps): abajo, fuera de las tarjetas
+  const wh=document.getElementById('wam-webhook')
+  if(wh){
+    const vt=(apps[0]||{}).verify_token||''
+    const urlWh=SURL+'/functions/v1/wa-webhook'
+    wh.innerHTML=`<div style="background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.35);border-radius:8px;padding:10px 12px;margin-top:14px">
+      <div style="font-size:11px;font-weight:800;color:var(--muted);margin-bottom:6px">🔗 Datos FIJOS del Webhook — son los mismos para TODAS las apps. Se pegan UNA vez por app en Meta → WhatsApp → Configuración → Webhook.</div>
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
+        <input readonly value="${_waEsc(urlWh)}" style="flex:1;min-width:220px;font-size:11.5px" onclick="this.select()">
+        <button class="btn btn-sm" onclick="waCopiar('${_waEsc(urlWh)}',this)">📋 URL</button>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <input readonly value="${_waEsc(vt)}" style="flex:1;min-width:220px;font-size:11.5px" onclick="this.select()">
+        <button class="btn btn-sm" onclick="waCopiar('${_waEsc(vt)}',this)">📋 Verify Token</button>
+      </div>
+    </div>`
+  }
   if(!apps.length){el.innerHTML='<div style="color:var(--muted);font-size:12px">No hay apps. Agrega la primera.</div>';return}
   el.innerHTML=apps.map(a=>`<div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px">
     <div style="font-weight:800;font-size:13px;margin-bottom:10px">🔑 ${_waEsc(a.etiqueta)} ${a.estado!=='activo'?'<span style="color:var(--muted);font-weight:400">(inactiva)</span>':''}</div>
-    <div style="background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.35);border-radius:8px;padding:10px 12px;margin-bottom:10px">
-      <div style="font-size:11px;font-weight:800;color:var(--muted);margin-bottom:6px">🔗 Configuración de Webhook (pegar en Meta → WhatsApp → Configuración → Webhook)</div>
-      <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
-        <input readonly value="${_waEsc(SURL)}/functions/v1/wa-webhook" style="flex:1;min-width:220px;font-size:11.5px" onclick="this.select()">
-        <button class="btn btn-sm" onclick="waCopiar('${_waEsc(SURL)}/functions/v1/wa-webhook',this)">📋 Copiar URL</button>
-      </div>
-      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-        <input readonly value="${_waEsc(a.verify_token||'')}" style="flex:1;min-width:220px;font-size:11.5px" onclick="this.select()">
-        <button class="btn btn-sm" onclick="waCopiar('${_waEsc(a.verify_token||'')}',this)">📋 Copiar Verify Token</button>
-      </div>
-    </div>
-    <div class="form-grid g3" style="margin-bottom:8px">
+    <div class="form-grid g2" style="margin-bottom:8px">
       <div class="fld"><label>Etiqueta</label><input id="waa-et-${a.id}" value="${_waEsc(a.etiqueta)}"></div>
       <div class="fld"><label>App ID</label><input id="waa-ai-${a.id}" value="${_waEsc(a.app_id||'')}"></div>
-      <div class="fld"><label>Verify Token (webhook)</label><input id="waa-vt-${a.id}" value="${_waEsc(a.verify_token||'')}"></div>
     </div>
     <div class="form-grid g2" style="margin-bottom:8px">
       <div class="fld"><label>Token permanente 🔒</label><input type="password" id="waa-tk-${a.id}" value="" placeholder="•••••••• (vacío = no cambiar)" autocomplete="new-password"></div>
@@ -17754,6 +17760,7 @@ function renderWaApps(){
       <div style="flex:1"></div>
       <button class="btn btn-sm" onclick="waVerificarApp('${a.id}')">🔎 Verificar token</button>
       <button class="btn btn-sm" onclick="waGuardarApp('${a.id}')">💾 Guardar</button>
+      <button class="btn btn-sm" style="border-color:var(--red);color:var(--red)" onclick="waEliminarApp('${a.id}')">🗑️</button>
     </div>
     <div id="waa-ver-${a.id}" style="margin-top:8px"></div>
   </div>`).join('')
@@ -17778,7 +17785,7 @@ window.waVerificarApp=async(id)=>{
 window.waGuardarApp=async(id)=>{
   const msg=document.getElementById('wam-msg')
   const g=(p)=>document.getElementById(p+id)?.value?.trim()||''
-  const upd={etiqueta:g('waa-et-'),app_id:g('waa-ai-'),verify_token:g('waa-vt-'),estado:g('waa-es-')||'activo',actualizado_en:new Date().toISOString()}
+  const upd={etiqueta:g('waa-et-'),app_id:g('waa-ai-'),estado:g('waa-es-')||'activo',actualizado_en:new Date().toISOString()} // verify_token NO se toca aquí: es fijo (solo waRegenerarVT)
   if(!upd.etiqueta){if(msg)msg.innerHTML='<div class="alert alert-red">La etiqueta es obligatoria.</div>';return}
   const tk=g('waa-tk-'),sc=g('waa-sc-')
   if(tk)upd.token=tk         // vacío = conservar el actual
@@ -17792,7 +17799,10 @@ window.waGuardarApp=async(id)=>{
 
 window.waAgregarApp=async()=>{
   const msg=document.getElementById('wam-msg')
-  const{error}=await sb.from('wa_apps').insert({etiqueta:'Nueva app',app_id:'PENDIENTE',verify_token:'nexo_wa_'+Math.random().toString(36).slice(2,10),estado:'activo'})
+  // Verify token ÚNICO para todas las apps: hereda el de la primera existente.
+  // Solo se genera uno nuevo si no hay ninguna app todavía.
+  const vtExistente=(((window._waState||{}).apps||[])[0]||{}).verify_token
+  const{error}=await sb.from('wa_apps').insert({etiqueta:'Nueva app',app_id:'PENDIENTE',verify_token:vtExistente||('nexo_wa_'+Math.random().toString(36).slice(2,10)),estado:'activo'})
   if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${_waEsc(error.message)}</div>`;return}
   logAction('wa_app_creada',{}).catch(()=>{})
   cargarWaMensajeria()
@@ -17840,6 +17850,23 @@ window.waAgregarNumero=async()=>{
   const{error}=await sb.from('wa_numeros').insert({etiqueta:'Nuevo número',modo:'respaldo',estado:'dormido',orden})
   if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${_waEsc(error.message)}</div>`;return}
   logAction('wa_numero_creado',{}).catch(()=>{})
+  cargarWaMensajeria()
+}
+
+// Eliminar app: bloqueado si tiene números vinculados (desvincúlalos primero).
+window.waEliminarApp=async(id)=>{
+  const msg=document.getElementById('wam-msg')
+  const a=((window._waState||{}).apps||[]).find(x=>x.id===id)
+  const vinculados=((window._waState||{}).nums||[]).filter(n=>n.wa_app_id===id)
+  if(vinculados.length){
+    if(msg)msg.innerHTML=`<div class="alert alert-amber">⚠️ No se puede eliminar "${_waEsc(a?a.etiqueta:'')}": tiene ${vinculados.length} número(s) vinculado(s) (${vinculados.map(n=>_waEsc(n.etiqueta)).join(', ')}). Cámbialos de app o elimínalos primero.</div>`
+    return
+  }
+  if(!confirm(`¿Eliminar la app "${a?a.etiqueta:''}"?\n\nSe borra su token, secret y verify token. Si Meta aún apunta su webhook aquí, dejará de validar.\n\nEsta acción no se puede deshacer.`))return
+  const{error}=await sb.from('wa_apps').delete().eq('id',id)
+  if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${_waEsc(error.message)}</div>`;return}
+  if(msg)msg.innerHTML='<div class="alert alert-green">✅ App eliminada.</div>'
+  logAction('wa_app_eliminada',{id}).catch(()=>{})
   cargarWaMensajeria()
 }
 

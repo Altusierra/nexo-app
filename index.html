@@ -38815,11 +38815,56 @@ window._wchAudioEliminar=function(convId){
 window._wchAudioEnviar=async function(convId,tel){
   const st=window._wchState
   if(!st.rec||st.rec.fase!=='listo'||!st.rec.blob)return
-  const blob=st.rec.blob,mime=st.rec.mime
+  let blob=st.rec.blob,mime=st.rec.mime
   st.rec=null
   _wchBtnModo(convId)
-  if(blob.size>8*1024*1024){const out=document.getElementById('wch-enviomsg-'+convId);if(out)out.innerHTML='<span style="color:#ef4444">El audio pesa más de 8MB.</span>';return}
-  await _wchEnviarMedia(convId,tel,blob,mime,'nota_de_voz','audio')
+  const out=document.getElementById('wch-enviomsg-'+convId)
+  // FIX 131053: WhatsApp no acepta el formato en que graba el navegador (mp4
+  // fragmentado / webm). Se convierte SIEMPRE a MP3 (audio/mpeg), que Meta sí
+  // soporta y suena en cualquier celular.
+  if(mime!=='audio/mpeg'){
+    try{
+      if(out)out.innerHTML='<span style="color:var(--muted)">Convirtiendo audio…</span>'
+      blob=await _wchAudioAMp3(blob)
+      mime='audio/mpeg'
+    }catch(e){console.warn('[wch mp3] conversión falló, intento con el original:',e&&e.message)}
+  }
+  if(blob.size>8*1024*1024){if(out)out.innerHTML='<span style="color:#ef4444">El audio pesa más de 8MB.</span>';return}
+  await _wchEnviarMedia(convId,tel,blob,mime,'nota_de_voz.mp3','audio')
+}
+// Decodifica lo grabado (mp4/webm/lo que sea) a PCM y lo re-codifica a MP3 64kbps mono.
+// El codificador (lamejs) se carga del CDN UNA sola vez, solo cuando se necesita.
+async function _wchAudioAMp3(blob){
+  if(!window.lamejs){
+    await new Promise((res,rej)=>{
+      const s=document.createElement('script')
+      s.src='https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js'
+      s.onload=res;s.onerror=()=>rej(new Error('no pude cargar el codificador MP3'))
+      document.head.appendChild(s)
+    })
+  }
+  const ab=await blob.arrayBuffer()
+  const ctx=new (window.AudioContext||window.webkitAudioContext)()
+  let audio
+  try{audio=await ctx.decodeAudioData(ab)}
+  finally{try{ctx.close()}catch(_){}}
+  let pcm
+  if(audio.numberOfChannels>1){ // a mono
+    const a=audio.getChannelData(0),b=audio.getChannelData(1)
+    pcm=new Float32Array(a.length)
+    for(let i=0;i<a.length;i++)pcm[i]=(a[i]+b[i])/2
+  }else pcm=audio.getChannelData(0)
+  const samples=new Int16Array(pcm.length)
+  for(let i=0;i<pcm.length;i++){const x=Math.max(-1,Math.min(1,pcm[i]));samples[i]=x<0?x*0x8000:x*0x7FFF}
+  const enc=new lamejs.Mp3Encoder(1,audio.sampleRate,64)
+  const partes=[]
+  for(let i=0;i<samples.length;i+=1152){
+    const c=enc.encodeBuffer(samples.subarray(i,i+1152))
+    if(c.length)partes.push(new Int8Array(c))
+  }
+  const fin=enc.flush()
+  if(fin.length)partes.push(new Int8Array(fin))
+  return new Blob(partes,{type:'audio/mpeg'})
 }
 window._wchArchivoElegido=async function(convId,tel,inp){
   const f=inp.files&&inp.files[0];inp.value=''
@@ -39212,7 +39257,7 @@ async function _wchHiloPintar(convId){
     }
     return `<div class="wch-msg" data-txt="${_wchEsc((m.cuerpo||'').toLowerCase())}" style="display:flex;${lado?'':'justify-content:flex-end;'}margin-bottom:7px">
       <div style="max-width:82%;background:${lado?'#202c33':'#005c4b'};border:none;border-radius:10px;padding:7px 10px;color:#e9edef">
-        <div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">${lado?'📥 Cliente':'📤 '+(m.usuario_id?'Humano':'Auto')}${m.plantilla?' · 📋':''} · ${hora}${m.estado?' · '+(m.estado==='failed'?'<span style="color:#ef4444">failed'+(m.error_detalle?' — '+_wchEsc(m.error_detalle):'')+'</span>':_wchEsc(m.estado)):''}</div>
+        <div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">${lado?'📥 Cliente':'📤 '+(m.usuario_id?'Humano':'Auto')}${m.plantilla?' · 📋':''} · ${hora}${!lado&&m.estado?' '+(m.estado==='failed'?'<span style="color:#ef4444;font-weight:800" title="No se pudo enviar">❗'+(m.error_detalle?' '+_wchEsc(m.error_detalle):'')+'</span>':(m.estado==='read'?'<span style="color:#53bdeb;letter-spacing:-2px" title="Leído">✓✓</span>':((m.estado==='delivered')?'<span style="color:#8696a0;letter-spacing:-2px" title="Entregado">✓✓</span>':((m.estado==='sent'||m.estado==='accepted')?'<span style="color:#8696a0" title="Enviado — aún no le llega">✓</span>':_wchEsc(m.estado))))):''}</div>
         <div style="font-size:12.5px;white-space:pre-wrap">${cuerpo||(media?'':'<em style="color:var(--muted)">['+_wchEsc(m.tipo)+']</em>')}</div>${media}
       </div></div>`
   }).join('')

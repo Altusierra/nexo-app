@@ -39128,8 +39128,8 @@ window._wchWaMe=async function(convId,tel,conTexto){
   if(conTexto){
     try{
       const st=window._wchState
-      const secTxt={novedades:'novedades',reservado:'confirmacion',cancelados:'cancelados',reclame:'reclame',entrantes:'confirmacion'}[st.sec]||'confirmacion'
-      const{data:tx}=await sb.from('app_mensajes').select('texto').eq('seccion',secTxt).neq('activo',false).order('idx').limit(1)
+      const secsTxt=WCH_SEC_TEXTOS[st.sec]||[]
+      const{data:tx}=secsTxt.length?await sb.from('app_mensajes').select('texto').in('seccion',secsTxt).neq('activo',false).order('seccion').order('idx').limit(1):{data:[]}
       const conv=st.convs.find(c=>c.id===convId)
       let msg=(tx&&tx[0]&&tx[0].texto)||''
       if(msg){msg=msg.replace(/\[NOMBRE\]/g,(conv&&conv.nombre)||'').trim();navigator.clipboard.writeText(msg).catch(()=>{});url+='?text='+encodeURIComponent(msg)}
@@ -39154,12 +39154,16 @@ window._wchChatAbrir=async function(convId){
   div.id='wch-chat-'+convId
   const anchoCh=Math.min(440,window.innerWidth-24) // todas las conversaciones APILADAS en el mismo sitio; el dock lateral las cambia
   _wchM1Izquierda() // primero el Centro se acomoda a la izquierda...
-  let _posCh='right:16px;top:4vh'
-  try{ // ...y la conversación se pega a su ladito derecho (como una sola unidad)
+  let _posCh='right:16px;top:4vh',_altoCh='min(86vh,720px)'
+  try{ // ...y la conversación se pega a su ladito derecho, con LA MISMA altura del Centro
     const _m1=document.getElementById('wch-modal')
-    if(_m1){const _r=_m1.getBoundingClientRect();_posCh='left:'+Math.min(_r.right+12,window.innerWidth-anchoCh-8)+'px;top:'+Math.max(8,_r.top)+'px'}
+    if(_m1){
+      const _r=_m1.getBoundingClientRect()
+      _posCh='left:'+Math.min(_r.right+12,window.innerWidth-anchoCh-8)+'px;top:'+Math.max(8,_r.top)+'px'
+      _altoCh=Math.round(_r.height)+'px' // mismo borde superior e inferior que la ventana 1
+    }
   }catch(_){}
-  div.style.cssText='position:fixed;z-index:'+(++window._wchZ)+';width:'+anchoCh+'px;height:min(86vh,720px);'+_posCh
+  div.style.cssText='position:fixed;z-index:'+(++window._wchZ)+';width:'+anchoCh+'px;height:'+_altoCh+';'+_posCh
   const tel=c?_wchTel(c.telefono):''
   const etqs=_wchEtqsDe(st.sec)
   const etqActual=c&&c.etiqueta&&c.etiqueta!==WCH_SELLO_WAME?c.etiqueta:''
@@ -39300,6 +39304,24 @@ window._wchEtiquetar=async function(convId,val){
   }
 }
 
+// Qué secciones de Textos/Mensajes le sirven a cada pestaña (coherencia):
+// reservado bebe de sus DOS fuentes reales (confirmación y PSF); entrantes tiene
+// sección propia (el cliente escribió primero → saludos de bienvenida, no
+// mensajes de confirmación); novedades va por protocolo de cada tipo.
+const WCH_SEC_TEXTOS={novedades:['novedades'],reservado:['confirmacion','psf'],cancelados:['cancelados'],reclame:['reclame'],entrantes:['entrantes']}
+// ➕ (solo admin) Crea la sección Entrantes en Textos/Mensajes con un clic
+window._wchEntrantesCrear=async function(convId){
+  try{
+    const{data:d1,error:e1}=await sb.from('app_mensajes_config').upsert({seccion:'entrantes',nombre:'📥 Entrantes (escriben primero)',cuota_diaria:2},{onConflict:'seccion'}).select('seccion')
+    if(e1||!d1||!d1.length)throw new Error((e1&&e1.message)||'config no confirmó')
+    const{error:e2}=await sb.from('app_mensajes').upsert({seccion:'entrantes',idx:0,etiqueta:'Saludo de bienvenida',texto:'¡Hola! 🙌 Gracias por escribirnos. Cuéntanos, ¿en qué te podemos ayudar hoy?',activo:true},{onConflict:'seccion,idx'})
+    if(e2)throw new Error(e2.message)
+    waToast('✅ Sección Entrantes creada. Edita sus textos en Textos / Mensajes.','ok')
+    const c=window._wchState.convs.find(x=>x.id===convId)
+    _wchSugerencias(convId,c)
+  }catch(e){alert('❌ No pude crear la sección: '+(e.message||e))}
+}
+
 // ── SUGERENCIAS al abrir el chat: reintro → plantilla Meta (+24h) → texto de Textos (–24h) ──
 async function _wchSugerencias(convId,c){
   const el=document.getElementById('wch-sug-'+convId);if(!el)return
@@ -39327,10 +39349,16 @@ async function _wchSugerencias(convId,c){
         html+=`<div style="font-size:10.5px;color:var(--muted);margin-bottom:3px">🔒 Fuera de ventana — envía una plantilla aprobada:</div><div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px">${tpls.map(t=>`<button class="btn-sm btn-outline" style="font-size:10.5px" onclick="_wchEnviarTpl('${convId}','${_wchTel(c&&c.telefono)}','${_wchEsc(t.nombre)}')">📋 ${_wchEsc(t.nombre)}</button>`).join('')}</div>`
       }
     }else{
-      const secTxt={novedades:'novedades',reservado:'confirmacion',cancelados:'cancelados',reclame:'reclame',entrantes:'confirmacion'}[st.sec]||'confirmacion'
-      const{data:txs}=await sb.from('app_mensajes').select('etiqueta,texto').eq('seccion',secTxt).neq('activo',false).order('idx').limit(3)
+      const secsTxt=WCH_SEC_TEXTOS[st.sec]||[]
+      const{data:txs}=secsTxt.length?await sb.from('app_mensajes').select('seccion,etiqueta,texto').in('seccion',secsTxt).neq('activo',false).order('seccion').order('idx').limit(4):{data:[]}
       if(txs&&txs.length){
         html+=`<div style="font-size:10.5px;color:var(--muted);margin-bottom:3px">🟢 Ventana abierta — un clic pega el texto abajo (edítalo y envía):</div><div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px">${txs.map((t,i)=>`<button class="btn-sm btn-outline" style="font-size:10.5px" data-wchtx="${_wchEsc(t.texto)}" onclick="var inp=document.getElementById('wch-envio-${convId}');inp.value=this.getAttribute('data-wchtx').replace(/\\[NOMBRE\\]/g,'${_wchEsc((c&&c.nombre)||'')}');inp.focus()">✏️ ${_wchEsc(t.etiqueta||('Texto '+(i+1)))}</button>`).join('')}</div>`
+      }else if(st.sec==='entrantes'){
+        html+=`<div style="background:rgba(139,92,246,.08);border:1px dashed var(--border);border-radius:8px;padding:7px 9px;margin-bottom:6px;font-size:10.5px;color:var(--muted)">📥 Este cliente <strong style="color:var(--text)">te escribió primero</strong>. Aún no hay textos de bienvenida para Entrantes${(typeof me!=='undefined'&&me&&me.rol==='admin')?` — <button class="btn-sm btn-outline" style="font-size:10px" onclick="_wchEntrantesCrear('${convId}')">➕ Crear sección Entrantes</button> y edítalos en Textos / Mensajes`:' (pídele al admin crearlos en Textos / Mensajes)'}. Mientras tanto, escribe libre: la ventana está abierta 🟢.</div>`
+      }else if(st.sec==='novedades'){
+        html+=`<div style="font-size:10.5px;color:var(--muted);margin-bottom:4px">🔔 Los mensajes de Novedades salen por el <strong style="color:var(--text)">protocolo de cada tipo</strong> desde la cola de Novedades. Aquí puedes escribir libre (ventana 🟢).</div>`
+      }else{
+        html+=`<div style="font-size:10.5px;color:var(--muted);margin-bottom:4px">✏️ No hay textos activos de esta sección en Textos / Mensajes. Escribe libre (ventana 🟢).</div>`
       }
     }
   }catch(e){console.warn('[wch sugerencias]',e)}

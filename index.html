@@ -14206,7 +14206,8 @@ window._colaDespachar=async()=>{
   if(!m)return
   const proto=NOV_PROTO[m.cat.idx]
   if(!proto||!proto.msg){alert('Esta novedad no tiene protocolo con mensaje. No hay plantilla que despachar.');return}
-  const plantilla=('nexo_novedades_'+_waTplSlug(m.cat.tipo)+'_v1').slice(0,512)
+  await _waTplNombresCargar() // ✏️ sobrenombres
+  const plantilla=_waTplNombre(('nexo_novedades_'+_waTplSlug(m.cat.tipo)+'_v1').slice(0,512))
   const conv=_waTplConvertir(proto.msg)
   const parametros=conv.vars.map(tag=>_waValorReal(tag,m))
   const telLimpio=String(m.tel||'').replace(/\D/g,'')
@@ -17632,7 +17633,7 @@ async function cargarTextosAdmin(){
   const _waSecDe={confirmacion:'reservado',psf:'reservado',cancelados:'cancelados',reclame:'reclame'}
   const _waChipTpl=(sec,etiqueta,idx,texto,footer,boton)=>{
     if(typeof _waTplSlug!=='function')return ''
-    const nombre='nexo_'+(_waSecDe[sec]||sec)+'_'+_waTplSlug(etiqueta||('variante_'+idx))+'_v1'
+    const nombre=_waTplNombre('nexo_'+(_waSecDe[sec]||sec)+'_'+_waTplSlug(etiqueta||('variante_'+idx))+'_v1') // ✏️ respeta el nombre manual
     return _waChipMulti(nombre,texto,(_waSecDe[sec]||sec),footer,boton)
   }
   try{
@@ -18107,11 +18108,12 @@ window.cargarWaPlantillasCard=async()=>{
   el.innerHTML='<div class="loading">Cargando textos...</div>'
   try{
     const fuente=await _waTplFuente(n.seccion)
+    await _waTplNombresCargar() // ✏️ sobrenombres
     const{data:ya}=await sb.from('wa_plantillas').select('nombre,estado').eq('waba_id',n.waba_id)
     const yaMap={};(ya||[]).forEach(p=>yaMap[p.nombre]=p.estado)
     const items=fuente.map(t=>{
       const conv=_waTplConvertir(t.texto)
-      const nombre=('nexo_'+n.seccion+'_'+_waTplSlug(t.etiqueta)+'_v1').slice(0,512)
+      const nombre=_waTplNombre(('nexo_'+n.seccion+'_'+_waTplSlug(t.etiqueta)+'_v1').slice(0,512))
       const bordeVar=/^\{\{\d+\}\}/.test(conv.cuerpo.trim())||/\{\{\d+\}\}$/.test(conv.cuerpo.trim())
       return{...t,conv,nombre,estadoMeta:yaMap[nombre]||null,bordeVar}
     })
@@ -18257,6 +18259,7 @@ async function waEncolarSeccionAuto(seccion,itemsRaw){
 // y wa-dispatch (cron) valida plantilla aprobada, número y switches al enviar.
 window._waEncolando=false
 async function waEncolarNovedadesAuto(items){
+  try{await _waTplNombresCargar()}catch(_){} // ✏️ sobrenombres antes de encolar
   if(window._waEncolando)return
   window._waEncolando=true
   try{
@@ -18279,7 +18282,7 @@ async function waEncolarNovedadesAuto(items){
       if(!proto||!proto.msg)continue
       const telLimpio=String(m.tel||'').replace(/\D/g,'')
       if(telLimpio.length<10)continue
-      const plantilla=('nexo_novedades_'+_waTplSlug(m.cat.tipo)+'_v1').slice(0,512)
+      const plantilla=_waTplNombre(('nexo_novedades_'+_waTplSlug(m.cat.tipo)+'_v1').slice(0,512)) // ✏️ sobrenombres
       if(autoTpls&&!autoTpls.has(plantilla))continue
       const clave=telLimpio+'|'+plantilla
       if(window._waEncoladoHoy.set.has(clave))continue // ya intentado en esta sesión
@@ -18314,9 +18317,85 @@ async function _waChipCargar(){
     ])
     const est={};(tpls||[]).forEach(t=>{(est[t.nombre]=est[t.nombre]||{})[t.waba_id]=t.estado})
     window._waChipData={estados:est,numeros:(nums||[]).filter(n=>n.phone_number_id&&n.waba_id)}
+    await _waTplNombresCargar(true) // ✏️ sobrenombres al día antes de pintar las cards
   }catch(_){window._waChipData={estados:{},numeros:[]}}
 }
 window._waTplTextos=window._waTplTextos||{}
+
+// ── ✏️ NOMBRE DE PLANTILLA EDITABLE (27jul26) ────────────────────────────────
+// El nombre normal lo calcula NEXO solo (sección + etiqueta). Cuando Meta
+// RECHAZA una plantilla, su nombre queda quemado: no deja reeditarla ni
+// reusarlo. Por eso aquí se puede poner un nombre propio (ej. terminado en _v2)
+// que MANDA sobre el automático en TODOS los flujos: chip de aprobación,
+// ↻ reenviar, visor de prueba, cola del cron y despacho manual.
+// REGLA: solo se renombra lo que Meta NO conoce todavía o ya rechazó.
+//   🔒 aprobada  → bloqueado (los envíos la buscan por ese nombre)
+//   🔒 en revisión → bloqueado (dejaría la solicitud huérfana)
+//   ✏️ rechazada / sin enviar → editable
+// Persistencia: clave 'wa_tpl_nombres' de config (mapa auto → manual), con
+// verificación de ida y vuelta (si RLS se lo traga, se avisa en rojo).
+window._waTplNombres=window._waTplNombres||null
+async function _waTplNombresCargar(force){
+  if(window._waTplNombres&&!force)return window._waTplNombres
+  let m={}
+  try{const raw=await getConfig('wa_tpl_nombres');if(raw){const o=JSON.parse(raw);if(o&&typeof o==='object')m=o}}catch(_){}
+  window._waTplNombres=m
+  return m
+}
+// auto → el que de verdad se usa
+function _waTplNombre(auto){
+  const m=window._waTplNombres||{}
+  const v=m[auto]
+  return (typeof v==='string'&&v)?v:auto
+}
+// manual → el automático del que salió (para deducir la sección al reenviar)
+function _waTplNombreAuto(usado){
+  const m=window._waTplNombres||{}
+  for(const k of Object.keys(m)){if(m[k]===usado)return k}
+  return usado
+}
+window.waTplRenombrar=async(auto)=>{
+  await _waTplNombresCargar()
+  const actual=_waTplNombre(auto)
+  const nuevo=prompt(
+    'Nombre de la plantilla en Meta\n\n'
+    +'Nombre automático de NEXO:\n'+auto+'\n\n'
+    +'Reglas de Meta: solo minúsculas, números y guion bajo (sin tildes, sin ñ, sin espacios).\n'
+    +'Truco: si Meta la rechazó, cambia el final a _v2 (ese nombre ya no se puede reusar).\n\n'
+    +'Deja el campo VACÍO para volver al nombre automático.',
+    actual)
+  if(nuevo===null)return
+  const limpio=String(nuevo).trim().toLowerCase()
+  const m=window._waTplNombres||{}
+  if(!limpio||limpio===auto){ // volver al automático
+    if(!(auto in m)){waToast('Ya estaba con el nombre automático.','aviso');return}
+    delete m[auto]
+  }else{
+    if(!/^[a-z][a-z0-9_]*$/.test(limpio)){waToast('❌ Nombre inválido. Solo minúsculas, números y guion bajo, empezando por letra.','error');return}
+    if(limpio.length>512){waToast('❌ El nombre no puede pasar de 512 caracteres.','error');return}
+    // ¿ese nombre ya lo usa otra plantilla?
+    for(const k of Object.keys(m)){if(k!==auto&&m[k]===limpio){waToast('❌ Ese nombre ya lo usa otra variante. Elige otro.','error');return}}
+    const est=(window._waChipData&&window._waChipData.estados)||{}
+    if(est[limpio]){
+      const vals=Object.values(est[limpio])
+      const ya=vals.includes('APPROVED')?'APROBADA':vals.includes('PENDING')?'EN REVISIÓN':vals.includes('REJECTED')?'RECHAZADA':'ya registrada'
+      if(!confirm('⚠️ En Meta ya existe una plantilla llamada "'+limpio+'" ('+ya+').\n\nSi está aprobada, usarás ESA. Si fue rechazada, Meta no dejará reusar el nombre.\n\n¿Usarlo de todas formas?'))return
+    }
+    m[auto]=limpio
+  }
+  window._waTplNombres=m
+  const js=JSON.stringify(m)
+  const{error}=await sb.from('config').upsert({clave:'wa_tpl_nombres',valor:js,updated_at:new Date().toISOString()},{onConflict:'clave'})
+  if(error){waToast('❌ No se guardó: '+error.message,'error');await _waTplNombresCargar(true);return}
+  let eco=null;try{eco=await getConfig('wa_tpl_nombres')}catch(_){}
+  if(eco!==js){waToast('❌ La nube no devolvió lo guardado (¿RLS en config para wa_tpl_nombres?). El cambio NO quedó.','error');await _waTplNombresCargar(true);return}
+  waToast('✅ Nombre guardado: '+(limpio||auto)+'. Ya puedes enviarla a aprobación.','ok')
+  try{logAction('wa_plantilla_renombrada',{auto,nuevo:limpio||null}).catch(()=>{})}catch(_){}
+  await _waChipCargar()
+  try{if(typeof cargarTextosAdmin==='function')cargarTextosAdmin()}catch(_){}
+  try{if(typeof cargarNovedadesAdmin==='function')cargarNovedadesAdmin()}catch(_){}
+}
+
 function _waChipMulti(nombre,texto,secFiltro,footer,boton){
   window._waTplTextos[nombre]={t:texto||'',f:footer||null,b:boton||null}
   const porWaba=(window._waChipData.estados||{})[nombre]||{}
@@ -18327,7 +18406,7 @@ function _waChipMulti(nombre,texto,secFiltro,footer,boton){
   if(secFiltro&&secFiltro!=='entrantes'){
     nums=nums.filter(n=>((Array.isArray(n.secciones)&&n.secciones.includes(secFiltro))||n.seccion===secFiltro))
     if(!nums.length){
-      return `<div style="font-size:10.5px;margin-top:6px;color:var(--muted)">📄 <code style="background:rgba(255,255,255,.06);padding:1px 6px;border-radius:5px;color:var(--text)">${nombre}</code> · <span style="color:var(--amber)">⚠️ La sección <strong>${_waEsc(secFiltro)}</strong> no tiene número API activo — asígnale uno en Mensajería para poder aprobar esta plantilla.</span></div>`
+      return `<div style="font-size:10.5px;margin-top:6px;color:var(--muted)">📄 <code style="background:rgba(255,255,255,.06);padding:1px 6px;border-radius:5px;color:var(--text)">${nombre}</code> <button onclick="waTplRenombrar('${_waTplNombreAuto(nombre)}')" title="Cambiar el nombre con el que Meta la va a registrar" style="border:none;background:none;cursor:pointer;font-size:11px;padding:0 2px;line-height:1">✏️</button> · <span style="color:var(--amber)">⚠️ La sección <strong>${_waEsc(secFiltro)}</strong> no tiene número API activo — asígnale uno en Mensajería para poder aprobar esta plantilla.</span></div>`
     }
   }
   // El estado global se calcula SOLO sobre los portafolios de esos números
@@ -18349,7 +18428,15 @@ function _waChipMulti(nombre,texto,secFiltro,footer,boton){
       ${falta?`<button onclick="waTplReenviar('${_waEsc(nombre)}','${n.id}')" style="border:none;background:none;color:${c};cursor:pointer;font-size:10px;padding:0 0 0 2px;font-weight:800" title="Enviar a aprobación en este portafolio (ya sabemos que Meta la aprueba)">↻ reenviar</button>`:''}
     </span>`
   }).join(' ')
-  return `<div style="font-size:10.5px;margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--muted)">📄 <code style="background:rgba(255,255,255,.06);padding:1px 6px;border-radius:5px;color:var(--text)">${nombre}</code> · ${chipG} ${bolas?'· '+bolas:''}</div>`
+  // ✏️ renombrar: solo si Meta NO la conoce todavía o ya la rechazó
+  const _auto=_waTplNombreAuto(nombre)
+  const _renom=_auto!==nombre
+  const _editable=global!=='APPROVED'&&global!=='PENDING'
+  const _lapiz=_editable
+    ? `<button onclick="waTplRenombrar('${_auto}')" title="Cambiar el nombre con el que Meta la va a registrar (útil cuando la rechazaron: ese nombre ya no se puede reusar)" style="border:none;background:none;cursor:pointer;font-size:11px;padding:0 2px;line-height:1">✏️</button>`
+    : `<span title="El nombre no se puede cambiar: Meta ya tiene esta plantilla (${global==='APPROVED'?'aprobada':'en revisión'}) y los envíos la buscan por él." style="font-size:10px;opacity:.6">🔒</span>`
+  const _avisoRenom=_renom?`<span style="font-size:9.5px;color:var(--muted)" title="Nombre automático de NEXO: ${_auto}">✏️ renombrada</span>`:''
+  return `<div style="font-size:10.5px;margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--muted)">📄 <code style="background:rgba(255,255,255,.06);padding:1px 6px;border-radius:5px;color:var(--text)">${nombre}</code>${_lapiz}${_avisoRenom} · ${chipG} ${bolas?'· '+bolas:''}</div>`
 }
 // Reenvía la plantilla a aprobación en el portafolio del número elegido
 window.waTplReenviar=async(nombre,numeroId)=>{
@@ -18358,7 +18445,7 @@ window.waTplReenviar=async(nombre,numeroId)=>{
   if(!texto){waToast('❌ No tengo el texto de esa plantilla. Recarga la página.','error');return}
   if(!confirm('¿Enviar "'+nombre+'" a aprobación en el portafolio de este número?'))return
   const conv=_waTplConvertir(texto)
-  const seccion=(nombre.split('_')[1]||null)
+  const seccion=(_waTplNombreAuto(nombre).split('_')[1]||null) // ✏️ la sección sale del nombre automático
   const r=await _waSend({action:'create_template',numero_id:numeroId,nombre,cuerpo_meta:conv.cuerpo,ejemplos:conv.ejemplos,variables:conv.vars,seccion,footer:(reg&&reg.f)||null,boton:(reg&&reg.b)||null})
   if(!r.ok){waToast('❌ '+_waEsc(r.error),'error');return}
   waToast('✅ "'+_waEsc(nombre)+'" enviada a aprobación en ese portafolio. Estado: '+_waEsc((r.data&&r.data.estado)||'PENDING'),'ok')
@@ -18641,9 +18728,10 @@ window.waCargarPlantillas=async(numeroId)=>{
     // 3) Tus textos de la sección → convertidos, con su estado si ya se enviaron
     const fuente=await _waTplFuente(n.seccion)
     const items=[]
+    await _waTplNombresCargar() // ✏️ sobrenombres
     fuente.forEach(t=>{
       const conv=_waTplConvertir(t.texto)
-      const nombre=('nexo_'+n.seccion+'_'+_waTplSlug(t.etiqueta)+'_v1').slice(0,512)
+      const nombre=_waTplNombre(('nexo_'+n.seccion+'_'+_waTplSlug(t.etiqueta)+'_v1').slice(0,512))
       const meta=yaMap[nombre]
       items.push({origen:'texto',nombre,lang:'es',estado:meta?meta.estado:null,conv,etiqueta:t.etiqueta,footer:t.footer||null,boton:t.boton||null})
     })
@@ -18779,7 +18867,7 @@ async function cargarNovedadesAdmin(){
   await _waChipCargar()
   const _nvChipTpl=(tipo,idx,texto,footer,boton)=>{
     if(typeof _waTplSlug!=='function')return ''
-    const nombre='nexo_novedades_'+_waTplSlug(tipo||('novedad_'+idx))+'_v1'
+    const nombre=_waTplNombre('nexo_novedades_'+_waTplSlug(tipo||('novedad_'+idx))+'_v1') // ✏️ respeta el nombre manual
     return _waChipMulti(nombre,texto,'novedades',footer,boton)
   }
   let rows, sembrado

@@ -37889,7 +37889,7 @@ window.nxSimColMover=(from,to)=>{
 }
 window.nxSimColsReset=()=>{_nxSimColsSave(NX_SIM_COLS_DEF.slice());_nxSimPintar()}
 window._nxSimDragIdx=null
-window.nxSimDragStart=(e,i)=>{window._nxSimDragIdx=i;try{e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',String(i))}catch(_){}}
+window.nxSimDragStart=(e,i)=>{try{window.nxSimPopOut&&window.nxSimPopOut()}catch(_){};window._nxSimDragIdx=i;try{e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',String(i))}catch(_){}}
 window.nxSimDragOver=(e,i)=>{
   e.preventDefault();try{e.dataTransfer.dropEffect='move'}catch(_){}
   const th=e.currentTarget
@@ -37946,9 +37946,27 @@ function _nxSimSaldosRefrescar(){ // repinta SOLO saldo + totales (no re-renderi
   if(eT)eT.innerHTML=hay?_nxSimSaldoHTMLv(tSal):'<div style="font-size:12px;color:var(--subtle)">—</div>'
 }
 // ── 🔎 Ventana emergente: qué estados capturó cada sección ──
-window.nxSimPopOut=()=>{const e=document.getElementById('nx-sim-pop');if(e)e.remove()}
-window.nxSimPopIn=(ev,grupos,titulo)=>{
+// (27jul26-b · pedido del owner) Se abre con UN CLIC y NO se cierra sola: así se
+// puede hacer scroll adentro tranquilo. Se cierra con DOBLE CLIC por fuera, con la
+// ✕, con Esc, o volviendo a hacer clic en la misma sección.
+window._nxSimPopClave=null
+window._nxSimPopDbl=(ev)=>{ // doble clic FUERA cierra · adentro no (para poder seleccionar texto)
+  const p=document.getElementById('nx-sim-pop')
+  if(p&&p.contains(ev.target))return
   window.nxSimPopOut()
+}
+window._nxSimPopEsc=(ev)=>{if(ev&&ev.key==='Escape'){ev.stopPropagation();window.nxSimPopOut()}}
+window.nxSimPopOut=()=>{
+  const e=document.getElementById('nx-sim-pop');if(e)e.remove()
+  window._nxSimPopClave=null
+  try{document.removeEventListener('dblclick',window._nxSimPopDbl,true)}catch(_){}
+  try{document.removeEventListener('keydown',window._nxSimPopEsc,true)}catch(_){}
+}
+window.nxSimPopIn=(ev,grupos,titulo)=>{
+  try{ev&&ev.stopPropagation&&ev.stopPropagation()}catch(_){}
+  const abierta=window._nxSimPopClave
+  window.nxSimPopOut()
+  if(abierta===grupos)return // segundo clic en la MISMA sección = cerrar
   const D=window._nxSimData;if(!D)return
   const _e=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
   const gs=String(grupos||'').split(',').filter(Boolean)
@@ -37958,32 +37976,46 @@ window.nxSimPopIn=(ev,grupos,titulo)=>{
     for(const k of Object.keys(b)){if(!acc[k])acc[k]={n:0,u:0};acc[k].n+=b[k].n;acc[k].u+=b[k].u}
   }
   const keys=Object.keys(acc).sort((a,b)=>acc[b].n-acc[a].n||a.localeCompare(b))
+  let tN=0,tU=0;for(const k of keys){tN+=acc[k].n;tU+=acc[k].u}
   let cuerpo
-  if(!keys.length)cuerpo='<div style="font-size:11px;color:var(--muted);padding:4px 0">Este archivo no trajo ninguna orden en esta sección.</div>'
+  if(!keys.length)cuerpo='<div style="font-size:11px;color:var(--muted);padding:6px 0">Este archivo no trajo ninguna orden en esta sección.</div>'
   else cuerpo=keys.map(k=>{
     let meta=null;try{meta=DROPI_STATUS[String(k).trim().toUpperCase()]}catch(_){}
-    return `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:3px 0;border-bottom:1px dashed var(--border)">
+    return `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:4px 0;border-bottom:1px dashed var(--border)">
       <span style="font-family:monospace;font-size:11px;color:var(--text)">${meta&&meta.emoji?meta.emoji+' ':''}${_e(k)}</span>
       <span style="font-size:10.5px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums"><b style="color:var(--text)">${acc[k].n}</b> órd · ${acc[k].u} u</span>
     </div>`}).join('')
   const div=document.createElement('div')
   div.id='nx-sim-pop'
-  div.style.cssText='position:fixed;z-index:100001;background:var(--card);border:1px solid var(--purple);border-radius:10px;padding:9px 11px;max-width:340px;max-height:330px;overflow:auto;box-shadow:0 10px 34px rgba(0,0,0,.65);pointer-events:none'
-  div.innerHTML=`<div style="font-size:11.5px;font-weight:800;margin-bottom:5px">${_e(titulo||'Estados capturados')}</div>
-    <div style="font-size:10px;color:var(--muted);margin-bottom:5px">Estados TAL CUAL vienen del Excel de Dropi que esta sección está contando (${keys.length}).</div>${cuerpo}`
+  div.style.cssText='position:fixed;z-index:100001;background:var(--card);border:1px solid var(--purple);border-radius:10px;max-width:400px;min-width:280px;display:flex;flex-direction:column;max-height:min(60vh,460px);box-shadow:0 10px 34px rgba(0,0,0,.65)'
+  div.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;padding:9px 11px 6px;border-bottom:1px solid var(--border);flex-shrink:0">
+      <div>
+        <div style="font-size:11.5px;font-weight:800">${_e(titulo||'Estados capturados')}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">${keys.length} estado(s) TAL CUAL vienen del Excel${keys.length?` · <b style="color:var(--text)">${tN}</b> órd · ${tU} u`:''}</div>
+      </div>
+      <button onclick="nxSimPopOut()" title="Cerrar" style="cursor:pointer;flex-shrink:0;background:rgba(239,68,68,.12);border:1px solid var(--red);color:var(--red);border-radius:6px;padding:1px 7px;font-size:11px;font-weight:700;line-height:1.5">✕</button>
+    </div>
+    <div style="overflow:auto;padding:4px 11px 6px">${cuerpo}</div>
+    <div style="flex-shrink:0;padding:5px 11px 8px;border-top:1px solid var(--border);font-size:9.5px;color:var(--subtle);line-height:1.5">🖱️ Haz scroll aquí adentro tranquilo. Cierra con <b>doble clic por fuera</b>, con la ✕, con <b>Esc</b>, o volviendo a hacer clic en la sección.</div>`
   document.body.appendChild(div)
   try{
     const r=ev.currentTarget.getBoundingClientRect()
-    const w=div.offsetWidth||320,h=div.offsetHeight||160
+    const w=div.offsetWidth||320,h=div.offsetHeight||200
     let x=r.left,y=r.bottom+7
     if(x+w>window.innerWidth-10)x=Math.max(10,window.innerWidth-w-10)
     if(y+h>window.innerHeight-10)y=Math.max(10,r.top-h-7)
+    if(y<10)y=10
     div.style.left=x+'px';div.style.top=y+'px'
   }catch(_){div.style.left='20px';div.style.top='20px'}
+  window._nxSimPopClave=grupos
+  // Se registran DESPUÉS de pintar para que el clic que la abrió no la cierre de una
+  setTimeout(()=>{
+    if(window._nxSimPopClave!==grupos)return
+    try{document.addEventListener('dblclick',window._nxSimPopDbl,true)}catch(_){}
+    try{document.addEventListener('keydown',window._nxSimPopEsc,true)}catch(_){}
+  },0)
 }
-function _nxSimHov(grupos,titulo){ // handlers listos para pegar en cualquier tarjeta/encabezado
-  return ` onmouseenter="nxSimPopIn(event,'${grupos}','${String(titulo).replace(/'/g,'')}')" onmouseleave="nxSimPopOut()"`
-}
+
 function _nxSimPintar(){
   const D=window._nxSimData
   try{window.nxSimPopOut&&window.nxSimPopOut()}catch(_){} // ninguna ventana emergente queda colgada al repintar
@@ -38029,7 +38061,7 @@ function _nxSimPintar(){
     <div style="font-size:14px;font-weight:700;color:${n>0?col:'var(--subtle)'}">${n}</div>
     <div style="font-size:10px;color:var(--muted)">${u} u${sc?` <span title="${sc} orden(es) sin cantidad" style="color:var(--amber);cursor:help">⚠️+${sc}?</span>`:''}</div></td>`
   const _swBtn=(cual,on)=>`<button onclick="nxSimSw('${cual}')" title="${on?'Prendido: SUMA al total. Click para apagar.':'Apagado: se ve pero NO suma. Click para prender.'}" style="cursor:pointer;border-radius:999px;border:1px solid ${on?'var(--green)':'var(--border)'};background:${on?'rgba(34,197,94,.15)':'var(--card2)'};color:${on?'var(--green)':'var(--muted)'};font-size:10px;font-weight:700;padding:2px 9px">${on?'SUMA ✓':'NO SUMA'}</button>`
-  const _chip=(emoji,nom,n,u,sc,col,swHtml,grupo)=>`<div${grupo?` onmouseenter="nxSimPopIn(event,'${grupo}','${String(nom).replace(/'/g,'')} — estados capturados')" onmouseleave="nxSimPopOut()" title="Pasa el cursor: te muestro los estados EXACTOS del Excel que esta sección está contando"`:''} style="display:flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:8px 12px${grupo?';cursor:help':''}">
+  const _chip=(emoji,nom,n,u,sc,col,swHtml,grupo)=>`<div${grupo?` onclick="nxSimPopIn(event,'${grupo}','${String(nom).replace(/'/g,'')} — estados capturados')" title="Clic: te muestro los estados EXACTOS del Excel que esta sección está contando (la ventana se queda abierta para hacer scroll)"`:''} style="display:flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:8px 12px${grupo?';cursor:pointer':''}">
     <span style="font-size:15px">${emoji}</span>
     <div><div style="font-size:11px;color:var(--muted)">${nom}</div>
     <div style="font-size:13px;font-weight:700;color:${col}">${n} <span style="font-size:11px;font-weight:400;color:var(--muted)">órd · ${u} u${sc?` <span title="${sc} sin cantidad" style="color:var(--amber);cursor:help">⚠️+${sc}?</span>`:''}</span></div></div>
@@ -38038,8 +38070,8 @@ function _nxSimPintar(){
   const COLS=_nxSimColsGet()
   const _thDrag=(k,i)=>{
     const d=NX_SIM_COLDEF[k]||{t:k}
-    const hov=d.g?` onmouseenter="nxSimPopIn(event,'${d.g}','${String(d.t).replace(/'/g,'')} — estados capturados')" onmouseleave="nxSimPopOut()"`:''
-    return `<th class="nxsim-th" draggable="true" ondragstart="nxSimDragStart(event,${i})" ondragover="nxSimDragOver(event,${i})" ondragleave="nxSimDragLeave(event)" ondrop="nxSimDrop(event,${i})" ondragend="nxSimDragEnd(event)"${hov} title="Arrastra esta columna para cambiarla de lugar${d.g?' · pasa el cursor para ver qué estados cuenta':''}" style="text-align:${k==='prod'?'left':'center'};padding:7px 6px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:${d.col||'var(--muted)'};cursor:grab;user-select:none;white-space:nowrap">⠿ ${d.t}</th>`
+    const hov=d.g?` onclick="nxSimPopIn(event,'${d.g}','${String(d.t).replace(/'/g,'')} — estados capturados')"`:''
+    return `<th class="nxsim-th" draggable="true" ondragstart="nxSimDragStart(event,${i})" ondragover="nxSimDragOver(event,${i})" ondragleave="nxSimDragLeave(event)" ondrop="nxSimDrop(event,${i})" ondragend="nxSimDragEnd(event)"${hov} title="Arrastra esta columna para cambiarla de lugar${d.g?' · o haz CLIC para ver qué estados cuenta':''}" style="text-align:${k==='prod'?'left':'center'};padding:7px 6px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:${d.col||'var(--muted)'};cursor:grab;user-select:none;white-space:nowrap">⠿ ${d.t}</th>`
   }
   window._nxSimRU={}
   const _tdTot=(n,u,sc,big)=>`<td style="text-align:center;padding:${big?9:8}px 8px;font-variant-numeric:tabular-nums;background:linear-gradient(0deg,rgba(167,139,250,.${big?'14':'10'}),rgba(167,139,250,.${big?'14':'10'})),transparent"><div style="font-size:${big?15:14}px;font-weight:800;color:var(--purple)">${n}</div><div style="font-size:10px;color:var(--muted)">${u} u${sc?` <span style="color:var(--amber)">⚠️+${sc}?</span>`:''}</div></td>`
@@ -38111,7 +38143,7 @@ function _nxSimPintar(){
       </div>
       <div style="padding:14px 16px;overflow:auto">
         <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:stretch;margin-bottom:12px">
-          <div onmouseenter="nxSimPopIn(event,'ordenes','✅ Órdenes — estados capturados')" onmouseleave="nxSimPopOut()" title="Pasa el cursor: te muestro los estados EXACTOS del Excel que están contando como órdenes" style="cursor:help;background:linear-gradient(0deg,rgba(167,139,250,.10),rgba(167,139,250,.10)),var(--card);border:1px solid var(--purple);border-radius:12px;padding:10px 16px;min-width:200px">
+          <div onclick="nxSimPopIn(event,'ordenes','✅ Órdenes — estados capturados')" title="Clic: te muestro los estados EXACTOS del Excel que están contando como órdenes (la ventana se queda abierta para hacer scroll)" style="cursor:pointer;background:linear-gradient(0deg,rgba(167,139,250,.10),rgba(167,139,250,.10)),var(--card);border:1px solid var(--purple);border-radius:12px;padding:10px 16px;min-width:200px">
             <div style="font-size:11px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase">✅ Órdenes del archivo</div>
             <div style="font-size:24px;font-weight:800;color:var(--purple);font-variant-numeric:tabular-nums">${totN} <span style="font-size:14px;font-weight:600;color:var(--text)">órdenes</span></div>
             <div style="font-size:13px;color:var(--text)">${totU} unidades${totSC?` <span title="${totSC} sin cantidad" style="color:var(--amber);cursor:help">⚠️ +${totSC} sin cantidad</span>`:''}</div>
@@ -38120,13 +38152,13 @@ function _nxSimPintar(){
           ${_chip('↩️','Devueltas',T.devN,T.devU,T.devSC,'var(--red)',_swBtn('dev',!!sw.dev),'dev')}
           ${_chip('⏳','Pendiente confirmación',T.pcN,T.pcU,T.pcSC,'var(--amber)',_swBtn('pconf',!!sw.pconf),'pconf')}
           ${_chip('❌','Canc / Rech / Anuladas',T.caN,T.caU,T.caSC,'var(--red)','<span style="font-size:9px;color:var(--muted)">nunca suman</span>','cancel')}
-          ${T.fueraN?`<div onmouseenter="nxSimPopIn(event,'sin_estado,desconocido','🔎 FUERA del conteo — estados capturados')" onmouseleave="nxSimPopOut()" title="Pasa el cursor: te muestro los estados EXACTOS que quedaron por fuera" style="cursor:help;display:flex;align-items:center;gap:8px;background:rgba(239,68,68,.08);border:1px solid var(--red);border-radius:10px;padding:8px 12px"><span style="font-size:15px">🔎</span><div style="font-size:12px;color:var(--red);font-weight:700">${T.fueraN} FUERA del conteo<div style="font-size:10px;font-weight:400;color:var(--muted)">sin estado o sin clasificar</div></div></div>`:''}
+          ${T.fueraN?`<div onclick="nxSimPopIn(event,'sin_estado,desconocido','🔎 FUERA del conteo — estados capturados')" title="Clic: te muestro los estados EXACTOS que quedaron por fuera (la ventana se queda abierta para hacer scroll)" style="cursor:pointer;display:flex;align-items:center;gap:8px;background:rgba(239,68,68,.08);border:1px solid var(--red);border-radius:10px;padding:8px 12px"><span style="font-size:15px">🔎</span><div style="font-size:12px;color:var(--red);font-weight:700">${T.fueraN} FUERA del conteo<div style="font-size:10px;font-weight:400;color:var(--muted)">sin estado o sin clasificar</div></div></div>`:''}
         </div>
         <div class="table-wrap" style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;min-width:860px">
           <thead><tr style="border-bottom:1px solid var(--border)">${COLS.map((k,i)=>_thDrag(k,i)).join('')}</tr></thead>
           <tbody>${body}</tbody><tfoot>${foot}</tfoot></table></div>
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px">
-          <div style="font-size:10px;color:var(--subtle);line-height:1.6;flex:1;min-width:240px">💡 Órdenes = IDs de orden DISTINTOS del archivo (una orden con 2 variaciones = 1 orden, cantidades sumadas) · unidades = suma de CANTIDAD · mismas reglas de la pestaña 📦 Órdenes.<br>⠰ <b>Arrastra cualquier encabezado</b> para cambiar el orden de las columnas — queda guardado en este computador. 📦 <b>Stock</b> sale del 📦 Stock por ID de la tarjeta del producto y aquí lo puedes pisar <b>temporalmente</b> (no toca la base de datos). ⚖️ <b>Saldo</b> = Stock − Total del ID, en unidades. 🔎 Pasa el cursor por cualquier sección para ver los <b>estados exactos</b> que capturó.</div>
+          <div style="font-size:10px;color:var(--subtle);line-height:1.6;flex:1;min-width:240px">💡 Órdenes = IDs de orden DISTINTOS del archivo (una orden con 2 variaciones = 1 orden, cantidades sumadas) · unidades = suma de CANTIDAD · mismas reglas de la pestaña 📦 Órdenes.<br>⠰ <b>Arrastra cualquier encabezado</b> para cambiar el orden de las columnas — queda guardado en este computador. 📦 <b>Stock</b> sale del 📦 Stock por ID de la tarjeta del producto y aquí lo puedes pisar <b>temporalmente</b> (no toca la base de datos). ⚖️ <b>Saldo</b> = Stock − Total del ID, en unidades. 🔎 <b>Haz clic</b> en cualquier sección (✅ ↩️ ⏳ ❌ o su encabezado) para ver los <b>estados exactos</b> que capturó: la ventana se queda abierta para hacer scroll y se cierra con <b>doble clic por fuera</b>, con la ✕ o con <b>Esc</b>.</div>
           <button onclick="nxSimColsReset()" title="Volver al orden de fábrica: Producto · Órdenes · Devueltas · Total del ID · Stock · Saldo · P. Conf. · Canc/Rech/Anul" style="cursor:pointer;flex-shrink:0;background:var(--card2);border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:4px 10px;font-size:10.5px;font-weight:700">↺ Orden de fábrica</button>
         </div>
         ${novBox}

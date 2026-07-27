@@ -628,6 +628,7 @@ async function loadProductos(){
   }catch(e){console.error('loadProductos exception:',e);productos=[]}
   try{await cargarDropiIdsArchivados()}catch(_){}
   try{await cargarCostosEsperados()}catch(_){} // 💰 verificador Dropi (8jul26): índice de costos esperados + IDs paralelos
+  try{if(typeof stkLoad==='function')await stkLoad()}catch(_){} // 📦 stock por ID de Dropi (27jul26): totales para el Simulador
   await cargarMensajesDinamicos()
 }
 
@@ -6420,7 +6421,10 @@ async function renderProdBody(id,maestrosList){
         <input type="text" inputmode="numeric" id="pdropi-${id}" value="${prod.dropi_id||''}" placeholder="Ej: 152345" style="font-family:monospace;font-size:12px">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
           <span style="font-size:10px;color:var(--muted)">${_dropiVigDesde?`✅ Vigente desde ${_dropiVigDesde.split('-').reverse().join('/')}`:'ℹ️ Sin historial de IDs todavía'}</span>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
           <button type="button" class="btn-sm" onclick="verHistorialDropiIds('${id}')" style="background:rgba(167,139,250,.12);border:1px solid var(--purple);color:var(--purple);font-size:11px;padding:3px 8px">📜 Historial de IDs · 💰 Costos esperados</button>
+          <button type="button" class="btn-sm" onclick="verStockDropiIds('${id}')" title="Registra cada compra al proveedor por ID de Dropi (fecha, unidades, costo por frasco y nota). El total se suma solo y el 🧪 Simulador lo usa para las columnas 📦 Stock y ⚖️ Saldo." style="background:rgba(34,197,94,.12);border:1px solid var(--green);color:var(--green);font-size:11px;padding:3px 8px">📦 Stock por ID</button>
+          </div>
         </div>
         <div id="dce-badge-${id}">${_dceBadgeHtml}</div>
         <label style="margin-top:10px;display:block">🔗 URL de Dropi del producto <span style="color:var(--muted);font-size:10px">(única por producto — enlace directo a su ficha en Dropi)</span></label>
@@ -7206,6 +7210,207 @@ window.marcarDropiIdVigente=async(prodId,rowId,silencioso)=>{
     if(!silencioso)await _renderHistDropiBody(prodId)
   }catch(e){if(!silencioso)alert((e&&e.message)||e)}
 }
+
+// ══ NUEVO (27jul26) · 📦 STOCK POR ID DE DROPI (compras al proveedor) ═══════
+// El stock NO es un número suelto: es la SUMA de las COMPRAS. Compras 500 → las
+// registras; en una semana compras 1.000 → las registras; NEXO muestra 1.500 sin
+// que sumes nada. Cada movimiento guarda FECHA, UNIDADES, COSTO POR FRASCO y NOTA,
+// y calcula solo cuánto costó esa mercancía (unidades × costo). Se amarra al ID DE
+// DROPI (no al producto) porque el proveedor despacha por ID.
+// Vive en producto_stock_movimientos. El 🧪 Simulador lee este total para las
+// columnas 📦 STOCK y ⚖️ SALDO (Stock − Total del ID).
+// Todo ADITIVO y tolerante: si la tabla aún no existe, nada se rompe (legacy).
+const STK_TABLA='producto_stock_movimientos'
+window._stkCache=window._stkCache||null      // filas crudas de la tabla
+window._stkTotales=window._stkTotales||{}    // {dropi_id → {u,inv,n}}
+window._stkTablaOk=(window._stkTablaOk===undefined)?true:window._stkTablaOk
+function _stkE(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function _stkSfx(v){return String(v==null?'':v).replace(/[^\w]/g,'_')}
+function _stkNum(v){const n=Number(String(v==null?'':v).replace(/[^\d.-]/g,''));return isFinite(n)?n:0}
+function _stkMoney(n){return '$'+Math.round(_stkNum(n)).toLocaleString('es-CO')}
+function _stkFmtDia(v){const d=String(v||'').slice(0,10);return d?d.split('-').reverse().join('/'):'—'}
+function stkReindex(){
+  const t={}
+  for(const r of (window._stkCache||[])){
+    const k=String(r.dropi_id||'').trim();if(!k)continue
+    if(!t[k])t[k]={u:0,inv:0,n:0}
+    const u=_stkNum(r.unidades),c=_stkNum(r.costo_unitario)
+    t[k].u+=u;t[k].inv+=u*c;t[k].n++
+  }
+  window._stkTotales=t
+}
+async function stkLoad(){
+  try{
+    const{data,error}=await sb.from(STK_TABLA).select('id,producto_id,dropi_id,fecha,unidades,costo_unitario,nota,created_at')
+    if(error){window._stkTablaOk=false;window._stkCache=window._stkCache||[];stkReindex();return}
+    window._stkTablaOk=true
+    window._stkCache=data||[]
+  }catch(e){window._stkTablaOk=false;window._stkCache=window._stkCache||[]}
+  stkReindex()
+}
+window.stkLoad=stkLoad
+// Lookups sincrónicos (los usa el 🧪 Simulador — cero await en el pintado)
+window.stkTotalId=(dropiId)=>{const t=window._stkTotales[String(dropiId||'').trim()];return t?t.u:0}
+window.stkInfoId=(dropiId)=>window._stkTotales[String(dropiId||'').trim()]||null
+window.stkMovsId=(dropiId)=>{
+  const k=String(dropiId||'').trim()
+  return (window._stkCache||[]).filter(r=>String(r.dropi_id||'').trim()===k)
+    .sort((a,b)=>String(b.fecha||'').localeCompare(String(a.fecha||''))||String(b.created_at||'').localeCompare(String(a.created_at||'')))
+}
+// Todos los IDs de Dropi que tocan a este producto: vigente + historial + paralelos + los que ya tienen stock
+async function _stkIdsDeProducto(prodId){
+  const out=[],vis=new Set()
+  const prod=(productos||[]).find(p=>p.id===prodId)
+  const vig=String((prod&&prod.dropi_id)||'').trim()
+  if(vig){out.push({id:vig,tag:'✅ VIGENTE',color:'var(--green)'});vis.add(vig)}
+  try{
+    const{data}=await sb.from('producto_dropi_ids').select('dropi_id,vigente_desde,vigente_hasta').eq('producto_id',prodId).order('vigente_desde',{ascending:false})
+    for(const r of (data||[])){
+      const k=String(r.dropi_id||'').trim();if(!k||vis.has(k))continue
+      out.push({id:k,tag:r.vigente_hasta?'📁 histórico':'✅ VIGENTE',color:r.vigente_hasta?'var(--muted)':'var(--green)'});vis.add(k)
+    }
+  }catch(_){}
+  for(const c of (window._dceCache||[])){
+    if(c.producto_id!==prodId)continue
+    const k=String(c.dropi_id||'').trim();if(!k||vis.has(k))continue
+    out.push({id:k,tag:'🔀 paralelo',color:'var(--blue,#3b82f6)'});vis.add(k)
+  }
+  for(const r of (window._stkCache||[])){
+    if(r.producto_id!==prodId)continue
+    const k=String(r.dropi_id||'').trim();if(!k||vis.has(k))continue
+    out.push({id:k,tag:'📦 con compras',color:'var(--amber)'});vis.add(k)
+  }
+  return out
+}
+// ── MODAL: 📦 Stock por ID ──────────────────────────────────────────────────
+window.verStockDropiIds=async(prodId)=>{
+  closeModal()
+  const prod=(productos||[]).find(p=>p.id===prodId)
+  const div=document.createElement('div')
+  div.id='user-modal';div.className='modal-bg'
+  div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:700px">
+    <div class="modal-title">📦 Stock por ID de Dropi</div>
+    <div class="modal-sub">${_stkE(prod?(prod.nombre||''):'')} — cada compra al proveedor queda registrada y el total se suma solo</div>
+    <div class="alert alert-blue" style="font-size:11px;margin-top:10px;line-height:1.7">🧾 <b>Así funciona:</b> compras 500 → las registras. En una semana compras 1.000 → las registras. NEXO muestra el <b>total acumulado (1.500)</b> de ese ID sin que sumes nada.<br>💵 Cada compra guarda <b>fecha, unidades, costo por frasco y nota</b>, y calcula sola cuánto costó esa mercancía (unidades × costo). Todo se puede <b>editar</b> o <b>borrar</b> si te equivocaste.<br>🧪 El <b>Simulador</b> toma ese total en la columna 📦 STOCK y saca ⚖️ SALDO = Stock − Total del ID.</div>
+    <div id="stk-body" style="margin-top:12px;max-height:60vh;overflow:auto"><div class="loading">Cargando...</div></div>
+    <div class="modal-actions"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>
+  </div>`
+  div.onclick=closeModal
+  document.body.appendChild(div)
+  await _renderStockBody(prodId)
+}
+async function _renderStockBody(prodId){
+  const cont=document.getElementById('stk-body')
+  if(!cont)return
+  await stkLoad()
+  if(!window._stkTablaOk){
+    cont.innerHTML=`<div class="alert alert-amber" style="font-size:12px;line-height:1.7">⚠️ Falta crear la tabla <code>producto_stock_movimientos</code> en Supabase. Ejecuta el SQL de migración que vino con esta entrega y vuelve a abrir esta ventana.<br>Mientras tanto <b>nada más de NEXO se ve afectado</b>: el Simulador simplemente muestra la columna 📦 Stock vacía (y la puedes escribir a mano ahí mismo).</div>`
+    return
+  }
+  const ids=await _stkIdsDeProducto(prodId)
+  if(!ids.length){cont.innerHTML='<div style="color:var(--muted);font-size:13px;padding:8px">Este producto todavía no tiene ningún ID de Dropi. Ponle el ID vigente en la tarjeta y vuelve.</div>';return}
+  let html='',gU=0,gInv=0
+  for(const it of ids){
+    const sfx=_stkSfx(it.id)
+    const movs=window.stkMovsId(it.id).filter(r=>r.producto_id===prodId)
+    let tU=0,tInv=0
+    for(const m of movs){const u=_stkNum(m.unidades);tU+=u;tInv+=u*_stkNum(m.costo_unitario)}
+    gU+=tU;gInv+=tInv
+    const filasH=movs.map(m=>{
+      const u=_stkNum(m.unidades),c=_stkNum(m.costo_unitario)
+      return `<div style="display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap;padding:7px 0;border-bottom:1px dashed var(--border)">
+        <div><div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">Fecha</div><input type="date" id="stk-f-${m.id}" value="${_stkE(String(m.fecha||'').slice(0,10))}" style="font-size:11px;padding:4px 6px"></div>
+        <div><div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">Unidades</div><input type="number" min="0" step="1" id="stk-u-${m.id}" value="${u}" oninput="stkCalcFila('${m.id}')" style="font-size:11px;padding:4px 6px;width:85px"></div>
+        <div><div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">Costo c/u</div><input type="number" min="0" step="1" id="stk-c-${m.id}" value="${c||''}" placeholder="0" oninput="stkCalcFila('${m.id}')" style="font-size:11px;padding:4px 6px;width:95px"></div>
+        <div style="flex:1;min-width:120px"><div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">Nota</div><input type="text" id="stk-n-${m.id}" value="${_stkE(m.nota||'')}" placeholder="opcional" style="font-size:11px;padding:4px 6px;width:100%"></div>
+        <div style="min-width:112px"><div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">Costó</div><div id="stk-tot-${m.id}" style="font-size:12.5px;font-weight:800;color:var(--amber);font-variant-numeric:tabular-nums;padding:4px 0">${c?_stkMoney(u*c):'—'}</div></div>
+        <button type="button" class="btn-sm btn-primary" style="font-size:10.5px;padding:4px 9px" onclick="stkGuardarMov('${prodId}','${m.id}')">💾</button>
+        <button type="button" class="btn-sm" style="font-size:10.5px;padding:4px 9px;background:rgba(239,68,68,.1);border:1px solid var(--red);color:var(--red)" onclick="stkEliminarMov('${prodId}','${m.id}')">🗑️</button>
+      </div>`
+    }).join('')
+    html+=`<div style="padding:10px 12px;border-radius:9px;margin-bottom:10px;background:rgba(255,255,255,.02);border:1px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <div style="font-weight:700;font-size:14px;font-family:monospace">${_stkE(it.id)} <span style="font-size:10px;color:${it.color};font-family:inherit">${it.tag}</span></div>
+        <div style="text-align:right">
+          <div style="font-size:17px;font-weight:800;color:var(--green);font-variant-numeric:tabular-nums">${fmt(tU)} <span style="font-size:11px;font-weight:600;color:var(--text)">unidades</span></div>
+          <div style="font-size:10.5px;color:var(--muted)">${movs.length} compra(s)${tInv>0?` · invertido ${_stkMoney(tInv)}`:''}</div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap;background:rgba(34,197,94,.06);border:1px solid var(--green);border-radius:8px;padding:9px">
+        <div><div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">Fecha de compra</div><input type="date" id="stk-new-f-${sfx}" value="${today()}" style="font-size:11px;padding:5px 7px"></div>
+        <div><div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">Unidades compradas</div><input type="number" min="1" step="1" id="stk-new-u-${sfx}" placeholder="Ej: 500" oninput="stkCalcNuevo('${sfx}')" style="font-size:11px;padding:5px 7px;width:110px"></div>
+        <div><div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">Costo por frasco</div><input type="number" min="0" step="1" id="stk-new-c-${sfx}" placeholder="Ej: 8000" oninput="stkCalcNuevo('${sfx}')" style="font-size:11px;padding:5px 7px;width:110px"></div>
+        <div style="flex:1;min-width:130px"><div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">Nota (opcional)</div><input type="text" id="stk-new-n-${sfx}" placeholder="Ej: lote 2 — proveedor Deonline" style="font-size:11px;padding:5px 7px;width:100%"></div>
+        <div style="min-width:120px"><div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">Esa compra costó</div><div id="stk-new-tot-${sfx}" style="font-size:13.5px;font-weight:800;color:var(--amber);font-variant-numeric:tabular-nums;padding:5px 0">—</div></div>
+        <button type="button" class="btn-sm btn-primary" style="font-size:11px;padding:6px 11px" onclick="stkAgregarMov('${prodId}','${_stkE(it.id)}')">➕ Registrar compra</button>
+      </div>
+      <div id="stk-msg-${sfx}" style="margin-top:7px"></div>
+      ${movs.length?`<div style="font-size:11px;font-weight:700;margin:9px 0 2px;color:var(--muted)">🧾 Compras registradas (${movs.length}) — edítalas o bórralas aquí mismo</div>${filasH}`:'<div style="font-size:11.5px;color:var(--muted);padding:8px 0 2px">Sin compras registradas para este ID todavía.</div>'}
+    </div>`
+  }
+  html=`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;background:linear-gradient(0deg,rgba(167,139,250,.10),rgba(167,139,250,.10)),transparent;border:1px solid var(--purple);border-radius:9px;padding:9px 12px;margin-bottom:11px">
+      <div style="font-size:11px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase">📦 Stock total del producto (todos sus IDs)</div>
+      <div style="text-align:right"><div style="font-size:19px;font-weight:800;color:var(--purple);font-variant-numeric:tabular-nums">${fmt(gU)} <span style="font-size:12px;font-weight:600;color:var(--text)">unidades</span></div>${gInv>0?`<div style="font-size:10.5px;color:var(--muted)">invertido ${_stkMoney(gInv)}</div>`:''}</div>
+    </div>`+html
+  cont.innerHTML=html
+}
+window._renderStockBody=_renderStockBody
+window.stkCalcNuevo=(sfx)=>{
+  const u=_stkNum((document.getElementById('stk-new-u-'+sfx)||{}).value)
+  const c=_stkNum((document.getElementById('stk-new-c-'+sfx)||{}).value)
+  const o=document.getElementById('stk-new-tot-'+sfx)
+  if(o)o.textContent=(u>0&&c>0)?_stkMoney(u*c):'—'
+}
+window.stkCalcFila=(movId)=>{
+  const u=_stkNum((document.getElementById('stk-u-'+movId)||{}).value)
+  const c=_stkNum((document.getElementById('stk-c-'+movId)||{}).value)
+  const o=document.getElementById('stk-tot-'+movId)
+  if(o)o.textContent=(u>0&&c>0)?_stkMoney(u*c):'—'
+}
+window.stkAgregarMov=async(prodId,dropiId)=>{
+  const sfx=_stkSfx(dropiId)
+  const msg=document.getElementById('stk-msg-'+sfx)
+  const _err=(t)=>{if(msg)msg.innerHTML=`<div class="alert alert-red" style="font-size:11px">${t}</div>`}
+  const f=((document.getElementById('stk-new-f-'+sfx)||{}).value||'').trim()
+  const u=_stkNum((document.getElementById('stk-new-u-'+sfx)||{}).value)
+  const cRaw=String((document.getElementById('stk-new-c-'+sfx)||{}).value||'').trim()
+  const nt=String((document.getElementById('stk-new-n-'+sfx)||{}).value||'').trim()
+  if(!f)return _err('Ponle la fecha de la compra.')
+  if(!(u>0))return _err('Las unidades compradas deben ser mayores a 0.')
+  try{
+    const rec={producto_id:prodId,dropi_id:String(dropiId).trim(),fecha:f,unidades:Math.round(u),nota:nt||null}
+    if(cRaw!=='')rec.costo_unitario=_stkNum(cRaw)
+    try{rec.usuario_id=(me&&me.id)||null}catch(_){}
+    const{error}=await sb.from(STK_TABLA).insert(rec)
+    if(error)throw error
+    logAction('stock_compra_agregada',{producto_id:prodId,dropi_id:String(dropiId).trim(),unidades:Math.round(u),costo_unitario:cRaw!==''?_stkNum(cRaw):null}).catch(()=>{})
+    await _renderStockBody(prodId)
+  }catch(e){_err((e&&e.message)||e)}
+}
+window.stkGuardarMov=async(prodId,movId)=>{
+  try{
+    const f=((document.getElementById('stk-f-'+movId)||{}).value||'').trim()
+    const u=_stkNum((document.getElementById('stk-u-'+movId)||{}).value)
+    const cRaw=String((document.getElementById('stk-c-'+movId)||{}).value||'').trim()
+    const nt=String((document.getElementById('stk-n-'+movId)||{}).value||'').trim()
+    if(!f){alert('La fecha no puede quedar vacía.');return}
+    if(!(u>0)){alert('Las unidades deben ser mayores a 0.');return}
+    const{error}=await sb.from(STK_TABLA).update({fecha:f,unidades:Math.round(u),costo_unitario:cRaw===''?null:_stkNum(cRaw),nota:nt||null}).eq('id',movId)
+    if(error)throw error
+    logAction('stock_compra_editada',{producto_id:prodId,mov_id:movId,unidades:Math.round(u)}).catch(()=>{})
+    await _renderStockBody(prodId)
+  }catch(e){alert('❌ '+((e&&e.message)||e))}
+}
+window.stkEliminarMov=async(prodId,movId)=>{
+  if(!confirm('¿Borrar esta compra? El total del ID se vuelve a sumar sin ella.'))return
+  try{
+    const{error}=await sb.from(STK_TABLA).delete().eq('id',movId)
+    if(error)throw error
+    logAction('stock_compra_eliminada',{producto_id:prodId,mov_id:movId}).catch(()=>{})
+    await _renderStockBody(prodId)
+  }catch(e){alert('❌ '+((e&&e.message)||e))}
+}
+// ═══ FIN STOCK POR ID DE DROPI ═══
 
 // ══ NUEVO (8jul26) · 💰 BLOQUE DE COSTOS ESPERADOS DENTRO DE CADA ID ═════════
 // Sub-sección auto-alimentada: cada ID del historial muestra sus costos esperados
@@ -37589,6 +37794,7 @@ window.nxSimAbrir=(prodId)=>{
       const wb=XLSX.read(buf,{type:'array'})
       const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''})
       if(!rows.length){alert('El archivo no trae filas.');return}
+      try{if(typeof stkLoad==='function')await stkLoad()}catch(_){} // 📦 stock por ID fresco antes de pintar
       window._nxSimData=_nxSimCalc(rows,f.name)
       _nxSimPintar()
     }catch(e){alert('❌ No se pudo leer el archivo: '+((e&&e.message)||e))}
@@ -37620,11 +37826,16 @@ function _nxSimCalc(rows,archivo){
     if(!pid&&nov.sin_pid.length<200)nov.sin_pid.push({oid:idOrden||'—',tel:O.tel||'—',fecha:O.fecha||'—',estado:O.estado})
   }
   const porId={}
+  // 🔎 NUEVO (27jul26): qué ESTADOS exactos del Excel cayeron en cada grupo (con conteo de
+  // órdenes y unidades) → alimenta las ventanas emergentes al pasar el cursor por cada sección.
+  const estG={ordenes:{},dev:{},pconf:{},cancel:{},sin_estado:{},desconocido:{}}
+  const _estSum=(g,est,n,u)=>{const b=(estG[g]=estG[g]||{});const k=est||'(sin estado)';if(!b[k])b[k]={n:0,u:0};b[k].n+=n;b[k].u+=u}
   for(const O of Object.values(ordenes)){
     if(!porId[O.pid])porId[O.pid]={S:S0(),nombre:O.nombre}
     const P=porId[O.pid];if(!P.nombre&&O.nombre)P.nombre=O.nombre
     const S=P.S
     const _id={oid:O.idOrden,tel:O.tel||'—',fecha:O.fecha||'—',estado:O.estado}
+    _estSum(O.grupo,O.estado,1,(O.qOk?O.q:0))
     if(O.grupo==='sin_estado'){S.fueraN++;nov.sin_estado.push(_id);continue}
     if(O.grupo==='desconocido'){S.fueraN++;estadosDesc.add(O.estado);nov.desconocido.push(_id);continue}
     if(!O.qOk)nov.sin_cantidad.push(_id)
@@ -37634,13 +37845,148 @@ function _nxSimCalc(rows,archivo){
     else if(O.grupo==='cancel'){S.caN++;S.caU+=u;if(!O.qOk)S.caSC++}
     else{S.ordN++;S.ordU+=u;if(!O.qOk)S.ordSC++}
   }
-  return{porId,nov,estadosDesc:[...estadosDesc],filas,archivo,sw:{dev:0,pconf:0},min:false}
+  return{porId,nov,estadosDesc:[...estadosDesc],filas,archivo,sw:{dev:0,pconf:0},min:false,estG,stockOv:{}}
 }
 window.nxSimSw=(cual)=>{const D=window._nxSimData;if(!D)return;D.sw[cual]=D.sw[cual]?0:1;_nxSimPintar()}
 window.nxSimMin=()=>{const D=window._nxSimData;if(!D)return;D.min=!D.min;_nxSimPintar()}
-window.nxSimCerrar=()=>{const el=document.getElementById('nx-sim-modal');if(el)el.remove();window._nxSimData=null}
+window.nxSimCerrar=()=>{try{window.nxSimPopOut&&window.nxSimPopOut()}catch(_){};const el=document.getElementById('nx-sim-modal');if(el)el.remove();window._nxSimData=null;window._nxSimRU={}}
+// ── 🧲 COLUMNAS ARRASTRABLES + 📦 STOCK / ⚖️ SALDO + 🔎 ESTADOS AL PASAR EL CURSOR (27jul26) ──
+// · El orden de columnas se arrastra desde el encabezado y queda GUARDADO en este
+//   computador (localStorage) — sobrevive a cerrar y volver a abrir.
+// · 📦 STOCK sale solo del 📦 Stock por ID de la tarjeta del producto (suma de compras).
+//   Se puede pisar a mano AQUÍ: ese cambio es TEMPORAL, solo mientras el modal esté
+//   abierto — no toca la base de datos ni el stock real.
+// · ⚖️ SALDO = Stock − Total del ID (en unidades). Verde sobra · rojo falta · ámbar exacto.
+// · Al pasar el cursor por cualquier sección sale la lista EXACTA de estados del Excel
+//   que esa sección capturó, con sus órdenes y unidades.
+const NX_SIM_COLS_KEY='nx_sim_cols_v1'
+const NX_SIM_COLS_DEF=['prod','ord','dev','tot','stock','saldo','pconf','canc']
+const NX_SIM_COLDEF={
+  prod :{t:'PRODUCTO ID (proveedor)',col:'var(--muted)'},
+  ord  :{t:'✅ Órdenes',col:'var(--blue)',g:'ordenes'},
+  dev  :{t:'↩️ Devueltas',col:'var(--red)',g:'dev'},
+  pconf:{t:'⏳ P. Conf.',col:'var(--amber)',g:'pconf'},
+  canc :{t:'❌ Canc/Rech/Anul',col:'var(--red)',g:'cancel'},
+  tot  :{t:'Σ Total del ID',col:'var(--purple)'},
+  stock:{t:'📦 Stock',col:'var(--green)'},
+  saldo:{t:'⚖️ Saldo',col:'var(--hier-cuenta,#14B8A6)'},
+}
+function _nxSimColsGet(){
+  let arr=null
+  try{const raw=localStorage.getItem(NX_SIM_COLS_KEY);if(raw){const a=JSON.parse(raw);if(Array.isArray(a))arr=a.map(x=>String(x))}}catch(_){}
+  if(!arr)arr=NX_SIM_COLS_DEF.slice()
+  // Saneo: se botan las desconocidas y se agregan al final las que falten — nunca se pierde una columna
+  arr=arr.filter((k,i)=>NX_SIM_COLDEF[k]&&arr.indexOf(k)===i)
+  for(const k of NX_SIM_COLS_DEF)if(arr.indexOf(k)<0)arr.push(k)
+  return arr
+}
+function _nxSimColsSave(arr){try{localStorage.setItem(NX_SIM_COLS_KEY,JSON.stringify(arr))}catch(_){}}
+window.nxSimColMover=(from,to)=>{
+  const a=_nxSimColsGet()
+  if(!(from>=0&&to>=0&&from<a.length&&to<a.length)||from===to)return
+  const x=a.splice(from,1)[0];a.splice(to,0,x)
+  _nxSimColsSave(a);_nxSimPintar()
+}
+window.nxSimColsReset=()=>{_nxSimColsSave(NX_SIM_COLS_DEF.slice());_nxSimPintar()}
+window._nxSimDragIdx=null
+window.nxSimDragStart=(e,i)=>{window._nxSimDragIdx=i;try{e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',String(i))}catch(_){}}
+window.nxSimDragOver=(e,i)=>{
+  e.preventDefault();try{e.dataTransfer.dropEffect='move'}catch(_){}
+  const th=e.currentTarget
+  if(th&&window._nxSimDragIdx!==null&&window._nxSimDragIdx!==i)th.style.boxShadow=(i<window._nxSimDragIdx?'inset 3px 0 0 var(--purple)':'inset -3px 0 0 var(--purple)')
+}
+window.nxSimDragLeave=(e)=>{const th=e.currentTarget;if(th)th.style.boxShadow=''}
+window.nxSimDrop=(e,i)=>{
+  e.preventDefault()
+  const th=e.currentTarget;if(th)th.style.boxShadow=''
+  const f=window._nxSimDragIdx;window._nxSimDragIdx=null
+  if(f===null||f===undefined||f===i)return
+  window.nxSimColMover(f,i)
+}
+window.nxSimDragEnd=()=>{window._nxSimDragIdx=null;try{document.querySelectorAll('.nxsim-th').forEach(t=>{t.style.boxShadow=''})}catch(_){}}
+// ── Stock y saldo ──
+function _nxSimPidSafe(pid){return String(pid==null?'':pid).replace(/[^\w]/g,'_')}
+window._nxSimRU={} // {pid → unidades que suman al Total del ID en la última pintada}
+function _nxSimStockDe(pid){ // → número o null (null = ese ID no tiene stock registrado ni escrito a mano)
+  const D=window._nxSimData;if(!D)return null
+  const ov=D.stockOv||{}
+  if(Object.prototype.hasOwnProperty.call(ov,pid))return ov[pid]
+  if(pid==='__sinpid')return null
+  let t=0
+  try{if(typeof window.stkTotalId==='function')t=window.stkTotalId(pid)}catch(_){}
+  return t>0?t:null
+}
+function _nxSimSaldoHTMLv(saldo){
+  if(saldo===null)return '<div style="font-size:12px;color:var(--subtle)">—</div>'
+  const col=saldo>0?'var(--green)':(saldo<0?'var(--red)':'var(--amber)')
+  const pie=saldo>0?'u disponibles':(saldo<0?`faltan ${Math.abs(saldo)} u`:'justo, sin sobrante')
+  return `<div style="font-size:14px;font-weight:800;color:${col}">${saldo}</div><div style="font-size:10px;color:var(--muted)">${pie}</div>`
+}
+function _nxSimSaldoHTML(st,rU){return _nxSimSaldoHTMLv(st===null?null:(st-(rU||0)))}
+window.nxSimStockIn=(pid,val)=>{ // edición TEMPORAL del stock dentro del simulador (no toca la BD)
+  const D=window._nxSimData;if(!D)return
+  D.stockOv=D.stockOv||{}
+  const v=String(val==null?'':val).trim()
+  if(v==='')delete D.stockOv[pid]
+  else{const n=Math.round(Number(v.replace(/[^\d.-]/g,'')));D.stockOv[pid]=isFinite(n)?n:0}
+  _nxSimSaldosRefrescar()
+}
+function _nxSimSaldosRefrescar(){ // repinta SOLO saldo + totales (no re-renderiza: no se pierde el foco del input)
+  const RU=window._nxSimRU||{}
+  let tS=0,tSal=0,hay=false
+  for(const pid of Object.keys(RU)){
+    const st=_nxSimStockDe(pid),rU=RU[pid]||0
+    const el=document.getElementById('nxsim-saldo-'+_nxSimPidSafe(pid))
+    if(el)el.innerHTML=_nxSimSaldoHTML(st,rU)
+    if(st!==null){hay=true;tS+=st;tSal+=(st-rU)}
+  }
+  const eS=document.getElementById('nxsim-stock-tot')
+  if(eS)eS.innerHTML=hay?`<div style="font-size:14px;font-weight:800;color:var(--green)">${tS}</div><div style="font-size:10px;color:var(--muted)">u en total</div>`:'<div style="font-size:12px;color:var(--subtle)">—</div>'
+  const eT=document.getElementById('nxsim-saldo-tot')
+  if(eT)eT.innerHTML=hay?_nxSimSaldoHTMLv(tSal):'<div style="font-size:12px;color:var(--subtle)">—</div>'
+}
+// ── 🔎 Ventana emergente: qué estados capturó cada sección ──
+window.nxSimPopOut=()=>{const e=document.getElementById('nx-sim-pop');if(e)e.remove()}
+window.nxSimPopIn=(ev,grupos,titulo)=>{
+  window.nxSimPopOut()
+  const D=window._nxSimData;if(!D)return
+  const _e=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  const gs=String(grupos||'').split(',').filter(Boolean)
+  const acc={}
+  for(const g of gs){
+    const b=(D.estG||{})[g]||{}
+    for(const k of Object.keys(b)){if(!acc[k])acc[k]={n:0,u:0};acc[k].n+=b[k].n;acc[k].u+=b[k].u}
+  }
+  const keys=Object.keys(acc).sort((a,b)=>acc[b].n-acc[a].n||a.localeCompare(b))
+  let cuerpo
+  if(!keys.length)cuerpo='<div style="font-size:11px;color:var(--muted);padding:4px 0">Este archivo no trajo ninguna orden en esta sección.</div>'
+  else cuerpo=keys.map(k=>{
+    let meta=null;try{meta=DROPI_STATUS[String(k).trim().toUpperCase()]}catch(_){}
+    return `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:3px 0;border-bottom:1px dashed var(--border)">
+      <span style="font-family:monospace;font-size:11px;color:var(--text)">${meta&&meta.emoji?meta.emoji+' ':''}${_e(k)}</span>
+      <span style="font-size:10.5px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums"><b style="color:var(--text)">${acc[k].n}</b> órd · ${acc[k].u} u</span>
+    </div>`}).join('')
+  const div=document.createElement('div')
+  div.id='nx-sim-pop'
+  div.style.cssText='position:fixed;z-index:100001;background:var(--card);border:1px solid var(--purple);border-radius:10px;padding:9px 11px;max-width:340px;max-height:330px;overflow:auto;box-shadow:0 10px 34px rgba(0,0,0,.65);pointer-events:none'
+  div.innerHTML=`<div style="font-size:11.5px;font-weight:800;margin-bottom:5px">${_e(titulo||'Estados capturados')}</div>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:5px">Estados TAL CUAL vienen del Excel de Dropi que esta sección está contando (${keys.length}).</div>${cuerpo}`
+  document.body.appendChild(div)
+  try{
+    const r=ev.currentTarget.getBoundingClientRect()
+    const w=div.offsetWidth||320,h=div.offsetHeight||160
+    let x=r.left,y=r.bottom+7
+    if(x+w>window.innerWidth-10)x=Math.max(10,window.innerWidth-w-10)
+    if(y+h>window.innerHeight-10)y=Math.max(10,r.top-h-7)
+    div.style.left=x+'px';div.style.top=y+'px'
+  }catch(_){div.style.left='20px';div.style.top='20px'}
+}
+function _nxSimHov(grupos,titulo){ // handlers listos para pegar en cualquier tarjeta/encabezado
+  return ` onmouseenter="nxSimPopIn(event,'${grupos}','${String(titulo).replace(/'/g,'')}')" onmouseleave="nxSimPopOut()"`
+}
 function _nxSimPintar(){
   const D=window._nxSimData
+  try{window.nxSimPopOut&&window.nxSimPopOut()}catch(_){} // ninguna ventana emergente queda colgada al repintar
   if(!D)return
   let el=document.getElementById('nx-sim-modal')
   if(!el){el=document.createElement('div');el.id='nx-sim-modal';document.body.appendChild(el)}
@@ -37683,34 +38029,59 @@ function _nxSimPintar(){
     <div style="font-size:14px;font-weight:700;color:${n>0?col:'var(--subtle)'}">${n}</div>
     <div style="font-size:10px;color:var(--muted)">${u} u${sc?` <span title="${sc} orden(es) sin cantidad" style="color:var(--amber);cursor:help">⚠️+${sc}?</span>`:''}</div></td>`
   const _swBtn=(cual,on)=>`<button onclick="nxSimSw('${cual}')" title="${on?'Prendido: SUMA al total. Click para apagar.':'Apagado: se ve pero NO suma. Click para prender.'}" style="cursor:pointer;border-radius:999px;border:1px solid ${on?'var(--green)':'var(--border)'};background:${on?'rgba(34,197,94,.15)':'var(--card2)'};color:${on?'var(--green)':'var(--muted)'};font-size:10px;font-weight:700;padding:2px 9px">${on?'SUMA ✓':'NO SUMA'}</button>`
-  const _chip=(emoji,nom,n,u,sc,col,swHtml)=>`<div style="display:flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:8px 12px">
+  const _chip=(emoji,nom,n,u,sc,col,swHtml,grupo)=>`<div${grupo?` onmouseenter="nxSimPopIn(event,'${grupo}','${String(nom).replace(/'/g,'')} — estados capturados')" onmouseleave="nxSimPopOut()" title="Pasa el cursor: te muestro los estados EXACTOS del Excel que esta sección está contando"`:''} style="display:flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:8px 12px${grupo?';cursor:help':''}">
     <span style="font-size:15px">${emoji}</span>
     <div><div style="font-size:11px;color:var(--muted)">${nom}</div>
     <div style="font-size:13px;font-weight:700;color:${col}">${n} <span style="font-size:11px;font-weight:400;color:var(--muted)">órd · ${u} u${sc?` <span title="${sc} sin cantidad" style="color:var(--amber);cursor:help">⚠️+${sc}?</span>`:''}</span></div></div>
     ${swHtml||''}</div>`
-  const _th=(t,col)=>`<th style="text-align:center;padding:7px 6px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:${col||'var(--muted)'}">${t}</th>`
+  // ── 🧲 Tabla con COLUMNAS ARRASTRABLES (orden guardado) + 📦 Stock y ⚖️ Saldo ──
+  const COLS=_nxSimColsGet()
+  const _thDrag=(k,i)=>{
+    const d=NX_SIM_COLDEF[k]||{t:k}
+    const hov=d.g?` onmouseenter="nxSimPopIn(event,'${d.g}','${String(d.t).replace(/'/g,'')} — estados capturados')" onmouseleave="nxSimPopOut()"`:''
+    return `<th class="nxsim-th" draggable="true" ondragstart="nxSimDragStart(event,${i})" ondragover="nxSimDragOver(event,${i})" ondragleave="nxSimDragLeave(event)" ondrop="nxSimDrop(event,${i})" ondragend="nxSimDragEnd(event)"${hov} title="Arrastra esta columna para cambiarla de lugar${d.g?' · pasa el cursor para ver qué estados cuenta':''}" style="text-align:${k==='prod'?'left':'center'};padding:7px 6px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:${d.col||'var(--muted)'};cursor:grab;user-select:none;white-space:nowrap">⠿ ${d.t}</th>`
+  }
+  window._nxSimRU={}
+  const _tdTot=(n,u,sc,big)=>`<td style="text-align:center;padding:${big?9:8}px 8px;font-variant-numeric:tabular-nums;background:linear-gradient(0deg,rgba(167,139,250,.${big?'14':'10'}),rgba(167,139,250,.${big?'14':'10'})),transparent"><div style="font-size:${big?15:14}px;font-weight:800;color:var(--purple)">${n}</div><div style="font-size:10px;color:var(--muted)">${u} u${sc?` <span style="color:var(--amber)">⚠️+${sc}?</span>`:''}</div></td>`
+  const _tdStock=(pid,st)=>`<td style="text-align:center;padding:6px 6px"><input type="number" step="1" value="${st===null?'':st}" placeholder="—" oninput="nxSimStockIn('${String(pid).replace(/'/g,'')}',this.value)" title="Sale del 📦 Stock por ID de la tarjeta del producto. Puedes pisarlo aquí: el cambio es TEMPORAL, solo mientras esta ventana esté abierta — no toca la base de datos." style="width:78px;text-align:center;font-size:13px;font-weight:700;color:var(--green);background:rgba(34,197,94,.07);border:1px solid ${st===null?'var(--border)':'var(--green)'};border-radius:7px;padding:4px 5px;font-variant-numeric:tabular-nums"></td>`
+  const _tdSaldo=(pid,st,rU)=>`<td id="nxsim-saldo-${_nxSimPidSafe(pid)}" style="text-align:center;padding:8px 8px;font-variant-numeric:tabular-nums;background:linear-gradient(0deg,rgba(20,184,166,.08),rgba(20,184,166,.08)),transparent">${_nxSimSaldoHTML(st,rU)}</td>`
   const body=filas.map((f,i)=>{
     const S=f.S
     const rN=S.ordN+(sw.dev?S.devN:0)+(sw.pconf?S.pcN:0)
     const rU=S.ordU+(sw.dev?S.devU:0)+(sw.pconf?S.pcU:0)
     const rSC=S.ordSC+(sw.dev?S.devSC:0)+(sw.pconf?S.pcSC:0)
-    return`<tr style="border-bottom:1px solid var(--border);background:${i%2===0?'rgba(255,255,255,.02)':'transparent'}">
-      <td style="text-align:left;padding:8px 10px"><div style="font-family:monospace;font-weight:700;font-size:13px;color:var(--text)">${_e(f.label)}</div><div style="font-size:10px;color:${f.tag.c}">${_e(f.tag.tx)}</div>${f.nombre?`<div style="font-size:10px;color:var(--muted)">Excel: ${_e(f.nombre)}</div>`:''}</td>
-      ${_cel(S.ordN,S.ordU,S.ordSC,'var(--blue)')}
-      ${_cel(S.devN,S.devU,S.devSC,'var(--red)',!sw.dev)}
-      ${_cel(S.pcN,S.pcU,S.pcSC,'var(--amber)',!sw.pconf)}
-      ${_cel(S.caN,S.caU,S.caSC,'var(--red)',true)}
-      <td style="text-align:center;padding:8px 8px;font-variant-numeric:tabular-nums;background:linear-gradient(0deg,rgba(167,139,250,.10),rgba(167,139,250,.10)),transparent"><div style="font-size:14px;font-weight:800;color:var(--purple)">${rN}</div><div style="font-size:10px;color:var(--muted)">${rU} u${rSC?` <span style="color:var(--amber)">⚠️+${rSC}?</span>`:''}</div></td>
-    </tr>`
+    window._nxSimRU[f.pid]=rU
+    const st=_nxSimStockDe(f.pid)
+    const celda=(k)=>{
+      if(k==='prod')return `<td style="text-align:left;padding:8px 10px"><div style="font-family:monospace;font-weight:700;font-size:13px;color:var(--text)">${_e(f.label)}</div><div style="font-size:10px;color:${f.tag.c}">${_e(f.tag.tx)}</div>${f.nombre?`<div style="font-size:10px;color:var(--muted)">Excel: ${_e(f.nombre)}</div>`:''}</td>`
+      if(k==='ord')return _cel(S.ordN,S.ordU,S.ordSC,'var(--blue)')
+      if(k==='dev')return _cel(S.devN,S.devU,S.devSC,'var(--red)',!sw.dev)
+      if(k==='pconf')return _cel(S.pcN,S.pcU,S.pcSC,'var(--amber)',!sw.pconf)
+      if(k==='canc')return _cel(S.caN,S.caU,S.caSC,'var(--red)',true)
+      if(k==='tot')return _tdTot(rN,rU,rSC,false)
+      if(k==='stock')return _tdStock(f.pid,st)
+      if(k==='saldo')return _tdSaldo(f.pid,st,rU)
+      return '<td></td>'
+    }
+    return`<tr style="border-bottom:1px solid var(--border);background:${i%2===0?'rgba(255,255,255,.02)':'transparent'}">${COLS.map(celda).join('')}</tr>`
   }).join('')
-  const foot=`<tr style="border-top:2px solid var(--border)">
-    <td style="text-align:left;padding:9px 10px;font-weight:800;color:var(--text)">TOTAL</td>
-    ${_cel(T.ordN,T.ordU,T.ordSC,'var(--blue)')}
-    ${_cel(T.devN,T.devU,T.devSC,'var(--red)',!sw.dev)}
-    ${_cel(T.pcN,T.pcU,T.pcSC,'var(--amber)',!sw.pconf)}
-    ${_cel(T.caN,T.caU,T.caSC,'var(--red)',true)}
-    <td style="text-align:center;padding:9px 8px;background:linear-gradient(0deg,rgba(167,139,250,.14),rgba(167,139,250,.14)),transparent"><div style="font-size:15px;font-weight:800;color:var(--purple)">${totN}</div><div style="font-size:10px;color:var(--muted)">${totU} u${totSC?` <span style="color:var(--amber)">⚠️+${totSC}?</span>`:''}</div></td>
-  </tr>`
+  // Totales de 📦 Stock y ⚖️ Saldo (solo de los IDs que SÍ tienen stock)
+  let _tS=0,_tSal=0,_hayS=false
+  for(const f of filas){
+    const st=_nxSimStockDe(f.pid);if(st===null)continue
+    _hayS=true;_tS+=st;_tSal+=(st-(window._nxSimRU[f.pid]||0))
+  }
+  const foot=`<tr style="border-top:2px solid var(--border)">${COLS.map(k=>{
+    if(k==='prod')return `<td style="text-align:left;padding:9px 10px;font-weight:800;color:var(--text)">TOTAL</td>`
+    if(k==='ord')return _cel(T.ordN,T.ordU,T.ordSC,'var(--blue)')
+    if(k==='dev')return _cel(T.devN,T.devU,T.devSC,'var(--red)',!sw.dev)
+    if(k==='pconf')return _cel(T.pcN,T.pcU,T.pcSC,'var(--amber)',!sw.pconf)
+    if(k==='canc')return _cel(T.caN,T.caU,T.caSC,'var(--red)',true)
+    if(k==='tot')return _tdTot(totN,totU,totSC,true)
+    if(k==='stock')return `<td id="nxsim-stock-tot" style="text-align:center;padding:9px 8px;font-variant-numeric:tabular-nums">${_hayS?`<div style="font-size:14px;font-weight:800;color:var(--green)">${_tS}</div><div style="font-size:10px;color:var(--muted)">u en total</div>`:'<div style="font-size:12px;color:var(--subtle)">—</div>'}</td>`
+    if(k==='saldo')return `<td id="nxsim-saldo-tot" style="text-align:center;padding:9px 8px;font-variant-numeric:tabular-nums;background:linear-gradient(0deg,rgba(20,184,166,.12),rgba(20,184,166,.12)),transparent">${_hayS?_nxSimSaldoHTMLv(_tSal):'<div style="font-size:12px;color:var(--subtle)">—</div>'}</td>`
+    return '<td></td>'
+  }).join('')}</tr>`
   const nv=D.nov
   const _lst=(arr,max)=>arr.slice(0,max||20).map(x=>`<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:4px 8px;border-bottom:1px dashed var(--border);font-size:11px">
       <span style="font-family:monospace;font-weight:700">${_e(x.oid)}</span><span>📞 ${_e(x.tel)}</span><span>📅 ${_e(x.fecha)}</span><span style="color:var(--muted)">${_e(x.estado)}</span>
@@ -37727,7 +38098,7 @@ function _nxSimPintar(){
     :`<div class="alert alert-green" style="margin-top:12px">✅ Todo cuadra: todas las órdenes del archivo traen estado clasificado, cantidad y PRODUCTO ID.</div>`
   // ⚠️ SIN fondo clickeable para cerrar: SOLO la ✕ cierra (pedido del owner). — minimiza.
   el.innerHTML=`<div style="position:fixed;inset:0;z-index:99997;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:18px">
-    <div style="background:var(--card);border:1px solid var(--purple);border-radius:14px;max-width:920px;width:100%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 10px 40px rgba(0,0,0,.6)">
+    <div style="background:var(--card);border:1px solid var(--purple);border-radius:14px;max-width:1180px;width:100%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 10px 40px rgba(0,0,0,.6)">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border)">
         <div>
           <div style="font-size:15px;font-weight:800">🧪 Simulador · análisis del Excel de Dropi</div>
@@ -37740,21 +38111,24 @@ function _nxSimPintar(){
       </div>
       <div style="padding:14px 16px;overflow:auto">
         <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:stretch;margin-bottom:12px">
-          <div style="background:linear-gradient(0deg,rgba(167,139,250,.10),rgba(167,139,250,.10)),var(--card);border:1px solid var(--purple);border-radius:12px;padding:10px 16px;min-width:200px">
+          <div onmouseenter="nxSimPopIn(event,'ordenes','✅ Órdenes — estados capturados')" onmouseleave="nxSimPopOut()" title="Pasa el cursor: te muestro los estados EXACTOS del Excel que están contando como órdenes" style="cursor:help;background:linear-gradient(0deg,rgba(167,139,250,.10),rgba(167,139,250,.10)),var(--card);border:1px solid var(--purple);border-radius:12px;padding:10px 16px;min-width:200px">
             <div style="font-size:11px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase">✅ Órdenes del archivo</div>
             <div style="font-size:24px;font-weight:800;color:var(--purple);font-variant-numeric:tabular-nums">${totN} <span style="font-size:14px;font-weight:600;color:var(--text)">órdenes</span></div>
             <div style="font-size:13px;color:var(--text)">${totU} unidades${totSC?` <span title="${totSC} sin cantidad" style="color:var(--amber);cursor:help">⚠️ +${totSC} sin cantidad</span>`:''}</div>
             <div style="font-size:10px;color:var(--muted);margin-top:2px">${_inc.length?_inc.join(' · '):'solo el grupo ✅ (switches apagados)'}${totN>0?` · ${(totU/Math.max(1,totN-totSC)).toFixed(2)} u/orden`:''}</div>
           </div>
-          ${_chip('↩️','Devueltas',T.devN,T.devU,T.devSC,'var(--red)',_swBtn('dev',!!sw.dev))}
-          ${_chip('⏳','Pendiente confirmación',T.pcN,T.pcU,T.pcSC,'var(--amber)',_swBtn('pconf',!!sw.pconf))}
-          ${_chip('❌','Canc / Rech / Anuladas',T.caN,T.caU,T.caSC,'var(--red)','<span style="font-size:9px;color:var(--muted)">nunca suman</span>')}
-          ${T.fueraN?`<div style="display:flex;align-items:center;gap:8px;background:rgba(239,68,68,.08);border:1px solid var(--red);border-radius:10px;padding:8px 12px"><span style="font-size:15px">🔎</span><div style="font-size:12px;color:var(--red);font-weight:700">${T.fueraN} FUERA del conteo<div style="font-size:10px;font-weight:400;color:var(--muted)">sin estado o sin clasificar</div></div></div>`:''}
+          ${_chip('↩️','Devueltas',T.devN,T.devU,T.devSC,'var(--red)',_swBtn('dev',!!sw.dev),'dev')}
+          ${_chip('⏳','Pendiente confirmación',T.pcN,T.pcU,T.pcSC,'var(--amber)',_swBtn('pconf',!!sw.pconf),'pconf')}
+          ${_chip('❌','Canc / Rech / Anuladas',T.caN,T.caU,T.caSC,'var(--red)','<span style="font-size:9px;color:var(--muted)">nunca suman</span>','cancel')}
+          ${T.fueraN?`<div onmouseenter="nxSimPopIn(event,'sin_estado,desconocido','🔎 FUERA del conteo — estados capturados')" onmouseleave="nxSimPopOut()" title="Pasa el cursor: te muestro los estados EXACTOS que quedaron por fuera" style="cursor:help;display:flex;align-items:center;gap:8px;background:rgba(239,68,68,.08);border:1px solid var(--red);border-radius:10px;padding:8px 12px"><span style="font-size:15px">🔎</span><div style="font-size:12px;color:var(--red);font-weight:700">${T.fueraN} FUERA del conteo<div style="font-size:10px;font-weight:400;color:var(--muted)">sin estado o sin clasificar</div></div></div>`:''}
         </div>
-        <div class="table-wrap" style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;min-width:620px">
-          <thead><tr style="border-bottom:1px solid var(--border)">${_th('PRODUCTO ID (proveedor)')}${_th('✅ Órdenes','var(--blue)')}${_th('↩️ Devueltas','var(--red)')}${_th('⏳ P. Conf.','var(--amber)')}${_th('❌ Canc/Rech/Anul','var(--red)')}${_th('Σ Total del ID','var(--purple)')}</tr></thead>
+        <div class="table-wrap" style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;min-width:860px">
+          <thead><tr style="border-bottom:1px solid var(--border)">${COLS.map((k,i)=>_thDrag(k,i)).join('')}</tr></thead>
           <tbody>${body}</tbody><tfoot>${foot}</tfoot></table></div>
-        <div style="font-size:10px;color:var(--subtle);margin-top:6px;line-height:1.6">💡 Órdenes = IDs de orden DISTINTOS del archivo (una orden con 2 variaciones = 1 orden, cantidades sumadas) · unidades = suma de CANTIDAD · mismas reglas de la pestaña 📦 Órdenes.</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px">
+          <div style="font-size:10px;color:var(--subtle);line-height:1.6;flex:1;min-width:240px">💡 Órdenes = IDs de orden DISTINTOS del archivo (una orden con 2 variaciones = 1 orden, cantidades sumadas) · unidades = suma de CANTIDAD · mismas reglas de la pestaña 📦 Órdenes.<br>⠰ <b>Arrastra cualquier encabezado</b> para cambiar el orden de las columnas — queda guardado en este computador. 📦 <b>Stock</b> sale del 📦 Stock por ID de la tarjeta del producto y aquí lo puedes pisar <b>temporalmente</b> (no toca la base de datos). ⚖️ <b>Saldo</b> = Stock − Total del ID, en unidades. 🔎 Pasa el cursor por cualquier sección para ver los <b>estados exactos</b> que capturó.</div>
+          <button onclick="nxSimColsReset()" title="Volver al orden de fábrica: Producto · Órdenes · Devueltas · Total del ID · Stock · Saldo · P. Conf. · Canc/Rech/Anul" style="cursor:pointer;flex-shrink:0;background:var(--card2);border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:4px 10px;font-size:10.5px;font-weight:700">↺ Orden de fábrica</button>
+        </div>
         ${novBox}
       </div>
     </div>

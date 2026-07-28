@@ -1945,11 +1945,73 @@ function _dashCajonesHTML(){
          nuevo (cajón 🧪). pageAdminGasto/loadTracker quedan INTACTOS. Revertir = descomentar la línea:
     \${_dashCajonHTML1('trk','💰','Tracker','¿Cómo va la plata día por día?')} -->
     ${_dashCajonHTML1('res','📈','Resumen Semanal','¿Cómo va semana por semana?')}
+    ${_dashCajonHTML1('msj','📊','Mensajería — Tablero del día','¿Las colas están bajando? Pendientes, hechos HOY por persona y semáforo · meta: todo en CERO')}
     ${_dashCajonHTML1('rep','📋','Reportes','El detalle fino por fecha')}
     ${_dashCajonHTML1('hb','📗','Hoja Base — Constructor','Archivos por día (exports + hojas) y configuración de columnas')}
     <!-- NUEVO (3jul26 · Mejora 3): Novedades ID vive ahora AQUÍ, de última (debajo de Reportes). -->
     <div id="novedadesIdBox" style="margin-top:12px"></div>
   </div>`
+}
+// ── 📊 TABLERO DE MENSAJERÍA (28jul26) — SOLO ADMIN (cajón del Dashboard) ───
+// La regla de gestión: TODA cola de trabajo debe quedar en CERO al cierre.
+// PENDIENTES = lo que falta ahora · HOY = lo hecho hoy POR PERSONA (las tablas ya
+// guardan usuario_nombre) · Semáforo: 🟢 en cero · 🟡 hay pendientes pero HOY se
+// movió · 🔴 hay pendientes y HOY nadie tocó esa cola. La FOTO DE APERTURA se
+// guarda una vez al día (config) para ver "arrancó en X → va en Y".
+// El auxiliar NUNCA ve esto: solo vive en el Dashboard del admin.
+async function _msjTableroRender(body){
+  body.innerHTML='<div class="loading">📊 Contando las colas…</div>'
+  const hoy=today(),desde=hoy+'T00:00:00-05:00'
+  const cnt=async(fn)=>{try{const{count}=await fn();return count||0}catch(_){return null}}
+  const rows=async(fn)=>{try{const{data}=await fn();return data||[]}catch(_){return[]}}
+  const porPersona=(arr,campo)=>{const m={};for(const r of arr){const u=(r[campo]||'—').trim()||'—';m[u]=(m[u]||0)+1}return Object.entries(m).sort((a,b)=>b[1]-a[1]).map(([u,n])=>u+' '+n).join(' · ')}
+  try{
+    // ── PENDIENTES (ahora) ──
+    const pendConfTot=await cnt(()=>sb.from('mapeos').select('id',{count:'exact',head:true}).in('estado_final',['PENDIENTE CONFIRMACION','PENDIENTE','CONFIRMADO','TELEMERCADEO']))
+    const progActivas=await cnt(()=>sb.from('programaciones_envio').select('id',{count:'exact',head:true}).eq('estado','programado'))
+    const sinProg=(pendConfTot!=null&&progActivas!=null)?Math.max(0,pendConfTot-progActivas):null // aprox honesta: pendientes − programaciones activas
+    // ── HECHO HOY (por persona) ──
+    const progHoy=await rows(()=>sb.from('programaciones_envio').select('usuario_nombre').gte('created_at',desde).limit(800))
+    const novHoy=await rows(()=>sb.from('novedades_resoluciones').select('usuario_nombre,accion').gte('created_at',desde).limit(800))
+    const novResHoy=novHoy.filter(r=>r.accion==='resuelta')
+    const recHoy=await rows(()=>sb.from('reclame_envios').select('usuario_nombre,nivel_mensaje').gte('created_at',desde).limit(800))
+    const recResHoy=recHoy.filter(r=>r.nivel_mensaje===99),recAvHoy=recHoy.filter(r=>r.nivel_mensaje!==99)
+    const cancHoy=await rows(()=>sb.from('mapeo_eventos').select('evento').gte('created_at',desde).in('evento',['re_cancelado','confirmado']).limit(800))
+    const dijoNoHoy=cancHoy.filter(r=>r.evento==='re_cancelado').length,confHoy=cancHoy.filter(r=>r.evento==='confirmado').length
+    // ── FOTO DE APERTURA (una vez al día, patrón config con eco) ──
+    let foto=null
+    try{
+      const clave='msj_foto_'+hoy
+      const raw=await getConfig(clave)
+      if(raw){foto=JSON.parse(raw)}
+      else{
+        foto={sinProg,ts:new Date().toISOString()}
+        await sb.from('config').upsert({clave,valor:JSON.stringify(foto),updated_at:new Date().toISOString()},{onConflict:'clave'})
+      }
+    }catch(_){}
+    const fila=(emoji,nombre,pend,hoyN,hoyDet,extra)=>{
+      const sem=pend===0?'🟢':(hoyN>0?'🟡':'🔴')
+      const semTxt=pend===0?'EN CERO':(hoyN>0?'bajando':'⚠️ QUIETA — nadie la tocó hoy')
+      return `<div style="background:var(--card2);border:1px solid ${pend===0?'var(--green)':(hoyN>0?'var(--amber)':'var(--red)')};border-radius:10px;padding:10px 13px;margin-bottom:7px">
+        <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap">
+          <div style="font-weight:800;font-size:13px;min-width:180px">${emoji} ${nombre}</div>
+          <div style="font-size:12.5px"><span style="color:var(--muted)">PENDIENTES:</span> <strong style="font-size:15px;color:${pend===0?'var(--green)':'var(--amber)'}">${pend==null?'?':pend}</strong>${extra||''}</div>
+          <div style="font-size:12px"><span style="color:var(--muted)">HOY:</span> <strong>${hoyN}</strong> ✅${hoyDet?` <span style="color:var(--muted)">(${_wchEsc(hoyDet)})</span>`:''}</div>
+          <div style="font-size:12px;font-weight:800">${sem} ${semTxt}</div>
+        </div>
+      </div>`
+    }
+    const fotoTxt=(foto&&foto.sinProg!=null&&sinProg!=null&&foto.sinProg!==sinProg)?` <span style="font-size:11px;color:var(--muted)">(arrancó en ${foto.sinProg} → va en ${sinProg})</span>`:''
+    body.innerHTML=`
+      <div style="font-size:11.5px;color:var(--muted);margin-bottom:10px">Regla: <strong style="color:var(--text)">toda cola debe quedar en CERO al cierre</strong>. 🟢 en cero · 🟡 hay pendientes pero HOY se movió · 🔴 pendientes y nadie la tocó hoy. Los PENDIENTES de Pend. Conf. son aproximados (pendientes reales − programaciones activas). Hecho HOY sale de las tablas reales con su usuario.</div>
+      ${fila('🗓️','Pend. Conf. · Sin programar envío',sinProg,progHoy.length,porPersona(progHoy,'usuario_nombre'),fotoTxt)}
+      ${fila('📅','Programaciones activas (esperando plantilla 2d antes)',progActivas,progHoy.length,porPersona(progHoy,'usuario_nombre'))}
+      ${fila('🔔','Novedades · resueltas hoy',null,novResHoy.length,porPersona(novResHoy,'usuario_nombre'))}
+      ${fila('📢','Reclame · avisos hoy / resueltas hoy',null,recAvHoy.length+recResHoy.length,'avisos '+recAvHoy.length+' · resueltas '+recResHoy.length+(porPersona(recResHoy,'usuario_nombre')?' · '+porPersona(recResHoy,'usuario_nombre'):''))}
+      ${fila('❌','Cancelados · gestiones hoy',null,dijoNoHoy+confHoy,'🚫 dijo NO '+dijoNoHoy+' · ✅ confirmados '+confHoy)}
+      <div style="font-size:10.5px;color:var(--muted);margin-top:8px">💡 Los conteos de esperas por riel (🆕/💬/🔁 sin atender) viven en el Centro de Chats — este tablero mide las COLAS OPERATIVAS. Ábrelo con el botón 💬 Chats para el detalle en vivo.</div>
+      <div style="text-align:right;margin-top:6px"><button class="btn-sm btn-outline" onclick="this.closest('[id^=dcaj-body-]').dataset.loaded='';_dashCajonToggle('msj');_dashCajonToggle('msj')">🔄 Recargar</button></div>`
+  }catch(e){body.innerHTML='<div class="alert alert-red">❌ '+String(e.message||e)+'</div>'}
 }
 // Toggle + lazy-load: la 1ª apertura renderiza la página original dentro del cajón.
 window._dashCajonToggle=async(k)=>{
@@ -1966,6 +2028,7 @@ window._dashCajonToggle=async(k)=>{
       if(k==='sim')await _sim2Render(body) // NUEVO (2jul26): simulador ¿Qué pasa si...?
       else if(k==='trk')await pageAdminGasto(body)
       else if(k==='res')await pageAdminResumen(body)
+      else if(k==='msj')await _msjTableroRender(body) // (28jul26) 📊 Tablero de Mensajería — solo admin
       else if(k==='rep')await pageAdminReportes(body)
       else if(k==='hb')await hbRenderDashboard(body) // NUEVO (4jul26): Constructor de Hoja Base
     }catch(e){
@@ -17788,7 +17851,8 @@ const _TXT_VALIDAS={
   cancelados:['[NOMBRE]','[PRODUCTO]','[CANTIDAD]','[CIUDAD]','[TRANSPORTADORA]','[TOTAL]','[SALDO]'],
   reclame:['[NOMBRE]','[PRODUCTO]','[CANTIDAD]','[CIUDAD]','[TRANSPORTADORA]','[CARRIER]','[GUIA]','[TOTAL]'],
   'novedades-msg':['[NOMBRE]','[PRODUCTO]','[CARRIER]','[TRANSPORTADORA]','[CANTIDAD]','[CIUDAD]','[GUIA]','[TOTAL]','[SALDO]'],
-  entrantes:['[NOMBRE]'] // Centro de Chats (26jul26): el cliente escribió primero — solo se auto-rellena su nombre
+  entrantes:['[NOMBRE]'], // Centro de Chats (26jul26): el cliente escribió primero — solo se auto-rellena su nombre
+  general:['[NOMBRE]'] // (28jul26) 🌐 textos que salen en TODAS las secciones del Centro de Chats — solo nombre, sirven en cualquier contexto
 }
 const _TXT_C_WRAP='display:inline-flex;flex-direction:column;align-items:flex-start;gap:1px;flex:0 0 auto;white-space:nowrap;cursor:pointer;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:5px 10px;line-height:1.15'
 const _TXT_C_CODE='font-family:monospace;font-size:12px;font-weight:700;color:var(--accent)'
@@ -17837,11 +17901,23 @@ async function pageAdminTextos(c){
   cargarNovedadesAdmin()
 }
 
-async function cargarTextosAdmin(){
-  const el=document.getElementById('txt-list')
+// (28jul26) 🌐 Crea la sección de TEXTOS GENERALES con un clic (mismo patrón
+// verificado de _wchEntrantesCrear). Sus textos salen de PRIMEROS en el chat de
+// TODAS las secciones del Centro de Chats, antes de los propios de cada una.
+window._txtGeneralCrear=async function(){
+  try{
+    const{data:d1,error:e1}=await sb.from('app_mensajes_config').upsert({seccion:'general',nombre:'🌐 Generales (todas las secciones)',cuota_diaria:2},{onConflict:'seccion'}).select('seccion')
+    if(e1||!d1||!d1.length)throw new Error((e1&&e1.message)||'config no confirmó')
+    const{error:e2}=await sb.from('app_mensajes').upsert({seccion:'general',idx:0,etiqueta:'Saludo general',texto:'¡Hola [NOMBRE]! 🙌 Gracias por escribirnos. Cuéntanos, ¿en qué te podemos ayudar hoy?',activo:true},{onConflict:'seccion,idx'})
+    if(e2)throw new Error(e2.message)
+    try{waToast('✅ Sección 🌐 Generales creada. Edita sus textos aquí mismo.','ok')}catch(_){}
+    cargarTextosAdmin()
+  }catch(e){alert('❌ No pude crear la sección: '+(e.message||e))}
+}
+async function cargarTextosAdmin(){  const el=document.getElementById('txt-list')
   if(!el)return
-  const _orden=['confirmacion','psf','cancelados','reclame']
-  const _icono={confirmacion:'📅',psf:'⏳',cancelados:'🔴',reclame:'📦',entrantes:'📥'} // 📥 (26jul26): textos del Centro de Chats para quien escribe primero
+  const _orden=['general','confirmacion','psf','cancelados','reclame'] // (28jul26) 'general' primero: textos que salen en TODAS las secciones del Centro de Chats
+  const _icono={general:'🌐',confirmacion:'📅',psf:'⏳',cancelados:'🔴',reclame:'📦',entrantes:'📥'} // 🌐 (28jul26) generales · 📥 (26jul26): textos del Centro de Chats para quien escribe primero
   const esc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
   const escAttr=(s)=>esc(s).replace(/"/g,'&quot;')
   // Chip multi-portafolio: estados por WABA + circulitos por número
@@ -17859,8 +17935,14 @@ async function cargarTextosAdmin(){
     const cfgBySec={};(cfg||[]).forEach(x=>cfgBySec[x.seccion]=x)
     const tplsBySec={};(tpls||[]).forEach(t=>{(tplsBySec[t.seccion]=tplsBySec[t.seccion]||[]).push(t)})
     window._txtState={}
-    const _todas=[..._orden,...Object.keys(cfgBySec).filter(s=>!_orden.includes(s))]
+    const _todas=[..._orden,...Object.keys(cfgBySec).filter(s=>!_orden.includes(s))].filter(s=>s!=='general'||cfgBySec['general']) // general solo si ya existe
     let html=''
+    if(!cfgBySec['general'])html+=`<div class="card" style="margin-bottom:18px;border:1px dashed var(--primary)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="font-size:12.5px"><strong>🌐 Textos generales</strong> — salen de PRIMEROS en el chat de TODAS las secciones del Centro de Chats (antes de los textos propios de cada una). Aún no existe la sección.</div>
+        <button class="btn btn-sm btn-primary" onclick="_txtGeneralCrear()">➕ Crear sección Generales</button>
+      </div>
+    </div>`
     for(const sec of _todas){
       const cf=cfgBySec[sec]||{nombre:sec,cuota_diaria:2,tope_total:null,placeholders:''}
       const plantillas=(tplsBySec[sec]||[]).slice().sort((a,b)=>a.idx-b.idx)
@@ -39681,6 +39763,29 @@ async function _wchCatLoad(force){
       if(_i>=0)cat.globales.splice(_i+1,0,_nv);else (cat.globales=cat.globales||[]).push(_nv)
     }
   }catch(_){}
+  // (28jul26 · Flujo Pend.Conf) 4 etiquetas de SECCIÓN auto-creadas — solo se AGREGAN
+  // si faltan; renombres/archivados del admin se respetan (viven por su ID):
+  //   reservado → 📅 Envío programado (NO cierra: espera la plantilla de 2 días antes)
+  //               ✅ Envío confirmado (cierra) · 🚫 Cancelado por cliente (cierra)
+  //   cancelados → 🚫 Ya dijo que NO (cierra — el cliente canceló DESPUÉS de contactado)
+  try{
+    const _defsSec={
+      reservado:[
+        {id:'s_pc_prog',n:'Envío programado',e:'📅',c:'#38bdf8',cierre:false,arch:false},
+        {id:'s_pc_conf',n:'Envío confirmado',e:'✅',c:'#22c55e',cierre:true,arch:false},
+        {id:'s_pc_canc',n:'Cancelado por cliente',e:'🚫',c:'#ef4444',cierre:true,arch:false}
+      ],
+      cancelados:[
+        {id:'s_ca_no',n:'Ya dijo que NO',e:'🚫',c:'#ef4444',cierre:true,arch:false}
+      ]
+    }
+    for(const _sk in _defsSec){
+      cat.secciones[_sk]=cat.secciones[_sk]||[]
+      for(const _d of _defsSec[_sk]){
+        if(!cat.secciones[_sk].find(x=>x&&x.id===_d.id))cat.secciones[_sk].push(JSON.parse(JSON.stringify(_d)))
+      }
+    }
+  }catch(_){}
   st.cat=cat
   return cat
 }
@@ -39747,6 +39852,14 @@ function _wchDerivar(c){
         const diasR=(Date.now()-tR)/864e5
         const sNR=(WCH_SECS.find(s=>s.k===c._resolSec.sec)||{}).n||c._resolSec.sec
         return {tipo:'riel',clave:diasR>(nxSysVal('ccDiasVuelve')||7)?'volvio_viejo':'volvio',ts:c.ultimo_msg_en,de:{n:'Resuelta · '+sNR,e:'✅',col:'#22c55e',ts:c._resolSec.ts,tabla:true}}
+      }
+    }
+    // (28jul26) 🚫 dijo que NO y escribió DESPUÉS → reingreso (si escribe, algo quiere)
+    if(c._dijoNo&&c._dijoNo.ts){
+      const tN=new Date(c._dijoNo.ts).getTime()
+      if(isFinite(tN)&&(tMsg==null||tN<tMsg)){
+        const diasN=(Date.now()-tN)/864e5
+        return {tipo:'riel',clave:diasN>(nxSysVal('ccDiasVuelve')||7)?'volvio_viejo':'volvio',ts:c.ultimo_msg_en,de:{n:'Ya dijo que NO',e:'🚫',col:'#ef4444',ts:c._dijoNo.ts,tabla:true}}
       }
     }
     // ¿ALGUNA vez le contestó un humano? → hilo vivo (💬). Si no, es lead crudo (🆕).
@@ -39896,6 +40009,24 @@ async function _wchCargar(){
             const{resol}=await _wchRastroYResol(falta.map(c=>c.telefono))
             for(const c of falta){const rz=resol[_wchTel(c.telefono)];if(rz)c._resolSec=rz}
           }
+        }catch(_){}
+        // (28jul26) 🚫 "Ya dijo que NO": en Cancelados, si el cliente re_cancelado escribe,
+        // cae en 🔁 con su chip — porque si escribe, algo quiere. Dos consultas por lote.
+        if(sec==='cancelados')try{
+          const telsB=[...new Set(base.map(c=>c.telefono).filter(Boolean))]
+          const varB=[...new Set(telsB.flatMap(t=>{const d=String(t).replace(/\D/g,'');return[d,d.startsWith('57')?d.slice(2):('57'+d)]}))]
+          const mapIdDe={}
+          for(let i=0;i<varB.length;i+=150){
+            const{data:mm}=await sb.from('mapeos').select('id,telefono').in('telefono',varB.slice(i,i+150)).order('created_at',{ascending:false}).limit(500)
+            for(const m of(mm||[])){const k=_wchTel(m.telefono);if(!(k in mapIdDe))mapIdDe[k]=m.id}
+          }
+          const idsB=[...new Set(Object.values(mapIdDe))]
+          const rcDe={}
+          for(let i=0;i<idsB.length;i+=100){
+            const{data:rc}=await sb.from('mapeo_eventos').select('mapeo_id,created_at').in('mapeo_id',idsB.slice(i,i+100)).eq('evento','re_cancelado').order('created_at',{ascending:false})
+            for(const r of(rc||[]))if(!(r.mapeo_id in rcDe))rcDe[r.mapeo_id]=r.created_at
+          }
+          for(const c of base){const mid=mapIdDe[_wchTel(c.telefono)];if(mid&&(mid in rcDe))c._dijoNo={ts:rcDe[mid]}}
         }catch(_){}
       }
       for(const c of base){if(tels.has(c.telefono))c._tieneEnvio=true;c._sec=secDe[c.telefono]||sec}
@@ -40302,14 +40433,15 @@ window._wchAbrir=async function(){
         <button onclick="_wchCerrar()" title="Cerrar el Centro de Chats" style="width:30px;height:30px;border-radius:8px;border:none;background:#e81123;color:#fff;font-size:14px;font-weight:800;cursor:pointer;flex:0 0 auto;line-height:1;box-shadow:0 2px 6px rgba(0,0,0,.35)">✕</button>
       </div>
     </div>
+    <div style="display:flex;gap:6px;padding:9px 14px 0">
+      <input id="wch-busca" placeholder="Buscar número o nombre en TODAS las secciones…" style="flex:1;font-size:12.5px;padding:7px 10px" oninput="_wchBuscaCambio(this.value)">
+      <button class="btn-sm btn-outline" onclick="_wchPegar()" title="Pega lo del portapapeles y busca">📋 Pegar</button>
+    </div>
+    <div id="wch-busca-glob" style="display:none;margin:6px 14px 0;background:var(--card2);border:1px solid var(--primary);border-radius:9px;padding:7px 9px;max-height:190px;overflow-y:auto"></div>
     <div id="wch-tabs" style="display:flex;gap:6px;padding:9px 14px 0;flex-wrap:wrap"></div>
     <div style="padding:8px 14px 4px;position:relative">
       <div id="wch-franja" style="display:flex;gap:6px;overflow-x:auto;padding-bottom:6px;scrollbar-width:none" onscroll="_wchScrollGuardar(this)" onwheel="if(Math.abs(event.deltaY)>Math.abs(event.deltaX)){this.scrollLeft+=event.deltaY;event.preventDefault()}"></div>
       <div id="wch-franja-bar" style="height:6px;border-radius:4px;background:rgba(255,255,255,.06);position:relative;cursor:pointer"><div id="wch-franja-thumb" style="position:absolute;top:0;height:6px;border-radius:4px;background:rgba(168,85,247,.55);min-width:24px"></div></div>
-    </div>
-    <div style="display:flex;gap:6px;padding:6px 14px">
-      <input id="wch-busca" placeholder="Buscar número o nombre…" style="flex:1;font-size:12.5px;padding:7px 10px" oninput="_wchBuscaCambio(this.value)">
-      <button class="btn-sm btn-outline" onclick="_wchPegar()" title="Pega lo del portapapeles y busca">📋 Pegar</button>
     </div>
     <div id="wch-lista" style="flex:1;overflow-y:auto;padding:6px 14px 14px"><div class="loading">Cargando…</div></div>
   </div>`
@@ -40339,7 +40471,218 @@ window._wchFechaCambio=function(v){
   const inp=document.getElementById('wch-fecha');if(inp&&!st.fecha)inp.value=''
   _wchRecargar()
 }
-window._wchBuscaCambio=function(v){window._wchState.busca=v;_wchAplicarVista();_wchListaRender();_wchFranjaContadores()}
+window._wchBuscaCambio=function(v){window._wchState.busca=v;_wchAplicarVista();_wchListaRender();_wchFranjaContadores();_wchBuscaGlobal(v)}
+// ── 🌐 BUSCADOR GLOBAL (28jul26) ────────────────────────────────────────────
+// El buscador vive ENCIMA de las pestañas y busca en TODAS las secciones a la
+// vez. Si la sección actual ya tiene resultados, no estorba. Si NO los tiene,
+// busca la conversación en toda la base, averigua su sección (último envío en
+// envios_cola → si no, rastro operativo con _wchRastroYResol) y muestra una
+// tarjeta con su estado interno (etiqueta vigente o riel) — un clic y te lleva
+// a esa sección con el filtro puesto. Debounce de 350ms, todo tolerante.
+window._wchBuscaGlobT=null
+function _wchBuscaGlobal(v){
+  clearTimeout(window._wchBuscaGlobT)
+  const box=document.getElementById('wch-busca-glob')
+  const q=String(v||'').trim()
+  if(!box)return
+  if(q.length<3){box.style.display='none';box.innerHTML='';return}
+  window._wchBuscaGlobT=setTimeout(()=>{_wchBuscaGlobalRun(q).catch(()=>{})},350)
+}
+async function _wchBuscaGlobalRun(q){
+  const st=window._wchState
+  const box=document.getElementById('wch-busca-glob');if(!box)return
+  const inp=document.getElementById('wch-busca')
+  if(inp&&String(inp.value||'').trim()!==q)return // ya escribió otra cosa
+  if((st.vista||[]).length){box.style.display='none';box.innerHTML='';return} // la sección actual ya lo tiene
+  box.style.display='';box.innerHTML='<div style="font-size:11px;color:var(--muted)">🌐 Buscando en todas las secciones…</div>'
+  try{
+    const dig=q.replace(/\D/g,'')
+    let qq=sb.from('conversaciones').select('id,telefono,nombre,origen,etiqueta,etiqueta_en,ultimo_msg_en,ultimo_msg_dir,no_leidos').order('ultimo_msg_en',{ascending:false,nullsFirst:false}).limit(6)
+    if(dig.length>=7){const full=dig.startsWith('57')?dig:('57'+dig);qq=qq.or('telefono.ilike.%'+dig+'%,telefono.ilike.%'+full+'%')}
+    else qq=qq.ilike('nombre','%'+q.replace(/[%_,]/g,'')+'%')
+    const{data:convs,error}=await qq
+    if(error)throw error
+    const hits=convs||[]
+    if(inp&&String(inp.value||'').trim()!==q)return // respuesta vieja: descartar
+    // (28jul26) OJO: aunque no haya conversaciones, se sigue — puede haber PEDIDOS sin conversación en mapeos
+    // Sección de cada hit: último envío en envios_cola manda; si no hay, el rastro operativo
+    const secDe={}
+    try{
+      const{data:evs}=hits.length?await sb.from('envios_cola').select('telefono,seccion,creado_en').in('telefono',hits.map(h=>h.telefono)).order('creado_en',{ascending:false}).limit(300):{data:[]}
+      for(const ev of(evs||[])){const t=_wchTel(ev.telefono);if(!(t in secDe))secDe[t]=ev.seccion}
+    }catch(_){}
+    const sinSec=hits.map(h=>h.telefono).filter(t=>!(_wchTel(t)in secDe))
+    if(sinSec.length){try{const{rastro}=await _wchRastroYResol(sinSec);for(const k in rastro)if(!(k in secDe))secDe[k]=rastro[k].sec}catch(_){}}
+    if(inp&&String(inp.value||'').trim()!==q)return
+    // (28jul26) 📦 PEDIDOS SIN CONVERSACIÓN: también se buscan en mapeos. La sección
+    // sale del estado Dropi. Un clic abre el modal de plantillas (única vía de contacto).
+    let pedidos=[]
+    try{
+      const telsConConv=new Set(hits.map(h=>_wchTel(h.telefono)))
+      let qm=sb.from('mapeos').select('id,telefono,nombre_cliente,producto,cantidad,ciudad,estado_final,created_at').order('created_at',{ascending:false}).limit(6)
+      if(dig.length>=7){const full=dig.startsWith('57')?dig:('57'+dig);qm=qm.or('telefono.ilike.%'+dig+'%,telefono.ilike.%'+full+'%')}
+      else qm=qm.ilike('nombre_cliente','%'+q.replace(/[%_,]/g,'')+'%')
+      const{data:mps}=await qm
+      // (28jul26) 🚫 "Ya dijo que NO" (re_cancelado) → NO vuelve a aparecer como pedido,
+      // aunque el Excel diga CANCELADO: el cliente canceló DESPUÉS de contactado.
+      let _rcSet=new Set()
+      try{
+        const _mIds=(mps||[]).map(p=>p.id).filter(Boolean)
+        if(_mIds.length){const{data:rc}=await sb.from('mapeo_eventos').select('mapeo_id').in('mapeo_id',_mIds).eq('evento','re_cancelado');for(const r of(rc||[]))_rcSet.add(r.mapeo_id)}
+      }catch(_){}
+      const ESTSEC={'NOVEDAD':'novedades','INTENTO DE ENTREGA':'novedades','SIN MOVIMIENTOS':'novedades','NOVEDAD SOLUCIONADA':'novedades','RECLAME EN OFICINA':'reclame','PENDIENTE CONFIRMACION':'reservado','PENDIENTE':'reservado','CONFIRMADO':'reservado','TELEMERCADEO':'reservado','CANCELADO':'cancelados','RECHAZADO':'cancelados'}
+      const vistos=new Set()
+      for(const p of(mps||[])){
+        if(_rcSet.has(p.id))continue // ya dijo que NO → fuera para siempre
+        const tN=_wchTel(p.telefono)
+        if(!tN||telsConConv.has(tN)||vistos.has(tN))continue // ya salió como conversación o repetido
+        vistos.add(tN)
+        pedidos.push({tel:p.telefono,nombre:p.nombre_cliente||'',producto:p.producto||'',cantidad:p.cantidad,sec:ESTSEC[String(p.estado_final||'').toUpperCase()]||secDe[tN]||null,est:p.estado_final||''})
+      }
+    }catch(_){}
+    if(!hits.length&&!pedidos.length){box.innerHTML='<div style="font-size:11px;color:var(--muted)">🔎 Nada con «'+_wchEsc(q)+'» en ninguna sección.</div>';return}
+    box.innerHTML='<div style="font-size:10px;color:var(--muted);font-weight:700;margin-bottom:5px">🌐 ENCONTRADO — un clic te lleva a su sección:</div>'+hits.map((h,i)=>{
+      const sec=secDe[_wchTel(h.telefono)]||(h.origen==='cliente'?'entrantes':null)
+      const s=WCH_SECS.find(x=>x.k===sec)
+      try{h._est=_wchDerivar(h)}catch(_){h._est={tipo:'riel',clave:'disparada',ts:null}}
+      let chip='';try{chip=_wchChipHTML(h)}catch(_){}
+      return `<div data-gsec="${sec||''}" data-gi="${i}" onclick="_wchIrA(this)" style="display:flex;gap:7px;align-items:center;flex-wrap:wrap;padding:6px 7px;border-radius:8px;cursor:pointer;border:1px solid transparent" onmouseover="this.style.background='rgba(168,85,247,.12)'" onmouseout="this.style.background=''">
+        ${_wchAvatar(h.nombre,_wchTel(h.telefono),24)}
+        <strong style="font-size:12px">${_wchEsc(h.nombre||'Sin nombre')}</strong>
+        <span style="font-size:11px;color:var(--muted)">${_wchEsc(_wchTelCorto(h.telefono))}</span>
+        ${s?`<span style="background:rgba(168,85,247,.15);border:1px solid var(--primary);border-radius:999px;padding:1px 8px;font-size:10px;font-weight:800">${s.e} ${_wchEsc(s.n)}</span>`:`<span style="font-size:10px;color:var(--muted)">📥 sin sección</span>`}
+        ${chip}
+        <span style="margin-left:auto;font-size:11px;color:var(--primary);font-weight:800">Ir →</span>
+      </div>`
+    }).join('')+pedidos.map(p=>{
+      const s=WCH_SECS.find(x=>x.k===p.sec)
+      return `<div data-gtel="${_wchEsc(String(p.tel||''))}" data-gsec="${p.sec||''}" data-gnom="${_wchEsc(p.nombre)}" onclick="_wchTplModal(this)" style="display:flex;gap:7px;align-items:center;flex-wrap:wrap;padding:6px 7px;border-radius:8px;cursor:pointer;border:1px dashed var(--border)" onmouseover="this.style.background='rgba(37,211,102,.10)'" onmouseout="this.style.background=''" title="Pedido sin conversación — se contacta SOLO por plantilla aprobada">
+        ${_wchAvatar(p.nombre,_wchTel(p.tel),24)}
+        <strong style="font-size:12px">${_wchEsc(p.nombre||'Sin nombre')}</strong>
+        <span style="font-size:11px;color:var(--muted)">${_wchEsc(_wchTelCorto(p.tel))}</span>
+        ${s?`<span style="background:rgba(168,85,247,.15);border:1px solid var(--primary);border-radius:999px;padding:1px 8px;font-size:10px;font-weight:800">${s.e} ${_wchEsc(s.n)}</span>`:''}
+        <span style="border:1px dashed #25D366;color:#25D366;border-radius:999px;padding:1px 8px;font-size:10px;font-weight:700">📦 sin conversación${p.producto?' · '+_wchEsc(p.producto)+(p.cantidad?' ('+p.cantidad+'u)':''):''}</span>
+        <span style="margin-left:auto;font-size:11px;color:#25D366;font-weight:800">📨 Plantilla →</span>
+      </div>`
+    }).join('')
+  }catch(e){box.innerHTML='<div style="font-size:11px;color:var(--red)">❌ '+_wchEsc(e.message||String(e))+'</div>'}
+}
+// ── 📨 PLANTILLAS CON VISTA PREVIA REAL (28jul26) ───────────────────────────
+// Motor compartido: lista las plantillas APROBADAS de UNA sección (solo las de
+// la cuenta del número emisor — candado 132001), y al tocar una muestra el
+// MENSAJE FINAL tal cual le llegará al cliente (datos reales del pedido vía
+// _waValorReal + mapeos). El auxiliar mira, y decide: 📨 Enviar o ✖ Cancelar.
+// Sirve en 2 sitios: el chat normal y el modal de pedidos SIN conversación
+// (donde la plantilla es la ÚNICA vía — texto libre bloqueado, sin ventana 24h).
+window._wchTplPrevState={}
+async function _wchTplPanelPintar(contId,tel,secWch,nombre,convId){
+  const el=document.getElementById(contId);if(!el)return
+  el.innerHTML='<div style="font-size:11px;color:var(--muted)">Cargando plantillas de la sección…</div>'
+  try{
+    const num=await _wchNumeroDe(secWch,null)
+    let q=sb.from('wa_plantillas').select('nombre,variables').eq('seccion',secWch).eq('estado','APPROVED').order('nombre').limit(8)
+    if(num&&num.waba_id)q=q.eq('waba_id',num.waba_id) // 🛡️ solo las aprobadas en la cuenta del número emisor
+    const{data:tpls}=await q
+    if(!tpls||!tpls.length){el.innerHTML='<div style="font-size:11px;color:var(--amber)">⚠️ No hay plantillas APROBADAS de esta sección'+(num?'':' (y no hay número API activo)')+'. Apruébalas en Textos (chip ↻).</div>';return}
+    // Datos reales del pedido: el mapeo más reciente de este teléfono (tolerante)
+    let m={nombre:nombre||''}
+    try{
+      const d=String(tel||'').replace(/\D/g,''),d10=d.startsWith('57')?d.slice(2):d
+      const{data:mp}=await sb.from('mapeos').select('id,telefono,nombre_cliente,producto,cantidad,ciudad,precio_dropi,estado_final,created_at').in('telefono',[d,d10]).order('created_at',{ascending:false}).limit(1)
+      if(mp&&mp.length)m={id:mp[0].id,nombre:mp[0].nombre_cliente||nombre||'',producto:mp[0].producto||'',cantidad:mp[0].cantidad,ciudad:mp[0].ciudad||'',precio_dropi:mp[0].precio_dropi,tel}
+    }catch(_){}
+    window._wchTplPrevState[contId]={tel,secWch,convId:convId||null,m,tpls}
+    el.innerHTML=`<div style="font-size:10.5px;color:var(--muted);margin-bottom:4px">📨 Plantillas de la sección — toca una para VER el mensaje final antes de enviar:</div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap">${tpls.map((t,i)=>`<button class="btn-sm btn-outline" style="font-size:10.5px" onclick="_wchTplPrev('${contId}',${i})">📋 ${_wchEsc(t.nombre)}</button>`).join('')}</div>
+      <div id="${contId}-prev" style="display:none;margin-top:6px"></div>`
+  }catch(e){el.innerHTML='<div style="font-size:11px;color:var(--red)">❌ '+_wchEsc(e.message||String(e))+'</div>'}
+}
+// Vista previa: cuerpo aprobado (cuerpo_meta de Textos) + parámetros REALES del pedido
+window._wchTplPrev=async function(contId,i){
+  const st=window._wchTplPrevState[contId];if(!st)return
+  const t=st.tpls[i];if(!t)return
+  const box=document.getElementById(contId+'-prev');if(!box)return
+  box.style.display='';box.innerHTML='<div style="font-size:11px;color:var(--muted)">Armando el mensaje…</div>'
+  try{
+    const mapa=await _wchTplCuerposCargar()
+    const tpl=(mapa||{})[t.nombre]
+    const vars=Array.isArray(t.variables)?t.variables:((tpl&&tpl.vars)||[])
+    const params=vars.map(tag=>_waValorReal(String(tag).replace(/^\[|\]$/g,''),st.m))
+    const cuerpo=tpl&&tpl.cuerpo?tpl.cuerpo:''
+    const texto=cuerpo?cuerpo.replace(/\{\{\s*(\d+)\s*\}\}/g,(s,n)=>{const v=params[parseInt(n,10)-1];return(v==null||v==='')?s:v}):'(No tengo el cuerpo guardado de esta plantilla — se enviará el texto aprobado en Meta con estos datos: '+params.join(', ')+')'
+    st.sel={nombre:t.nombre,params}
+    box.innerHTML=`<div style="background:var(--card);border:1px solid #25D366;border-radius:9px;padding:9px 11px">
+      <div style="font-size:9.5px;color:var(--muted);margin-bottom:4px">📋 ${_wchEsc(t.nombre)} · así le llegará a ${_wchEsc(st.m.nombre||'el cliente')}:</div>
+      <div style="font-size:12.5px;white-space:pre-wrap;line-height:1.45">${_wchEsc(texto)}</div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button style="flex:1;padding:9px;border:none;border-radius:8px;background:#25D366;color:#fff;font-weight:800;font-size:12.5px;cursor:pointer" onclick="_wchTplEnviarDirecto('${contId}')">📨 Confirmar envío</button>
+        <button class="btn-sm btn-outline" onclick="document.getElementById('${contId}-prev').style.display='none'">✖ Cancelar</button>
+      </div>
+      <div id="${contId}-envmsg" style="font-size:11px;margin-top:5px"></div>
+    </div>`
+  }catch(e){box.innerHTML='<div style="font-size:11px;color:var(--red)">❌ '+_wchEsc(e.message||String(e))+'</div>'}
+}
+// Envío real por wa-send (mismo camino probado de _wchEnviarTpl, sin prompts: params ya resueltos)
+window._wchTplEnviarDirecto=async function(contId){
+  const st=window._wchTplPrevState[contId];if(!st||!st.sel)return
+  const out=document.getElementById(contId+'-envmsg')
+  try{
+    const num=await _wchNumeroDe(st.secWch,null)
+    if(!num)throw new Error('No hay número API activo para esta sección.')
+    if(num.waba_id){ // 🛡️ candado 132001
+      const{data:ok132}=await sb.from('wa_plantillas').select('nombre').eq('nombre',st.sel.nombre).eq('waba_id',num.waba_id).eq('estado','APPROVED').limit(1)
+      if(!ok132||!ok132.length)throw new Error('"'+st.sel.nombre+'" no está aprobada en la cuenta de este número (132001).')
+    }
+    const d=String(st.tel||'').replace(/\D/g,'')
+    const telFull=d.startsWith('57')?d:('57'+d)
+    if(out)out.innerHTML='<span style="color:var(--muted)">Enviando plantilla…</span>'
+    const{data:res,error}=await sb.functions.invoke('wa-send',{body:{action:'send_template',numero_id:num.id,telefono:telFull,template_name:st.sel.nombre,parametros:st.sel.params}})
+    if(error||!res||!res.ok)throw new Error(await _wchErrMsg(res,error))
+    if(out)out.innerHTML='<span style="color:#22c55e">✅ Plantilla enviada</span>'
+    logAction('wch_tpl_enviada_preview',{tel:telFull,plantilla:st.sel.nombre,seccion:st.secWch,sin_conversacion:!st.convId}).catch(()=>{})
+    if(st.convId){_wchHiloPintar(st.convId)}
+    else{ // pedido SIN conversación: el webhook la crea — se busca y se abre el chat real
+      setTimeout(async()=>{
+        try{
+          const{data:cv}=await sb.from('conversaciones').select('id').in('telefono',[telFull,d]).order('ultimo_msg_en',{ascending:false,nullsFirst:false}).limit(1)
+          if(cv&&cv.length){const mo=document.getElementById('wch-tplmodal');if(mo)mo.remove();_wchChatAbrir(cv[0].id)}
+        }catch(_){}
+      },2500)
+    }
+  }catch(e){if(out)out.innerHTML='<span style="color:#ef4444">❌ '+_wchEsc(e.message||String(e))+'</span>'}
+}
+// ── 📦 MODAL de pedido SIN conversación: la plantilla es la ÚNICA vía ──
+window._wchTplModal=function(el){
+  const tel=el.getAttribute('data-gtel')||'',sec=el.getAttribute('data-gsec')||'',nom=el.getAttribute('data-gnom')||''
+  const prev=document.getElementById('wch-tplmodal');if(prev)prev.remove()
+  const s=WCH_SECS.find(x=>x.k===sec)
+  const div=document.createElement('div')
+  div.id='wch-tplmodal'
+  div.style.cssText='position:fixed;z-index:'+(++window._wchZ)+';right:16px;top:8vh;width:min(420px,calc(100vw - 24px))'
+  div.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden;box-shadow:0 12px 44px rgba(0,0,0,.55)">
+    <div id="wch-tplmodal-head" style="display:flex;justify-content:space-between;align-items:center;padding:11px 14px;border-bottom:1px solid var(--border);background:var(--card2);gap:8px">
+      <div style="min-width:0"><div style="font-weight:800;font-size:13px">${_wchAvatar(nom,_wchTel(tel),26)} ${_wchEsc(nom||'Sin nombre')} <span style="color:var(--muted);font-weight:400;font-size:11px">${_wchEsc(_wchTelCorto(tel))}</span></div>
+      <div style="font-size:10.5px;color:var(--muted);margin-top:2px">${s?s.e+' '+_wchEsc(s.n):''} · 📦 pedido sin conversación</div></div>
+      <button onclick="document.getElementById('wch-tplmodal').remove()" style="width:30px;height:30px;border-radius:8px;border:none;background:#e81123;color:#fff;font-size:14px;font-weight:800;cursor:pointer;flex:0 0 auto;line-height:1">✕</button>
+    </div>
+    <div style="padding:12px 14px">
+      <div style="font-size:11.5px;color:var(--muted);text-align:center;padding:10px;border:1px dashed var(--border);border-radius:9px;margin-bottom:9px">💬 Sin mensajes todavía — este cliente nunca ha conversado.<br>🔒 Texto libre bloqueado (sin ventana de 24h): <strong>la única vía es una plantilla aprobada.</strong></div>
+      <div id="wch-tplmodal-panel"></div>
+    </div>
+  </div>`
+  div.addEventListener('pointerdown',()=>_wchAlFrente(div))
+  document.body.appendChild(div)
+  _wchDrag(div,div.querySelector('#wch-tplmodal-head'))
+  _wchTplPanelPintar('wch-tplmodal-panel',tel,sec,nom,null)
+}
+// Clic en un resultado: salta a SU sección con el filtro puesto — la tarjeta llega filtrada
+window._wchIrA=function(el){
+  const sec=el&&el.getAttribute('data-gsec')
+  const box=document.getElementById('wch-busca-glob')
+  if(box){box.style.display='none';box.innerHTML=''}
+  if(!sec)return // sin sección conocida: se queda donde está (el filtro sigue puesto)
+  _wchTabCambio(sec) // conserva st.busca → al cargar la sección, la tarjeta llega filtrada con su estado
+}
 window._wchPegar=async function(){
   try{const t=await navigator.clipboard.readText();const inp=document.getElementById('wch-busca');if(inp){inp.value=t.trim();_wchBuscaCambio(inp.value)}}
   catch(_){alert('No pude leer el portapapeles. Pega con Ctrl+V en el buscador.')}
@@ -40469,6 +40812,10 @@ async function _wchTabsBadges(){
 function _wchChipsOrden(){
   const st=window._wchState,cat=st.cat
   const rieles=['disparada','respondio','conversando','atendida','volvio','volvio_viejo','wame'].map(k=>({tipo:'riel',clave:k,...cat.rieles[k]}))
+  // (28jul26) 🗓️ etapa CERO de Pend.Conf: pedidos pendientes SIN fecha programada.
+  // DERIVADA (el sistema la calcula sola — nadie la pone a mano, así el contador
+  // nunca miente). Va ANTES de Disparada: sin fecha no hay plantilla de 2 días antes.
+  if(st.sec==='reservado')rieles.unshift({tipo:'porprog',clave:'porprog',n:'Por programar',e:'🗓️',c:'#f59e0b'})
   const manuales=_wchEtqsDe(st.sec).map(x=>({tipo:'manual',id:x.id,n:x.n,e:x.e,c:x.c,cierre:x.cierre,ambito:x.ambito}))
   return [...rieles,...manuales]
 }
@@ -40507,8 +40854,96 @@ function _wchBarraSync(){
   th.style.left=(el.scrollLeft/Math.max(1,el.scrollWidth)*100)+'%'
   const bar=document.getElementById('wch-franja-bar');if(bar)bar.style.display=w>=0.999?'none':''
 }
+// ── 🗓️ POR PROGRAMAR (28jul26) — etapa CERO de Pend. Conf. ──────────────────
+// Pedidos con estado real PENDIENTE (mapeos) que NO tienen programación ACTIVA
+// (programaciones_envio estado='programado') ni "ya dijo que NO" (re_cancelado).
+// Sin fecha, la plantilla de 2 días antes NUNCA se dispara — por eso esta cola
+// debe quedar en CERO. Viejos primero (🔴 si llevan más de 2 días), de a 50.
+window._wchPorProgState=null
+async function _wchPorProgToggle(){
+  const el=document.getElementById('wch-lista');if(!el)return
+  let box=document.getElementById('wch-porprog')
+  if(box){box.remove();window._wchPorProgState=null;_wchListaRender();return}
+  window._wchPorProgState={items:[],pagina:0,cargando:false}
+  box=document.createElement('div')
+  box.id='wch-porprog'
+  box.innerHTML='<div class="loading" style="font-size:12px">🗓️ Buscando pedidos pendientes sin fecha…</div>'
+  el.prepend(box)
+  await _wchPorProgCargar()
+}
+async function _wchPorProgCargar(){
+  const st=window._wchPorProgState;if(!st||st.cargando)return
+  st.cargando=true
+  try{
+    // 1) Pendientes (estado real) más viejos primero — mismo criterio del PASO 2 de la sección
+    const{data:mps,error}=await sb.from('mapeos').select('id,telefono,nombre_cliente,producto,cantidad,ciudad,estado_final,created_at').in('estado_final',['PENDIENTE CONFIRMACION','PENDIENTE','CONFIRMADO','TELEMERCADEO']).order('created_at',{ascending:true}).range(st.pagina*150,st.pagina*150+149)
+    if(error)throw error
+    const lote=mps||[]
+    const ids=lote.map(m=>m.id)
+    // 2) Fuera los que YA tienen programación activa y los "ya dijo que NO"
+    const conProg=new Set(),dijoNo=new Set()
+    for(let i=0;i<ids.length;i+=100){
+      const b=ids.slice(i,i+100)
+      try{const{data:pg}=await sb.from('programaciones_envio').select('mapeo_id').in('mapeo_id',b).eq('estado','programado');for(const p of(pg||[]))conProg.add(p.mapeo_id)}catch(_){}
+      try{const{data:rc}=await sb.from('mapeo_eventos').select('mapeo_id').in('mapeo_id',b).eq('evento','re_cancelado');for(const r of(rc||[]))dijoNo.add(r.mapeo_id)}catch(_){}
+    }
+    const nuevos=lote.filter(m=>!conProg.has(m.id)&&!dijoNo.has(m.id))
+    st.items=st.items.concat(nuevos)
+    st.hayMas=lote.length===150
+    st.pagina++
+    _wchPorProgPintar()
+  }catch(e){const box=document.getElementById('wch-porprog');if(box)box.innerHTML='<div class="alert alert-red" style="font-size:12px">❌ '+_wchEsc(e.message||String(e))+'</div>'}
+  finally{st.cargando=false}
+}
+function _wchPorProgPintar(){
+  const st=window._wchPorProgState,box=document.getElementById('wch-porprog')
+  if(!st||!box)return
+  const mostrar=st.items.slice(0,50*Math.max(1,st.pagina))
+  const cnt=document.querySelector('[data-wchn="porprog"]');if(cnt)cnt.textContent=st.items.length+(st.hayMas?'+':'')
+  if(!st.items.length){box.innerHTML='<div style="background:rgba(34,197,94,.10);border:1px solid var(--green);border-radius:10px;padding:12px;font-size:12.5px;color:var(--green);text-align:center;margin-bottom:8px">🎉 CERO pedidos por programar — todos los pendientes tienen fecha.</div>';return}
+  box.innerHTML=`<div style="background:rgba(245,158,11,.10);border:1px solid var(--amber);border-radius:10px;padding:9px 11px;margin-bottom:8px">
+    <div style="font-size:12px;font-weight:800;color:var(--amber)">🗓️ ${st.items.length}${st.hayMas?'+':''} pedido(s) pendiente(s) SIN fecha de envío — sin fecha, la plantilla de 2 días antes NO se dispara. Meta: dejar esto en CERO.</div>
+  </div>`+mostrar.map(m=>{
+    const dias=Math.floor((Date.now()-new Date(m.created_at).getTime())/864e5)
+    const urg=dias>2
+    return `<div style="background:var(--card2);border:1px solid ${urg?'var(--red)':'var(--border)'};border-left:3px solid ${urg?'var(--red)':'var(--amber)'};border-radius:10px;padding:8px 11px;margin-bottom:6px">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
+        <div style="min-width:0">
+          <strong style="font-size:12.5px">${_wchEsc(m.nombre_cliente||'Sin nombre')}</strong>
+          <span style="font-size:11px;color:var(--muted)">${_wchEsc(_wchTelCorto(m.telefono))}</span>
+          <span style="font-size:11px;color:var(--muted)"> · ${_wchEsc(m.producto||'')}${m.cantidad?' ('+m.cantidad+'u)':''}${m.ciudad?' · '+_wchEsc(m.ciudad):''}</span>
+          <span style="border:1px solid ${urg?'var(--red)':'var(--amber)'};color:${urg?'var(--red)':'var(--amber)'};border-radius:999px;padding:1px 7px;font-size:9.5px;font-weight:800;margin-left:4px">${urg?'🔴':'⏳'} hace ${dias} día${dias===1?'':'s'}</span>
+        </div>
+        <div style="display:flex;gap:5px;flex-wrap:wrap">
+          <button class="btn-sm" style="background:#38bdf8;color:#04121a;border:none;font-weight:800;font-size:11px" onclick="_wchPcProgramar(null,'${_wchEsc(String(m.telefono||''))}',this)">📅 Programar</button>
+          <button class="btn-sm btn-outline" style="font-size:11px" data-gtel="${_wchEsc(String(m.telefono||''))}" data-gsec="reservado" data-gnom="${_wchEsc(m.nombre_cliente||'')}" onclick="_wchTplModal(this)">📨 Plantillas</button>
+        </div>
+      </div>
+    </div>`
+  }).join('')+((st.hayMas||st.items.length>mostrar.length)?`<div style="text-align:center;margin:6px 0 10px"><button class="btn-sm btn-outline" onclick="_wchPorProgCargar()">⬇️ Cargar más</button></div>`:'')
+}
+// Tras programar desde el panel: el pedido sale solo y el contador baja
+window._wchPorProgRefrescar=function(){
+  const st=window._wchPorProgState;if(!st)return
+  ;(async()=>{
+    try{
+      const tels=st.items.map(m=>m.id)
+      if(!tels.length){_wchPorProgPintar();return}
+      const quedan=[]
+      for(let i=0;i<tels.length;i+=100){
+        const b=st.items.slice(i,i+100)
+        const{data:pg}=await sb.from('programaciones_envio').select('mapeo_id').in('mapeo_id',b.map(x=>x.id)).eq('estado','programado')
+        const set=new Set((pg||[]).map(p=>p.mapeo_id))
+        for(const m of b)if(!set.has(m.id))quedan.push(m)
+      }
+      st.items=quedan
+      _wchPorProgPintar()
+    }catch(_){}
+  })()
+}
 window._wchChipClick=function(key){
   const st=window._wchState
+  if(key==='porprog'){_wchPorProgToggle();return} // (28jul26) 🗓️ panel propio — no filtra la lista de chats
   st.filtroEtq=st.filtroEtq===key?null:key
   const el=document.getElementById('wch-franja');const sl=el?el.scrollLeft:0
   _wchFranjaRender() // repinta selección
@@ -40561,6 +40996,9 @@ function _wchChipHTML(c){
       let f='';try{f=rz.ts?new Date(rz.ts).toLocaleDateString('es-CO',{day:'numeric',month:'short',timeZone:'America/Bogota'}):''}catch(_){}
       const sinC=(/sin contacto/i.test(rz.motivo||'')||c._algunIn===false)?' · 🔇':''
       chip+=`<span title="Este cliente ya estaba RESUELTO en ${_wchEsc(sN)}${f?' desde el '+_wchEsc(f):''}${sinC?' · nunca contestó':''}" style="border:1px dashed #22c55e;color:#22c55e;opacity:.7;border-radius:999px;padding:1px 7px;font-size:9.5px;font-weight:700">✅ estaba resuelta (${_wchEsc(sN)}${f?', '+_wchEsc(f):''})${sinC}</span>`
+    }
+    if(c._dijoNo){ // (28jul26) escribió DESPUÉS de decir que NO — si escribe, algo quiere
+      chip+=`<span title="Este cliente había dicho que NO (definitivo) y volvió a escribir" style="border:1px dashed var(--red);color:var(--red);opacity:.75;border-radius:999px;padding:1px 7px;font-size:9.5px;font-weight:700">🚫 había dicho que NO</span>`
     }
   }
   return chip
@@ -40964,7 +41402,7 @@ window._wchEtiquetar=async function(convId,val){
 // reservado bebe de sus DOS fuentes reales (confirmación y PSF); entrantes tiene
 // sección propia (el cliente escribió primero → saludos de bienvenida, no
 // mensajes de confirmación); novedades va por protocolo de cada tipo.
-const WCH_SEC_TEXTOS={novedades:['novedades'],reservado:['confirmacion','psf'],cancelados:['cancelados'],reclame:['reclame'],entrantes:['entrantes']}
+const WCH_SEC_TEXTOS={novedades:['general','novedades'],reservado:['general','confirmacion','psf'],cancelados:['general','cancelados'],reclame:['general','reclame'],entrantes:['general','entrantes']} // (28jul26) 'general' primero en TODAS
 // ➕ (solo admin) Crea la sección Entrantes en Textos/Mensajes con un clic
 window._wchEntrantesCrear=async function(convId){
   try{
@@ -40979,6 +41417,76 @@ window._wchEntrantesCrear=async function(convId){
 }
 
 // ── SUGERENCIAS al abrir el chat: reintro → plantilla Meta (+24h) → texto de Textos (–24h) ──
+// ── 🎛️ ACCIONES LOGÍSTICAS DESDE EL CHAT (28jul26) ─────────────────────────
+// Los mismos botones de las secciones, ahora en el chat, escribiendo en las
+// MISMAS tablas con el MISMO patrón (programaciones_envio + mapeo_eventos) y
+// estampando la etiqueta correspondiente — un clic, los dos mundos al día.
+async function _wchMapeoDe(tel){ // mapeo más reciente del teléfono (tolerante)
+  try{
+    const d=String(tel||'').replace(/\D/g,''),d10=d.startsWith('57')?d.slice(2):d
+    const{data}=await sb.from('mapeos').select('id,telefono,nombre_cliente,producto,estado_final,created_at').in('telefono',[d,d10]).order('created_at',{ascending:false}).limit(1)
+    return(data&&data[0])||null
+  }catch(_){return null}
+}
+async function _wchEtiquetaDirecta(convId,etqId){ // estampa por el camino de siempre (con reversa si RLS falla)
+  try{if(convId)await window._wchEtiquetar(convId,etqId)}catch(_){}
+}
+// 📅 PROGRAMAR: cierra la programación activa anterior e inserta la nueva (patrón EXACTO de la sección)
+window._wchPcProgramar=async function(convId,tel,btn){
+  const fecha=prompt('📅 Fecha de envío programada (YYYY-MM-DD):',_isoDate(new Date(Date.now()+2*864e5)))
+  if(!fecha)return
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(fecha.trim())){alert('Formato de fecha inválido. Usa YYYY-MM-DD (ej: 2026-08-01).');return}
+  const m=await _wchMapeoDe(tel)
+  if(!m){alert('No encontré el pedido (mapeo) de este teléfono.');return}
+  if(btn)btn.disabled=true
+  try{
+    try{await sb.from('programaciones_envio').update({estado:'cancelado',motivo:'Reemplazada por nueva programación'}).eq('mapeo_id',m.id).eq('estado','programado')}catch(_){}
+    const{data,error}=await sb.from('programaciones_envio').insert({
+      mapeo_id:m.id,telefono:m.telefono,fecha_envio_programada:fecha.trim(),estado:'programado',
+      motivo:'Programado desde el Centro de Chats',usuario_id:me?.id||null,usuario_nombre:me?.nombre||null
+    }).select().maybeSingle()
+    if(error)throw new Error(error.message)
+    logAction('envio_programado',{mapeo_id:m.id,telefono:m.telefono,fecha_envio:fecha.trim(),programacion_id:data?.id,desde:'centro_chats'}).catch(()=>{})
+    try{await sb.from('mapeo_eventos').insert({mapeo_id:m.id,evento:'envio_programado',fuente:'centro_chats',usuario_id:me?.id||null,detalle:{fecha_envio:fecha.trim(),telefono:m.telefono}})}catch(_){}
+    await _wchEtiquetaDirecta(convId,'s_pc_prog')
+    try{waToast('📅 Envío programado para '+fecha.trim()+'.','ok')}catch(_){}
+    try{_wchPorProgRefrescar()}catch(_){}
+  }catch(e){alert('❌ No se programó: '+(e.message||e))}
+  finally{if(btn)btn.disabled=false}
+}
+// ✅ CONFIRMAR / 🚫 CANCELAR (Pend.Conf): cierra la programación activa con ese estado + evento + etiqueta
+window._wchPcAccion=async function(convId,tel,accion,btn){
+  const conf=accion==='confirmar'
+  if(!confirm(conf?'✅ ¿Confirmar el envío de este pedido?':'🚫 ¿Cancelar este pedido (el cliente no lo quiere)?'))return
+  const m=await _wchMapeoDe(tel)
+  if(!m){alert('No encontré el pedido (mapeo) de este teléfono.');return}
+  if(btn)btn.disabled=true
+  try{
+    const estadoProg=conf?'confirmado':'cancelado'
+    try{await sb.from('programaciones_envio').update({estado:estadoProg,updated_at:new Date().toISOString()}).eq('mapeo_id',m.id).eq('estado','programado')}catch(_){}
+    try{await sb.from('mapeo_eventos').insert({mapeo_id:m.id,evento:conf?'confirmado':'cancelado',fuente:'centro_chats',usuario_id:me?.id||null,detalle:{telefono:m.telefono,producto:m.producto||null}})}catch(_){}
+    logAction(conf?'pedido_confirmado':'pedido_cancelado',{mapeo_id:m.id,telefono:m.telefono,desde:'centro_chats'}).catch(()=>{})
+    await _wchEtiquetaDirecta(convId,conf?'s_pc_conf':'s_pc_canc')
+    try{waToast(conf?'✅ Envío confirmado.':'🚫 Pedido cancelado.','ok')}catch(_){}
+  }catch(e){alert('❌ No se guardó: '+(e.message||e))}
+  finally{if(btn)btn.disabled=false}
+}
+// 🚫 YA DIJO QUE NO (Cancelados): mismo re_cancelado de la sección — sale para siempre
+window._wchCancDijoNo=async function(convId,tel,btn){
+  const m=await _wchMapeoDe(tel)
+  if(!m){alert('No encontré el pedido (mapeo) de este teléfono.');return}
+  if(!confirm('🚫 ¿El cliente '+(m.nombre_cliente||m.telefono||'')+' ya te dijo que NO lo quiere?\n\nSale de las listas y NO volverá a aparecer.'))return
+  if(btn)btn.disabled=true
+  try{
+    const{error}=await sb.from('mapeo_eventos').insert({mapeo_id:m.id,evento:'re_cancelado',fuente:'centro_chats',usuario_id:me?.id||null,detalle:{motivo:'Cliente contactado: ya dijo que NO',telefono:m.telefono||null,producto:m.producto||null}})
+    if(error)throw new Error(error.message)
+    if(typeof window._cancRegistrarResuelta==='function'){try{window._cancRegistrarResuelta({id:m.id,telefono:m.telefono,nombre_cliente:m.nombre_cliente,producto:m.producto},'dijo_no')}catch(_){}}
+    logAction('re_cancelado',{mapeo_id:m.id,telefono:m.telefono,desde:'centro_chats'}).catch(()=>{})
+    await _wchEtiquetaDirecta(convId,'s_ca_no')
+    try{waToast('🚫 Registrado: ya dijo que NO. No volverá a aparecer.','ok')}catch(_){}
+  }catch(e){alert('❌ No se guardó: '+(e.message||e))}
+  finally{if(btn)btn.disabled=false}
+}
 async function _wchSugerencias(convId,c){
   const el=document.getElementById('wch-sug-'+convId);if(!el)return
   const st=window._wchState
@@ -41025,7 +41533,9 @@ async function _wchSugerencias(convId,c){
       }
     }else{
       const secsTxt=WCH_SEC_TEXTOS[st.sec]||[]
-      const{data:txs}=secsTxt.length?await sb.from('app_mensajes').select('seccion,etiqueta,texto').in('seccion',secsTxt).neq('activo',false).order('seccion').order('idx').limit(4):{data:[]}
+      let{data:txs}=secsTxt.length?await sb.from('app_mensajes').select('seccion,etiqueta,texto').in('seccion',secsTxt).neq('activo',false).order('seccion').order('idx').limit(8):{data:[]}
+      // (28jul26) 🌐 generales SIEMPRE de primeros, luego los de la sección; máximo 6 botones
+      txs=(txs||[]).sort((a,b)=>((a.seccion==='general'?0:1)-(b.seccion==='general'?0:1))||0).slice(0,6)
       if(txs&&txs.length){
         html+=`<div style="font-size:10.5px;color:var(--muted);margin-bottom:3px">🟢 Ventana abierta — un clic pega el texto abajo (edítalo y envía):</div><div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px">${txs.map((t,i)=>`<button class="btn-sm btn-outline" style="font-size:10.5px" data-wchtx="${_wchEsc(t.texto)}" onclick="var inp=document.getElementById('wch-envio-${convId}');inp.value=this.getAttribute('data-wchtx').replace(/\\[NOMBRE\\]/g,'${_wchEsc((c&&c.nombre)||'')}');inp.focus();window._wchBtnModo&&window._wchBtnModo('${convId}')">✏️ ${_wchEsc(t.etiqueta||('Texto '+(i+1)))}</button>`).join('')}</div>`
       }else if(st.sec==='entrantes'){
@@ -41037,6 +41547,23 @@ async function _wchSugerencias(convId,c){
       }
     }
   }catch(e){console.warn('[wch sugerencias]',e)}
+  // (28jul26) 📨 Plantillas de la sección con VISTA PREVIA en el chat: un botón las
+  // trae (mismo motor del modal sin conversación) — toca una, VES el mensaje final
+  // con los datos reales del pedido, y decides enviar o no. Vale con ventana abierta
+  // o cerrada: la plantilla siempre es válida.
+  try{
+    const _telSug=c?_wchTel(c.telefono):''
+    if(_telSug){
+      // (28jul26) 🎛️ acciones logísticas por sección — mismo dato que las secciones, un clic
+      let _acc=''
+      if(st.sec==='reservado')_acc=`<button class="btn-sm btn-outline" style="font-size:10.5px;border-color:#38bdf8;color:#38bdf8" onclick="_wchPcProgramar('${convId}','${_telSug}',this)">📅 Programar</button>
+        <button class="btn-sm btn-outline" style="font-size:10.5px;border-color:var(--green);color:var(--green)" onclick="_wchPcAccion('${convId}','${_telSug}','confirmar',this)">✅ Confirmar</button>
+        <button class="btn-sm btn-outline" style="font-size:10.5px;border-color:var(--red);color:var(--red)" onclick="_wchPcAccion('${convId}','${_telSug}','cancelar',this)">🚫 Cancelar</button>`
+      else if(st.sec==='cancelados')_acc=`<button class="btn-sm btn-outline" style="font-size:10.5px;border-color:var(--red);color:var(--red)" onclick="_wchCancDijoNo('${convId}','${_telSug}',this)">🚫 Ya dijo que NO</button>`
+      html+=`<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px"><button class="btn-sm btn-outline" style="font-size:10.5px" onclick="var p=document.getElementById('wch-tplchat-${convId}');if(p.style.display==='none'){p.style.display='';_wchTplPanelPintar('wch-tplchat-${convId}','${_telSug}','${st.sec}','${_wchEsc((c&&c.nombre)||'')}','${convId}')}else{p.style.display='none'}">📨 Plantillas de la sección</button>${_acc}</div>
+      <div id="wch-tplchat-${convId}" style="display:none;margin-bottom:6px"></div>`
+    }
+  }catch(_){}
   el.innerHTML=html
 }
 

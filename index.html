@@ -40421,8 +40421,52 @@ function _wchVentanaPintar(convId,c){
     el.innerHTML=`<span style="color:#f59e0b;font-weight:700">🔒 Fuera de ventana — solo plantillas aprobadas</span>`
   }
 }
+// ── 📋 PLANTILLAS EN EL HILO (28jul26) ──────────────────────────────────────
+// Antes la burbuja de un envío por plantilla mostraba el texto crudo que deja
+// wa-send: "[plantilla] nombre · dato1, dato2, dato3". Ahora se ve el NOMBRE en
+// pequeñito arriba y ABAJO el mensaje REAL que le llegó al cliente: se toma el
+// cuerpo aprobado (wa_plantillas.cuerpo_meta — el que sale de la sección
+// Textos, única fuente de las plantillas que se disparan) y se le meten los
+// parámetros guardados en sus {{1}}, {{2}}...
+// REGLA DE HONESTIDAD: si la plantilla no tiene cuerpo guardado o la cantidad
+// de parámetros no cuadra con la del cuerpo, NO se inventa nada — la burbuja
+// queda EXACTAMENTE como estaba (solo se le suma el nombre arriba).
+window._wchTplCache=window._wchTplCache||{mapa:null,ts:0}
+async function _wchTplCuerposCargar(force){
+  const c=window._wchTplCache
+  if(!force&&c.mapa&&(Date.now()-c.ts)<300000)return c.mapa // 5 min de caché: el hilo se repinta cada 3s
+  try{
+    const{data}=await sb.from('wa_plantillas').select('nombre,cuerpo_meta,variables')
+    const m={}
+    ;(data||[]).forEach(t=>{
+      if(!t||!t.nombre||!t.cuerpo_meta)return
+      if(!m[t.nombre])m[t.nombre]={cuerpo:String(t.cuerpo_meta),vars:Array.isArray(t.variables)?t.variables:[]}
+    })
+    c.mapa=m;c.ts=Date.now()
+  }catch(_){if(!c.mapa)c.mapa={}}
+  return c.mapa
+}
+// Devuelve {nombre,texto} del mensaje de plantilla, o null si no es de plantilla
+function _wchTplPartir(m){
+  const crudo=String((m&&m.cuerpo)||'')
+  const marca=crudo.match(/^\s*\[plantilla\]\s*([^\s·]+)\s*(?:·\s*([\s\S]*))?$/)
+  const nombre=String((m&&m.plantilla)||(marca&&marca[1])||'').trim()
+  if(!nombre)return null
+  const tpl=((window._wchTplCache&&window._wchTplCache.mapa)||{})[nombre]
+  const params=(marca&&marca[2]!=null)?String(marca[2]).split(',').map(s=>s.trim()):null
+  let texto=''
+  if(tpl&&tpl.cuerpo){
+    const nums=(tpl.cuerpo.match(/\{\{\s*\d+\s*\}\}/g)||[]).map(x=>parseInt(x.replace(/\D/g,''),10))
+    const maxN=nums.length?Math.max.apply(null,nums):0
+    if(maxN===0)texto=tpl.cuerpo // plantilla sin variables: el cuerpo ya es el mensaje
+    else if(params&&params.length===maxN)texto=tpl.cuerpo.replace(/\{\{\s*(\d+)\s*\}\}/g,(s,i)=>{const v=params[parseInt(i,10)-1];return (v==null||v==='')?s:v})
+  }
+  if(!texto)texto=marca?String(marca[2]||'').trim():crudo // no cuadró → lo de siempre, sin inventar
+  return{nombre,texto}
+}
 async function _wchHiloPintar(convId){
   const el=document.getElementById('wch-hilo-'+convId);if(!el)return
+  try{await _wchTplCuerposCargar()}catch(_){} // cuerpos de plantilla (cacheados) antes de pintar
   const{data,error}=await sb.from('mensajes').select('id,direccion,tipo,cuerpo,plantilla,estado,ts,usuario_id,media_path,media_mime,error_detalle').eq('conversacion_id',convId).order('ts',{ascending:false}).limit(40)
   if(error){el.innerHTML=`<div class="alert alert-red">${_wchEsc(error.message)}</div>`;return}
   const msgs=(data||[]).slice().reverse()
@@ -40439,15 +40483,22 @@ async function _wchHiloPintar(convId){
     const lado=m.direccion==='in'
     const hora=new Date(m.ts).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
     let cuerpo=m.cuerpo?_wchEsc(m.cuerpo):''
+    let tplHead='',busca=(m.cuerpo||'')
+    const _tp=_wchTplPartir(m) // 📋 plantilla → nombre chiquito arriba + mensaje real abajo
+    if(_tp){
+      tplHead=`<div style="font-size:9px;color:#8696a0;opacity:.85;margin-bottom:3px;word-break:break-all;line-height:1.25">📋 ${_wchEsc(_tp.nombre)}</div>`
+      if(_tp.texto)cuerpo=_wchEsc(_tp.texto)
+      busca=_tp.nombre+' '+(_tp.texto||'')+' '+busca
+    }
     let media=''
     if(m.media_path){
       const mid='wchm_'+m.id
       media=`<div id="${mid}" style="margin-top:4px"><button class="btn-sm btn-outline" onclick="_wchMedia('${_wchEsc(m.media_path)}','${_wchEsc(m.media_mime||'')}','${mid}')" style="font-size:10.5px">📎 Ver adjunto</button></div>`
     }
-    return `<div class="wch-msg" data-txt="${_wchEsc((m.cuerpo||'').toLowerCase())}" style="display:flex;${lado?'':'justify-content:flex-end;'}margin-bottom:7px">
+    return `<div class="wch-msg" data-txt="${_wchEsc(busca.toLowerCase())}" style="display:flex;${lado?'':'justify-content:flex-end;'}margin-bottom:7px">
       <div style="max-width:82%;background:${lado?'#202c33':'#005c4b'};border:none;border-radius:10px;padding:7px 10px;color:#e9edef">
         <div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">${lado?'📥 Cliente':'📤 '+(m.usuario_id?'Humano':'Auto')}${m.plantilla?' · 📋':''} · ${hora}${!lado&&m.estado?' '+(m.estado==='failed'?'<span style="color:#ef4444;font-weight:800" title="No se pudo enviar">❗'+(m.error_detalle?' '+_wchEsc(m.error_detalle):'')+'</span>':(m.estado==='read'?'<span style="color:#53bdeb;letter-spacing:-2px" title="Leído">✓✓</span>':((m.estado==='delivered')?'<span style="color:#8696a0;letter-spacing:-2px" title="Entregado">✓✓</span>':((m.estado==='sent'||m.estado==='accepted')?'<span style="color:#8696a0" title="Enviado — aún no le llega">✓</span>':_wchEsc(m.estado))))):''}</div>
-        <div style="font-size:12.5px;white-space:pre-wrap">${cuerpo||(media?'':'<em style="color:var(--muted)">['+_wchEsc(m.tipo)+']</em>')}</div>${media}
+        ${tplHead}<div style="font-size:12.5px;white-space:pre-wrap">${cuerpo||(media?'':'<em style="color:var(--muted)">['+_wchEsc(m.tipo)+']</em>')}</div>${media}
       </div></div>`
   }).join('')
   const b=(document.getElementById('wch-chatbusca-'+convId)||{}).value||''

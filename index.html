@@ -18108,6 +18108,13 @@ async function pageAdminMensajeria(c){
         <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;cursor:pointer;margin-bottom:8px"><input type="checkbox" id="wam-f3-skip" checked onchange="waF3Guardar()" style="margin-top:2px"><span><strong>🚫 No disparar a chats cerrados</strong> — el encolador automático salta a los clientes cuyo chat está CERRADO VIGENTE, marcados desde el chat o desde la sección.</span></label>
         <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;cursor:pointer"><input type="checkbox" id="wam-f3-estampa" checked onchange="waF3Guardar()" style="margin-top:2px"><span><strong>✅ Resuelta estampa el chat</strong> — el botón ✅ Resuelta de Novedades y Reclame también deja el chat en 🟢 Resuelta con el mismo clic (un solo gesto del auxiliar, los dos lados al día).</span></label>
         <div id="wam-f3-msg" style="font-size:11px;margin-top:6px"></div>
+        <div style="border-top:1px dashed var(--border);margin-top:10px;padding-top:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+            <div style="font-size:11.5px;color:var(--muted);max-width:640px"><strong style="color:var(--text)">🔄 Sincronización inicial (una sola vez):</strong> estampa en los CHATS existentes lo que ya está resuelto/programado en las secciones (Resuelta, 📅 Programado, ✅ Confirmado, 🚫 Cancelado, 🚫 Ya dijo NO) con la <strong>fecha real</strong> del evento — si el cliente escribió después, cae solo en 🔁 Volvió. Nunca pisa etiquetas ya puestas. Con esto + 🤖 Auto encendido, el sistema dispara SOLO lo no resuelto.</div>
+            <button class="btn btn-sm btn-primary" id="wam-sync-btn" onclick="waSyncInicial()">🔄 Sincronizar ahora</button>
+          </div>
+          <div id="wam-sync-msg" style="font-size:11px;margin-top:6px"></div>
+        </div>
       </div>
       <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
         <div style="font-size:13px;font-weight:800;margin-bottom:4px">🎚️ Valores del Centro de Chats</div>
@@ -18597,6 +18604,85 @@ window._waEstamparCierre=async function(tel){  try{
     const{data:ok}=await sb.from('conversaciones').update({etiqueta:'g_final',etiqueta_en:new Date().toISOString()}).eq('id',data[0].id).select('id')
     if(ok&&ok.length)logAction('wa_resuelta_estampada',{tel:full,conv_id:data[0].id}).catch(()=>{})
   }catch(_){} // nunca frena el flujo de Resuelta
+}
+// ── 🔄 SINCRONIZACIÓN INICIAL (28jul26) — backfill de etiquetas a los chats ──
+// Lee las tablas operativas y estampa la etiqueta correspondiente en las
+// conversaciones EXISTENTES que estén SIN etiqueta (jamás pisa trabajo manual).
+// La etiqueta_en se RETRO-DATA a la fecha real del evento: así la derivación
+// queda honesta sola — si el cliente escribió DESPUÉS, su mensaje es más nuevo
+// y cae en 🔁 Volvió; si no, queda cerrado y el encolador lo salta.
+// Fuentes → etiqueta:
+//   reclame_envios n99 / novedades_resoluciones resuelta → 🟢 g_final (Resuelta)
+//   programaciones_envio (última por tel): programado→📅 s_pc_prog ·
+//     confirmado→✅ s_pc_conf · cancelado (no "Reemplazada…")→🚫 s_pc_canc
+//   mapeo_eventos re_cancelado → 🚫 s_ca_no
+window.waSyncInicial=async function(){
+  const out=document.getElementById('wam-sync-msg')
+  const btn=document.getElementById('wam-sync-btn')
+  if(btn)btn.disabled=true
+  const say=(h)=>{if(out)out.innerHTML=h}
+  const norm=t=>{const d=String(t||'').replace(/\D/g,'');if(!d)return'';return d.startsWith('57')?d:('57'+d)}
+  const CAP=3000 // tope por tabla — suficiente para el arranque, nunca cuelga el navegador
+  const paged=async(mk)=>{let all=[],from=0;while(from<CAP){const{data,error}=await mk(from,from+499);if(error)break;all=all.concat(data||[]);if(!data||data.length<500)break;from+=500}return all}
+  try{
+    say('⏳ 1/4 · Leyendo las tablas operativas…')
+    const meta={} // telNorm → {etq, ts} · el evento MÁS RECIENTE por teléfono manda
+    const pon=(tel,etq,ts)=>{const k=norm(tel);if(!k||!ts)return;const ya=meta[k];if(!ya||new Date(ts)>new Date(ya.ts))meta[k]={etq,ts}}
+    const rec=await paged((a,b)=>sb.from('reclame_envios').select('telefono,nivel_mensaje,created_at').eq('nivel_mensaje',99).order('created_at',{ascending:false}).range(a,b))
+    for(const r of rec)pon(r.telefono,'g_final',r.created_at)
+    const nov=await paged((a,b)=>sb.from('novedades_resoluciones').select('telefono,accion,created_at').eq('accion','resuelta').order('created_at',{ascending:false}).range(a,b))
+    for(const r of nov)pon(r.telefono,'g_final',r.created_at)
+    const prg=await paged((a,b)=>sb.from('programaciones_envio').select('telefono,estado,motivo,created_at,updated_at').order('created_at',{ascending:false}).range(a,b))
+    const prgVisto=new Set()
+    for(const p of prg){ // viene DESC → la primera por tel es la ÚLTIMA programación real
+      const k=norm(p.telefono);if(!k||prgVisto.has(k))continue;prgVisto.add(k)
+      const ts=p.updated_at||p.created_at
+      if(p.estado==='programado')pon(p.telefono,'s_pc_prog',ts)
+      else if(p.estado==='confirmado')pon(p.telefono,'s_pc_conf',ts)
+      else if(p.estado==='cancelado'&&!/^Reemplazada/i.test(p.motivo||''))pon(p.telefono,'s_pc_canc',ts)
+    }
+    const rcEv=await paged((a,b)=>sb.from('mapeo_eventos').select('mapeo_id,created_at').eq('evento','re_cancelado').order('created_at',{ascending:false}).range(a,b))
+    if(rcEv.length){
+      const ids=[...new Set(rcEv.map(r=>r.mapeo_id).filter(Boolean))]
+      const telDe={}
+      for(let i=0;i<ids.length;i+=150){
+        const{data:mm}=await sb.from('mapeos').select('id,telefono').in('id',ids.slice(i,i+150))
+        for(const m of(mm||[]))telDe[m.id]=m.telefono
+      }
+      for(const r of rcEv)if(telDe[r.mapeo_id])pon(telDe[r.mapeo_id],'s_ca_no',r.created_at)
+    }
+    const tels=Object.keys(meta)
+    if(!tels.length){say('✅ Nada que sincronizar: las tablas operativas no tienen resoluciones/programaciones.');if(btn)btn.disabled=false;return}
+    say('⏳ 2/4 · '+tels.length+' teléfono(s) con estado operativo. Buscando sus chats…')
+    // Solo conversaciones EXISTENTES y SIN etiqueta (jamás pisar trabajo manual)
+    const objetivo=[]
+    const variantes=t=>[t,t.startsWith('57')?t.slice(2):t]
+    for(let i=0;i<tels.length;i+=140){
+      const lote=[...new Set(tels.slice(i,i+140).flatMap(variantes))]
+      try{
+        const{data:cs}=await sb.from('conversaciones').select('id,telefono,etiqueta').in('telefono',lote).is('etiqueta',null).limit(500)
+        for(const c of(cs||[])){const k=norm(c.telefono);if(meta[k])objetivo.push({id:c.id,tel:k,etq:meta[k].etq,ts:meta[k].ts})}
+      }catch(_){}
+    }
+    if(!objetivo.length){say('✅ Listo: ningún chat sin etiqueta coincide — o ya estaban estampados, o esos pedidos aún no tienen conversación (esos viven en 🗓️ Por programar y en el buscador de pedidos 📦).');if(btn)btn.disabled=false;return}
+    say('⏳ 3/4 · Estampando '+objetivo.length+' chat(s)…')
+    let ok=0,fallo=0
+    const porEtq={}
+    for(let i=0;i<objetivo.length;i++){
+      const o=objetivo[i]
+      try{
+        const{data,error}=await sb.from('conversaciones').update({etiqueta:o.etq,etiqueta_en:o.ts}).eq('id',o.id).is('etiqueta',null).select('id')
+        if(error||!data||!data.length)fallo++
+        else{ok++;porEtq[o.etq]=(porEtq[o.etq]||0)+1}
+      }catch(_){fallo++}
+      if(i%25===24)say('⏳ 3/4 · Estampando… '+(i+1)+' de '+objetivo.length)
+    }
+    const nomEtq={g_final:'🟢 Resuelta',s_pc_prog:'📅 Envío programado',s_pc_conf:'✅ Envío confirmado',s_pc_canc:'🚫 Cancelado por cliente',s_ca_no:'🚫 Ya dijo que NO'}
+    const det=Object.entries(porEtq).map(([k,n])=>(nomEtq[k]||k)+' '+n).join(' · ')
+    logAction('wa_sync_inicial',{estampados:ok,fallidos:fallo,detalle:porEtq}).catch(()=>{})
+    say('✅ 4/4 · <strong>'+ok+' chat(s) sincronizados</strong>'+(det?' ('+det+')':'')+(fallo?' · <span style="color:var(--red)">'+fallo+' no se pudieron (¿RLS?)</span>':'')+'.<br>Fechas RETRO-DATADAS al evento real: los que escribieron después ya aparecen en 🔁 Volvió. Los pedidos sin chat siguen en 🗓️/buscador 📦.<br>👉 Último paso: enciende 🤖 Auto en "Modos de envío por sección" — con el candado de cerrados, solo dispara lo NO resuelto.')
+  }catch(e){say('❌ '+String(e.message||e))}
+  finally{if(btn)btn.disabled=false}
 }
 // UI de los puentes (card en Mensajería): guardar con eco de verificación y cargar estado real
 window.waF3Guardar=async function(){
@@ -40815,6 +40901,10 @@ function _wchChipsOrden(){
   // (28jul26) 🗓️ etapa CERO de Pend.Conf: pedidos pendientes SIN fecha programada.
   // DERIVADA (el sistema la calcula sola — nadie la pone a mano, así el contador
   // nunca miente). Va ANTES de Disparada: sin fecha no hay plantilla de 2 días antes.
+  // (28jul26) ⚠️ NO DISPARADOS: encolados que NO salieron (pendiente/sin_plantilla/
+  // fallido). HOY + AYER por defecto; con el selector de fecha, ese día. Así un
+  // disparo que se quedó en la cola NUNCA es un error en silencio.
+  rieles.unshift({tipo:'nodisp',clave:'nodisp',n:'No disparados',e:'⚠️',c:'#ef4444'})
   if(st.sec==='reservado')rieles.unshift({tipo:'porprog',clave:'porprog',n:'Por programar',e:'🗓️',c:'#f59e0b'})
   const manuales=_wchEtqsDe(st.sec).map(x=>({tipo:'manual',id:x.id,n:x.n,e:x.e,c:x.c,cierre:x.cierre,ambito:x.ambito}))
   return [...rieles,...manuales]
@@ -40941,9 +41031,68 @@ window._wchPorProgRefrescar=function(){
     }catch(_){}
   })()
 }
+// ── ⚠️ NO DISPARADOS (28jul26) — el error en silencio, a la vista ───────────
+// Encolados en envios_cola que NO salieron: 🕓 pendiente (el cron aún no pasa o
+// está trabado), ⚠️ sin_plantilla, ❌ fallido (con su motivo). HOY + AYER por
+// defecto; si el selector de fecha está puesto, ESE día. 🔁 Reintentar deja el
+// envío en pendiente para que el próximo despacho lo tome (mismo patrón del
+// panel de la Cola de envíos).
+window._wchNoDispState=null
+async function _wchNoDispToggle(){
+  const el=document.getElementById('wch-lista');if(!el)return
+  let box=document.getElementById('wch-nodisp')
+  if(box){box.remove();window._wchNoDispState=null;return}
+  box=document.createElement('div')
+  box.id='wch-nodisp'
+  box.innerHTML='<div class="loading" style="font-size:12px">⚠️ Buscando envíos que no salieron…</div>'
+  el.prepend(box)
+  await _wchNoDispCargar()
+}
+async function _wchNoDispCargar(){
+  const box=document.getElementById('wch-nodisp');if(!box)return
+  const st=window._wchState
+  try{
+    const fechas=st.fecha?[st.fecha]:[today(),_daysAgo(1)]
+    const{data,error}=await sb.from('envios_cola').select('id,telefono,nombre,plantilla,estado,error_detalle,fecha,creado_en').eq('seccion',st.sec).in('fecha',fechas).in('estado',['pendiente','sin_plantilla','fallido']).order('creado_en',{ascending:false}).limit(300)
+    if(error)throw error
+    const items=data||[]
+    window._wchNoDispState={items}
+    const cnt=document.querySelector('[data-wchn="nodisp"]');if(cnt)cnt.textContent=items.length
+    if(!items.length){box.innerHTML='<div style="background:rgba(34,197,94,.10);border:1px solid var(--green);border-radius:10px;padding:11px;font-size:12.5px;color:var(--green);text-align:center;margin-bottom:8px">✅ Todo lo encolado de '+(st.fecha?('el '+st.fecha):'HOY y AYER')+' salió disparado — cero errores en silencio.</div>';return}
+    const chipE=(e)=>({pendiente:'🕓 pendiente (aún en cola)',sin_plantilla:'⚠️ sin plantilla aprobada',fallido:'❌ falló'})[e]||e
+    box.innerHTML=`<div style="background:rgba(239,68,68,.10);border:1px solid var(--red);border-radius:10px;padding:9px 11px;margin-bottom:8px">
+      <div style="font-size:12px;font-weight:800;color:var(--red)">⚠️ ${items.length} envío(s) encolado(s) que NO han salido (${st.fecha?('el '+st.fecha):'hoy y ayer'}). Para días anteriores usa el selector de 📅 fecha de arriba.</div>
+    </div>`+items.map(it=>{
+      const hace=_wchHace(it.creado_en)
+      return `<div style="background:var(--card2);border:1px solid var(--border);border-left:3px solid ${it.estado==='fallido'?'var(--red)':'var(--amber)'};border-radius:10px;padding:8px 11px;margin-bottom:6px">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
+          <div style="min-width:0">
+            <strong style="font-size:12.5px">${_wchEsc(it.nombre||'Sin nombre')}</strong>
+            <span style="font-size:11px;color:var(--muted)">${_wchEsc(_wchTelCorto(it.telefono))} · hace ${_wchEsc(hace)}</span>
+            <div style="font-size:10.5px;color:var(--muted);margin-top:2px">📋 ${_wchEsc(it.plantilla||'—')} · <span style="color:${it.estado==='fallido'?'var(--red)':'var(--amber)'};font-weight:700">${chipE(it.estado)}</span>${it.error_detalle?`<br><span style="color:var(--red)">↳ ${_wchEsc(it.error_detalle)}</span>`:''}</div>
+          </div>
+          <div style="display:flex;gap:5px;flex-wrap:wrap">
+            ${it.estado!=='pendiente'?`<button class="btn-sm btn-outline" style="font-size:11px" onclick="_wchNoDispReintentar('${it.id}',this)">🔁 Reintentar</button>`:''}
+          </div>
+        </div>
+      </div>`
+    }).join('')
+  }catch(e){box.innerHTML='<div class="alert alert-red" style="font-size:12px">❌ '+_wchEsc(e.message||String(e))+'</div>'}
+}
+window._wchNoDispReintentar=async function(id,btn){
+  if(btn)btn.disabled=true
+  try{
+    const{error}=await sb.from('envios_cola').update({estado:'pendiente',error_detalle:null}).eq('id',id)
+    if(error)throw new Error(error.message)
+    try{waToast('🔁 De vuelta a la cola — el próximo despacho lo toma.','ok')}catch(_){}
+    logAction('wa_reintento_nodisp',{envio_id:id}).catch(()=>{})
+    _wchNoDispCargar()
+  }catch(e){alert('❌ No se pudo reintentar: '+(e.message||e));if(btn)btn.disabled=false}
+}
 window._wchChipClick=function(key){
   const st=window._wchState
   if(key==='porprog'){_wchPorProgToggle();return} // (28jul26) 🗓️ panel propio — no filtra la lista de chats
+  if(key==='nodisp'){_wchNoDispToggle();return} // (28jul26) ⚠️ panel propio — no filtra la lista de chats
   st.filtroEtq=st.filtroEtq===key?null:key
   const el=document.getElementById('wch-franja');const sl=el?el.scrollLeft:0
   _wchFranjaRender() // repinta selección

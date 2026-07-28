@@ -36528,6 +36528,7 @@ async function pageAuxHojaBase(c){
       <input type="file" id="hb-files" multiple accept=".xlsx,.xls" style="display:none" onchange="hbOnFiles(this)">
     </label>
   </div>
+  <div id="hb-subidos"></div><!-- 📂 (28jul26): cuántos Excel se subieron + sus nombres (mientras se sube) -->
   <div id="hb-gap"></div>
   <div id="hb-lista"></div>
   <div id="hb-acciones"></div>
@@ -36580,9 +36581,36 @@ window.hbOnFiles=async(inp)=>{
   try{await hbCantChecarTodos()}catch(_){}
 }
 
+// ══ 📂 (28jul26 · pedido del owner): PANEL SUPERIOR "EXCEL SUBIDOS" ══════════
+// Mientras se sube (ANTES de generar): cuántos Excel hay cargados en pantalla y el
+// NOMBRE de cada uno — TODOS, sin importar su estado (listo / revisión / error…).
+// Es la foto de lo que hay cargado AHORA: si se quita uno con ✕, desaparece de aquí.
+// Lo que se PROCESÓ de verdad sale abajo, en "⬇️ Hojas base generadas HOY".
+// Solo pinta: no valida, no bloquea, no toca ningún flujo existente.
+function hbPintarSubidos(){
+  const el=document.getElementById('hb-subidos');if(!el)return
+  const st=window._hb
+  const files=(st&&Array.isArray(st.files))?st.files:[]
+  if(!files.length){el.innerHTML='';return}
+  const _ico=e=>e==='listo'?'✅':(e==='revision'?'⚠️':((e==='precio'||e==='oferta')?'💲':'❌'))
+  const _txt={listo:'listo',revision:'en revisión',precio:'verificando precios',oferta:'verificando precios de oferta',
+    error:'no se procesa',nombre_mal:'nombre mal',duplicado:'duplicado'}
+  const nListos=files.filter(f=>f.estado==='listo').length
+  el.innerHTML=`<div class="card" style="margin-top:12px">
+    <div class="section-title">📂 Excel subidos: ${files.length} · ✅ ${nListos} listo${nListos===1?'':'s'}</div>
+    <div style="font-size:13px;line-height:1.9">
+      ${files.map((f,i)=>`<div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
+        <span style="color:var(--muted);min-width:24px;text-align:right">${i+1}.</span>
+        <span style="font-family:monospace;word-break:break-all">${hbEsc(f.name)}</span>
+        <span style="font-size:12px;color:var(--muted)">${_ico(f.estado)} ${hbEsc(_txt[f.estado]||f.estado||'')}</span>
+      </div>`).join('')}
+    </div>
+  </div>`
+}
 // ── 9. RENDER DE LA LISTA + PANEL DE REVISIÓN ───────────────────────────────
 function hbRender(){
   const st=window._hb;if(!st)return
+  hbPintarSubidos() // 📂 (28jul26): panel superior — antes del early-return, para que también se limpie al quedar 0
   const lista=document.getElementById('hb-lista'),acc=document.getElementById('hb-acciones'),gap=document.getElementById('hb-gap')
   if(!lista)return
   if(!st.files.length){lista.innerHTML='';if(acc)acc.innerHTML='';if(gap)gap.innerHTML='';return}
@@ -36784,7 +36812,58 @@ function hbRender(){
     </div>`:''
   }
 }
-window.hbQuitar=(fi)=>{if(!window._hb)return;window._hb.files.splice(fi,1);hbRender()}
+// 🗑️ (28jul26 · pedido del owner): al quitar con ✕ se RECUERDA el nombre, para preguntar al GENERAR.
+// Lo demás queda EXACTAMENTE igual que antes (splice + hbRender).
+window.hbQuitar=(fi)=>{
+  const st=window._hb;if(!st)return
+  const _f=st.files[fi]
+  if(_f&&_f.name){st.quitados=Array.isArray(st.quitados)?st.quitados:[];if(!st.quitados.some(q=>q.name===_f.name))st.quitados.push({name:_f.name,ok:false})}
+  st.files.splice(fi,1);hbRender()
+}
+// ══ 🗑️ (28jul26 · pedido del owner): AVISO AL GENERAR SI QUITASTE UN EXCEL ══════════════════
+// Regla: subiste un Excel, le diste ✕, y ahora vas a procesar sin él → NEXO pregunta ANTES de
+// seguir. Si lo vuelves a subir, la pregunta desaparece sola (y se procesa junto con los demás,
+// sin trabajo doble). SOLO en esta sesión: no toca la BD, no recarga nada, no bloquea nada.
+// Si confirmas, no se vuelve a preguntar por ESOS; si después quitas otro, pregunta por ese.
+function hbQuitadosPendientes(){
+  const st=window._hb;if(!st||!Array.isArray(st.quitados))return[]
+  const hay=new Set((st.files||[]).map(f=>f.name))
+  return st.quitados.filter(q=>!q.ok&&!hay.has(q.name))
+}
+window.hbQuitadosCancelar=()=>{document.getElementById('hb-quit-modal')?.remove();window._hbQuitListos=null;window._hbPrueba=false}
+window.hbQuitadosSeguir=()=>{
+  const st=window._hb;if(!st)return
+  for(const q of hbQuitadosPendientes())q.ok=true // decisión del auxiliar: no volver a preguntar por estos
+  document.getElementById('hb-quit-modal')?.remove()
+  const listos=Array.isArray(window._hbQuitListos)?window._hbQuitListos:st.files.filter(x=>x.estado==='listo')
+  window._hbQuitListos=null
+  hbVent1Show(listos) // sigue EXACTAMENTE el mismo flujo de siempre (🚚 → 📅 → generar)
+}
+function hbQuitadosPreguntar(listos,pend){
+  document.getElementById('hb-quit-modal')?.remove()
+  window._hbQuitListos=listos
+  const uno=pend.length===1
+  const ov=document.createElement('div')
+  ov.id='hb-quit-modal'
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px'
+  ov.innerHTML=`<div class="card" style="max-width:640px;width:100%;max-height:88vh;overflow-y:auto;border:2px solid var(--amber)">
+    ${window._hbPrueba===true?'<div class="alert" style="background:var(--amber-bg);border:2px solid var(--amber);color:var(--text);margin-bottom:8px;font-size:12.5px">🧪 <strong>MODO PRUEBA:</strong> este flujo es un simulacro — al final NO se guardará nada.</div>':''}
+    <div class="section-title" style="margin-bottom:4px;color:var(--amber)">🗑️ Quitaste ${pend.length} Excel — ¿seguro que sigues sin ${uno?'él':'ellos'}?</div>
+    <div style="font-size:12.5px;color:var(--muted);line-height:1.7;margin-bottom:10px">Anteriormente subiste ${uno?'este archivo':'estos archivos'} y ${uno?'lo':'los'} quitaste con ✕. Si le das continuar, la hoja se genera <b>sin ${uno?'él':'ellos'}</b>.<br>Si se te olvidó, dale <b>Cancelar</b>, vuélvelo a subir y se procesa junto con los que ya están cargados — <b>sin hacer el trabajo dos veces</b>.</div>
+    <div style="font-size:13px;line-height:1.9">
+      ${pend.map((q,i)=>`<div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;padding:6px 8px;border:1px solid var(--amber);border-left:4px solid var(--amber);border-radius:8px;margin-top:6px;background:rgba(255,242,204,.10)">
+        <span style="color:var(--muted);min-width:24px;text-align:right">${i+1}.</span>
+        <span style="font-family:monospace;word-break:break-all">${hbEsc(q.name)}</span>
+      </div>`).join('')}
+    </div>
+    <div style="font-size:12.5px;color:var(--muted);margin-top:10px">✅ Se van a procesar <b>${listos.length}</b> Excel.</div>
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+      <button class="btn-sm btn-red" onclick="hbQuitadosCancelar()">✕ Cancelar (lo voy a subir de nuevo)</button>
+      <button class="btn-full btn-primary" style="flex:1" onclick="hbQuitadosSeguir()">✅ Sí, continuar sin ${uno?'ese Excel':'esos Excel'}</button>
+    </div>
+  </div>`
+  document.body.appendChild(ov)
+}
 // ══ FASE 6 (6jul26) · M15.C: resolver teléfonos repetidos (recompra / quitar / deshacer) ══
 window.hbRepOk=(fi,xi)=>{
   const f=window._hb?.files[fi];const x=f&&(f.repetidos||[])[xi];if(!x)return
@@ -37280,6 +37359,10 @@ window.hbGenerar=async()=>{
     return
   }
   hbAvisoOk() // MEJORA (19jul26): pasó TODAS las validaciones — si había aviso rojo, pasa a verde (desaparece al generar)
+  // 🗑️ (28jul26): ¿quitaste algún Excel con ✕ y NO lo volviste a subir? → preguntar ANTES de seguir.
+  // Va al FINAL, después de TODAS las validaciones de siempre (que quedaron intactas arriba).
+  const _quit=hbQuitadosPendientes()
+  if(_quit.length){hbQuitadosPreguntar(listos,_quit);return}
   hbVent1Show(listos)
 }
 // ══ FASE 4 (6jul26) · Mejora 8: VENTANA 1 — 🚚 TRANSPORTADORA (Interrapidisimo) ══
@@ -37712,17 +37795,54 @@ window.hbCopiarS=(btn)=>{
   if(btn){btn.textContent='✅ Copiado — pégalo en el Asignador';setTimeout(()=>{btn.textContent='📋 Copiar líneas para el Asignador (columna S)'},1800)} // FASE 5 (6jul26) · Mejora 14
 }
 // Hojas generadas HOY (el auxiliar puede re-descargarlas las veces que necesite; días viejos solo ADS en el Dashboard)
+// ══ 📄 (28jul26 · pedido del owner): debajo de cada hoja, LOS EXCEL QUE SE PROCESARON ══════════
+// Aguanta el RECARGADO y se ve igual desde cualquier equipo porque TODO se relee de Supabase —
+// no se guarda nada nuevo ni se duplica ningún dato:
+//   · los chips de PEDIDOS POR PRODUCTO salen de detalle.productos del registro 'hoja_base'
+//     (los MISMOS números del bloque verde al generar — misma fuente, cero discrepancias);
+//   · los EXCEL PROCESADOS salen de los registros 'export' del MISMO lote_id (ya se guardaban
+//     desde siempre, con su respaldo en Storage) → cada uno con su propio ⬇️.
+// TOLERANTE: si la 2ª consulta falla o un lote viejo no trae detalle, la tarjeta se pinta igual
+// que antes (nombre + filas + ⬇️ Descargar) — nunca se rompe ni se queda en blanco.
 async function hbListarHojasHoy(){
   const el=document.getElementById('hb-hoyhojas');if(!el||!window._hb)return
   try{
-    const{data,error}=await sb.from('constructor_subidas').select('archivo_nombre,storage_path,hora_lote,filas')
+    const{data,error}=await sb.from('constructor_subidas').select('lote_id,archivo_nombre,storage_path,hora_lote,filas,detalle')
       .eq('tipo','hoja_base').eq('fecha_lote',window._hb.hoy).order('hora_lote',{ascending:false}).limit(20)
     if(error){el.innerHTML=`<div style="font-size:12px;color:var(--muted)">${hbEsc(error.message)}</div>`;return}
     if(!data||!data.length){el.innerHTML='<div style="font-size:13px;color:var(--muted)">Todavía no has generado ninguna hoy.</div>';return}
-    el.innerHTML=data.map(h=>`<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:13px">
-      <span style="font-family:monospace">${hbEsc(h.archivo_nombre)}</span><span style="color:var(--muted)">${h.filas||0} filas</span>
-      ${h.storage_path?`<button class="btn-sm btn-primary" onclick="hbDescargarPath('${hbEscA(h.storage_path)}','${hbEscA(h.archivo_nombre)}')">⬇️ Descargar</button>`:'<span style="color:var(--amber);font-size:11px">sin respaldo</span>'}
-    </div>`).join('')
+    const _porLote={}
+    const _lotes=[...new Set(data.map(h=>h.lote_id).filter(Boolean))]
+    if(_lotes.length)try{
+      const{data:_ex}=await sb.from('constructor_subidas').select('lote_id,archivo_nombre,storage_path,filas,resultado')
+        .eq('tipo','export').in('lote_id',_lotes).limit(500)
+      for(const r of(_ex||[])){
+        if(!r||r.resultado==='sin_ventas')continue // eso NO es un Excel: es "ese día no hubo ventas" confirmado
+        ;(_porLote[r.lote_id]=_porLote[r.lote_id]||[]).push(r)
+      }
+      for(const k in _porLote)_porLote[k].sort((a,b)=>String(a.archivo_nombre||'').localeCompare(String(b.archivo_nombre||''),undefined,{numeric:true}))
+    }catch(_e){console.warn('[hb hojas hoy] excel procesados:',_e&&_e.message)}
+    const _pal=hbCfgPaleta()
+    el.innerHTML=data.map((h,hi)=>{
+      const prods=(h.detalle&&Array.isArray(h.detalle.productos))?h.detalle.productos:[]
+      const exs=_porLote[h.lote_id]||[]
+      return`<div style="margin-top:${hi?'12px':'6px'};${hi?'padding-top:12px;border-top:1px solid var(--border);':''}">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px">
+        <span style="font-family:monospace">${hbEsc(h.archivo_nombre)}</span><span style="color:var(--muted)">${h.filas||0} filas</span>
+        ${h.storage_path?`<button class="btn-sm btn-primary" onclick="hbDescargarPath('${hbEscA(h.storage_path)}','${hbEscA(h.archivo_nombre)}')">⬇️ Descargar</button>`:'<span style="color:var(--amber);font-size:11px">sin respaldo</span>'}
+      </div>
+      ${prods.length?`<div style="font-size:13px;line-height:1.9;margin-top:6px">${prods.map((p,i)=>`<span style="display:inline-block;padding:2px 10px;border-radius:8px;margin:2px;background:#${String(_pal[i%_pal.length]).slice(2)};color:#1a1a1a;font-weight:700">${hbEsc(p&&p.nombre)} · ${hbEsc(p&&p.filas)}</span>`).join('')}</div>`:''}
+      ${exs.length?`<div style="margin-top:10px;border-left:3px solid var(--border);padding-left:10px">
+        <div style="font-size:12px;font-weight:800;color:var(--muted);letter-spacing:.4px">📄 EXCEL PROCESADOS</div>
+        ${exs.map((x,i)=>`<div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:12.5px;margin-top:5px">
+          <span style="color:var(--muted);min-width:24px;text-align:right">${i+1}.</span>
+          <span style="font-family:monospace;word-break:break-all">${hbEsc(x.archivo_nombre)}</span>
+          <span style="color:var(--muted)">${x.filas||0} filas</span>
+          ${x.storage_path?`<button class="btn-sm" style="padding:1px 8px;font-size:11px" onclick="hbDescargarPath('${hbEscA(x.storage_path)}','${hbEscA(x.archivo_nombre)}')" title="Descargar este Excel">⬇️</button>`:'<span style="color:var(--amber);font-size:11px">sin respaldo</span>'}
+        </div>`).join('')}
+        <div style="font-size:12.5px;font-weight:800;margin-top:8px">TOTAL DE EXCEL PROCESADOS: ${exs.length}</div>
+      </div>`:''}
+    </div>`}).join('')
   }catch(e){el.innerHTML=`<div style="font-size:12px;color:var(--muted)">${hbEsc(e&&e.message||e)}</div>`}
 }
 window.hbDescargarPath=async(path,nombre)=>{
@@ -39709,6 +39829,19 @@ window.presupVerifYAbrir=async(metaId,nombre,accountId,btn)=>{
 // sola vez (r._dirOriginalEnvio) — desmarcar restaura, y el modo PRUEBA puede
 // repetirse sin duplicar el prefijo. Todo aditivo.
 // ════════════════════════════════════════════════════════════════════════════
+// 🔴🛒 (28jul26 · pedido del owner): PREFIJO de los pedidos con FECHA DE ENVÍO.
+// Va PEGADO al inicio absoluto de la fusión, sin espacios, y SOLO cuando de verdad
+// hay fecha que fusionar → "🔴🛒2 de agosto- CALLE 11#24-90 Barrio San Felipe".
+// Fuente ÚNICA: la vista previa de la ventana y la fusión real leen esta constante.
+// (En el Excel del masivo el emoji del semáforo lo antepone la columna direccion_emoji
+//  → allí se ve "📦✅🔴🛒2 de agosto- ...". En hoja base y Asignador va sin ese emoji.)
+const HB_ENVIO_PREFIJO='🔴🛒'
+// Arma la dirección fusionada de un envío: prefijo + "llegar" TAL CUAL + "- " + dirección.
+// Si NO hay fecha en "llegar", devuelve la dirección intacta (igual que antes del 28jul26).
+function hbEnvioFusion(llegar,dir){
+  const L=String(llegar==null?'':llegar).trim()
+  return(L?HB_ENVIO_PREFIJO+L+'- ':'')+String(dir==null?'':dir)
+}
 // Señal sobre el texto de "llegar": 'envio' (fecha/día concreto) · 'normal' · 'ambigua'
 function hbEnvioSenal(llegar){
   const t=String(llegar==null?'':llegar).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim()
@@ -39756,7 +39889,10 @@ function hbVentEnvFila(x,i){
   const bord=on?'var(--amber)':(senal==='ambigua'?'var(--purple)':'var(--border)')
   const bg=on?'rgba(255,242,204,.14)':(senal==='ambigua'?'rgba(167,139,250,.08)':'transparent')
   const tag=on?'':(senal==='envio'?'<span style="color:var(--amber);font-size:11px;font-weight:700">✨ posible envío</span> ':(senal==='ambigua'?'<span style="color:var(--purple);font-size:11px;font-weight:700">⚠️ revísalo tú</span> ':''))
-  const fusion=on?`<br><span style="color:var(--amber);font-size:11.5px">🟡 Quedará: <b>${hbEsc(llegar)}- ${hbEsc(x.dir)}</b></span>`:''
+  // 🔴🛒 (28jul26): la vista previa usa hbEnvioFusion → es EXACTAMENTE lo que se va a guardar.
+  // Si ya hubo un intento anterior, se parte de la dirección ORIGINAL (nunca de la ya fusionada).
+  const _dirBase=(x.r._dirOriginalEnvio!=null?x.r._dirOriginalEnvio:x.dir)
+  const fusion=on?`<br><span style="color:var(--amber);font-size:11.5px">🟡 Quedará: <b>${hbEsc(hbEnvioFusion(llegar,_dirBase))}</b></span>`:''
   return`<div id="hb-venv-row-${i}" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px;border:1px solid ${bord};border-left:4px solid ${bord};border-radius:8px;margin-top:6px;background:${bg};font-size:12.5px">
     <div style="width:34px;height:34px;flex-shrink:0;border-radius:50%;border:2px solid ${bord};background:rgba(255,255,255,.06);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:800">${i+1}</div>
     <div style="flex:1;min-width:230px;line-height:1.5">${tag}📅 llegar: <b>${hbEsc(llegar)||'<i>(vacío)</i>'}</b><br><span style="color:var(--muted)">📍 ${hbEsc(x.dir)||'(sin dirección)'} · 📞 ${hbEsc(x.tel)||'—'} ${hbTelBtn(x.tel)} · ${hbEsc(x.prod)}</span>${fusion}</div>
@@ -39785,7 +39921,7 @@ window.hbVentEnvContinuar=()=>{
     if(r._envioMarcado){
       if(r._dirOriginalEnvio==null)r._dirOriginalEnvio=String(r.sc.direccion==null?'':r.sc.direccion) // el original, UNA sola vez
       const llegar=String(r.sc.llegar==null?'':r.sc.llegar).trim()
-      r.sc.direccion=(llegar?llegar+'- ':'')+r._dirOriginalEnvio // TAL CUAL + "- " + dirección (regla del owner)
+      r.sc.direccion=hbEnvioFusion(llegar,r._dirOriginalEnvio) // 🔴🛒 + TAL CUAL + "- " + dirección (regla del owner · 28jul26)
       nEnv++
     }else if(r._dirOriginalEnvio!=null){
       r.sc.direccion=r._dirOriginalEnvio // desmarcada tras un intento anterior (o PRUEBA): restaurar

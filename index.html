@@ -1665,7 +1665,11 @@ const NX_SYS_ORIG={
   ccDiasSinResp:{v:2,min:1,max:30,label:'💬 Días visibles sin respuesta (Centro de Chats)',mod:'Centro de Chats',
     explica:'Cuántos días se muestran en la vista de HOY las conversaciones DISPARADAS que el cliente no ha respondido. Después se OCULTAN (no se borran): el selector de fecha las trae siempre.'},
   ccHorasAlerta:{v:4,min:1,max:72,label:'💬 Horas para alarma de respondió-sin-atender (Centro de Chats)',mod:'Centro de Chats',
-    explica:'Si un cliente respondió y pasan más de estas horas sin que un humano le conteste, el chip 🆕 se marca con ⚠️.'}
+    explica:'Si un cliente respondió y pasan más de estas horas sin que un humano le conteste, el chip 🆕 se marca con ⚠️.'},
+  ccDiasVuelve:{v:7,min:1,max:365,label:'🔁 Días para que un reingreso siga siendo "reciente" (Centro de Chats)',mod:'Centro de Chats',
+    explica:'Un cliente que ya estaba CERRADO y vuelve a escribir cae en 🔁 Volvió. Si el cierre fue hace MÁS de estos días, cae en 🕰️ Volvió (viejo) — misma sección, pero abajo en la lista, porque no es urgente. Cada sección respeta la suya: Reclame nunca se mezcla con Novedades.'},
+  ccLatidoSeg:{v:12,min:5,max:120,label:'💓 Cada cuántos segundos se refresca la lista (Centro de Chats)',mod:'Centro de Chats',
+    explica:'El refresco es EN EL SITIO: cambia los chips y contadores sin rearmar la lista, así el auxiliar nunca pierde dónde iba. Si el orden cambia, avisa con una barra y reordena solo cuando el auxiliar quiera.'}
 }
 window._nxSysCfg=window._nxSysCfg||{} // overrides vigentes {clave:número}
 function nxSysVal(k){ // getter único: override válido → original del sistema
@@ -14067,6 +14071,7 @@ window.marcarResuelta=async(tel,ordenId)=>{
     })
     if(error){alert('Error marcando: '+error.message);return}
     logAction('novedad_marcada',{tel,orden_id:ordenId}).catch(()=>{})
+    try{_waEstamparCierre(tel)}catch(_){} // (28jul26 · F3) el chat queda 🟢 Resuelta con el mismo clic
     // Update optimista: la novedad pasa a "resuelta" AL INSTANTE (el re-fetch de abajo solo confirma)
     try{
       const _m=((window._novCache&&window._novCache.items)||[]).find(i=>String(i.tel)===String(tel)&&String(i.orden_id||'')===String(ordenId||''))
@@ -14529,6 +14534,7 @@ window._colaMarcarResuelta=async()=>{
     if(error)throw error
     m.resol={accion:'resuelta',usuario:me?.nombre||'',cuando:new Date().toISOString(),motivo:'desde_cola'}
     logAction('novedad_marcada',{tel:m.tel,orden_id:m.orden_id,desde:'cola'}).catch(()=>{})
+    try{_waEstamparCierre(m.tel)}catch(_){} // (28jul26 · F3) el chat queda 🟢 Resuelta con el mismo clic
     st.idx++
     _colaRender()
   }catch(e){alert('No se pudo marcar como resuelta: '+e.message)}
@@ -15244,6 +15250,7 @@ window.marcarReclameResuelta=async(tel,guia)=>{
     })
     if(error)throw error
     logAction('reclame_resuelta_marcada',{tel:m.tel,guia:m.guia}).catch(()=>{})
+    try{_waEstamparCierre(m.tel)}catch(_){} // (28jul26 · F3) el chat queda 🟢 Resuelta con el mismo clic
     // ── Fase 3 paso 4: registrar evento en mapeo_eventos ──
     try{
       const{data:mapData}=await sb.from('mapeos').select('id').eq('telefono',m.tel).order('created_at',{ascending:false}).limit(1).maybeSingle()
@@ -15529,6 +15536,7 @@ window._recColaMarcarResuelta=async()=>{
     m.resueltaFecha=new Date().toISOString()
     m.resueltaUsuario=me?.nombre||''
     logAction('reclame_resuelta_marcada',{tel:m.tel,guia:m.guia,desde:'cola'}).catch(()=>{})
+    try{_waEstamparCierre(m.tel)}catch(_){} // (28jul26 · F3) el chat queda 🟢 Resuelta con el mismo clic
     // ── Fase 3 paso 4: registrar evento en mapeo_eventos ──
     try{
       const{data:mapData}=await sb.from('mapeos').select('id').eq('telefono',m.tel).order('created_at',{ascending:false}).limit(1).maybeSingle()
@@ -18012,6 +18020,13 @@ async function pageAdminMensajeria(c){
       <div style="font-size:15px;font-weight:800;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">⚙️ Modos de envío por sección</div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:10px">🤖 Automático: el sistema envía solo cada 5 min (interno). ▶️ Despachar: el auxiliar ve un botón que envía por API. 📱 Manual: el auxiliar ve el botón de WhatsApp de siempre. 🔀 Por tipo: cada plantilla manda con sus propios switches.</div>
       <div id="wam-modos"><div class="loading">Cargando...</div></div>
+      <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
+        <div style="font-size:13px;font-weight:800;margin-bottom:6px">🔗 Puentes chat ↔ secciones (28jul26)</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">CERRADO VIGENTE = el chat tiene etiqueta 🟢 Resuelta (o cualquier etiqueta de cierre) y el cliente NO ha escrito después. Si el cliente volvió a escribir (🔁 Volvió), SÍ recibe mensajes.</div>
+        <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;cursor:pointer;margin-bottom:8px"><input type="checkbox" id="wam-f3-skip" checked onchange="waF3Guardar()" style="margin-top:2px"><span><strong>🚫 No disparar a chats cerrados</strong> — el encolador automático salta a los clientes cuyo chat está CERRADO VIGENTE, marcados desde el chat o desde la sección.</span></label>
+        <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;cursor:pointer"><input type="checkbox" id="wam-f3-estampa" checked onchange="waF3Guardar()" style="margin-top:2px"><span><strong>✅ Resuelta estampa el chat</strong> — el botón ✅ Resuelta de Novedades y Reclame también deja el chat en 🟢 Resuelta con el mismo clic (un solo gesto del auxiliar, los dos lados al día).</span></label>
+        <div id="wam-f3-msg" style="font-size:11px;margin-top:6px"></div>
+      </div>
     </div>
     <div class="card" style="margin-bottom:18px">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">
@@ -18059,6 +18074,7 @@ async function cargarWaMensajeria(){
     if(eA||eN){const m=(eA||eN).message;elN.innerHTML=`<div class="alert alert-red">${_waEsc(m)}</div>`;elA.innerHTML='';return}
     window._waState={apps:apps||[],nums:nums||[]}
     renderWaNumeros();renderWaApps()
+    try{waF3Cargar()}catch(_){} // (28jul26 · F3) estado real de los puentes chat ↔ secciones
     // 🚨 Alarma de calidad: números YELLOW/RED o bloqueados. La X la oculta por HOY;
     // si mañana sigue mal, reaparece sola.
     const alertaEl=document.getElementById('wam-alerta-calidad')
@@ -18426,6 +18442,101 @@ window.waTplEnviarTodas=async()=>{
   cargarWaPlantillasCard()
 }
 
+// ── ✅ FASE 3 (28jul26): el chat y las secciones hablan el mismo idioma ──────
+// Dos switches (config, ON de fábrica, editables en Mensajería):
+//   wa_skip_cerrados    → el encolador NO dispara a chats CERRADOS VIGENTES
+//   wa_resuelta_estampa → el botón ✅ Resuelta de Novedades/Reclame estampa la
+//                         etiqueta de cierre (g_final · "Resuelta") en el chat
+// CERRADO VIGENTE = etiqueta de cierre puesta y el cliente NO ha escrito después.
+// Si el cliente escribió después (🔁 Volvió), SÍ recibe — está vivo otra vez.
+window._waF3Cfg=window._waF3Cfg||{t:0,skip:true,estampa:true}
+async function _waF3CfgLoad(force){
+  const c=window._waF3Cfg
+  if(!force&&Date.now()-c.t<60000)return c
+  try{
+    const[a,b]=await Promise.all([getConfig('wa_skip_cerrados'),getConfig('wa_resuelta_estampa')])
+    c.skip=a!=='0';c.estampa=b!=='0';c.t=Date.now() // vacío o '1' = ON (de fábrica)
+  }catch(_){}
+  return c
+}
+// Ids de las etiquetas de CIERRE del Centro de Chats (catálogo cc_etiquetas + g_final)
+async function _waCierresIds(){
+  const w=window._waCierresCache=window._waCierresCache||{t:0,ids:null}
+  if(w.ids&&Date.now()-w.t<300000)return w.ids
+  const ids=new Set(['g_final','g_final_volvio']) // los 2 cierres de fábrica siempre cuentan
+  try{
+    const raw=await getConfig('cc_etiquetas')
+    if(raw){
+      const o=JSON.parse(raw)
+      for(const g of((o&&o.globales)||[]))if(g&&g.cierre&&g.id)ids.add(g.id)
+      const secs=(o&&o.secciones)||{}
+      for(const k in secs)for(const s of(secs[k]||[]))if(s&&s.cierre&&s.id)ids.add(s.id)
+    }
+  }catch(_){}
+  w.ids=ids;w.t=Date.now()
+  return ids
+}
+// Teléfonos (con 57) cuyo chat está CERRADO VIGENTE → el encolador los salta
+async function _waTelsCerradosVigentes(tels){
+  const out=new Set()
+  const cfg=await _waF3CfgLoad()
+  if(!cfg.skip)return out // switch apagado = comportamiento de siempre
+  const cierres=await _waCierresIds()
+  const lista=[...new Set((tels||[]).filter(Boolean))]
+  for(let i=0;i<lista.length;i+=150){
+    try{
+      const{data}=await sb.from('conversaciones').select('telefono,etiqueta,etiqueta_en,ultimo_msg_en,ultimo_msg_dir').in('telefono',lista.slice(i,i+150)).not('etiqueta','is',null).limit(500)
+      for(const c of(data||[])){
+        if(!c.etiqueta||!cierres.has(c.etiqueta))continue
+        const tE=c.etiqueta_en?new Date(c.etiqueta_en).getTime():0
+        const tM=c.ultimo_msg_en?new Date(c.ultimo_msg_en).getTime():0
+        const reabierto=c.ultimo_msg_dir==='in'&&tM>tE // el cliente escribió DESPUÉS del cierre
+        if(!reabierto)out.add(String(c.telefono))
+      }
+    }catch(_){} // tolerante: si falla, no se bloquea nada
+  }
+  return out
+}
+// Estampa la etiqueta de cierre (Resuelta) en el chat del teléfono. Fire-and-forget.
+window._waEstamparCierre=async function(tel){  try{
+    const cfg=await _waF3CfgLoad()
+    if(!cfg.estampa)return
+    const d=String(tel||'').replace(/\D/g,'')
+    if(d.length<7)return
+    const full=d.startsWith('57')?d:('57'+d)
+    const{data}=await sb.from('conversaciones').select('id').in('telefono',[full,d]).order('ultimo_msg_en',{ascending:false,nullsFirst:false}).limit(1)
+    if(!data||!data.length)return
+    const{data:ok}=await sb.from('conversaciones').update({etiqueta:'g_final',etiqueta_en:new Date().toISOString()}).eq('id',data[0].id).select('id')
+    if(ok&&ok.length)logAction('wa_resuelta_estampada',{tel:full,conv_id:data[0].id}).catch(()=>{})
+  }catch(_){} // nunca frena el flujo de Resuelta
+}
+// UI de los puentes (card en Mensajería): guardar con eco de verificación y cargar estado real
+window.waF3Guardar=async function(){
+  const msg=document.getElementById('wam-f3-msg')
+  const skip=document.getElementById('wam-f3-skip')?.checked?'1':'0'
+  const est=document.getElementById('wam-f3-estampa')?.checked?'1':'0'
+  try{
+    for(const[k,v]of[['wa_skip_cerrados',skip],['wa_resuelta_estampa',est]]){
+      const{error}=await sb.from('config').upsert({clave:k,valor:v,updated_at:new Date().toISOString()},{onConflict:'clave'})
+      if(error)throw new Error(error.message)
+      let eco=null;try{eco=await getConfig(k)}catch(_){}
+      if(eco!==v)throw new Error('la nube no devolvió lo guardado en '+k+' (¿RLS en config?)')
+    }
+    await _waF3CfgLoad(true)
+    if(msg)msg.innerHTML='<span style="color:var(--green)">✅ Guardado y verificado.</span>'
+    logAction('wa_f3_switches',{skip,estampa:est}).catch(()=>{})
+  }catch(e){
+    if(msg)msg.innerHTML='<span style="color:var(--red)">❌ NO se guardó: '+_waEsc(e.message||String(e))+'</span>'
+    waF3Cargar() // devuelve los checkboxes al estado real
+  }
+}
+window.waF3Cargar=async function(){
+  try{
+    const c=await _waF3CfgLoad(true)
+    const a=document.getElementById('wam-f3-skip');if(a)a.checked=!!c.skip
+    const b=document.getElementById('wam-f3-estampa');if(b)b.checked=!!c.estampa
+  }catch(_){}
+}
 // ── 🤖 ENCOLADOR AUTOMÁTICO (4 secciones) ──
 // Normaliza items de cualquier sección al formato que entiende _waValorReal
 function _waNormItem(m){
@@ -18456,6 +18567,9 @@ async function waEncolarSeccionAuto(seccion,itemsRaw){
     if(!tpls||!tpls.length)return
     const hoyKey=new Date().toISOString().slice(0,10)
     if(!window._waEncoladoHoy||window._waEncoladoHoy.dia!==hoyKey)window._waEncoladoHoy={dia:hoyKey,set:new Set()}
+    // (28jul26 · F3) Chats CERRADOS VIGENTES (Resuelta en el chat, sin respuesta posterior) → no se les dispara
+    let _cerr=null
+    try{_cerr=await _waTelsCerradosVigentes((itemsRaw||[]).map(r=>{const d=String(r.tel||r.telefono||'').replace(/\D/g,'');return d?(d.startsWith('57')?d:('57'+d)):''}))}catch(_){}
     let encolados=0,i=0
     for(const raw of (itemsRaw||[])){
       if(raw.resol?.accion==='resuelta'||raw.resuelta||raw.confirmado)continue
@@ -18468,6 +18582,7 @@ async function waEncolarSeccionAuto(seccion,itemsRaw){
       const vars=Array.isArray(tpl.variables)?tpl.variables:[]
       const parametros=vars.map(tag=>_waValorReal(tag,m))
       const telFull=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+      if(_cerr&&_cerr.has(telFull))continue // (F3) cerrado vigente en el chat → no disparar
       const{error}=await sb.from('envios_cola').insert({
         mapeo_id:m.id,telefono:telFull,nombre:m.nombre||null,
         seccion,tipo:null,plantilla:tpl.nombre,parametros,origen:'cruce'
@@ -18510,6 +18625,9 @@ async function waEncolarNovedadesAuto(items){
     }
     const hoyKey=new Date().toISOString().slice(0,10)
     if(!window._waEncoladoHoy||window._waEncoladoHoy.dia!==hoyKey)window._waEncoladoHoy={dia:hoyKey,set:new Set()}
+    // (28jul26 · F3) Chats CERRADOS VIGENTES → no se les dispara
+    let _cerrN=null
+    try{_cerrN=await _waTelsCerradosVigentes((items||[]).map(m=>{const d=String(m.tel||'').replace(/\D/g,'');return d?(d.startsWith('57')?d:('57'+d)):''}))}catch(_){}
     let encolados=0
     for(const m of (items||[])){
       if(m.resol?.accion==='resuelta')continue
@@ -18517,6 +18635,7 @@ async function waEncolarNovedadesAuto(items){
       if(!proto||!proto.msg)continue
       const telLimpio=String(m.tel||'').replace(/\D/g,'')
       if(telLimpio.length<10)continue
+      if(_cerrN&&_cerrN.has(telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)))continue // (F3) cerrado vigente
       const plantilla=_waNombreTpl('novedades',m.cat.tipo,m.cat.idx) // 🏷️ único por tarjeta + ✏️ sobrenombres
       if(autoTpls&&!autoTpls.has(plantilla))continue
       const clave=telLimpio+'|'+plantilla
@@ -39480,7 +39599,10 @@ try{if(hbTrabajoPendiente())history.pushState({hbGuard:1},'',location.href)}catc
 const WCH_RIELES_DEF={
   disparada:{n:'Disparada',e:'📤',c:'#64748b'},
   respondio:{n:'Respondió',e:'🆕',c:'#f59e0b'},
+  conversando:{n:'En conversación',e:'💬',c:'#22d3ee'}, // (28jul26) escribió y YA hubo respuesta humana antes
   atendida:{n:'Atendida',e:'🟣',c:'#a855f7'},
+  volvio:{n:'Volvió',e:'🔁',c:'#f97316'},               // (28jul26) estaba CERRADO y volvió a escribir
+  volvio_viejo:{n:'Volvió (viejo)',e:'🕰️',c:'#94a3b8'}, // (28jul26) idem pero pasado el corte ccDiasVuelve
   wame:{n:'Por wa.me',e:'📲',c:'#0ea5e9'}
 }
 const WCH_SELLO_WAME='~wame' // valor especial en conversaciones.etiqueta (sello, no id de catálogo)
@@ -39492,7 +39614,8 @@ const WCH_SECS=[
   {k:'entrantes',n:'Entrantes',e:'📥'}
 ]
 const WCH_CAT_DEF=()=>({v:1,rieles:JSON.parse(JSON.stringify(WCH_RIELES_DEF)),
-  globales:[{id:'g_final',n:'Finalizado',e:'🟢',c:'#22c55e',cierre:true,arch:false}],
+  globales:[{id:'g_final',n:'Resuelta',e:'🟢',c:'#22c55e',cierre:true,arch:false},
+    {id:'g_final_volvio',n:'Resuelta · volvió',e:'🔁',c:'#f97316',cierre:true,arch:false}], // (28jul26) cierre para REINGRESOS: contador propio; al elegirla el select SÍ dispara (valor distinto a g_final)
   secciones:{novedades:[],reservado:[],cancelados:[],reclame:[],entrantes:[]}})
 
 // ── Estado en memoria ──
@@ -39538,6 +39661,20 @@ async function _wchCatLoad(force){
   // Sanea: rieles siempre completos (si el guardado viejo no tiene alguno, se repone del default)
   for(const k of Object.keys(WCH_RIELES_DEF)){if(!cat.rieles[k])cat.rieles[k]=JSON.parse(JSON.stringify(WCH_RIELES_DEF[k]))}
   for(const s of WCH_SECS){if(!cat.secciones[s.k])cat.secciones[s.k]=[]}
+  // (28jul26) Rename suave 'Finalizado' → 'Resuelta' para hablar el MISMO idioma que el
+  // botón ✅ Resuelta de Novedades/Reclame. Solo si nadie le puso nombre propio: si el
+  // auxiliar ya lo renombró, se respeta. El id (g_final) NUNCA cambia → cero datos tocados.
+  try{const _gf=(cat.globales||[]).find(x=>x.id==='g_final');if(_gf&&_gf.n==='Finalizado')_gf.n='Resuelta'}catch(_){}
+  // (28jul26) Migración suave: si el catálogo guardado aún no tiene la etiqueta de cierre
+  // para REINGRESOS, se agrega detrás de g_final. Solo se AGREGA — nada se pisa; si el
+  // admin la renombra o archiva después, se respeta (vive por su ID g_final_volvio).
+  try{
+    if(!(cat.globales||[]).find(x=>x&&x.id==='g_final_volvio')){
+      const _i=(cat.globales||[]).findIndex(x=>x&&x.id==='g_final')
+      const _nv={id:'g_final_volvio',n:'Resuelta · volvió',e:'🔁',c:'#f97316',cierre:true,arch:false}
+      if(_i>=0)cat.globales.splice(_i+1,0,_nv);else (cat.globales=cat.globales||[]).push(_nv)
+    }
+  }catch(_){}
   st.cat=cat
   return cat
 }
@@ -39565,6 +39702,15 @@ function _wchEtqPorId(id){
   return null
 }
 
+// (28jul26) ¿La conversación traía una etiqueta de CIERRE que quedó TAPADA por un
+// mensaje más nuevo? Devuelve de dónde venía (para el chip "venía de…") o null.
+// La etiqueta NO se borra nunca — solo deja de mandar por ser más vieja que el mensaje.
+function _wchCierreTapado(c){
+  if(!c||!c.etiqueta||c.etiqueta===WCH_SELLO_WAME)return null
+  const et=_wchEtqPorId(c.etiqueta)
+  if(!et||!et.cierre)return null
+  return{id:c.etiqueta,n:et.n||'',e:et.e||'',col:et.c||'#22c55e',ts:c.etiqueta_en||null}
+}
 // ── DERIVACIÓN DE ESTADO — el evento más reciente manda ──
 // c: {etiqueta, etiqueta_en, ultimo_msg_en, ultimo_msg_dir, _lastOutHum, _tieneEnvio}
 // Devuelve {tipo:'riel'|'manual', clave|id, ts}
@@ -39576,7 +39722,31 @@ function _wchDerivar(c){
     if(c.etiqueta===WCH_SELLO_WAME)return {tipo:'riel',clave:'wame',ts:c.etiqueta_en}
     return {tipo:'manual',id:c.etiqueta,ts:c.etiqueta_en}
   }
-  if(c.ultimo_msg_dir==='in')return {tipo:'riel',clave:'respondio',ts:c.ultimo_msg_en}
+  if(c.ultimo_msg_dir==='in'){
+    // (28jul26) ¿venía de una etiqueta de CIERRE que este mensaje acaba de tapar? → REINGRESO.
+    // Si el cierre fue hace más de ccDiasVuelve días, es un reingreso VIEJO (no urgente).
+    const cerr=_wchCierreTapado(c)
+    if(cerr){
+      const tC=cerr.ts?new Date(cerr.ts).getTime():0
+      const dias=tC?((Date.now()-tC)/864e5):0
+      return {tipo:'riel',clave:dias>(nxSysVal('ccDiasVuelve')||7)?'volvio_viejo':'volvio',ts:c.ultimo_msg_en,de:cerr}
+    }
+    // (28jul26 · F2) Resuelta en su TABLA de sección (histórico sin etiqueta) y volvió a
+    // escribir. Solo es REINGRESO si ya hubo ida y vuelta real (algún humano le contestó
+    // o tiene más de un entrante). Si escribe por PRIMERA vez en su vida → 🆕 (acordado),
+    // y el chip "✅ estaba resuelta (…)" conserva de dónde viene.
+    if(c._resolSec&&c._resolSec.ts){
+      const tR=new Date(c._resolSec.ts).getTime()
+      if(isFinite(tR)&&(tMsg==null||tR<tMsg)&&(c._algunOutHum||(c._numIn||0)>1)){
+        const diasR=(Date.now()-tR)/864e5
+        const sNR=(WCH_SECS.find(s=>s.k===c._resolSec.sec)||{}).n||c._resolSec.sec
+        return {tipo:'riel',clave:diasR>(nxSysVal('ccDiasVuelve')||7)?'volvio_viejo':'volvio',ts:c.ultimo_msg_en,de:{n:'Resuelta · '+sNR,e:'✅',col:'#22c55e',ts:c._resolSec.ts,tabla:true}}
+      }
+    }
+    // ¿ALGUNA vez le contestó un humano? → hilo vivo (💬). Si no, es lead crudo (🆕).
+    if(c._algunOutHum)return {tipo:'riel',clave:'conversando',ts:c.ultimo_msg_en}
+    return {tipo:'riel',clave:'respondio',ts:c.ultimo_msg_en}
+  }
   if(c.ultimo_msg_dir==='out'){
     // salió el último mensaje: ¿humano (atendida) o automático (sigue disparada)?
     if(c._lastOutHum)return {tipo:'riel',clave:'atendida',ts:c.ultimo_msg_en}
@@ -39585,6 +39755,45 @@ function _wchDerivar(c){
   return {tipo:'riel',clave:'disparada',ts:null} // encolada/sin mensajes aún
 }
 
+// ── 🧭 RASTRO OPERATIVO E HISTÓRICO DE RESOLUCIÓN (28jul26 · Fase 2) ────────
+// Los clientes RESUELTOS antes de la mensajería API no tienen fila en envios_cola,
+// así que el Centro no sabía de qué sección eran: caían en Entrantes o se perdían.
+// Este helper busca su rastro en las tablas operativas reales:
+//   reclame_envios → 'reclame' · novedades_resoluciones → 'novedades' ·
+//   confirmacion_envios → 'reservado'.  Gana el rastro MÁS RECIENTE.
+// Además devuelve la ÚLTIMA RESOLUCIÓN por teléfono (reclame nivel 99 /
+// novedades accion='resuelta') para el chip "✅ estaba resuelta (…)" y el riel 🔁.
+// Tolerante total: cada tabla en su try — si una no existe o RLS la tapa, se sigue.
+async function _wchRastroYResol(tels){
+  const rastro={},resol={}
+  const norm=[...new Set((tels||[]).map(_wchTel).filter(Boolean))]
+  if(!norm.length)return{rastro,resol}
+  // Las tablas operativas guardan el teléfono SIN el 57 (m.tel) — se consulta con ambas formas
+  const variantes=[...new Set(norm.flatMap(t=>[t,t.startsWith('57')?t.slice(2):t]))]
+  const pon=(mapa,t,obj)=>{const k=_wchTel(t);if(!k)return;const ya=mapa[k];if(!ya||new Date(obj.ts||0)>new Date(ya.ts||0))mapa[k]=obj}
+  for(let i=0;i<variantes.length;i+=200){
+    const lote=variantes.slice(i,i+200)
+    try{ // 📢 RECLAME: cualquier envío = rastro · nivel 99 = resolución
+      const{data}=await sb.from('reclame_envios').select('telefono,nivel_mensaje,created_at').in('telefono',lote).order('created_at',{ascending:false}).limit(1000)
+      for(const r of(data||[])){
+        pon(rastro,r.telefono,{sec:'reclame',ts:r.created_at})
+        if(r.nivel_mensaje===99)pon(resol,r.telefono,{sec:'reclame',ts:r.created_at,motivo:null})
+      }
+    }catch(_){}
+    try{ // 🔔 NOVEDADES: cualquier fila = rastro · accion 'resuelta' = resolución
+      const{data}=await sb.from('novedades_resoluciones').select('telefono,accion,motivo,created_at').in('telefono',lote).order('created_at',{ascending:false}).limit(1000)
+      for(const r of(data||[])){
+        pon(rastro,r.telefono,{sec:'novedades',ts:r.created_at})
+        if(r.accion==='resuelta')pon(resol,r.telefono,{sec:'novedades',ts:r.created_at,motivo:r.motivo||null})
+      }
+    }catch(_){}
+    try{ // ⏳ PEND. CONF.: cualquier envío de confirmación = rastro
+      const{data}=await sb.from('confirmacion_envios').select('telefono,created_at').in('telefono',lote).order('created_at',{ascending:false}).limit(1000)
+      for(const r of(data||[]))pon(rastro,r.telefono,{sec:'reservado',ts:r.created_at})
+    }catch(_){}
+  }
+  return{rastro,resol}
+}
 // ── CARGA DE DATOS de la sección activa ──
 // Vista HOY (fecha=null): disparos de hoy + todo lo VIVO (🆕/🟣/📲/manual sin cierre) de días previos.
 // Vista FECHA: todo lo que SE MOVIÓ ese día (envío o mensaje), incluyendo ocultos.
@@ -39602,6 +39811,19 @@ async function _wchCargar(){
       const{data,error}=await q
       if(error)throw error
       st.convs=await _wchEnriquecer(data||[],{})
+      // (28jul26 · F2) Un cliente con RASTRO operativo (reclame/novedades/confirmación)
+      // pertenece a SU sección — no es un entrante nuevo. Aquí se filtra y su tarjeta
+      // aparece en la sección correcta (con 🔁/🕰️ si estaba resuelto). Tolerante:
+      // si el rastro falla, Entrantes se queda como siempre.
+      try{
+        const{rastro,resol}=await _wchRastroYResol(st.convs.map(c=>c.telefono))
+        st.convs=st.convs.filter(c=>{
+          const r=rastro[_wchTel(c.telefono)]
+          if(!r)return true
+          const rz=resol[_wchTel(c.telefono)];if(rz)c._resolSec=rz
+          return false
+        })
+      }catch(_){}
     }else{
       // 1) Envíos de la sección del día seleccionado
       const{data:envs,error:e1}=await sb.from('envios_cola').select('telefono,seccion,fecha').eq('seccion',sec).eq('fecha',diaSel).limit(1500)
@@ -39635,6 +39857,41 @@ async function _wchCargar(){
       const telsCon=new Set(base.map(c=>c.telefono))
       for(const t of telArr){if(!telsCon.has(t))base.push({id:null,telefono:t,_sinConv:true,_tieneEnvio:true})}
       if(!fecha){for(const c of vivas){if(!yaIds.has(c.id)&&secDe[c.telefono]===sec){base.push(c);yaIds.add(c.id)}}}
+      // (28jul26 · F2) CASCADA DE RASTRO — solo en vista HOY y solo para lo que
+      // envios_cola no cubrió. Trae a SU sección a los históricos (resueltos antes
+      // de la API) aunque su conversación sea origen 'cliente'. Cada sección
+      // respeta la suya: el rastro más reciente decide.
+      if(!fecha){
+        try{
+          // Vivas que quedaron SIN sección tras envios_cola → cascada
+          const sinSec=vivas.filter(c=>!yaIds.has(c.id)&&!(_wchTel(c.telefono)in secDe)&&!(c.telefono in secDe))
+          // Históricos con conversación origen 'cliente' que escribieron (no están en vivas por el neq)
+          let cliVivas=[]
+          try{
+            const{data:cv}=await sb.from('conversaciones').select('id,telefono,nombre,ultimo_msg_en,ultimo_msg_dir,ventana_24h_hasta,no_leidos,requiere_reintro,etiqueta,etiqueta_en,origen,wa_numero_id').eq('origen','cliente').eq('ultimo_msg_dir','in').order('ultimo_msg_en',{ascending:false}).limit(200)
+            cliVivas=(cv||[]).filter(c=>!yaIds.has(c.id))
+          }catch(_){}
+          const cand=[...sinSec,...cliVivas]
+          if(cand.length){
+            const{rastro,resol}=await _wchRastroYResol(cand.map(c=>c.telefono))
+            for(const c of cand){
+              const r=rastro[_wchTel(c.telefono)]
+              if(r&&r.sec===sec&&!yaIds.has(c.id)){
+                base.push(c);yaIds.add(c.id);secDe[c.telefono]=r.sec
+                const rz=resol[_wchTel(c.telefono)];if(rz)c._resolSec=rz
+              }
+            }
+          }
+        }catch(_){}
+        // Última resolución de TODOS los de la sección (para el chip ✅ y el riel 🔁 por tabla)
+        try{
+          const falta=base.filter(c=>!c._resolSec&&c.telefono)
+          if(falta.length){
+            const{resol}=await _wchRastroYResol(falta.map(c=>c.telefono))
+            for(const c of falta){const rz=resol[_wchTel(c.telefono)];if(rz)c._resolSec=rz}
+          }
+        }catch(_){}
+      }
       for(const c of base){if(tels.has(c.telefono))c._tieneEnvio=true;c._sec=secDe[c.telefono]||sec}
       st.convs=await _wchEnriquecer(base,secDe)
     }
@@ -39654,9 +39911,27 @@ async function _wchEnriquecer(convs,secDe){
     const{data:outs}=await sb.from('mensajes').select('conversacion_id,ts,usuario_id').in('conversacion_id',ids.slice(i,i+150)).eq('direccion','out').order('ts',{ascending:false}).limit(1200)
     for(const m of(outs||[])){if(!(m.conversacion_id in lastOut))lastOut[m.conversacion_id]=m}
   }
+  // (28jul26) UNA sola consulta más por lote para dos preguntas:
+  //   💬 ¿ALGUNA vez le contestó un humano? (no solo el último) → riel En conversación
+  //   🔇 ¿tiene algún mensaje entrante en toda su vida?          → sufijo "sin contestar"
+  // Si el cliente ya escribió lo último, _algunIn se sabe sin preguntar.
+  const conHum=new Set(),conIn=new Set(),numIn={} // (F2) numIn: cuántos entrantes tiene en su vida
+  for(const c of convs){if(c.id&&c.ultimo_msg_dir==='in')conIn.add(c.id)}
+  try{
+    for(let i=0;i<ids.length;i+=150){
+      const{data:mm}=await sb.from('mensajes').select('conversacion_id,direccion,usuario_id').in('conversacion_id',ids.slice(i,i+150)).or('direccion.eq.in,usuario_id.not.is.null').limit(3000)
+      for(const m of(mm||[])){
+        if(m.direccion==='in'){conIn.add(m.conversacion_id);numIn[m.conversacion_id]=(numIn[m.conversacion_id]||0)+1}
+        else if(m.usuario_id)conHum.add(m.conversacion_id)
+      }
+    }
+  }catch(_){} // si falla, los rieles caen al comportamiento de siempre (🆕/🟣) — nada se rompe
   for(const c of convs){
     const lo=c.id?lastOut[c.id]:null
     c._lastOutHum=!!(lo&&lo.usuario_id)
+    c._algunOutHum=!!(c.id&&conHum.has(c.id))
+    c._algunIn=!!(c.id&&conIn.has(c.id))
+    c._numIn=c.id?(numIn[c.id]||0):0
     c._est=_wchDerivar(c)
   }
   return convs
@@ -39679,9 +39954,9 @@ function _wchAplicarVista(){
   }
   const b=(st.busca||'').trim().toLowerCase()
   if(b)lista=lista.filter(c=>(c.telefono||'').includes(b.replace(/\D/g,''))&&b.replace(/\D/g,'')||String(c.nombre||'').toLowerCase().includes(b)||(c.telefono||'').includes(b))
-  const peso={respondio:0,atendida:1,wame:1,disparada:3}
+  const peso={respondio:0,conversando:1,atendida:2,volvio:3,volvio_viejo:4,wame:5,disparada:6} // (28jul26) 🆕→💬→🟣→🔁→🕰️→📲/manuales→📤
   lista.sort((a,b2)=>{
-    const pa=a._est.tipo==='manual'?2:peso[a._est.clave],pb=b2._est.tipo==='manual'?2:peso[b2._est.clave]
+    const pa=a._est.tipo==='manual'?5:peso[a._est.clave],pb=b2._est.tipo==='manual'?5:peso[b2._est.clave]
     if(pa!==pb)return pa-pb
     return new Date(b2.ultimo_msg_en||0)-new Date(a.ultimo_msg_en||0)
   })
@@ -40041,7 +40316,7 @@ window._wchAbrir=async function(){
   if(st.timer)clearInterval(st.timer)
   st.timer=setInterval(()=>{_wchRecargar(true)},60000) // refresco suave: contadores en el sitio
   if(st.latido)clearInterval(st.latido)
-  st.latido=setInterval(_wchLatido,12000) // 💓 rieles al día sin esperar el minuto
+  st.latido=setInterval(_wchLatido,(nxSysVal('ccLatidoSeg')||12)*1000) // 💓 rieles al día sin esperar el minuto (segundos configurables)
 }
 window._wchCerrar=function(){
   const st=window._wchState
@@ -40076,6 +40351,42 @@ window._wchRecargar=async function(suave){
   _wchFranjaContadores()
   _wchTabsBadges()
 }
+// ── 🔄 REFRESCO EN EL SITIO (28jul26) ───────────────────────────────────────
+// REGLA DE ORO: el auxiliar NUNCA pierde dónde va. Este refresco actualiza los
+// chips y contadores DENTRO de las tarjetas ya pintadas — no rearma la lista,
+// no reordena, no mueve el scroll. Si el orden o la membresía cambiaron, avisa
+// con una barra arriba (「🔄 N cambios · Reordenar」) y la lista solo se rearma
+// cuando el auxiliar la toca (o al cambiar de pestaña/filtro, que ya rearma).
+function _wchRefrescoSitio(){
+  const el=document.getElementById('wch-lista')
+  if(!el){return}
+  const st=window._wchState
+  const tarjetas=el.querySelectorAll('[data-wchid]')
+  if(!tarjetas.length){_wchListaRender();_wchFranjaContadores();return} // lista vacía o vieja: pintar normal
+  const antes=[...tarjetas].map(d=>d.getAttribute('data-wchid'))
+  _wchAplicarVista() // recalcula st.vista (orden nuevo) SIN tocar el DOM
+  const ahora=(st.vista||[]).map(c=>String(c.id||c.telefono||''))
+  // chips al día, tarjeta por tarjeta, en el sitio
+  for(const c of st.convs){
+    const key=String(c.id||c.telefono||'')
+    if(!key)continue
+    const sp=el.querySelector('[data-wchchip="'+key.replace(/"/g,'\\"')+'"]')
+    if(sp){const h=_wchChipHTML(c);if(sp.innerHTML!==h)sp.innerHTML=h}
+  }
+  _wchFranjaContadores()
+  const igual=antes.length===ahora.length&&antes.every((v,i)=>v===ahora[i])
+  let bar=document.getElementById('wch-reorden')
+  if(igual){if(bar)bar.remove();return}
+  const n=Math.max(1,Math.abs(ahora.length-antes.length)||ahora.filter((v,i)=>v!==antes[i]).length)
+  if(!bar){
+    bar=document.createElement('div')
+    bar.id='wch-reorden'
+    bar.style.cssText='position:sticky;top:0;z-index:5;display:flex;gap:8px;align-items:center;justify-content:center;background:rgba(168,85,247,.16);border:1px solid var(--primary);border-radius:9px;padding:6px 10px;margin-bottom:7px;font-size:11.5px;font-weight:700;color:var(--text);backdrop-filter:blur(4px)'
+    el.prepend(bar)
+  }
+  bar.innerHTML=`<span>🔄 ${n} cambio${n>1?'s':''} en la lista</span><button class="btn-sm btn-primary" style="font-size:11px;padding:3px 10px" onclick="_wchListaRender();_wchFranjaContadores()">Reordenar</button>`
+}
+window._wchRefrescoSitio=_wchRefrescoSitio
 // ── 💓 LATIDO EN VIVO (28jul26) ─────────────────────────────────────────────
 // La lista solo se refrescaba cada 60s: si el cliente respondía, la píldora se
 // quedaba en 🟣 Atendida un buen rato. Este latido corre cada 12s y es BARATO:
@@ -40106,6 +40417,7 @@ async function _wchLatido(){
       c.no_leidos=r.no_leidos;c.ventana_24h_hasta=r.ventana_24h_hasta
       c.requiere_reintro=r.requiere_reintro;c.etiqueta=r.etiqueta;c.etiqueta_en=r.etiqueta_en
       if(r.nombre)c.nombre=r.nombre
+      if(r.ultimo_msg_dir==='in')c._algunIn=true // (28jul26) escribió → ya tiene entrante de por vida
       if(r.ultimo_msg_dir==='out')pedirOut.push(r.id)
       tocadas.push(c)
     }
@@ -40114,14 +40426,14 @@ async function _wchLatido(){
       try{
         const{data:outs}=await sb.from('mensajes').select('conversacion_id,ts,usuario_id').in('conversacion_id',pedirOut).eq('direccion','out').order('ts',{ascending:false}).limit(400)
         const visto={}
-        for(const m of(outs||[])){if(visto[m.conversacion_id])continue;visto[m.conversacion_id]=true;const c=porId[m.conversacion_id];if(c)c._lastOutHum=!!m.usuario_id}
+        for(const m of(outs||[])){if(visto[m.conversacion_id])continue;visto[m.conversacion_id]=true;const c=porId[m.conversacion_id];if(c){c._lastOutHum=!!m.usuario_id;if(m.usuario_id)c._algunOutHum=true}} // (28jul26) humano contestó → 💬 de por vida
       }catch(_){}
     }
     const sello=e=>e?((e.tipo==='manual'?'m:'+e.id:'r:'+e.clave)+'|'+(e.ts||'')):''
     let movio=false
     for(const c of tocadas){const antes=sello(c._est);c._est=_wchDerivar(c);if(antes!==sello(c._est))movio=true}
     if(!movio)return
-    _wchAplicarVista();_wchListaRender();_wchFranjaContadores();_wchTabsBadges()
+    _wchRefrescoSitio();_wchTabsBadges() // (28jul26) EN EL SITIO: el auxiliar no pierde dónde va
   }catch(_){}
   finally{window._wchLatidoCorriendo=false}
 }
@@ -40150,7 +40462,7 @@ async function _wchTabsBadges(){
 // ── FRANJA (tubería) — se construye UNA vez por sección; contadores se actualizan EN EL SITIO ──
 function _wchChipsOrden(){
   const st=window._wchState,cat=st.cat
-  const rieles=['disparada','respondio','atendida','wame'].map(k=>({tipo:'riel',clave:k,...cat.rieles[k]}))
+  const rieles=['disparada','respondio','conversando','atendida','volvio','volvio_viejo','wame'].map(k=>({tipo:'riel',clave:k,...cat.rieles[k]}))
   const manuales=_wchEtqsDe(st.sec).map(x=>({tipo:'manual',id:x.id,n:x.n,e:x.e,c:x.c,cierre:x.cierre,ambito:x.ambito}))
   return [...rieles,...manuales]
 }
@@ -40205,13 +40517,48 @@ function _wchFranjaContadores(){
   for(const c of st.convs){
     const e=c._est,key=e.tipo==='manual'?e.id:e.clave
     tot[key]=(tot[key]||0)+1
-    if(e.clave==='respondio'){const h=_wchHrs(e.ts);if(h!=null&&h>=horasAlerta)alerta[key]=true}
+    if(e.clave==='respondio'||e.clave==='conversando'||e.clave==='volvio'){const h=_wchHrs(e.ts);if(h!=null&&h>=horasAlerta)alerta[key]=true} // (28jul26) ⚠️ también para 💬 y 🔁
   }
   document.querySelectorAll('[data-wchn]').forEach(sp=>{sp.textContent=tot[sp.getAttribute('data-wchn')]||0})
   document.querySelectorAll('[data-wcha]').forEach(sp=>{sp.style.display=alerta[sp.getAttribute('data-wcha')]?'':'none'})
 }
 
 // ── LISTA de conversaciones ──
+// (28jul26) Chip de estado de UNA tarjeta — extraído para que el refresco en el
+// sitio lo reuse sin rearmar la lista. Misma lógica de siempre, más:
+//   · ⚠️ también en 💬 y 🔁 (cliente esperando)
+//   · sufijo 🔇 sin contestar en cierres donde el cliente JAMÁS escribió
+//   · chip tenue "venía de 🏷️/✅" cuando una etiqueta quedó tapada por el mensaje
+function _wchChipHTML(c){
+  const st=window._wchState
+  const e=c._est
+  let chip=''
+  if(e.tipo==='manual'){
+    const et=_wchEtqPorId(e.id)
+    const sinResp=(et&&et.cierre&&c._algunIn===false)?' · 🔇 sin contestar':'' // solo si SABEMOS que no hay entrantes
+    chip=et?`<span style="border:1px solid ${et.c||'#666'};color:${et.c||'var(--text)'};border-radius:999px;padding:1px 8px;font-size:10.5px;font-weight:700">${et.e||''} ${_wchEsc(et.n)}${sinResp}${et.arch?' 🔒':''}</span>`:`<span style="color:var(--muted);font-size:10.5px">🔒 etiqueta archivada</span>`
+  }else{
+    const r=st.cat.rieles[e.clave]||{n:e.clave,e:'',c:'#666'}
+    const alerta=(e.clave==='respondio'||e.clave==='conversando'||e.clave==='volvio')&&_wchHrs(e.ts)>=(nxSysVal('ccHorasAlerta')||4)
+    chip=`<span style="background:${r.c}22;border:1px solid ${r.c};color:var(--text);border-radius:999px;padding:1px 8px;font-size:10.5px;font-weight:700">${r.e} ${_wchEsc(r.n)}${alerta?' ⚠️':''}</span>`
+    // "venía de": la etiqueta sigue en la columna, solo quedó tapada por el mensaje nuevo
+    if(c.etiqueta&&c.etiqueta!==WCH_SELLO_WAME){
+      const ev=_wchEtqPorId(c.etiqueta)
+      if(ev){
+        const sinResp=(ev.cierre&&c._algunIn===false)?' · 🔇':''
+        chip+=`<span title="Venía de esta etiqueta (quedó tapada por el mensaje nuevo)${c.etiqueta_en?' · '+_wchEsc(_fechaHoraBog(c.etiqueta_en)):''}" style="border:1px dashed ${ev.c||'#666'};color:${ev.c||'var(--muted)'};opacity:.65;border-radius:999px;padding:1px 7px;font-size:9.5px;font-weight:700">${ev.e||'🏷️'} ${_wchEsc(ev.n)}${sinResp}</span>`
+      }
+    }else if(c._resolSec){
+      // (28jul26 · F2) Histórico: resuelto en la TABLA de su sección (sin etiqueta en el chat)
+      const rz=c._resolSec
+      const sN=(WCH_SECS.find(s=>s.k===rz.sec)||{}).n||rz.sec
+      let f='';try{f=rz.ts?new Date(rz.ts).toLocaleDateString('es-CO',{day:'numeric',month:'short',timeZone:'America/Bogota'}):''}catch(_){}
+      const sinC=(/sin contacto/i.test(rz.motivo||'')||c._algunIn===false)?' · 🔇':''
+      chip+=`<span title="Este cliente ya estaba RESUELTO en ${_wchEsc(sN)}${f?' desde el '+_wchEsc(f):''}${sinC?' · nunca contestó':''}" style="border:1px dashed #22c55e;color:#22c55e;opacity:.7;border-radius:999px;padding:1px 7px;font-size:9.5px;font-weight:700">✅ estaba resuelta (${_wchEsc(sN)}${f?', '+_wchEsc(f):''})${sinC}</span>`
+    }
+  }
+  return chip
+}
 function _wchListaRender(){
   const el=document.getElementById('wch-lista');if(!el)return
   const st=window._wchState
@@ -40219,21 +40566,18 @@ function _wchListaRender(){
   const lista=st.vista||[]
   if(!lista.length){el.innerHTML='<div style="color:var(--muted);font-size:12.5px;text-align:center;padding:26px">📭 Nada por aquí'+(st.fecha?' ese día':' hoy')+'.</div>';return}
   el.innerHTML=lista.map(c=>{
-    const e=c._est
-    let chip=''
-    if(e.tipo==='manual'){const et=_wchEtqPorId(e.id);chip=et?`<span style="border:1px solid ${et.c||'#666'};color:${et.c||'var(--text)'};border-radius:999px;padding:1px 8px;font-size:10.5px;font-weight:700">${et.e||''} ${_wchEsc(et.n)}${et.arch?' 🔒':''}</span>`:`<span style="color:var(--muted);font-size:10.5px">🔒 etiqueta archivada</span>`}
-    else{const r=st.cat.rieles[e.clave];const alerta=e.clave==='respondio'&&_wchHrs(e.ts)>=(nxSysVal('ccHorasAlerta')||4);chip=`<span style="background:${r.c}22;border:1px solid ${r.c};color:var(--text);border-radius:999px;padding:1px 8px;font-size:10.5px;font-weight:700">${r.e} ${_wchEsc(r.n)}${alerta?' ⚠️':''}</span>`}
+    const chip=_wchChipHTML(c) // (28jul26) chip extraído — el refresco en el sitio lo reusa
     const tel=_wchTel(c.telefono)
     const reintro=c.requiere_reintro?`<span style="background:rgba(245,158,11,.15);border:1px solid #f59e0b;color:#f59e0b;border-radius:6px;padding:1px 6px;font-size:10px;font-weight:700">🔄 Número cambió</span>`:''
     const noL=c.no_leidos>0?`<span style="background:#ef4444;color:#fff;border-radius:999px;min-width:17px;height:17px;line-height:17px;font-size:10px;text-align:center;padding:0 3px;font-weight:800">${c.no_leidos}</span>`:''
-    return `<div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:9px 11px;margin-bottom:7px">
+    return `<div data-wchid="${_wchEsc(String(c.id||c.telefono||''))}" style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:9px 11px;margin-bottom:7px">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
         <div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap;min-width:0">
           ${_wchAvatar(c.nombre,tel,30)}
           <strong style="font-size:12.5px">${_wchEsc(c.nombre||'Sin nombre')}</strong>
           <span style="font-size:11.5px;color:var(--muted)">${_wchEsc(_wchTelCorto(tel))}</span>
           <button onclick="navigator.clipboard.writeText('${_wchTelCorto(tel)}');this.textContent='✅';setTimeout(()=>this.textContent='📋',900)" title="Copiar número" style="background:none;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;padding:1px 5px;color:var(--text)">📋</button>
-          ${noL}${chip}${reintro}
+          ${noL}<span data-wchchip="${_wchEsc(String(c.id||c.telefono||''))}" style="display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap">${chip}</span>${reintro}
         </div>
         <div style="font-size:10.5px;color:var(--muted)">${c.ultimo_msg_en?('hace '+_wchHace(c.ultimo_msg_en)):(c._sinConv?'encolado, sin conversación aún':'')}</div>
       </div>
@@ -40537,11 +40881,12 @@ async function _wchHiloPintar(convId){
         if(tU>tC||cS.ultimo_msg_dir!==ult.direccion){
           if(tU>tC)cS.ultimo_msg_en=ult.ts
           cS.ultimo_msg_dir=ult.direccion
-          if(ult.direccion==='out')cS._lastOutHum=!!ult.usuario_id
+          if(ult.direccion==='in')cS._algunIn=true // (28jul26) para 💬/🔇 al vuelo
+          if(ult.direccion==='out'){cS._lastOutHum=!!ult.usuario_id;if(ult.usuario_id)cS._algunOutHum=true}
           const sl=e=>e?((e.tipo==='manual'?'m:'+e.id:'r:'+e.clave)+'|'+(e.ts||'')):''
           const antes=sl(cS._est)
           cS._est=_wchDerivar(cS)
-          if(antes!==sl(cS._est)){_wchAplicarVista();_wchListaRender();_wchFranjaContadores()}
+          if(antes!==sl(cS._est)){_wchRefrescoSitio()} // (28jul26) EN EL SITIO — sin perder el flujo
         }
       }
     }
@@ -40633,6 +40978,20 @@ async function _wchSugerencias(convId,c){
   const st=window._wchState
   const abierta=c&&c.ventana_24h_hasta&&_wchHrs(c.ventana_24h_hasta)<0
   let html=''
+  // (28jul26) REINGRESO a la vista: cierre de un clic con SU etiqueta (g_final_volvio).
+  // Así el contador separa cierres limpios de reingresos ya atendidos, y como el valor
+  // es DISTINTO a g_final, el select nunca se atasca. El select sigue libre para lo demás.
+  try{
+    const _e=c&&c._est
+    if(_e&&_e.tipo==='riel'&&(_e.clave==='volvio'||_e.clave==='volvio_viejo')){
+      const _ev=_wchEtqPorId('g_final_volvio')
+      const _de=_e.de?` · venía de ${_wchEsc((_e.de.e||'')+' '+(_e.de.n||''))}`:''
+      html+=`<div style="background:rgba(249,115,22,.08);border:1px solid #f97316;border-radius:8px;padding:6px 9px;margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span style="font-size:10.5px;color:#f97316;font-weight:800">🔁 Cliente que VOLVIÓ${_de}</span>
+        ${_ev?`<button class="btn-sm" style="background:#f97316;color:#fff;border:none;border-radius:7px;font-size:11px;font-weight:800;padding:4px 10px;cursor:pointer" onclick="_wchEtiquetar('${convId}','g_final_volvio');this.closest('div').style.opacity='.45'" title="Cierra este reingreso con su propia etiqueta (cuenta aparte de las Resueltas normales)">✅ ${_wchEsc(_ev.e||'🔁')} ${_wchEsc(_ev.n)}</button>`:''}
+      </div>`
+    }
+  }catch(_){}
   try{
     if(c&&c.requiere_reintro){
       const numRe=await _wchNumeroDe(st.sec,c) // 🛡️ solo reintros aprobadas en la cuenta del número emisor

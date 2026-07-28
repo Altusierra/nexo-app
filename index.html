@@ -18547,14 +18547,14 @@ window._waChipData={estados:{},numeros:[]}
 async function _waChipCargar(){
   try{
     const[{data:tpls},{data:nums}]=await Promise.all([
-      sb.from('wa_plantillas').select('nombre,estado,waba_id,cuerpo_meta,footer,boton'),
+      sb.from('wa_plantillas').select('nombre,estado,waba_id,cuerpo_meta,footer,boton,variables'),
       sb.from('wa_numeros').select('id,etiqueta,display,waba_id,phone_number_id,seccion,secciones').eq('modo','api').eq('estado','activo') // (26jul26) sección para filtrar chips coherentes
     ])
     const est={},cont={}
     ;(tpls||[]).forEach(t=>{
       (est[t.nombre]=est[t.nombre]||{})[t.waba_id]=t.estado
       // Lo que Meta tiene REALMENTE guardado, para detectar textos desfasados
-      if(!cont[t.nombre]&&t.cuerpo_meta)cont[t.nombre]={cuerpo:t.cuerpo_meta,footer:t.footer||null,boton:t.boton||null}
+      if(!cont[t.nombre]&&t.cuerpo_meta)cont[t.nombre]={cuerpo:t.cuerpo_meta,footer:t.footer||null,boton:t.boton||null,vars:t.variables||null}
     })
     window._waChipData={estados:est,contenido:cont,numeros:(nums||[]).filter(n=>n.phone_number_id&&n.waba_id)}
     await _waTplNombresCargar(true) // ✏️ sobrenombres al día antes de pintar las cards
@@ -18779,6 +18779,30 @@ async function _waTplVersionar(auto,textoViejo,footerViejo,botonViejo){
   try{logAction('wa_tpl_versionada',{auto,de:actual,a:nuevo}).catch(()=>{})}catch(_){}
   return{ok:true,anterior:actual,nuevo}
 }
+// {{1}} → [NOMBRE]: devuelve el cuerpo de Meta al formato de NEXO, para poder
+// archivarlo y que el ↩ usar sirva de verdad.
+function _waTplDesTags(cuerpo,vars){
+  let s=String(cuerpo||'')
+  const v=Array.isArray(vars)?vars:[]
+  v.forEach((tag,i)=>{s=s.split('{{'+(i+1)+'}}').join('['+tag+']')})
+  return s
+}
+// 🏷️ Versionar AHORA una tarjeta cuyo texto se desfasó (típico: se cambió por
+// SQL o a mano en la base, saltándose el guardado). Archiva lo que Meta tiene
+// bajo el nombre viejo y deja el nombre nuevo listo para enviar a aprobación.
+window.waTplVersionarYa=async function(auto,destino){
+  await _waTplNombresCargar()
+  const nomAct=_waTplNombre(auto)
+  const m=(window._waChipData&&window._waChipData.contenido||{})[nomAct]
+  if(!confirm('Meta tiene esta plantilla aprobada con el TEXTO ANTERIOR.\n\nSe creará una versión nueva con el texto de ahora (hay que enviarla a aprobación), y la anterior queda archivada para volver a ella con ↩ usar.\n\n¿Continuar?'))return
+  const r=await _waTplVersionar(auto,m?_waTplDesTags(m.cuerpo,m.vars):'',m?m.footer:null,m?m.boton:null)
+  if(!r.ok){try{waToast('❌ No se pudo versionar: '+r.error,'error')}catch(_){}return}
+  try{waToast('🏷️ Versión nueva: '+r.nuevo+' — envíala a aprobación. La anterior quedó archivada.','ok')}catch(_){}
+  await _waChipCargar()
+  try{if(typeof cargarTextosAdmin==='function')cargarTextosAdmin()}catch(_){}
+  try{if(typeof cargarNovedadesAdmin==='function')cargarNovedadesAdmin()}catch(_){}
+}
+
 // ↩ Volver a una versión anterior: restaura su texto/pie/botones Y su nombre,
 // así vuelve a quedar la plantilla que Meta ya aprobó, sin re-aprobar nada.
 window.waTplUsarVersion=async function(auto,nombreVer,destino){
@@ -18915,7 +18939,14 @@ function _waChipMulti(nombre,texto,secFiltro,footer,boton,destino){
     const usable=guardada&&ve.includes('APPROVED')
     return `<span style="display:inline-flex;align-items:center;gap:3px"><code style="background:rgba(255,255,255,.04);padding:0 4px;border-radius:4px">${hn}</code> ${he}${guardada?`<button onclick="waTplUsarVersion('${_auto}','${hn}',${_destinoVer})" title="${usable?'Volver a esta versión: restaura su texto, pie y botones. Como ya está aprobada en Meta, queda usable de una.':'Restaura el texto de esta versión (ojo: no está aprobada en Meta).'}" style="border:1px solid ${usable?'var(--green)':'var(--border)'};background:none;color:${usable?'var(--green)':'var(--muted)'};border-radius:20px;cursor:pointer;font-size:9px;padding:0 6px;font-weight:800">↩ usar</button>`:''}</span>`
   }).join(' · ')}${_hist.length>=2?' <span style="color:var(--amber)">⚠️ ya van '+(_hist.length+1)+' versiones — revisa el TEXTO antes de reintentar</span>':''}</div>`:''
-  return `<div style="font-size:10.5px;margin-top:6px"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--muted)">📄 <code style="background:rgba(255,255,255,.06);padding:1px 6px;border-radius:5px;color:var(--text)">${nombre}</code>${_lapiz}${_avisoRenom} · ${chipG} ${bolas?'· '+bolas:''}</div>${_histHtml}</div>`
+  // ⚠️ El texto de la tarjeta ya no es el que Meta aprobó (pasa si se editó por
+  // SQL o directo en la base). Sin esto, al cliente le llegaría el texto VIEJO.
+  const _desf=_waTplDesfasada(nombre,texto,footer,boton)
+  const _avisoDesf=_desf?`<div style="font-size:10px;margin-top:4px;padding:5px 8px;background:rgba(245,158,11,.1);border:1px solid var(--amber);border-radius:7px;color:var(--amber);display:flex;gap:7px;flex-wrap:wrap;align-items:center">
+    <span><strong>⚠️ Este texto ya no es el que Meta tiene aprobado.</strong> Si se envía así, al cliente le llega el texto anterior.</span>
+    <button onclick="waTplVersionarYa('${_auto}',${_destinoVer})" style="border:1px solid var(--amber);background:none;color:var(--amber);border-radius:20px;cursor:pointer;font-size:10px;padding:2px 9px;font-weight:800">🏷️ Crear versión nueva</button>
+  </div>`:''
+  return `<div style="font-size:10.5px;margin-top:6px"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--muted)">📄 <code style="background:rgba(255,255,255,.06);padding:1px 6px;border-radius:5px;color:var(--text)">${nombre}</code>${_lapiz}${_avisoRenom} · ${chipG} ${bolas?'· '+bolas:''}</div>${_avisoDesf}${_histHtml}</div>`
 }
 // ═══ 📤 VERIFICACIÓN DE PLANTILLAS (27jul26) ═══════════════════════════════
 // Envía a aprobación de Meta, EN LA CUENTA de un número, todas las plantillas

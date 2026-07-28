@@ -17875,7 +17875,7 @@ async function cargarTextosAdmin(){
           <textarea id="txt-${sec}-${p.idx}-tx" style="width:100%;min-height:130px;padding:10px;font-family:monospace;font-size:12px;line-height:1.5;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);resize:vertical;box-sizing:border-box">${esc(p.texto)}</textarea>
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
             <input type="text" id="txt-${sec}-${p.idx}-ft" value="${escAttr(p.footer||'')}" maxlength="60" placeholder="📝 Pie de página (opcional, máx 60) — ej: Estaremos atentos a cualquier duda" style="flex:2;min-width:220px;font-size:11.5px;padding:6px 9px;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--text)">
-            <input type="text" id="txt-${sec}-${p.idx}-bt" value="${escAttr(p.boton||'')}" maxlength="83" placeholder="🔘 Botones (máx 3, 25 letras c/u) — sepáralos con |  ej: Sí, confirmo | Ya no lo quiero" style="flex:1;min-width:170px;font-size:11.5px;padding:6px 9px;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--text)"><button onclick="waBotonMas('txt-${sec}-${p.idx}-bt')" title="Agregar otro botón (hasta 3)" style="border:1px solid var(--border);background:var(--card);color:var(--text);border-radius:7px;font-size:12px;cursor:pointer;padding:4px 9px;flex:0 0 auto">➕ botón</button>
+            ${_waBotonesWrapHtml(`txt-${sec}-${p.idx}-btw`,p.boton||'')}
           </div>
           ${_waChipTpl(sec,p.etiqueta,p.idx,p.texto,p.footer,p.boton)}
           <div style="display:flex;gap:6px;margin-top:8px">
@@ -17918,7 +17918,7 @@ window.txtGuardarPlantilla=async(sec,idx)=>{
     return
   }
   const footer=(document.getElementById(`txt-${sec}-${idx}-ft`)?.value||'').trim()||null
-  const _bn=_waBotonesNorm(document.getElementById(`txt-${sec}-${idx}-bt`)?.value||'')
+  const _bn=_waBotonesNorm(_waBotonesLeer(`txt-${sec}-${idx}-btw`)||'')
   if(!_bn.ok){if(msg)msg.innerHTML=`<div class="alert alert-red">🔘 ${_bn.error}</div>`;return}
   const boton=_bn.valor
   const{error}=await sb.from('app_mensajes').upsert({seccion:sec,idx,etiqueta,texto,activo,footer,boton},{onConflict:'seccion,idx'})
@@ -18552,14 +18552,39 @@ function _waBotonesNorm(s){
   if(largo)return{ok:false,error:'El botón "'+largo+'" pasa de 25 letras (límite de Meta).'}
   return{ok:true,valor:bs.join(' | ')}
 }
-// ➕ agrega el separador al campo para escribir el siguiente botón
-window.waBotonMas=function(inputId){
-  const i=document.getElementById(inputId);if(!i)return
-  const bs=_waBotonesParse(i.value)
-  if(bs.length>=3){waToast('Máximo 3 botones.','aviso');return}
-  i.value=(i.value.trim()?i.value.trim()+' | ':'')
-  i.focus()
-  try{i.selectionStart=i.selectionEnd=i.value.length}catch(_){}
+// Un CAMPO por botón (lo que se guarda sigue siendo un solo texto con | )
+function _waBotonCampoHtml(i,valor){
+  const v=String(valor==null?'':valor).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+  return `<span data-btcampo style="display:inline-flex;align-items:center;gap:2px;flex:1 1 150px;min-width:130px">
+    <input type="text" data-bt value="${v}" maxlength="25" placeholder="🔘 Botón ${i+1} (máx 25)" style="flex:1;min-width:0;font-size:11.5px;padding:6px 9px;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--text)">
+    <button onclick="waBotonQuitar(this)" title="Quitar este botón" style="border:none;background:none;color:var(--red);cursor:pointer;font-size:12px;padding:0 3px;line-height:1">✕</button>
+  </span>`
+}
+// Bloque completo: los campos existentes + el ➕
+function _waBotonesWrapHtml(wrapId,valor){
+  const bs=_waBotonesParse(valor)
+  if(!bs.length)bs.push('')
+  return `<div id="${wrapId}" style="flex:1;min-width:170px;display:flex;gap:4px;flex-wrap:wrap;align-items:center">${bs.map((b,i)=>_waBotonCampoHtml(i,b)).join('')}</div><button onclick="waBotonMas('${wrapId}')" title="Agregar otro botón (hasta 3)" style="border:1px solid var(--border);background:var(--card);color:var(--text);border-radius:7px;font-size:12px;cursor:pointer;padding:5px 9px;flex:0 0 auto">➕ botón</button>`
+}
+// Lee todos los campos y los une con | (null si no hay ninguno con texto)
+function _waBotonesLeer(wrapId){
+  const w=document.getElementById(wrapId);if(!w)return null
+  const bs=[...w.querySelectorAll('input[data-bt]')].map(i=>i.value.trim()).filter(Boolean)
+  return bs.length?bs.slice(0,3).join(' | '):null
+}
+window.waBotonMas=function(wrapId){
+  const w=document.getElementById(wrapId);if(!w)return
+  const n=w.querySelectorAll('input[data-bt]').length
+  if(n>=3){try{waToast('Máximo 3 botones — así los aprueba Meta.','aviso')}catch(_){}return}
+  w.insertAdjacentHTML('beforeend',_waBotonCampoHtml(n,''))
+  const ins=w.querySelectorAll('input[data-bt]')
+  const ult=ins[ins.length-1];if(ult)ult.focus()
+}
+window.waBotonQuitar=function(btn){
+  const campo=btn.closest('[data-btcampo]');if(!campo)return
+  const w=campo.parentElement
+  campo.remove()
+  if(w)w.querySelectorAll('input[data-bt]').forEach((i,k)=>{i.placeholder='🔘 Botón '+(k+1)+' (máx 25)'})
 }
 
 // ── Cuenta de WhatsApp (WABA) del número activo de una sección ──
@@ -19346,7 +19371,7 @@ function _novFilaDOM(idx){
     excluir: ex?ex.value.trim():(st.excluir||''),
     msg: m?m.value:(st.msg||''),
     footer:(g('nvp-'+idx+'-ft')?.value||'').trim()||null,
-    boton:(function(){const b=_waBotonesNorm(g('nvp-'+idx+'-bt')?.value||'');if(!b.ok){try{waToast('🔘 '+b.error,'error')}catch(_){}return (g('nvp-'+idx+'-bt')?.value||'').trim()||null}return b.valor})(),
+    boton:(function(){const leido=_waBotonesLeer('nvp-'+idx+'-btw');if(leido===null&&!document.getElementById('nvp-'+idx+'-btw'))return (st.boton||null);const b=_waBotonesNorm(leido||'');if(!b.ok){try{waToast('🔘 '+b.error,'error')}catch(_){}return leido}return b.valor})(),
     resp: rp?rp.value:(st.resp||''),
     activo: ac?ac.checked:(st.activo!==false)
   }
@@ -19396,7 +19421,7 @@ async function cargarNovedadesAdmin(){
       <textarea id="nvp-${r.idx}-msg" style="${tx};min-height:108px">${esc(r.msg)}</textarea>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
         <input type="text" id="nvp-${r.idx}-ft" value="${escAttr(r.footer||'')}" maxlength="60" placeholder="📝 Pie de página (opcional, máx 60)" style="flex:2;min-width:220px;font-size:11.5px;padding:6px 9px;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--text)">
-        <input type="text" id="nvp-${r.idx}-bt" value="${escAttr(r.boton||'')}" maxlength="83" placeholder="🔘 Botones (máx 3, 25 letras c/u) — sepáralos con |" style="flex:1;min-width:170px;font-size:11.5px;padding:6px 9px;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--text)"><button onclick="waBotonMas('nvp-${r.idx}-bt')" title="Agregar otro botón (hasta 3)" style="border:1px solid var(--border);background:var(--card);color:var(--text);border-radius:7px;font-size:12px;cursor:pointer;padding:4px 9px;flex:0 0 auto">➕ botón</button>
+        ${_waBotonesWrapHtml(`nvp-${r.idx}-btw`,r.boton||'')}
       </div>
       ${_nvChipTpl(r.tipo,r.idx,r.msg,r.footer,r.boton)}
       <label style="${lbl}">📋 Protocolo de respuesta (interno)</label>

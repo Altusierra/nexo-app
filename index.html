@@ -40040,10 +40040,13 @@ window._wchAbrir=async function(){
   await _wchRecargar()
   if(st.timer)clearInterval(st.timer)
   st.timer=setInterval(()=>{_wchRecargar(true)},60000) // refresco suave: contadores en el sitio
+  if(st.latido)clearInterval(st.latido)
+  st.latido=setInterval(_wchLatido,12000) // 💓 rieles al día sin esperar el minuto
 }
 window._wchCerrar=function(){
   const st=window._wchState
   if(st.timer){clearInterval(st.timer);st.timer=null}
+  if(st.latido){clearInterval(st.latido);st.latido=null}
   for(const k of Object.keys(st.chatTimers)){clearInterval(st.chatTimers[k]);delete st.chatTimers[k]}
   document.querySelectorAll('[id^="wch-chat-"]').forEach(x=>x.remove())
   const m=document.getElementById('wch-modal');if(m)m.remove()
@@ -40072,6 +40075,55 @@ window._wchRecargar=async function(suave){
   _wchListaRender()
   _wchFranjaContadores()
   _wchTabsBadges()
+}
+// ── 💓 LATIDO EN VIVO (28jul26) ─────────────────────────────────────────────
+// La lista solo se refrescaba cada 60s: si el cliente respondía, la píldora se
+// quedaba en 🟣 Atendida un buen rato. Este latido corre cada 12s y es BARATO:
+// UNA sola consulta que trae las conversaciones con actividad en los últimos 5
+// minutos (no las 400 de la lista) y actualiza SOLO las que ya están cargadas.
+// Las conversaciones NUEVAS siguen entrando por la recarga completa de 60s.
+// Si el último mensaje pasó a saliente, se averigua en UNA consulta más si lo
+// mandó un humano (🟣 Atendida) o el automático (📤 Disparada) — sin eso el
+// riel quedaría mal. Y si nada se movió, NO se repinta nada (cero parpadeo).
+window._wchLatidoCorriendo=false
+async function _wchLatido(){
+  const st=window._wchState
+  if(window._wchLatidoCorriendo)return
+  if(!document.getElementById('wch-modal'))return
+  if(!st||!st.convs||!st.convs.length||!st.cat)return
+  window._wchLatidoCorriendo=true
+  try{
+    const porId={};for(const c of st.convs){if(c.id)porId[c.id]=c}
+    if(!Object.keys(porId).length)return
+    const desde=new Date(Date.now()-300000).toISOString() // ventana de 5 min: aguanta relojes desfasados
+    const{data,error}=await sb.from('conversaciones').select('id,nombre,ultimo_msg_en,ultimo_msg_dir,no_leidos,ventana_24h_hasta,requiere_reintro,etiqueta,etiqueta_en').gt('ultimo_msg_en',desde).limit(300)
+    if(error||!data||!data.length)return
+    const tocadas=[],pedirOut=[]
+    for(const r of data){
+      const c=porId[r.id];if(!c)continue
+      if(c.ultimo_msg_en===r.ultimo_msg_en&&c.ultimo_msg_dir===r.ultimo_msg_dir&&c.etiqueta===r.etiqueta&&c.no_leidos===r.no_leidos)continue
+      c.ultimo_msg_en=r.ultimo_msg_en;c.ultimo_msg_dir=r.ultimo_msg_dir
+      c.no_leidos=r.no_leidos;c.ventana_24h_hasta=r.ventana_24h_hasta
+      c.requiere_reintro=r.requiere_reintro;c.etiqueta=r.etiqueta;c.etiqueta_en=r.etiqueta_en
+      if(r.nombre)c.nombre=r.nombre
+      if(r.ultimo_msg_dir==='out')pedirOut.push(r.id)
+      tocadas.push(c)
+    }
+    if(!tocadas.length)return
+    if(pedirOut.length){ // ese último saliente: ¿humano (🟣 Atendida) o automático (📤 Disparada)?
+      try{
+        const{data:outs}=await sb.from('mensajes').select('conversacion_id,ts,usuario_id').in('conversacion_id',pedirOut).eq('direccion','out').order('ts',{ascending:false}).limit(400)
+        const visto={}
+        for(const m of(outs||[])){if(visto[m.conversacion_id])continue;visto[m.conversacion_id]=true;const c=porId[m.conversacion_id];if(c)c._lastOutHum=!!m.usuario_id}
+      }catch(_){}
+    }
+    const sello=e=>e?((e.tipo==='manual'?'m:'+e.id:'r:'+e.clave)+'|'+(e.ts||'')):''
+    let movio=false
+    for(const c of tocadas){const antes=sello(c._est);c._est=_wchDerivar(c);if(antes!==sello(c._est))movio=true}
+    if(!movio)return
+    _wchAplicarVista();_wchListaRender();_wchFranjaContadores();_wchTabsBadges()
+  }catch(_){}
+  finally{window._wchLatidoCorriendo=false}
 }
 function _wchTabsRender(){
   const el=document.getElementById('wch-tabs');if(!el)return
@@ -40476,6 +40528,23 @@ async function _wchHiloPintar(convId){
     const ult=msgs.length?msgs[msgs.length-1]:null
     if(stD.activo===convId){mD.vistoTs=Date.now();if(mD.dot){mD.dot=false;_wchDockRender()}}
     else if(ult&&ult.direccion==='in'&&new Date(ult.ts).getTime()>(mD.vistoTs||0)&&!mD.dot){mD.dot=true;_wchDockRender()}
+    // 💓 el hilo YA trae el último mensaje: la píldora de la lista se pone al día
+    // de una (3s), sin ninguna consulta extra. Si el riel no cambia, no repinta.
+    if(ult){
+      const cS=(stD.convs||[]).find(x=>x.id===convId)
+      if(cS){
+        const tU=new Date(ult.ts).getTime(),tC=new Date(cS.ultimo_msg_en||0).getTime()
+        if(tU>tC||cS.ultimo_msg_dir!==ult.direccion){
+          if(tU>tC)cS.ultimo_msg_en=ult.ts
+          cS.ultimo_msg_dir=ult.direccion
+          if(ult.direccion==='out')cS._lastOutHum=!!ult.usuario_id
+          const sl=e=>e?((e.tipo==='manual'?'m:'+e.id:'r:'+e.clave)+'|'+(e.ts||'')):''
+          const antes=sl(cS._est)
+          cS._est=_wchDerivar(cS)
+          if(antes!==sl(cS._est)){_wchAplicarVista();_wchListaRender();_wchFranjaContadores()}
+        }
+      }
+    }
   }catch(_){}
   if(!msgs.length){el.innerHTML='<div style="color:var(--muted);font-size:12px;text-align:center;padding:20px">Sin mensajes todavía.</div>';return}
   const abajo=el.scrollHeight-el.scrollTop-el.clientHeight<40

@@ -14412,7 +14412,7 @@ window._colaDespachar=async()=>{
   const proto=NOV_PROTO[m.cat.idx]
   if(!proto||!proto.msg){alert('Esta novedad no tiene protocolo con mensaje. No hay plantilla que despachar.');return}
   await _waTplNombresCargar() // ✏️ sobrenombres
-  const plantilla=_waTplNombre(('nexo_novedades_'+_waTplSlug(m.cat.tipo)+'_v1').slice(0,512))
+  const plantilla=_waNombreTpl('novedades',m.cat.tipo,m.cat.idx) // 🏷️ único por tarjeta
   const conv=_waTplConvertir(proto.msg)
   const parametros=conv.vars.map(tag=>_waValorReal(tag,m))
   const telLimpio=String(m.tel||'').replace(/\D/g,'')
@@ -17801,7 +17801,10 @@ window._txtCopiarTag=(tag,btn)=>{
 }
 function _txtBarraGlobal(){
   return `<div style="position:sticky;top:0;z-index:50;background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:10px 12px;margin-bottom:14px;box-shadow:0 6px 16px rgba(0,0,0,.4)">
-    <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px">👆 Toca una etiqueta y se copia sola. Pégala en cualquier mensaje de abajo.</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+      <div style="font-size:12px;font-weight:700;color:var(--text)">👆 Toca una etiqueta y se copia sola. Pégala en cualquier mensaje de abajo.</div>
+      <button class="btn-sm btn-outline" onclick="waSyncEstados(this)" title="Le pregunta a Meta el estado real de cada plantilla (aprobada / en revisión / rechazada) y repinta los chips">🔄 Estados de Meta</button>
+    </div>
     <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:4px">${_txtChips(_TXT_TODAS)}</div>
   </div>`
 }
@@ -17838,8 +17841,8 @@ async function cargarTextosAdmin(){
   const _waSecDe={confirmacion:'reservado',psf:'reservado',cancelados:'cancelados',reclame:'reclame'}
   const _waChipTpl=(sec,etiqueta,idx,texto,footer,boton)=>{
     if(typeof _waTplSlug!=='function')return ''
-    const nombre=_waTplNombre('nexo_'+(_waSecDe[sec]||sec)+'_'+_waTplSlug(etiqueta||('variante_'+idx))+'_v1') // ✏️ respeta el nombre manual
-    return _waChipMulti(nombre,texto,(_waSecDe[sec]||sec),footer,boton)
+    const nombre=_waNombreTpl((_waSecDe[sec]||sec),etiqueta,idx) // 🏷️ único por tarjeta + ✏️ sobrenombre
+    return _waChipMulti(nombre,texto,(_waSecDe[sec]||sec),footer,boton,{tipo:'texto',sec,idx,texto,footer,boton})
   }
   try{
     const{data:cfg,error:e1}=await sb.from('app_mensajes_config').select('*')
@@ -17921,9 +17924,25 @@ window.txtGuardarPlantilla=async(sec,idx)=>{
   const _bn=_waBotonesNorm(_waBotonesLeer(`txt-${sec}-${idx}-btw`)||'')
   if(!_bn.ok){if(msg)msg.innerHTML=`<div class="alert alert-red">🔘 ${_bn.error}</div>`;return}
   const boton=_bn.valor
+  // 🏷️ Si la plantilla YA está en Meta con otro contenido, se versiona: el
+  // nombre pasa a _vN y el anterior queda archivado con su texto. Si no se
+  // hiciera, al cliente le llegaría el texto VIEJO que Meta tiene guardado.
+  let _avisoVer=''
+  try{
+    const _sec2=(_waSecDe[sec]||sec)
+    const _auto=_waNombreTplAuto(_sec2,etiqueta,idx)
+    const _nomAct=_waTplNombre(_auto)
+    if(_waTplDesfasada(_nomAct,texto,footer,boton)){
+      const{data:_prev}=await sb.from('app_mensajes').select('texto,footer,boton').eq('seccion',sec).eq('idx',idx).maybeSingle()
+      const _r=await _waTplVersionar(_auto,(_prev&&_prev.texto)||'',(_prev&&_prev.footer)||null,(_prev&&_prev.boton)||null)
+      _avisoVer=_r.ok
+        ?` <br><b>🏷️ Versión nueva:</b> <code>${_r.nuevo}</code> — la anterior (<code>${_r.anterior}</code>) queda archivada y puedes volver a ella con <b>↩ usar</b>. Envía la nueva a aprobación cuando quieras.`
+        :` <br>⚠️ No pude crear la versión nueva (${_r.error}).`
+    }
+  }catch(_){}
   const{error}=await sb.from('app_mensajes').upsert({seccion:sec,idx,etiqueta,texto,activo,footer,boton},{onConflict:'seccion,idx'})
   if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
-  if(msg)msg.innerHTML='<div class="alert alert-green">✅ Plantilla guardada. El auxiliar debe recargar la app para que aplique.</div>'
+  if(msg)msg.innerHTML='<div class="alert alert-green">✅ Plantilla guardada. El auxiliar debe recargar la app para que aplique.'+_avisoVer+'</div>'
   logAction('textos_plantilla_editada',{sec,idx}).catch(()=>{})
   cargarTextosAdmin()
 }
@@ -18281,13 +18300,15 @@ async function _waTplFuente(seccion){
   if(seccion==='novedades'){
     const{data,error}=await sb.from('novedades_protocolos').select('idx,tipo,msg,activo,footer,boton').order('idx')
     if(error)throw error
-    return(data||[]).filter(r=>r.activo!==false&&String(r.msg||'').trim()).map(r=>({etiqueta:r.tipo||('novedad_'+r.idx),texto:r.msg,footer:r.footer||null,boton:r.boton||null}))
+    return(data||[]).filter(r=>r.activo!==false&&String(r.msg||'').trim()).map(r=>({idx:r.idx,etiqueta:r.tipo||('novedad_'+r.idx),texto:r.msg,footer:r.footer||null,boton:r.boton||null}))
   }
   const secsApp=_WA_TPL_MAP[seccion]||[]
   if(!secsApp.length)return[]
   const{data,error}=await sb.from('app_mensajes').select('seccion,idx,etiqueta,texto,activo,footer,boton').in('seccion',secsApp).order('seccion').order('idx')
   if(error)throw error
-  return(data||[]).filter(t=>t.activo!==false).map(t=>({etiqueta:t.etiqueta||('variante_'+t.idx),texto:t.texto,footer:t.footer||null,boton:t.boton||null}))
+  const filas=(data||[]).filter(t=>t.activo!==false).map(t=>({idx:t.idx,etiqueta:t.etiqueta||('variante_'+t.idx),texto:t.texto,footer:t.footer||null,boton:t.boton||null}))
+  window._waHermanos[seccion]=filas.map(f=>({idx:f.idx,etiqueta:f.etiqueta})) // 🏷️ para desempatar nombres repetidos
+  return filas
 }
 
 // [NOMBRE] → {{1}} en orden de aparición (repetidos usan el mismo número)
@@ -18322,7 +18343,7 @@ window.cargarWaPlantillasCard=async()=>{
     const yaMap={};(ya||[]).forEach(p=>yaMap[p.nombre]=p.estado)
     const items=fuente.map(t=>{
       const conv=_waTplConvertir(t.texto)
-      const nombre=_waTplNombre(('nexo_'+n.seccion+'_'+_waTplSlug(t.etiqueta)+'_v1').slice(0,512))
+      const nombre=_waNombreTpl(n.seccion,t.etiqueta,t.idx) // 🏷️ único por tarjeta
       const bordeVar=/^\{\{\d+\}\}/.test(conv.cuerpo.trim())||/\{\{\d+\}\}$/.test(conv.cuerpo.trim())
       return{...t,conv,nombre,estadoMeta:yaMap[nombre]||null,bordeVar}
     })
@@ -18496,7 +18517,7 @@ async function waEncolarNovedadesAuto(items){
       if(!proto||!proto.msg)continue
       const telLimpio=String(m.tel||'').replace(/\D/g,'')
       if(telLimpio.length<10)continue
-      const plantilla=_waTplNombre(('nexo_novedades_'+_waTplSlug(m.cat.tipo)+'_v1').slice(0,512)) // ✏️ sobrenombres
+      const plantilla=_waNombreTpl('novedades',m.cat.tipo,m.cat.idx) // 🏷️ único por tarjeta + ✏️ sobrenombres
       if(autoTpls&&!autoTpls.has(plantilla))continue
       const clave=telLimpio+'|'+plantilla
       if(window._waEncoladoHoy.set.has(clave))continue // ya intentado en esta sesión
@@ -18526,11 +18547,16 @@ window._waChipData={estados:{},numeros:[]}
 async function _waChipCargar(){
   try{
     const[{data:tpls},{data:nums}]=await Promise.all([
-      sb.from('wa_plantillas').select('nombre,estado,waba_id'),
+      sb.from('wa_plantillas').select('nombre,estado,waba_id,cuerpo_meta,footer,boton'),
       sb.from('wa_numeros').select('id,etiqueta,display,waba_id,phone_number_id,seccion,secciones').eq('modo','api').eq('estado','activo') // (26jul26) sección para filtrar chips coherentes
     ])
-    const est={};(tpls||[]).forEach(t=>{(est[t.nombre]=est[t.nombre]||{})[t.waba_id]=t.estado})
-    window._waChipData={estados:est,numeros:(nums||[]).filter(n=>n.phone_number_id&&n.waba_id)}
+    const est={},cont={}
+    ;(tpls||[]).forEach(t=>{
+      (est[t.nombre]=est[t.nombre]||{})[t.waba_id]=t.estado
+      // Lo que Meta tiene REALMENTE guardado, para detectar textos desfasados
+      if(!cont[t.nombre]&&t.cuerpo_meta)cont[t.nombre]={cuerpo:t.cuerpo_meta,footer:t.footer||null,boton:t.boton||null}
+    })
+    window._waChipData={estados:est,contenido:cont,numeros:(nums||[]).filter(n=>n.phone_number_id&&n.waba_id)}
     await _waTplNombresCargar(true) // ✏️ sobrenombres al día antes de pintar las cards
   }catch(_){window._waChipData={estados:{},numeros:[]}}
 }
@@ -18638,11 +18664,157 @@ function _waTplNombreAuto(usado){
   }
   return usado
 }
+// ── 🏷️ NOMBRE ÚNICO POR TARJETA (28jul26) ────────────────────────────────
+// Dos tarjetas pueden compartir el mismo TIPO y aun así ser escenarios
+// distintos (mismas etiquetas, distintas palabras clave y exclusiones). Cada
+// una necesita su propia plantilla en Meta, así que el nombre se desempata.
+// REGLA: la PRIMERA tarjeta de ese tipo (el idx menor) conserva el nombre
+// limpio — así no se rompe nada de lo ya aprobado — y las siguientes llevan
+// su idx al final. Es determinista: todos los flujos calculan lo mismo.
+window._waHermanos=window._waHermanos||{}
+function _waHermanosDe(seccion){
+  if(seccion==='novedades'){
+    const p=NOV_PROTO||{}
+    return Object.keys(p).map(k=>({idx:Number(k),etiqueta:(p[k]&&p[k].titulo)||('novedad_'+k)})).filter(x=>!isNaN(x.idx))
+  }
+  return (window._waHermanos||{})[seccion]||[]
+}
+function _waNombreTpl(seccion,etiqueta,idx){
+  const slug=_waTplSlug(etiqueta||('variante_'+idx))
+  const mismos=_waHermanosDe(seccion)
+    .filter(x=>_waTplSlug(x.etiqueta||('variante_'+x.idx))===slug)
+    .map(x=>Number(x.idx)).filter(n=>!isNaN(n)).sort((a,b)=>a-b)
+  const suf=(mismos.length>1&&idx!=null&&mismos[0]!==Number(idx))?('_'+idx):''
+  return _waTplNombre(('nexo_'+seccion+'_'+slug+suf+'_v1').slice(0,512))
+}
+// El nombre AUTOMÁTICO (sin sobrenombre) — lo necesita el ✏️ y el historial
+function _waNombreTplAuto(seccion,etiqueta,idx){
+  const slug=_waTplSlug(etiqueta||('variante_'+idx))
+  const mismos=_waHermanosDe(seccion)
+    .filter(x=>_waTplSlug(x.etiqueta||('variante_'+x.idx))===slug)
+    .map(x=>Number(x.idx)).filter(n=>!isNaN(n)).sort((a,b)=>a-b)
+  const suf=(mismos.length>1&&idx!=null&&mismos[0]!==Number(idx))?('_'+idx):''
+  return ('nexo_'+seccion+'_'+slug+suf+'_v1').slice(0,512)
+}
+
+// ── 🔄 SINCRONIZAR ESTADOS CON META (28jul26) ────────────────────────────
+// Los chips leen wa_plantillas, y esa tabla solo se refrescaba al abrir el
+// visor 🧪. Por eso una plantilla ya aprobada seguía viéndose "en revisión".
+// Esto le pregunta a Meta el estado real de TODAS las cuentas y repinta.
+window.waSyncEstados=async function(btn){
+  const nums=((window._waState||{}).nums||[]).filter(n=>n.modo==='api'&&n.estado==='activo'&&n.waba_id&&n.phone_number_id)
+  if(!nums.length){try{waToast('No hay números API activos que sincronizar.','aviso')}catch(_){}return false}
+  const txtPrev=btn?btn.innerHTML:null
+  if(btn){btn.disabled=true;btn.innerHTML='🔄 Sincronizando…'}
+  let ok=0,fallo=0
+  const vistas=new Set()
+  for(const n of nums){
+    if(vistas.has(n.waba_id))continue // una sola vez por cuenta de WhatsApp
+    vistas.add(n.waba_id)
+    try{
+      const r=await _waSend({action:'sync_templates',numero_id:n.id})
+      if(r&&r.ok)ok++;else fallo++
+    }catch(_){fallo++}
+  }
+  await _waChipCargar()
+  try{if(typeof cargarTextosAdmin==='function')cargarTextosAdmin()}catch(_){}
+  try{if(typeof cargarNovedadesAdmin==='function')cargarNovedadesAdmin()}catch(_){}
+  if(btn){btn.disabled=false;btn.innerHTML=txtPrev}
+  try{waToast(fallo?('🔄 '+ok+' cuenta(s) sincronizadas · '+fallo+' con error'):('✅ Estados al día ('+ok+' cuenta'+(ok===1?'':'s')+')'),fallo?'aviso':'ok')}catch(_){}
+  return true
+}
+
 // Intentos previos (nombres quemados) de una variante, por su nombre automático
 function _waTplHist(auto){
   const m=window._waTplNombres||{}
   const v=m[auto]
   return (v&&typeof v==='object'&&Array.isArray(v.h))?v.h:[]
+}
+// Contenido guardado de cada versión anterior: {nombre:{x:texto,f:pie,b:botones}}
+function _waTplVers(auto){
+  const m=window._waTplNombres||{}
+  const v=m[auto]
+  return (v&&typeof v==='object'&&v.t&&typeof v.t==='object')?v.t:{}
+}
+// Siguiente nombre libre a partir del actual (quita _vN e incrementa)
+function _waTplSigVer(nombre){
+  const ocupados=new Set(Object.keys((window._waChipData&&window._waChipData.estados)||{}))
+  for(const k of Object.keys(window._waTplNombres||{})){
+    const v=window._waTplNombres[k]
+    ocupados.add(typeof v==='string'?v:(v&&v.n)||k)
+    if(v&&typeof v==='object'&&Array.isArray(v.h))v.h.forEach(x=>ocupados.add(x))
+  }
+  return _waVerifSigNombre(nombre,ocupados)
+}
+// ¿El contenido de la tarjeta ya no coincide con lo que Meta tiene aprobado?
+// Si sí, la plantilla actual quedó obsoleta: hay que crear una versión nueva,
+// porque al cliente le llegaría el texto VIEJO que Meta guardó.
+function _waTplDesfasada(nombre,texto,footer,boton){
+  const est=(window._waChipData&&window._waChipData.estados)||{}
+  const vals=Object.values(est[nombre]||{})
+  if(!vals.includes('APPROVED')&&!vals.includes('PENDING'))return false // aún no está en Meta
+  const meta=(window._waChipData&&window._waChipData.contenido)||{}
+  const m=meta[nombre]
+  if(!m)return false // no sabemos qué tiene Meta: no inventamos
+  const cuerpoAhora=_waTplConvertir(texto).cuerpo
+  const norm=(s)=>String(s==null?'':s).trim()
+  return norm(cuerpoAhora)!==norm(m.cuerpo)||norm(footer)!==norm(m.footer)||norm(boton)!==norm(m.boton)
+}
+// Crea la versión nueva y archiva la anterior con su contenido
+async function _waTplVersionar(auto,textoViejo,footerViejo,botonViejo){
+  await _waTplNombresCargar()
+  const m=window._waTplNombres||{}
+  const actual=_waTplNombre(auto)
+  const nuevo=_waTplSigVer(actual)
+  const hist=_waTplHist(auto).slice()
+  if(!hist.includes(actual))hist.push(actual)
+  const vers=Object.assign({},_waTplVers(auto))
+  vers[actual]={x:textoViejo,f:footerViejo||null,b:botonViejo||null}
+  m[auto]={n:nuevo,h:hist,t:vers}
+  window._waTplNombres=m
+  const js=JSON.stringify(m)
+  const{error}=await sb.from('config').upsert({clave:'wa_tpl_nombres',valor:js,updated_at:new Date().toISOString()},{onConflict:'clave'})
+  let eco=null;try{eco=await getConfig('wa_tpl_nombres')}catch(_){}
+  if(error||eco!==js){await _waTplNombresCargar(true);return{ok:false,error:(error&&error.message)||'la nube no devolvió lo guardado'}}
+  try{logAction('wa_tpl_versionada',{auto,de:actual,a:nuevo}).catch(()=>{})}catch(_){}
+  return{ok:true,anterior:actual,nuevo}
+}
+// ↩ Volver a una versión anterior: restaura su texto/pie/botones Y su nombre,
+// así vuelve a quedar la plantilla que Meta ya aprobó, sin re-aprobar nada.
+window.waTplUsarVersion=async function(auto,nombreVer,destino){
+  await _waTplNombresCargar()
+  const vers=_waTplVers(auto)
+  const c=vers[nombreVer]
+  if(!c){try{waToast('No tengo guardado el texto de esa versión.','aviso')}catch(_){}return}
+  if(!confirm('¿Volver a la versión "'+nombreVer+'"?\n\nSe restaura su texto, su pie y sus botones en esta tarjeta, y la plantilla vuelve a ser esa (ya aprobada en Meta).\n\nLo que tengas escrito ahora se guarda como versión aparte.'))return
+  // Archivar lo actual antes de pisarlo
+  const m=window._waTplNombres||{}
+  const actual=_waTplNombre(auto)
+  const hist=_waTplHist(auto).filter(x=>x!==nombreVer)
+  if(actual!==nombreVer&&!hist.includes(actual))hist.push(actual)
+  const nuevasVers=Object.assign({},vers)
+  delete nuevasVers[nombreVer]
+  if(destino&&destino.texto!=null&&actual!==nombreVer)nuevasVers[actual]={x:destino.texto,f:destino.footer||null,b:destino.boton||null}
+  m[auto]=(nombreVer===auto&&!hist.length)?undefined:{n:nombreVer,h:hist,t:nuevasVers}
+  if(m[auto]===undefined)delete m[auto]
+  window._waTplNombres=m
+  const js=JSON.stringify(m)
+  const{error}=await sb.from('config').upsert({clave:'wa_tpl_nombres',valor:js,updated_at:new Date().toISOString()},{onConflict:'clave'})
+  let eco=null;try{eco=await getConfig('wa_tpl_nombres')}catch(_){}
+  if(error||eco!==js){try{waToast('❌ No se guardó el cambio de versión.','error')}catch(_){}await _waTplNombresCargar(true);return}
+  // Restaurar el contenido en la tabla que corresponda
+  try{
+    if(destino&&destino.tipo==='texto'){
+      await sb.from('app_mensajes').update({texto:c.x,footer:c.f,boton:c.b}).eq('seccion',destino.sec).eq('idx',destino.idx)
+    }else if(destino&&destino.tipo==='novedad'){
+      await sb.from('novedades_protocolos').update({msg:c.x,footer:c.f,boton:c.b}).eq('idx',destino.idx)
+    }
+  }catch(e){try{waToast('⚠️ El nombre cambió pero el texto no se restauró: '+(e.message||e),'aviso')}catch(_){}}
+  try{waToast('✅ Volviste a "'+nombreVer+'" — texto y botones restaurados.','ok')}catch(_){}
+  await _waChipCargar()
+  try{if(typeof cargarNovedadesProtocolos==='function')await cargarNovedadesProtocolos(true)}catch(_){}
+  try{if(typeof cargarTextosAdmin==='function')cargarTextosAdmin()}catch(_){}
+  try{if(typeof cargarNovedadesAdmin==='function')cargarNovedadesAdmin()}catch(_){}
 }
 window.waTplRenombrar=async(auto)=>{
   await _waTplNombresCargar()
@@ -18690,7 +18862,9 @@ window.waTplRenombrar=async(auto)=>{
   try{if(typeof cargarNovedadesAdmin==='function')cargarNovedadesAdmin()}catch(_){}
 }
 
-function _waChipMulti(nombre,texto,secFiltro,footer,boton){
+function _waChipMulti(nombre,texto,secFiltro,footer,boton,destino){
+  // destino = {tipo:'texto'|'novedad', sec, idx, texto, footer, boton} → para ↩ usar
+  const _destinoVer=JSON.stringify(destino||null).replace(/"/g,'&quot;')
   window._waTplTextos[nombre]={t:texto||'',f:footer||null,b:boton||null}
   const porWaba=(window._waChipData.estados||{})[nombre]||{}
   let nums=window._waChipData.numeros||[]
@@ -18733,11 +18907,14 @@ function _waChipMulti(nombre,texto,secFiltro,footer,boton){
   const _avisoRenom=_renom?`<span style="font-size:9.5px;color:var(--muted);font-style:italic" title="Nombre automático de NEXO: ${_auto}">(renombrada)</span>`:''
   // Historial: los nombres quemados de intentos anteriores, cada uno con su estado real
   const _hist=_waTplHist(_auto).filter(x=>x!==nombre)
-  const _histHtml=_hist.length?`<div style="font-size:9px;color:var(--muted);margin-top:2px;padding-left:18px">↳ intentos previos: ${_hist.map(hn=>{
+  const _vers=_waTplVers(_auto)
+  const _histHtml=_hist.length?`<div style="font-size:9px;color:var(--muted);margin-top:3px;padding-left:18px;display:flex;gap:8px;flex-wrap:wrap;align-items:center"><span>↳ versiones anteriores:</span>${_hist.map(hn=>{
     const ve=Object.values((window._waChipData.estados||{})[hn]||{})
     const he=ve.includes('APPROVED')?'🟢':ve.includes('PENDING')?'🔵':ve.includes('REJECTED')?'🔴':'⚪'
-    return `<code style="background:rgba(255,255,255,.04);padding:0 4px;border-radius:4px">${hn}</code> ${he}`
-  }).join(' · ')}${_hist.length>=2?' <span style="color:var(--amber)">⚠️ ya van '+(_hist.length+1)+' intentos — revisa el TEXTO antes de reintentar</span>':''}</div>`:''
+    const guardada=!!_vers[hn]
+    const usable=guardada&&ve.includes('APPROVED')
+    return `<span style="display:inline-flex;align-items:center;gap:3px"><code style="background:rgba(255,255,255,.04);padding:0 4px;border-radius:4px">${hn}</code> ${he}${guardada?`<button onclick="waTplUsarVersion('${_auto}','${hn}',${_destinoVer})" title="${usable?'Volver a esta versión: restaura su texto, pie y botones. Como ya está aprobada en Meta, queda usable de una.':'Restaura el texto de esta versión (ojo: no está aprobada en Meta).'}" style="border:1px solid ${usable?'var(--green)':'var(--border)'};background:none;color:${usable?'var(--green)':'var(--muted)'};border-radius:20px;cursor:pointer;font-size:9px;padding:0 6px;font-weight:800">↩ usar</button>`:''}</span>`
+  }).join(' · ')}${_hist.length>=2?' <span style="color:var(--amber)">⚠️ ya van '+(_hist.length+1)+' versiones — revisa el TEXTO antes de reintentar</span>':''}</div>`:''
   return `<div style="font-size:10.5px;margin-top:6px"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--muted)">📄 <code style="background:rgba(255,255,255,.06);padding:1px 6px;border-radius:5px;color:var(--text)">${nombre}</code>${_lapiz}${_avisoRenom} · ${chipG} ${bolas?'· '+bolas:''}</div>${_histHtml}</div>`
 }
 // ═══ 📤 VERIFICACIÓN DE PLANTILLAS (27jul26) ═══════════════════════════════
@@ -18760,7 +18937,7 @@ async function _waVerifPlan(numeroId,secs){
     for(const t of fuente){
       const conv=_waTplConvertir(t.texto)
       if(!String(conv.cuerpo||'').trim())continue
-      const auto=('nexo_'+sec+'_'+_waTplSlug(t.etiqueta)+'_v1').slice(0,512)
+      const auto=_waNombreTplAuto(sec,t.etiqueta,t.idx) // 🏷️ único por tarjeta
       const nombre=_waTplNombre(auto)
       const item={sec,auto,nombre,etiqueta:t.etiqueta,texto:t.texto,footer:t.footer||null,boton:t.boton||null,estado:est[nombre]||null,intentos:_waTplHist(auto).length+1}
       if(item.estado==='APPROVED'||item.estado==='PENDING')saltadas.push(item)
@@ -19253,7 +19430,7 @@ window.waCargarPlantillas=async(numeroId)=>{
     await _waTplNombresCargar() // ✏️ sobrenombres
     fuente.forEach(t=>{
       const conv=_waTplConvertir(t.texto)
-      const nombre=_waTplNombre(('nexo_'+n.seccion+'_'+_waTplSlug(t.etiqueta)+'_v1').slice(0,512))
+      const nombre=_waNombreTpl(n.seccion,t.etiqueta,t.idx) // 🏷️ único por tarjeta
       const meta=yaMap[nombre]
       items.push({origen:'texto',nombre,lang:'es',estado:meta?meta.estado:null,conv,etiqueta:t.etiqueta,footer:t.footer||null,boton:t.boton||null})
     })
@@ -19389,8 +19566,8 @@ async function cargarNovedadesAdmin(){
   await _waChipCargar()
   const _nvChipTpl=(tipo,idx,texto,footer,boton)=>{
     if(typeof _waTplSlug!=='function')return ''
-    const nombre=_waTplNombre('nexo_novedades_'+_waTplSlug(tipo||('novedad_'+idx))+'_v1') // ✏️ respeta el nombre manual
-    return _waChipMulti(nombre,texto,'novedades',footer,boton)
+    const nombre=_waNombreTpl('novedades',tipo,idx) // 🏷️ único por tarjeta + ✏️ sobrenombre
+    return _waChipMulti(nombre,texto,'novedades',footer,boton,{tipo:'novedad',idx,texto,footer,boton})
   }
   let rows, sembrado
   try{
@@ -19464,9 +19641,23 @@ window.novGuardarProto=async(idx)=>{
   if(window._novProtoState&&!window._novProtoState.sembrado){
     payload=(window._novProtoState.rows||[]).map(r=>_novFilaDOM(r.idx))
   }else{payload=[fila]}
+  // 🏷️ Versionado automático: si Meta ya tiene esta plantilla con otro
+  // contenido, el nombre pasa a _vN y el anterior se archiva con su texto.
+  let _avisoVer=''
+  try{
+    const _auto=_waNombreTplAuto('novedades',payload.tipo,Number(idx))
+    const _nomAct=_waTplNombre(_auto)
+    if(_waTplDesfasada(_nomAct,payload.msg,payload.footer,payload.boton)){
+      const{data:_prev}=await sb.from('novedades_protocolos').select('msg,footer,boton').eq('idx',Number(idx)).maybeSingle()
+      const _r=await _waTplVersionar(_auto,(_prev&&_prev.msg)||'',(_prev&&_prev.footer)||null,(_prev&&_prev.boton)||null)
+      _avisoVer=_r.ok
+        ?` <br><b>🏷️ Versión nueva:</b> <code>${_r.nuevo}</code> — la anterior (<code>${_r.anterior}</code>) queda archivada y puedes volver a ella con <b>↩ usar</b>.`
+        :` <br>⚠️ No pude crear la versión nueva (${_r.error}).`
+    }
+  }catch(_){}
   const{error}=await sb.from('novedades_protocolos').upsert(payload,{onConflict:'idx'})
   if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
-  if(msg)msg.innerHTML='<div class="alert alert-green">✅ Novedad guardada. El auxiliar debe recargar para que aplique.</div>'
+  if(msg)msg.innerHTML='<div class="alert alert-green">✅ Novedad guardada. El auxiliar debe recargar para que aplique.'+_avisoVer+'</div>'
   logAction('novedad_proto_editada',{idx:Number(idx)}).catch(()=>{})
   await cargarNovedadesProtocolos(true)
   cargarNovedadesAdmin()

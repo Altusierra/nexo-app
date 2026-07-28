@@ -856,9 +856,29 @@ const NAV={
   ]
 }
 
+// ── 🏠 MODO CENTRO DE CHATS (28jul26) — interruptor de VISIBILIDAD, no de
+// funcionamiento. ON: al AUXILIAR se le ocultan del menú las 3 páginas de
+// GESTIÓN (Confirmar y recuperar · Novedades · Reclame) — su trabajo vive en
+// 💬 Chats — y el buscador morado abre el Centro. Las páginas de INGESTA
+// (Hoja Base, Asignador, Fragmentador, Cruce) se quedan. El código de las
+// páginas ocultas queda INTACTO y el admin las sigue viendo. Apagar = todo
+// vuelve al instante. Fuente de verdad: config wa_modo_centro; espejo en
+// localStorage para que el menú pinte sin esperar la nube.
+const NX_MODO_CENTRO_OCULTA=['aux-reservado','aux-novedades','aux-reclame']
+function _modoCentroOn(){try{return localStorage.getItem('nx_modo_centro')==='1'}catch(_){return false}}
+async function _modoCentroSync(){ // al entrar: si la nube dice distinto al espejo, corrige y repinta
+  try{
+    const v=await getConfig('wa_modo_centro')
+    const on=v==='1'
+    const cambio=on!==_modoCentroOn()
+    try{localStorage.setItem('nx_modo_centro',on?'1':'0')}catch(_){}
+    if(cambio)renderNav()
+  }catch(_){}
+}
 function renderNav(){
   const rol=currentRol()
-  const items=(NAV[rol]||NAV.auxiliar).filter(i=>!i.hidden) // NUEVO (2jul26): omite ítems hidden (cajones Dashboard)
+  let items=(NAV[rol]||NAV.auxiliar).filter(i=>!i.hidden) // NUEVO (2jul26): omite ítems hidden (cajones Dashboard)
+  if(rol==='auxiliar'&&_modoCentroOn())items=items.filter(i=>!NX_MODO_CENTRO_OCULTA.includes(i.id)) // (28jul26) 🏠 Modo Centro: gestión oculta al auxiliar; ingesta se queda
   const cnt=window._auxCounts||null
   const badgeMap={'aux-novedades':['novedades','red'],'aux-reservado':['confirmar','amber'],'aux-reclame':['reclame','amber'],'aux-seguimiento':['transito','blue']}
   document.getElementById('sb-nav').innerHTML=
@@ -890,6 +910,7 @@ window.startImpersonate=(u)=>{
   renderImpersonateBar()
   const rol=impersonating.rol
   navigate(rol==='admin'?'admin-home':(rol==='auxiliar'?'aux-hoy':(rol==='trafficker'?'traff-portafolio':'admin-home')))
+  _modoCentroSync().catch(()=>{}) // (28jul26) 🏠 al entrar, el menú obedece lo que diga la nube
 }
 
 window.stopImpersonate=()=>{
@@ -10890,8 +10911,22 @@ window.procesarXlsxPendientes=async()=>{
       return a.envios-b.envios
     })
     window._xlsxPendCache={items,tablaOk}
+    // (28jul26) ⚡ AUTO-ENCOLADO: si el modo 🤖 de Pend.Conf está encendido, los
+    // pendientes del archivo van DERECHO al encolador (dedupe diario por teléfono,
+    // salta resueltos/cerrados/dijo-NO, candado 132001, rotación de plantillas) y
+    // el cron los despacha en ≤5 min. Con 🤖 apagado, todo sigue manual como hoy.
+    let _autoNota=''
+    try{
+      const _cfgA=await _waSecCfgLoad()
+      const _cA=_cfgA&&_cfgA.reservado
+      if(_cA&&(_cA.auto_on||_cA.por_plantilla)){
+        const _mapped=items.map(i=>({tel:i.telefono,nombre:i.nombre_cliente,producto:i.producto,cantidad:i.cantidad,ciudad:i.ciudad,id:null}))
+        waEncolarSeccionAuto('reservado',_mapped).catch(()=>{})
+        _autoNota=`<div class="alert alert-blue" style="margin-top:6px">🤖 Modo automático de Pend. Conf. encendido: los ${items.length} pendientes van al encolador — repetidos de hoy, resueltos, chats cerrados y "dijo NO" se saltan solos. El toast te dice cuántos entraron; vigila el chip ⚠️ No disparados.</div>`
+      }
+    }catch(_){}
     const sinMsgHoy=items.filter(i=>(i.envios_hoy||0)===0).length
-    if(msg)msg.innerHTML=`<div class="alert alert-green">✅ ${items.length} pendiente(s) de confirmación en el archivo · ${sinMsgHoy} sin mensaje hoy</div>${tablaOk?'':`<div class="alert alert-yellow" style="margin-top:6px">⚠️ La tabla <code>mensajes_enviados</code> no existe aún en Supabase — la lista funciona pero SIN contador. Pídele a Claude el SQL o córrelo desde el traspaso.</div>`}`
+    if(msg)msg.innerHTML=`<div class="alert alert-green">✅ ${items.length} pendiente(s) de confirmación en el archivo · ${sinMsgHoy} sin mensaje hoy</div>${_autoNota}${tablaOk?'':`<div class="alert alert-yellow" style="margin-top:6px">⚠️ La tabla <code>mensajes_enviados</code> no existe aún en Supabase — la lista funciona pero SIN contador. Pídele a Claude el SQL o córrelo desde el traspaso.</div>`}`
     logAction('xlsxpend_procesado',{total:items.length,sin_msg_hoy:sinMsgHoy}).catch(()=>{})
     window._xlsxPendRender()
   }catch(e){
@@ -16094,6 +16129,21 @@ window.auxBuscarPedido=async()=>{
   const inp=document.getElementById('aux-buscar-tel')
   const res=document.getElementById('aux-buscar-res')
   if(!inp)return
+  // (28jul26) 🏠 Modo Centro: el buscador morado se vuelve la PUERTA al Centro de
+  // Chats — misma barra, mismo hábito, y la búsqueda global (pedidos con y sin
+  // conversación, sección y estado) ya corre adentro. Con el modo apagado, todo
+  // sigue exactamente como siempre.
+  if(_modoCentroOn()&&typeof window._wchAbrir==='function'){
+    const q=(inp.value||'').trim()
+    try{
+      await window._wchAbrir()
+      if(q){
+        const bi=document.getElementById('wch-busca')
+        if(bi){bi.value=q;if(typeof window._wchBuscaCambio==='function')window._wchBuscaCambio(q)}
+      }
+    }catch(_){}
+    return
+  }
   const tel=(inp.value||'').replace(/\D/g,'')
   if(tel.length<7){if(res)res.innerHTML='<div class="alert alert-blue">Escribe un teléfono de al menos 7 dígitos.</div>';return}
   if(res)res.innerHTML='<div style="padding:12px;color:var(--muted)">Buscando…</div>'
@@ -18107,6 +18157,7 @@ async function pageAdminMensajeria(c){
         <div style="font-size:11px;color:var(--muted);margin-bottom:8px">CERRADO VIGENTE = el chat tiene etiqueta 🟢 Resuelta (o cualquier etiqueta de cierre) y el cliente NO ha escrito después. Si el cliente volvió a escribir (🔁 Volvió), SÍ recibe mensajes.</div>
         <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;cursor:pointer;margin-bottom:8px"><input type="checkbox" id="wam-f3-skip" checked onchange="waF3Guardar()" style="margin-top:2px"><span><strong>🚫 No disparar a chats cerrados</strong> — el encolador automático salta a los clientes cuyo chat está CERRADO VIGENTE, marcados desde el chat o desde la sección.</span></label>
         <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;cursor:pointer"><input type="checkbox" id="wam-f3-estampa" checked onchange="waF3Guardar()" style="margin-top:2px"><span><strong>✅ Resuelta estampa el chat</strong> — el botón ✅ Resuelta de Novedades y Reclame también deja el chat en 🟢 Resuelta con el mismo clic (un solo gesto del auxiliar, los dos lados al día).</span></label>
+        <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;cursor:pointer;margin-top:8px;padding-top:8px;border-top:1px dashed var(--border)"><input type="checkbox" id="wam-modo-centro" onchange="waModoCentroGuardar()" style="margin-top:2px"><span><strong>🏠 Modo Centro de Chats</strong> — al AUXILIAR se le ocultan del menú las páginas de GESTIÓN (Confirmar y recuperar · Novedades · Reclame): su trabajo vive en 💬 Chats, y el buscador morado abre el Centro. Las de INGESTA (Hoja Base, Asignador, Fragmentador, Cruce) se quedan. Solo visibilidad — el código queda intacto, el admin ve todo, y apagarlo devuelve el menú al instante.</span></label>
         <div id="wam-f3-msg" style="font-size:11px;margin-top:6px"></div>
         <div style="border-top:1px dashed var(--border);margin-top:10px;padding-top:10px">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -18704,11 +18755,29 @@ window.waF3Guardar=async function(){
     waF3Cargar() // devuelve los checkboxes al estado real
   }
 }
+window.waModoCentroGuardar=async function(){
+  const msg=document.getElementById('wam-f3-msg')
+  const on=document.getElementById('wam-modo-centro')?.checked?'1':'0'
+  try{
+    const{error}=await sb.from('config').upsert({clave:'wa_modo_centro',valor:on,updated_at:new Date().toISOString()},{onConflict:'clave'})
+    if(error)throw new Error(error.message)
+    let eco=null;try{eco=await getConfig('wa_modo_centro')}catch(_){}
+    if(eco!==on)throw new Error('la nube no devolvió lo guardado (¿RLS en config?)')
+    try{localStorage.setItem('nx_modo_centro',on)}catch(_){}
+    try{renderNav()}catch(_){}
+    if(msg)msg.innerHTML='<span style="color:var(--green)">✅ '+(on==='1'?'Modo Centro ENCENDIDO — el auxiliar lo recibe al entrar/recargar.':'Modo Centro apagado — el menú del auxiliar vuelve a lo de siempre.')+'</span>'
+    logAction('wa_modo_centro',{on}).catch(()=>{})
+  }catch(e){
+    if(msg)msg.innerHTML='<span style="color:var(--red)">❌ NO se guardó: '+_waEsc(e.message||String(e))+'</span>'
+    waF3Cargar()
+  }
+}
 window.waF3Cargar=async function(){
   try{
     const c=await _waF3CfgLoad(true)
     const a=document.getElementById('wam-f3-skip');if(a)a.checked=!!c.skip
     const b=document.getElementById('wam-f3-estampa');if(b)b.checked=!!c.estampa
+    try{const mc=await getConfig('wa_modo_centro');const el=document.getElementById('wam-modo-centro');if(el)el.checked=mc==='1'}catch(_){}
   }catch(_){}
 }
 // ── 🤖 ENCOLADOR AUTOMÁTICO (4 secciones) ──
@@ -40001,6 +40070,66 @@ async function _wchRastroYResol(tels){
 }
 // ── CARGA DE DATOS de la sección activa ──
 // Vista HOY (fecha=null): disparos de hoy + todo lo VIVO (🆕/🟣/📲/manual sin cierre) de días previos.
+// (28jul26) 🗂️ ARCHIVO OPERATIVO DEL DÍA — la vista por FECHA ahora bebe de las
+// MISMAS tablas que las secciones (Novedades/Reclame/Pend.Conf/Cancelados):
+// resoluciones, avisos, programaciones y gestiones de ESE día. Así lo resuelto
+// ANTES de la mensajería API también se filtra por fecha desde el Centro,
+// exactamente como se filtra dentro de cada sección.
+// Devuelve { telNorm: { evs:[{txt,ts,usuario}], etq|null, ts } } — etq = la
+// etiqueta que ese evento representa (solo para PINTAR el chip del día si el
+// chat no tiene etiqueta propia; jamás se escribe nada).
+async function _wchOpDia(sec,fecha){
+  const ini=fecha+'T00:00:00-05:00',fin=fecha+'T23:59:59-05:00'
+  const out={}
+  const add=(tel,txt,ts,usuario,etq)=>{
+    const k=_wchTel(tel);if(!k)return
+    const o=out[k]=out[k]||{evs:[],etq:null,ts:null}
+    o.evs.push({txt,ts,usuario:usuario||''})
+    if(etq&&(!o.ts||new Date(ts)>new Date(o.ts))){o.etq=etq;o.ts=ts}
+  }
+  try{
+    if(sec==='novedades'){
+      const{data}=await sb.from('novedades_resoluciones').select('telefono,accion,motivo,usuario_nombre,created_at').gte('created_at',ini).lte('created_at',fin).order('created_at',{ascending:false}).limit(800)
+      for(const r of(data||[])){
+        if(r.accion==='resuelta')add(r.telefono,'✅ Resuelta'+(/sin contacto/i.test(r.motivo||'')?' · 🔇 sin contacto':''),r.created_at,r.usuario_nombre,'g_final')
+        else if(r.accion==='desmarcada')add(r.telefono,'↩️ Desmarcada',r.created_at,r.usuario_nombre,null)
+        else add(r.telefono,'📞 '+(r.motivo||r.accion||'gestión'),r.created_at,r.usuario_nombre,null)
+      }
+    }else if(sec==='reclame'){
+      const{data}=await sb.from('reclame_envios').select('telefono,nivel_mensaje,usuario_nombre,created_at').gte('created_at',ini).lte('created_at',fin).order('created_at',{ascending:false}).limit(800)
+      for(const r of(data||[])){
+        if(r.nivel_mensaje===99)add(r.telefono,'✅ Resuelta (ya reclamó)',r.created_at,r.usuario_nombre,'g_final')
+        else add(r.telefono,'📨 Aviso nivel '+(r.nivel_mensaje||1),r.created_at,r.usuario_nombre,null)
+      }
+    }else if(sec==='reservado'){
+      try{
+        const{data}=await sb.from('programaciones_envio').select('telefono,estado,motivo,fecha_envio_programada,usuario_nombre,created_at').gte('created_at',ini).lte('created_at',fin).order('created_at',{ascending:false}).limit(800)
+        for(const r of(data||[])){
+          if(r.estado==='programado')add(r.telefono,'📅 Programado para '+(r.fecha_envio_programada||'—'),r.created_at,r.usuario_nombre,'s_pc_prog')
+          else if(r.estado==='confirmado')add(r.telefono,'✅ Envío confirmado',r.created_at,r.usuario_nombre,'s_pc_conf')
+          else if(r.estado==='cancelado'&&!/^Reemplazada/i.test(r.motivo||''))add(r.telefono,'🚫 Cancelado por cliente',r.created_at,r.usuario_nombre,'s_pc_canc')
+        }
+      }catch(_){}
+      try{
+        const{data}=await sb.from('confirmacion_envios').select('telefono,nivel_mensaje,usuario_nombre,created_at').gte('created_at',ini).lte('created_at',fin).order('created_at',{ascending:false}).limit(800)
+        for(const r of(data||[]))add(r.telefono,'📨 Confirmación enviada (nivel '+(r.nivel_mensaje||1)+')',r.created_at,r.usuario_nombre,null)
+      }catch(_){}
+    }else if(sec==='cancelados'){
+      const{data:evs}=await sb.from('mapeo_eventos').select('mapeo_id,evento,created_at').gte('created_at',ini).lte('created_at',fin).in('evento',['re_cancelado','confirmado']).order('created_at',{ascending:false}).limit(800)
+      const ids=[...new Set((evs||[]).map(e=>e.mapeo_id).filter(Boolean))]
+      const telDe={}
+      for(let i=0;i<ids.length;i+=150){
+        try{const{data:mm}=await sb.from('mapeos').select('id,telefono').in('id',ids.slice(i,i+150));for(const m of(mm||[]))telDe[m.id]=m.telefono}catch(_){}
+      }
+      for(const e of(evs||[])){
+        const t=telDe[e.mapeo_id];if(!t)continue
+        if(e.evento==='re_cancelado')add(t,'🚫 Ya dijo que NO',e.created_at,'','s_ca_no')
+        else add(t,'✅ Confirmado (recuperado)',e.created_at,'','s_pc_conf')
+      }
+    }
+  }catch(_){}
+  return out
+}
 // Vista FECHA: todo lo que SE MOVIÓ ese día (envío o mensaje), incluyendo ocultos.
 async function _wchCargar(){
   const st=window._wchState
@@ -40034,6 +40163,13 @@ async function _wchCargar(){
       const{data:envs,error:e1}=await sb.from('envios_cola').select('telefono,seccion,fecha').eq('seccion',sec).eq('fecha',diaSel).limit(1500)
       if(e1)throw e1
       for(const ev of(envs||[])){const t=_wchTel(ev.telefono);if(t){tels.add(t);secDe[t]=ev.seccion}}
+      // (28jul26) 🗂️ Vista FECHA: también entra la actividad OPERATIVA de ese día
+      // (resoluciones/avisos/programaciones/gestiones) — misma fuente que la sección.
+      let _opDia={}
+      if(fecha){
+        try{_opDia=await _wchOpDia(sec,fecha)}catch(_){}
+        for(const k in _opDia){if(!tels.has(k)){tels.add(k);secDe[k]=sec}}
+      }
       // 2) En vista HOY se suma lo VIVO de días previos que pertenece a esta sección
       let vivas=[]
       if(!fecha){
@@ -40117,6 +40253,29 @@ async function _wchCargar(){
       }
       for(const c of base){if(tels.has(c.telefono))c._tieneEnvio=true;c._sec=secDe[c.telefono]||sec}
       st.convs=await _wchEnriquecer(base,secDe)
+      // (28jul26) 🗂️ Vista FECHA: pegar los eventos del día a cada tarjeta. Si el chat
+      // no tiene etiqueta propia, el chip del día PINTA lo que pasó (✅/📅/🚫) — solo
+      // visual, jamás escribe. Y los sin-conversación reciben su nombre desde mapeos.
+      if(fecha&&Object.keys(_opDia).length){
+        for(const c of st.convs){
+          const o=_opDia[_wchTel(c.telefono)]
+          if(!o)continue
+          c._opDia=o.evs
+          if(o.etq&&!c.etiqueta)c._est={tipo:'manual',id:o.etq,ts:o.ts}
+        }
+        try{
+          const sinNom=st.convs.filter(c=>!c.nombre&&c.telefono)
+          if(sinNom.length){
+            const vars=[...new Set(sinNom.flatMap(c=>{const d=String(c.telefono).replace(/\D/g,'');return[d,d.startsWith('57')?d.slice(2):('57'+d)]}))]
+            const nomDe={}
+            for(let i=0;i<vars.length;i+=150){
+              const{data:mm}=await sb.from('mapeos').select('telefono,nombre_cliente,created_at').in('telefono',vars.slice(i,i+150)).order('created_at',{ascending:false}).limit(500)
+              for(const m of(mm||[])){const k=_wchTel(m.telefono);if(!(k in nomDe)&&m.nombre_cliente)nomDe[k]=m.nombre_cliente}
+            }
+            for(const c of sinNom){const n=nomDe[_wchTel(c.telefono)];if(n)c.nombre=n}
+          }
+        }catch(_){}
+      }
     }
   }catch(e){
     console.error('[wch cargar]',e)
@@ -40515,6 +40674,7 @@ window._wchAbrir=async function(){
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
         <input type="date" id="wch-fecha" style="font-size:12px;padding:5px 8px" title="Ver lo que se movió un día (trae también lo oculto)" onchange="_wchFechaCambio(this.value)">
         <button class="btn-sm btn-outline" id="wch-hoy-btn" onclick="_wchFechaCambio('')" title="Volver a la vista viva de HOY" style="display:none">⭐ Hoy</button>
+        <button class="btn-sm btn-primary" onclick="_nxPlusAbrir()" title="Subir cualquier Excel de Dropi: el sistema verifica que sea de la sección que dices antes de procesar">➕ Subir Excel</button>
         <button class="btn-sm btn-outline" onclick="_wchRecargar()">🔄</button>
         <button onclick="_wchCerrar()" title="Cerrar el Centro de Chats" style="width:30px;height:30px;border-radius:8px;border:none;background:#e81123;color:#fff;font-size:14px;font-weight:800;cursor:pointer;flex:0 0 auto;line-height:1;box-shadow:0 2px 6px rgba(0,0,0,.35)">✕</button>
       </div>
@@ -41172,10 +41332,11 @@ function _wchListaRender(){
           <button onclick="navigator.clipboard.writeText('${_wchTelCorto(tel)}');this.textContent='✅';setTimeout(()=>this.textContent='📋',900)" title="Copiar número" style="background:none;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;padding:1px 5px;color:var(--text)">📋</button>
           ${noL}<span data-wchchip="${_wchEsc(String(c.id||c.telefono||''))}" style="display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap">${chip}</span>${reintro}
         </div>
-        <div style="font-size:10.5px;color:var(--muted)">${c.ultimo_msg_en?('hace '+_wchHace(c.ultimo_msg_en)):(c._sinConv?'encolado, sin conversación aún':'')}</div>
+        <div style="font-size:10.5px;color:var(--muted)">${c.ultimo_msg_en?('hace '+_wchHace(c.ultimo_msg_en)):(c._sinConv?(c._opDia?'sin conversación (gestión de sección)':'encolado, sin conversación aún'):'')}</div>
       </div>
+      ${c._opDia&&c._opDia.length?`<div style="margin-top:6px;padding:6px 9px;background:rgba(255,255,255,.03);border:1px dashed var(--border);border-radius:8px;font-size:10.5px;color:var(--muted)">🗂️ Ese día: ${c._opDia.slice(0,3).map(ev=>`<span style="color:var(--text)">${_wchEsc(ev.txt)}</span>${ev.usuario?' <span style="opacity:.7">por '+_wchEsc(ev.usuario)+'</span>':''} <span style="opacity:.6">${_horaBog(ev.ts)}</span>`).join(' · ')}${c._opDia.length>3?' · +'+(c._opDia.length-3)+' más':''}</div>`:''}
       <div style="display:flex;gap:6px;margin-top:7px;flex-wrap:wrap">
-        ${c.id?`<button class="btn-sm btn-primary" onclick="_wchChatAbrir('${c.id}')">👁 Ver conversación</button>`:`<span style="font-size:11px;color:var(--muted);align-self:center">El hilo aparece cuando salga o entre el primer mensaje.</span>`}
+        ${c.id?`<button class="btn-sm btn-primary" onclick="_wchChatAbrir('${c.id}')">👁 Ver conversación</button>`:(c._opDia?`<button class="btn-sm btn-outline" data-gtel="${_wchEsc(String(c.telefono||''))}" data-gsec="${c._sec||st.sec}" data-gnom="${_wchEsc(c.nombre||'')}" onclick="_wchTplModal(this)">📨 Plantillas</button>`:`<span style="font-size:11px;color:var(--muted);align-self:center">El hilo aparece cuando salga o entre el primer mensaje.</span>`)}
         <button class="btn-sm btn-outline" onclick="_wchWaMe('${c.id||''}','${tel}',true)" title="Abre WhatsApp con el protocolo de la sección copiado">📱 WhatsApp</button>
         <button class="btn-sm btn-outline" onclick="_wchWaMe('${c.id||''}','${tel}',false)" title="Abre el chat limpio para llamar">📞 Llamar</button>
       </div>
@@ -41541,6 +41702,21 @@ window._wchEtiquetar=async function(convId,val){
   try{
     const{data,error}=await sb.from('conversaciones').update(patch).eq('id',convId).select('id')
     if(error||!data||!data.length)throw new Error(error&&error.message||'la base no confirmó el cambio (¿RLS?)')
+    // (28jul26) 🔁 PUENTE INVERSO: cerrar desde el CHAT también escribe en la tabla
+    // de la sección — así los contadores e históricos de Novedades/Reclame siguen
+    // cuadrando aunque nadie vuelva a abrir esas páginas. Solo con cierres GLOBALES
+    // (Resuelta / Resuelta·volvió); las etiquetas de sección ya escriben lo suyo
+    // por sus propios botones. Tolerante: si falla, la etiqueta del chat ya quedó.
+    if(nueva&&(nueva==='g_final'||nueva==='g_final_volvio')&&c&&c.telefono){
+      const d10=(()=>{const d=String(c.telefono).replace(/\D/g,'');return d.startsWith('57')?d.slice(2):d})()
+      if(st.sec==='novedades'){
+        sb.from('novedades_resoluciones').insert({telefono:d10,orden_id:null,accion:'resuelta',motivo:'desde_centro_chats',usuario_id:me?.id||null,usuario_nombre:me?.nombre||null}).then(({error:e2})=>{if(e2)console.warn('[puente inverso nov]',e2.message)})
+        logAction('novedad_marcada',{tel:d10,desde:'centro_chats'}).catch(()=>{})
+      }else if(st.sec==='reclame'){
+        sb.from('reclame_envios').insert({telefono:d10,guia:null,nivel_mensaje:99,usuario_id:me?.id||null,usuario_nombre:me?.nombre||null}).then(({error:e2})=>{if(e2)console.warn('[puente inverso rec]',e2.message)})
+        logAction('reclame_resuelta_marcada',{tel:d10,desde:'centro_chats'}).catch(()=>{})
+      }
+    }
   }catch(e){
     if(c&&antes){Object.assign(c,antes);c._est=_wchDerivar(c);_wchAplicarVista();_wchListaRender();_wchFranjaContadores()}
     alert('❌ La etiqueta NO se guardó: '+e.message)
@@ -41566,6 +41742,132 @@ window._wchEntrantesCrear=async function(convId){
 }
 
 // ── SUGERENCIAS al abrir el chat: reintro → plantilla Meta (+24h) → texto de Textos (–24h) ──
+// ── ➕ SUBIR EXCEL GLOBAL (28jul26) — doble verificación ────────────────────
+// 1) El humano dice la INTENCIÓN (⚡ Pendientes HOY · 🔔 Novedades · 📦 Reclame ·
+//    🔍 Cruce). 2) El sistema LEE el archivo y saca su huella: Capa 1 = ¿es un
+//    export de órdenes de Dropi? (columnas ancla). Capa 2 = la columna de ESTADO
+//    vota (≥60% de dominancia decide; mezcla sin dominante = firma del Cruce).
+// Si intención y huella NO cuadran → alerta ámbar con opciones; NUNCA procesa solo.
+// Como los Excel pueden venir filtrados o completos, la coincidencia no exige
+// pureza: exige que HAYA filas del tipo dicho.
+// ⚡ Pendientes HOY se procesa AQUÍ MISMO (reusa procesarXlsxPendientes + auto-
+// encolado). Novedades/Reclame/Cruce: verificado → te lleva a su bloque de subida
+// (Etapa 1 — un solo procesador, cero duplicación).
+const NX_PLUS_DEFS={
+  pend:{n:'⚡ Pendientes de HOY (PASO 4)',grupo:['PENDIENTE CONFIRMACION'],pagina:'aux-reservado'},
+  novedades:{n:'🔔 Novedades',grupo:['NOVEDAD','INTENTO DE ENTREGA','SIN MOVIMIENTOS','NOVEDAD SOLUCIONADA'],pagina:'aux-novedades'},
+  reclame:{n:'📦 Reclame en oficina',grupo:['RECLAME EN OFICINA'],pagina:'aux-reclame'},
+  cruce:{n:'🔍 Cruce Dropi (día completo)',grupo:null,pagina:'aux-dropi'}
+}
+window._nxPlusAbrir=function(){
+  const prev=document.getElementById('nxplus-modal');if(prev)prev.remove()
+  const div=document.createElement('div')
+  div.id='nxplus-modal'
+  div.style.cssText='position:fixed;z-index:'+(++window._wchZ)+';left:50%;top:10vh;transform:translateX(-50%);width:min(560px,calc(100vw - 24px))'
+  div.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden;box-shadow:0 12px 44px rgba(0,0,0,.55)">
+    <div id="nxplus-head" style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--card2)">
+      <div style="font-weight:800;font-size:14px">➕ Subir Excel de Dropi</div>
+      <button onclick="document.getElementById('nxplus-modal').remove()" style="width:30px;height:30px;border-radius:8px;border:none;background:#e81123;color:#fff;font-size:14px;font-weight:800;cursor:pointer;line-height:1">✕</button>
+    </div>
+    <div style="padding:14px 16px">
+      <div style="font-size:11.5px;color:var(--muted);margin-bottom:8px">1️⃣ ¿Qué Excel vas a subir? (el sistema lo verificará leyendo el archivo)</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">${Object.entries(NX_PLUS_DEFS).map(([k,d])=>`<button class="btn-sm btn-outline" data-nxint="${k}" onclick="_nxPlusIntencion('${k}',this)" style="font-size:11.5px">${d.n}</button>`).join('')}</div>
+      <div id="nxplus-paso2" style="display:none">
+        <div style="font-size:11.5px;color:var(--muted);margin-bottom:6px">2️⃣ Elige el archivo:</div>
+        <input type="file" id="nxplus-file" accept=".xlsx,.xls" onchange="_nxPlusAnalizar()" style="font-size:12px;margin-bottom:8px">
+      </div>
+      <div id="nxplus-veredicto"></div>
+      <div id="nxplus-proc"></div>
+    </div>
+  </div>`
+  div.addEventListener('pointerdown',()=>_wchAlFrente(div))
+  document.body.appendChild(div)
+  _wchDrag(div,div.querySelector('#nxplus-head'))
+  window._nxPlusState={int:null,rows:null,conteo:null}
+}
+window._nxPlusIntencion=function(k,btn){
+  window._nxPlusState=window._nxPlusState||{}
+  window._nxPlusState.int=k
+  document.querySelectorAll('[data-nxint]').forEach(b=>{b.style.background='';b.style.color='';b.style.borderColor=''})
+  if(btn){btn.style.background='var(--primary)';btn.style.color='#fff';btn.style.borderColor='var(--primary)'}
+  const p2=document.getElementById('nxplus-paso2');if(p2)p2.style.display=''
+  const v=document.getElementById('nxplus-veredicto');if(v)v.innerHTML=''
+  const f=document.getElementById('nxplus-file');if(f&&f.files&&f.files.length)_nxPlusAnalizar()
+}
+// Lee el archivo y saca la huella: total, conteo por estado, dominante
+window._nxPlusAnalizar=async function(){
+  const st=window._nxPlusState||{}
+  const inp=document.getElementById('nxplus-file')
+  const v=document.getElementById('nxplus-veredicto')
+  if(!inp||!inp.files.length||!v)return
+  if(!st.int){v.innerHTML='<div class="alert alert-amber" style="font-size:12px">Primero dime QUÉ Excel es (paso 1️⃣).</div>';return}
+  v.innerHTML='<div class="loading" style="font-size:12px">🔎 Leyendo el archivo…</div>'
+  try{
+    const buf=await inp.files[0].arrayBuffer()
+    const wb=XLSX.read(buf,{type:'array'})
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''})
+    if(!rows.length){v.innerHTML='<div class="alert alert-red" style="font-size:12px">El archivo está vacío.</div>';return}
+    // Capa 1: ¿export de órdenes de Dropi? (columnas ancla, tolerante)
+    const cols=Object.keys(rows[0]).map(c=>String(c).toUpperCase())
+    const tieneTel=cols.some(c=>c.includes('TELÉFONO')||c.includes('TELEFONO'))
+    const tieneEst=cols.some(c=>c==='ESTATUS'||c.includes('ESTADO'))
+    if(!tieneTel||!tieneEst){v.innerHTML='<div class="alert alert-red" style="font-size:12px">🚫 Esto no parece un export de órdenes de Dropi (no encuentro columnas de TELÉFONO y ESTATUS). Si es de Seller Chat, va por la Hoja Base.</div>';return}
+    // Capa 2: la columna de ESTADO vota
+    const _norm=s=>String(s||'').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()
+    const colEst=Object.keys(rows[0]).find(c=>_norm(c)==='ESTATUS')||Object.keys(rows[0]).find(c=>_norm(c).includes('ESTADO'))
+    const conteo={}
+    for(const r of rows){const e=_norm(r[colEst]);if(e)conteo[e]=(conteo[e]||0)+1}
+    st.rows=rows;st.conteo=conteo
+    const total=rows.length
+    const cuenta=grupo=>grupo?grupo.reduce((s,g)=>s+(conteo[g]||0),0):0
+    const umbral=0.6 // dominancia
+    let detectado='cruce' // mezcla sin dominante = la firma del Cruce
+    for(const[k,d]of Object.entries(NX_PLUS_DEFS)){if(d.grupo&&cuenta(d.grupo)/total>=umbral){detectado=k;break}}
+    const nInt=NX_PLUS_DEFS[st.int].grupo?cuenta(NX_PLUS_DEFS[st.int].grupo):total
+    const resumen=Object.entries(conteo).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([e,n])=>n+' '+e).join(' · ')
+    const coincide=st.int==='cruce'?detectado==='cruce':nInt>0 // filtrados o completos: basta que HAYA filas del tipo dicho
+    let html=`<div style="font-size:11px;color:var(--muted);margin-bottom:6px">🔎 Leí ${total} filas: ${_wchEsc(resumen)}${Object.keys(conteo).length>5?' · …':''}</div>`
+    if(coincide){
+      html+=`<div class="alert alert-green" style="font-size:12px">✅ Verificado: <strong>${NX_PLUS_DEFS[st.int].n}</strong>${NX_PLUS_DEFS[st.int].grupo?` — ${nInt} fila(s) de ese tipo (se procesarán ESAS)`:''}.</div>
+      <button class="btn btn-primary" style="width:100%;margin-top:8px;font-weight:800" onclick="_nxPlusProcesar('${st.int}')">▶ Procesar como ${_wchEsc(NX_PLUS_DEFS[st.int].n)}</button>`
+    }else{
+      html+=`<div class="alert alert-amber" style="font-size:12px">⚠️ Dijiste <strong>${NX_PLUS_DEFS[st.int].n}</strong>, pero este archivo ${NX_PLUS_DEFS[st.int].grupo?'no trae filas de ese tipo':'tiene un dominante claro'} — parece de <strong>${NX_PLUS_DEFS[detectado].n}</strong>.</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+        <button class="btn-sm btn-primary" onclick="_nxPlusProcesar('${detectado}')">▶ Procesarlo como ${_wchEsc(NX_PLUS_DEFS[detectado].n)}</button>
+        <button class="btn-sm btn-outline" onclick="_nxPlusProcesar('${st.int}')">Insistir en ${_wchEsc(NX_PLUS_DEFS[st.int].n)}</button>
+        <button class="btn-sm btn-outline" onclick="document.getElementById('nxplus-modal').remove()">✖ Cancelar</button>
+      </div>`
+    }
+    v.innerHTML=html
+  }catch(e){v.innerHTML='<div class="alert alert-red" style="font-size:12px">❌ No pude leer el archivo: '+_wchEsc(e.message||String(e))+'</div>'}
+}
+// Procesar: ⚡ nativo (procesador REAL del PASO 4 + 🤖 auto-encolado); las demás:
+// verificado → deep-link a su bloque de subida (un solo procesador, cero copias).
+window._nxPlusProcesar=async function(k){
+  const st=window._nxPlusState||{}
+  const proc=document.getElementById('nxplus-proc')
+  const inp=document.getElementById('nxplus-file')
+  if(k==='pend'){
+    if(!proc||!inp||!inp.files.length)return
+    proc.innerHTML=`<div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px">
+      <div id="xlsxpend-msg"></div><div id="xlsxpend-content" style="max-height:45vh;overflow-y:auto"></div></div>`
+    try{
+      const yaMontado=document.getElementById('xlsxpend-file') // ¿la página del PASO 4 está abierta?
+      const dt=new DataTransfer();dt.items.add(inp.files[0])
+      if(yaMontado){yaMontado.files=dt.files}
+      else{const tmp=document.createElement('input');tmp.type='file';tmp.id='xlsxpend-file';tmp.style.display='none';tmp.files=dt.files;proc.prepend(tmp)}
+      await procesarXlsxPendientes() // procesador REAL: filtro PENDIENTE CONFIRMACION, contadores y 🤖 auto-encolado
+      logAction('nxplus_procesado',{tipo:'pend',filas:(st.rows||[]).length}).catch(()=>{})
+    }catch(e){proc.innerHTML='<div class="alert alert-red" style="font-size:12px">❌ '+_wchEsc(e.message||String(e))+'</div>'}
+    return
+  }
+  const d=NX_PLUS_DEFS[k]
+  try{waToast('✅ Archivo verificado como '+d.n+'. Súbelo en el bloque de esta página (mismo archivo).','ok')}catch(_){}
+  logAction('nxplus_deeplink',{tipo:k}).catch(()=>{})
+  const m=document.getElementById('nxplus-modal');if(m)m.remove()
+  try{const w=document.getElementById('wch-modal');if(w)w.remove()}catch(_){}
+  navigate(d.pagina)
+}
 // ── 🎛️ ACCIONES LOGÍSTICAS DESDE EL CHAT (28jul26) ─────────────────────────
 // Los mismos botones de las secciones, ahora en el chat, escribiendo en las
 // MISMAS tablas con el MISMO patrón (programaciones_envio + mapeo_eventos) y
@@ -41634,6 +41936,24 @@ window._wchCancDijoNo=async function(convId,tel,btn){
     await _wchEtiquetaDirecta(convId,'s_ca_no')
     try{waToast('🚫 Registrado: ya dijo que NO. No volverá a aparecer.','ok')}catch(_){}
   }catch(e){alert('❌ No se guardó: '+(e.message||e))}
+  finally{if(btn)btn.disabled=false}
+}
+// 📞 REGISTRAR INTENTO (Novedades) — mismo rastro de la sección: filas
+// accion:'intento' con "canal · resultado" en novedades_resoluciones. Una llamada
+// no la puede automatizar la API: este es el registro humano.
+window._wchNovIntento=async function(convId,tel,btn){
+  const canal=prompt('📞 ¿Por dónde intentaste? (Llamada / WhatsApp / SMS)','Llamada')
+  if(!canal)return
+  const resultado=prompt('¿Resultado? (No contesta / Apagado / Número errado / Dice que llama luego…)','No contesta')
+  if(!resultado)return
+  const d=String(tel||'').replace(/\D/g,''),d10=d.startsWith('57')?d.slice(2):d
+  if(btn)btn.disabled=true
+  try{
+    const{error}=await sb.from('novedades_resoluciones').insert({telefono:d10,orden_id:null,accion:'intento',motivo:canal.trim()+' · '+resultado.trim(),usuario_id:me?.id||null,usuario_nombre:me?.nombre||null})
+    if(error)throw new Error(error.message)
+    logAction('novedad_intento',{tel:d10,canal:canal.trim(),resultado:resultado.trim(),desde:'centro_chats'}).catch(()=>{})
+    try{waToast('📞 Intento registrado: '+canal.trim()+' · '+resultado.trim(),'ok')}catch(_){}
+  }catch(e){alert('❌ No se registró: '+(e.message||e))}
   finally{if(btn)btn.disabled=false}
 }
 async function _wchSugerencias(convId,c){
@@ -41709,6 +42029,7 @@ async function _wchSugerencias(convId,c){
         <button class="btn-sm btn-outline" style="font-size:10.5px;border-color:var(--green);color:var(--green)" onclick="_wchPcAccion('${convId}','${_telSug}','confirmar',this)">✅ Confirmar</button>
         <button class="btn-sm btn-outline" style="font-size:10.5px;border-color:var(--red);color:var(--red)" onclick="_wchPcAccion('${convId}','${_telSug}','cancelar',this)">🚫 Cancelar</button>`
       else if(st.sec==='cancelados')_acc=`<button class="btn-sm btn-outline" style="font-size:10.5px;border-color:var(--red);color:var(--red)" onclick="_wchCancDijoNo('${convId}','${_telSug}',this)">🚫 Ya dijo que NO</button>`
+      else if(st.sec==='novedades')_acc=`<button class="btn-sm btn-outline" style="font-size:10.5px;border-color:var(--accent);color:var(--accent)" onclick="_wchNovIntento('${convId}','${_telSug}',this)">📞 Registrar intento</button>`
       html+=`<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px"><button class="btn-sm btn-outline" style="font-size:10.5px" onclick="var p=document.getElementById('wch-tplchat-${convId}');if(p.style.display==='none'){p.style.display='';_wchTplPanelPintar('wch-tplchat-${convId}','${_telSug}','${st.sec}','${_wchEsc((c&&c.nombre)||'')}','${convId}')}else{p.style.display='none'}">📨 Plantillas de la sección</button>${_acc}</div>
       <div id="wch-tplchat-${convId}" style="display:none;margin-bottom:6px"></div>`
     }

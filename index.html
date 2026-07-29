@@ -14507,6 +14507,22 @@ function _waValorReal(tag,m){
     default:return '—'
   }
 }
+// ── 🛡️ (28jul26 · Mejora #8) DEDUPE POR TELÉFONO cuando NO hay mapeo_id ──
+// El índice único de envios_cola solo cubre (mapeo_id,plantilla,fecha) CON
+// mapeo_id — si viene null, los duplicados entran sin freno (así nacieron las
+// 6 copias del 28jul26: el Set en memoria se borra con cada recarga). Este
+// helper pregunta a la BASE (no a la memoria) si ya existe el mismo
+// telefono+plantilla HOY en pendiente/enviado. Tolerante: si la consulta
+// falla, devuelve false y el flujo sigue como siempre.
+window._waYaEncoladoHoy=async function(telFull,plantilla){
+  try{
+    const hoyBog=new Date(new Date().toLocaleString('en-US',{timeZone:'America/Bogota'})).toISOString().slice(0,10)
+    const{count,error}=await sb.from('envios_cola').select('id',{count:'exact',head:true})
+      .eq('telefono',telFull).eq('plantilla',plantilla).eq('fecha',hoyBog).in('estado',['pendiente','enviado'])
+    if(error)return false
+    return (count||0)>0
+  }catch(_){return false}
+}
 // Despacha la novedad ACTUAL de la cola por Cloud API (plantilla aprobada)
 window._colaDespachar=async()=>{
   const st=window._colaState
@@ -14524,8 +14540,11 @@ window._colaDespachar=async()=>{
   if(!confirm(`▶️ Despachar por API:\n\nPlantilla: ${plantilla}\nA: ${m.nombre||''} (${telFull})\n\n¿Enviar?`))return
   try{
     // 1) Encolar (el índice único frena duplicados del mismo día)
+    // 🛡️ (Mejora #8) Sin mapeo_id el índice único NO aplica → dedupe por teléfono contra la BASE
+    const _mapId=m.mapeoId||m.mapeo_id||null
+    if(!_mapId&&await _waYaEncoladoHoy(telFull,plantilla)){alert('⚠️ Esta plantilla ya está encolada o enviada HOY a este teléfono. No se duplica.');return}
     const{data:fila,error}=await sb.from('envios_cola').insert({
-      mapeo_id:m.mapeoId||m.mapeo_id||null,telefono:telFull,nombre:m.nombre||null,
+      mapeo_id:_mapId,telefono:telFull,nombre:m.nombre||null,
       seccion:'novedades',tipo:m.cat.tipo,plantilla,parametros,
       origen:'despacho_manual',usuario_id:me?.id||null
     }).select('id').single()
@@ -17945,10 +17964,378 @@ async function pageAdminTextos(c){
     <div class="page-sub">Edita los mensajes que se envían a los clientes y cuántos se mandan por día. Los cambios aplican cuando el auxiliar recarga la app.</div>
     ${_txtBarraGlobal()}
     <div id="txt-msg" style="margin-bottom:12px"></div>
+    <div id="txt-reglas" style="margin-bottom:18px"></div>
     <div id="txt-list"><div class="loading">Cargando...</div></div>
     <div id="txt-novedades" style="margin-top:8px"></div>`
   cargarTextosAdmin()
   cargarNovedadesAdmin()
+  try{cargarReglasAdmin()}catch(_){}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⚡ MOTOR DE REGLAS (28jul26) — el admin estructura disparadores SIN tocar código.
+// Igual que SellerChat: CUÁNDO (disparador) + CONDICIONES + ACCIONES, pero con
+// lo que NEXO sí sabe y SellerChat no: la ENTREGA REAL de cada plantilla.
+// · El EDITOR y el SIMULADOR viven aquí (admin → Textos).
+// · El EVALUADOR vive en wa-dispatch (servidor): corre cada 5 min con reloj real,
+//   una sola vez, aunque nadie tenga NEXO abierto.
+// · Persistencia: config 'wa_reglas' (JSON, patrón de siempre con verificación
+//   de ida y vuelta). Bitácora: config 'wa_reglas_log' (la escribe el servidor).
+// · FRENOS: interruptor general (nace APAGADO) · tope de plantillas por
+//   teléfono/día · antibucle por conversación/día · dedupe contra la base ·
+//   prioridad con "parar aquí". El simulador muestra el radio de impacto SIN
+//   enviar nada — probar antes de armar.
+// ═══════════════════════════════════════════════════════════════════════════
+const WA_REG_KEY='wa_reglas'
+const WA_REG_SECS=[['reclame','📢 Reclame'],['novedades','🔔 Novedades'],['reservado','⏳ Pend. Conf.'],['cancelados','❌ Cancelados']]
+function _regDefaults(){
+  return {v:1,on:false,topeTelDia:2,maxEjecDia:3,reglas:[
+    {id:'r_rec_n2',nombre:'Reclame · Nivel 1 → Nivel 2',sec:'reclame',activa:true,prioridad:10,desde:'saliente',horas:24,
+     cond:{enviada:'nexo_reclame_nivel_1_primer_aviso_0_v1',noEnviada:'nexo_reclame_nivel_2_segundo_aviso_1_v1',entrega:'entregada',ultOut:'cualquiera',etqModo:'sin',etqLista:[],palabras:'',horaDe:'07:00',horaA:'20:00'},
+     acc:{plantilla:'nexo_reclame_nivel_2_segundo_aviso_1_v1',etiquetar:'',falla:false,aviso:'',parar:true},
+     nota:'La escalada acordada: 24h después del último mensaje NUESTRO, si el cliente NO escribió, el nivel 1 SÍ le llegó (✅ entregada) y el nivel 2 no ha salido. El reloj se reinicia con cada mensaje del auxiliar. Si el nombre de tus plantillas cambia, ajústalo aquí.'},
+    {id:'r_reenganche',nombre:'Reenganche · escribió y quedó 24h sin atención',sec:'reclame',activa:true,prioridad:20,desde:'entrante',horas:24,
+     cond:{enviada:'',noEnviada:'',entrega:'cualquiera',ultOut:'cualquiera',etqModo:'sin',etqLista:[],palabras:'',horaDe:'07:00',horaA:'20:00'},
+     acc:{plantilla:'',etiquetar:'s_re_sinat24',falla:true,aviso:'Cliente respondió y quedó 24h sin atención (falla operativa)',parar:true},
+     nota:'El cliente escribió y NADIE le contestó en 24h — falla nuestra, no suya. Estampa la etiqueta ⚠️ Sin atención 24h (roja: urgencia para el auxiliar) y registra la falla. Cuando Meta apruebe tu plantilla de reenganche, pega su nombre en "Enviar plantilla" y también le llegará el mensaje que reabre la puerta de 24h. Mientras el campo esté vacío, etiqueta y registra pero NO envía.'},
+    {id:'r_fallo_aviso',nombre:'Aviso · un envío FALLÓ (no le llegó)',sec:'reclame',activa:true,prioridad:30,desde:'saliente',horas:1,
+     cond:{enviada:'',noEnviada:'',entrega:'fallida',ultOut:'auto',etqModo:'cualquiera',etqLista:[],palabras:'',horaDe:'',horaA:''},
+     acc:{plantilla:'',etiquetar:'',falla:false,aviso:'Envío FALLÓ (❌ no entregada) — revisar número o llamar',parar:false},
+     nota:'Si Meta reporta failed, insistir por WhatsApp no sirve: el número está mal, sin WhatsApp o te bloqueó. Este aviso lo saca a la luz para que un humano llame o corrija el número. No envía nada al cliente.'},
+    {id:'r_ej_palabras',nombre:'EJEMPLO · el cliente dijo "cancelar"',sec:'reclame',activa:false,prioridad:40,desde:'entrante',horas:0,
+     cond:{enviada:'',noEnviada:'',entrega:'cualquiera',ultOut:'cualquiera',etqModo:'cualquiera',etqLista:[],palabras:'cancelar, no quiero, devolver',horaDe:'',horaA:''},
+     acc:{plantilla:'',etiquetar:'',falla:false,aviso:'Cliente mencionó cancelar/devolver — atender con prioridad',parar:false},
+     nota:'EJEMPLO APAGADO (duplícalo y adáptalo): usa la condición de PALABRAS — si el último mensaje del cliente contiene alguna de la lista (separadas por coma), dispara. Aquí solo avisa al admin; podrías también etiquetar o enviar una plantilla.'},
+    {id:'r_ej_horario',nombre:'EJEMPLO · escalar solo en horario laboral',sec:'novedades',activa:false,prioridad:50,desde:'saliente',horas:24,
+     cond:{enviada:'',noEnviada:'',entrega:'entregada',ultOut:'auto',etqModo:'sin',etqLista:[],palabras:'',horaDe:'08:00',horaA:'18:00'},
+     acc:{plantilla:'',etiquetar:'',falla:false,aviso:'',parar:true},
+     nota:'EJEMPLO APAGADO: igual que la escalada de Reclame pero para Novedades y con HORARIO — solo dispara entre las 8am y 6pm de Bogotá. Ponle la plantilla en la acción antes de prenderla.'},
+    {id:'r_ej_aviso',nombre:'EJEMPLO · avisar sin escribirle al cliente',sec:'novedades',activa:false,prioridad:60,desde:'entrante',horas:4,
+     cond:{enviada:'',noEnviada:'',entrega:'cualquiera',ultOut:'cualquiera',etqModo:'sin',etqLista:[],palabras:'',horaDe:'',horaA:''},
+     acc:{plantilla:'',etiquetar:'',falla:false,aviso:'Cliente de Novedades lleva 4h esperando respuesta',parar:false},
+     nota:'EJEMPLO APAGADO: una regla NO tiene que enviar mensajes — esta solo levanta la mano en la bitácora cuando un cliente lleva 4h sin respuesta. Es la alarma temprana antes de que el reenganche de 24h tenga que salvar el caso.'}
+  ]}
+}
+window._regState=null
+async function _regCargar(){
+  try{const raw=await getConfig(WA_REG_KEY);if(raw){window._regState=JSON.parse(raw);return window._regState}}catch(_){}
+  // Primera vez: sembrar (motor APAGADO — nada dispara hasta que el admin lo prenda)
+  window._regState=_regDefaults()
+  try{await _regGuardar(true)}catch(_){}
+  return window._regState
+}
+async function _regGuardar(silencio){
+  const js=JSON.stringify(window._regState)
+  const{error}=await sb.from('config').upsert({clave:WA_REG_KEY,valor:js,updated_at:new Date().toISOString()},{onConflict:'clave'})
+  if(error){if(!silencio)alert('❌ NO se guardó: '+error.message);return false}
+  let eco=null;try{eco=await getConfig(WA_REG_KEY)}catch(_){}
+  if(eco!==js){if(!silencio)alert('❌ NO se guardó: la nube no devolvió lo guardado (¿RLS en config para wa_reglas?)');return false}
+  if(!silencio){try{waToast('✅ Reglas guardadas.','ok')}catch(_){}}
+  return true
+}
+window.cargarReglasAdmin=async function(){
+  const el=document.getElementById('txt-reglas');if(!el)return
+  el.innerHTML='<div class="loading" style="font-size:12px">⚡ Cargando reglas…</div>'
+  const cfg=await _regCargar()
+  const esc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+  const vivas=cfg.reglas.filter(r=>!r.arch).sort((a,b)=>(a.prioridad||99)-(b.prioridad||99))
+  const secN=(k)=>{const f=WA_REG_SECS.find(x=>x[0]===k);return f?f[1]:k}
+  // Bitácora (la escribe el servidor)
+  let logHtml=''
+  try{
+    const lr=await getConfig('wa_reglas_log')
+    if(lr){
+      const log=JSON.parse(lr)
+      if(Array.isArray(log)&&log.length){
+        logHtml=`<details style="margin-top:12px"><summary style="cursor:pointer;font-size:12px;font-weight:800">📜 Bitácora del motor — últimos ${Math.min(log.length,30)} eventos (qué regla disparó, a quién y por qué)</summary>
+        <div style="max-height:220px;overflow-y:auto;margin-top:8px">${log.slice(0,30).map(e=>`<div style="font-size:11px;border-bottom:1px solid var(--border);padding:4px 2px;${e.tipo==='falla'?'color:var(--red);font-weight:700':(e.tipo==='aviso'?'color:var(--amber)':'')}">
+          ${e.tipo==='falla'?'🚨':(e.tipo==='aviso'?'📣':'⚡')} ${esc(e.regla||'')} · ${esc(e.tel||'')} · ${esc(e.detalle||'')} · <span style="opacity:.65">${e.ts?new Date(e.ts).toLocaleString('es-CO',{timeZone:'America/Bogota',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):''}</span>
+        </div>`).join('')}</div></details>`
+      }
+    }
+  }catch(_){}
+  el.innerHTML=`<div class="card" style="border:1px solid ${cfg.on?'var(--green)':'var(--border)'}">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:10px">
+      <div style="font-size:15px;font-weight:800">⚡ Reglas de disparo automático <span style="font-size:10.5px;font-weight:400;color:var(--muted)">· las evalúa el servidor cada 5 min, con NEXO abierto o cerrado</span></div>
+      <label style="display:flex;gap:7px;align-items:center;font-size:12.5px;cursor:pointer;font-weight:800;color:${cfg.on?'var(--green)':'var(--red)'}">
+        <input type="checkbox" ${cfg.on?'checked':''} onchange="_regMotorToggle(this.checked)"> ${cfg.on?'🟢 MOTOR ENCENDIDO':'🔴 MOTOR APAGADO'}
+      </label>
+    </div>
+    ${cfg.on?'':'<div class="alert alert-amber" style="margin-bottom:10px;font-size:12px">⏸️ El motor está APAGADO: ninguna regla dispara, así esté activa. Usa 🧪 Simular para ver a quién le pegaría cada una ANTES de prenderlo.</div>'}
+    <details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:12.5px;font-weight:800">📖 Guía — cómo funciona el flujo de Reclame (léela una vez y quedas)</summary>
+      <div style="font-size:12px;line-height:1.6;padding:10px 4px 2px;color:var(--text)">
+        <strong>📢 RECLAME — el pedido llegó a la oficina y el cliente debe ir a recogerlo:</strong><br>
+        <strong>1️⃣ Nivel 1 · Primer aviso</strong> — sale solo, a TODOS, apenas el pedido llega a la oficina (lo encola el Cruce, como siempre).<br>
+        <strong>2️⃣ Nivel 2 · Segundo aviso</strong> — lo dispara la regla "Reclame · Nivel 1 → Nivel 2": 24 horas después del último mensaje NUESTRO, solo si el cliente NO escribió y el nivel 1 SÍ le llegó (✅ entregada). Si el nivel 1 no se entregó, NO escala: insistirle a quien no recibió nada es absurdo.<br>
+        <strong>3️⃣ Nivel 3 · Último aviso</strong> — NO sale solo. Lo manda el auxiliar a mano cuando lo vea necesario.<br>
+        <strong>🔄 Reenganche</strong> — sale cuando el cliente SÍ escribió pero nadie le contestó en 24h. No es un regaño: retoma la conversación que se dejó caer, estampa la etiqueta ⚠️ Sin atención 24h y registra la falla operativa. Si te aparece esa etiqueta: atiende de una, ese cliente lleva un día esperando.<br>
+        <strong>🧪 Regla de oro:</strong> antes de prender una regla nueva, dale Simular. Te muestra la lista exacta de a quién le pegaría AHORA, sin enviar nada.
+      </div>
+    </details>
+    <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;background:var(--card2);padding:9px 12px;border-radius:8px;margin-bottom:12px">
+      <div class="fld" style="margin:0"><label>🛑 Tope de plantillas por CLIENTE al día (todas las reglas juntas)</label><input type="number" min="1" max="10" id="reg-tope" value="${cfg.topeTelDia||2}" style="width:80px" onchange="_regTopeCambio()"></div>
+      <div class="fld" style="margin:0"><label>🔁 Antibucle: máx. acciones por conversación al día</label><input type="number" min="1" max="10" id="reg-maxejec" value="${cfg.maxEjecDia||3}" style="width:80px" onchange="_regTopeCambio()"></div>
+      <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="_regEditar('')">➕ Nueva regla</button>
+    </div>
+    <div id="reg-lista">${vivas.length?vivas.map(r=>`
+      <div style="background:var(--card2);border:1px solid var(--border);border-left:3px solid ${r.activa?'var(--green)':'var(--border)'};border-radius:10px;padding:9px 12px;margin-bottom:7px">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
+          <div style="min-width:0;flex:1">
+            <strong style="font-size:12.5px">${r.activa?'🟢':'⚪'} ${esc(r.nombre)}</strong>
+            <span style="font-size:10.5px;color:var(--muted)">· ${secN(r.sec)} · prioridad ${r.prioridad||99}</span>
+            <div style="font-size:11px;color:var(--muted);margin-top:3px">
+              ⏱ ${r.horas}h después del último mensaje ${r.desde==='entrante'?'DEL CLIENTE (nadie le contestó)':'NUESTRO (él no respondió)'}
+              ${r.cond.entrega!=='cualquiera'?` · entrega: ${r.cond.entrega==='entregada'?'✅ entregada':'❌ falló'}`:''}
+              ${r.cond.enviada?` · ya salió: ${esc(r.cond.enviada)}`:''}
+              ${r.cond.noEnviada?` · aún no: ${esc(r.cond.noEnviada)}`:''}
+              ${r.cond.palabras?` · dijo: "${esc(r.cond.palabras)}"`:''}
+              ${r.cond.horaDe?` · 🕐 ${r.cond.horaDe}–${r.cond.horaA}`:''}
+              <br>→ ${[r.acc.plantilla?('📨 envía '+esc(r.acc.plantilla)):'',r.acc.etiquetar?'🏷 etiqueta':'',r.acc.falla?'🚨 registra falla':'',r.acc.aviso?'📣 avisa al admin':''].filter(Boolean).join(' · ')||'(sin acciones)'}
+              ${r.acc.plantilla===''&&r.id==='r_reenganche'?' · <span style="color:var(--amber);font-weight:700">⚠️ falta pegar el nombre de la plantilla de reenganche cuando Meta la apruebe</span>':''}
+            </div>
+          </div>
+          <div style="display:flex;gap:5px;flex-wrap:wrap;flex:0 0 auto">
+            <button class="btn-sm btn-outline" style="font-size:11px" onclick="_regSimular('${r.id}')">🧪 Simular</button>
+            <button class="btn-sm btn-outline" style="font-size:11px" onclick="_regEditar('${r.id}')">✏️</button>
+            <button class="btn-sm btn-outline" style="font-size:11px" onclick="_regDuplicar('${r.id}')" title="Clona esta regla para adaptarla — nunca arranques de cero">📋</button>
+            <button class="btn-sm btn-outline" style="font-size:11px" onclick="_regToggle('${r.id}')">${r.activa?'⏸️':'▶️'}</button>
+            <button class="btn-sm btn-outline" style="font-size:11px;color:var(--red)" onclick="_regArchivar('${r.id}')" title="Archivar (no borra: se puede recuperar)">🗑</button>
+          </div>
+        </div>
+        <div id="reg-sim-${r.id}"></div>
+      </div>`).join(''):'<div style="color:var(--muted);font-size:12px;padding:10px">Sin reglas todavía. ➕ Nueva regla para crear la primera.</div>'}
+    </div>
+    ${cfg.reglas.some(r=>r.arch)?`<details style="margin-top:8px"><summary style="cursor:pointer;font-size:11px;color:var(--muted)">🗃 ${cfg.reglas.filter(r=>r.arch).length} regla(s) archivada(s)</summary>${cfg.reglas.filter(r=>r.arch).map(r=>`<div style="font-size:11px;color:var(--muted);padding:4px 2px">⚪ ${esc(r.nombre)} <button class="btn-sm btn-outline" style="font-size:10px" onclick="_regDesarchivar('${r.id}')">↩️ Recuperar</button></div>`).join('')}</details>`:''}
+    ${logHtml}
+  </div>`
+}
+window._regMotorToggle=async function(on){
+  if(on&&!confirm('🟢 ¿ENCENDER el motor de reglas?\n\nLas reglas ACTIVAS empezarán a disparar solas en la próxima corrida del servidor (máx. 5 min).\n\n¿Ya simulaste cada regla activa para ver a quién le pega?'))
+    {cargarReglasAdmin();return}
+  window._regState.on=!!on
+  await _regGuardar()
+  logAction('wa_reglas_motor',{on:!!on}).catch(()=>{})
+  cargarReglasAdmin()
+}
+window._regTopeCambio=async function(){
+  const t=parseInt(document.getElementById('reg-tope')?.value)||2
+  const m=parseInt(document.getElementById('reg-maxejec')?.value)||3
+  window._regState.topeTelDia=Math.min(Math.max(t,1),10)
+  window._regState.maxEjecDia=Math.min(Math.max(m,1),10)
+  await _regGuardar()
+}
+window._regToggle=async function(id){
+  const r=window._regState.reglas.find(x=>x.id===id);if(!r)return
+  if(!r.activa&&window._regState.on&&!confirm('▶️ El motor está ENCENDIDO: esta regla empezará a disparar en la próxima corrida (máx. 5 min).\n\n¿Ya la simulaste?')){return}
+  r.activa=!r.activa
+  await _regGuardar();cargarReglasAdmin()
+}
+window._regArchivar=async function(id){
+  const r=window._regState.reglas.find(x=>x.id===id);if(!r)return
+  if(!confirm('🗑 ¿Archivar "'+r.nombre+'"?\n\nNo se borra: queda apagada y guardada, recuperable cuando quieras.'))return
+  r.arch=true;r.activa=false
+  await _regGuardar();cargarReglasAdmin()
+}
+window._regDesarchivar=async function(id){
+  const r=window._regState.reglas.find(x=>x.id===id);if(!r)return
+  r.arch=false
+  await _regGuardar();cargarReglasAdmin()
+}
+window._regDuplicar=async function(id){
+  const r=window._regState.reglas.find(x=>x.id===id);if(!r)return
+  const cp=JSON.parse(JSON.stringify(r))
+  cp.id='r_'+Date.now().toString(36)
+  cp.nombre=r.nombre+' (copia)'
+  cp.activa=false
+  cp.prioridad=(r.prioridad||99)+1
+  window._regState.reglas.push(cp)
+  await _regGuardar()
+  cargarReglasAdmin()
+  try{waToast('📋 Copia creada APAGADA — edítala y actívala cuando esté lista.','ok')}catch(_){}
+}
+// ── ✏️ Editor de una regla (modal) ──
+window._regEditar=function(id){
+  const cfg=window._regState
+  const r=id?cfg.reglas.find(x=>x.id===id):{id:'',nombre:'',sec:'reclame',activa:false,prioridad:(Math.max(0,...cfg.reglas.map(x=>x.prioridad||0))+10),desde:'saliente',horas:24,cond:{enviada:'',noEnviada:'',entrega:'cualquiera',ultOut:'cualquiera',etqModo:'cualquiera',etqLista:[],palabras:'',horaDe:'',horaA:''},acc:{plantilla:'',etiquetar:'',falla:false,aviso:'',parar:true},nota:''}
+  if(!r)return
+  const esc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+  let etqOpts=''
+  try{
+    const cat=window._wchState&&window._wchState.cat
+    if(cat){
+      const todas=[...(cat.globales||[]),...Object.values(cat.secciones||{}).flat()].filter(x=>x&&!x.arch)
+      etqOpts=todas.map(x=>`<option value="${x.id}" ${r.acc.etiquetar===x.id?'selected':''}>${x.e||''} ${esc(x.n)}</option>`).join('')
+    }
+  }catch(_){}
+  const old=document.getElementById('reg-modal');if(old)old.remove()
+  const div=document.createElement('div')
+  div.id='reg-modal'
+  div.style.cssText='position:fixed;inset:0;z-index:9600;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:14px'
+  div.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;max-width:640px;width:100%;max-height:92vh;overflow-y:auto;padding:16px 18px">
+    <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">
+      <div style="font-size:14.5px;font-weight:800">⚡ ${id?'Editar':'Nueva'} regla</div>
+      <button onclick="document.getElementById('reg-modal').remove()" style="width:28px;height:28px;border-radius:8px;border:none;background:#e81123;color:#fff;font-weight:800;cursor:pointer">✕</button>
+    </div>
+    <div class="fld"><label>Nombre (para ti — di qué hace)</label><input id="regf-nombre" value="${esc(r.nombre)}" placeholder="Ej: Reclame · Nivel 2 → Nivel 3"></div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap">
+      <div class="fld" style="flex:1;min-width:150px"><label>Sección</label><select id="regf-sec">${WA_REG_SECS.map(s=>`<option value="${s[0]}" ${r.sec===s[0]?'selected':''}>${s[1]}</option>`).join('')}</select></div>
+      <div class="fld" style="width:110px"><label>Prioridad <span style="color:var(--muted)">(menor = primero)</span></label><input type="number" id="regf-prio" value="${r.prioridad||99}" min="1"></div>
+    </div>
+    <div style="background:var(--card2);border-radius:10px;padding:10px 12px;margin:8px 0">
+      <div style="font-size:12px;font-weight:800;margin-bottom:8px">⏱ CUÁNDO dispara</div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+        <div class="fld" style="margin:0;flex:1;min-width:230px"><label>Contar desde el último mensaje…</label><select id="regf-desde">
+          <option value="saliente" ${r.desde!=='entrante'?'selected':''}>NUESTRO — y el cliente NO ha respondido</option>
+          <option value="entrante" ${r.desde==='entrante'?'selected':''}>DEL CLIENTE — y NADIE le ha contestado</option>
+        </select></div>
+        <div class="fld" style="margin:0;width:120px"><label>Horas de espera</label><input type="number" id="regf-horas" value="${r.horas||24}" min="0" max="720"></div>
+      </div>
+    </div>
+    <div style="background:var(--card2);border-radius:10px;padding:10px 12px;margin:8px 0">
+      <div style="font-size:12px;font-weight:800;margin-bottom:8px">🔍 CONDICIONES (todas deben cumplirse — vacío = no exigir)</div>
+      <div class="fld"><label>📨 Ya se le envió esta plantilla (nombre exacto de Meta)</label><input id="regf-enviada" value="${esc(r.cond.enviada)}" placeholder="vacío = no exigir"></div>
+      <div class="fld"><label>🚫 Aún NO se le ha enviado esta plantilla</label><input id="regf-noenviada" value="${esc(r.cond.noEnviada)}" placeholder="vacío = no exigir · pon aquí la que vas a enviar para no repetirla"></div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        <div class="fld" style="flex:1;min-width:180px"><label>📶 Entrega del último saliente</label><select id="regf-entrega">
+          <option value="cualquiera" ${r.cond.entrega==='cualquiera'?'selected':''}>— cualquiera —</option>
+          <option value="entregada" ${r.cond.entrega==='entregada'?'selected':''}>✅ Entregada (delivered/read)</option>
+          <option value="fallida" ${r.cond.entrega==='fallida'?'selected':''}>❌ Falló (failed)</option>
+        </select></div>
+        <div class="fld" style="flex:1;min-width:180px"><label>👤 El último mensaje nuestro lo mandó…</label><select id="regf-ultout">
+          <option value="cualquiera" ${r.cond.ultOut==='cualquiera'?'selected':''}>— cualquiera —</option>
+          <option value="auto" ${r.cond.ultOut==='auto'?'selected':''}>🤖 el sistema (plantilla automática)</option>
+          <option value="humano" ${r.cond.ultOut==='humano'?'selected':''}>👤 un auxiliar</option>
+        </select></div>
+      </div>
+      <div class="fld"><label>🏷 Etiqueta actual de la conversación</label><select id="regf-etqmodo">
+        <option value="cualquiera" ${r.cond.etqModo==='cualquiera'?'selected':''}>— cualquiera —</option>
+        <option value="sin" ${r.cond.etqModo==='sin'?'selected':''}>SIN etiqueta puesta (recomendado: una etiqueta manual significa que un humano ya decidió)</option>
+      </select></div>
+      <div class="fld"><label>💬 El último mensaje del cliente contiene (palabras separadas por coma)</label><input id="regf-palabras" value="${esc(r.cond.palabras)}" placeholder="vacío = no exigir · ej: cancelar, no quiero"></div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        <div class="fld" style="width:130px"><label>🕐 Solo desde las</label><input type="time" id="regf-horade" value="${esc(r.cond.horaDe)}"></div>
+        <div class="fld" style="width:130px"><label>hasta las (Bogotá)</label><input type="time" id="regf-horaa" value="${esc(r.cond.horaA)}"></div>
+      </div>
+    </div>
+    <div style="background:var(--card2);border-radius:10px;padding:10px 12px;margin:8px 0">
+      <div style="font-size:12px;font-weight:800;margin-bottom:8px">⚡ ACCIONES</div>
+      <div class="fld"><label>📨 Enviar plantilla (nombre exacto aprobado en Meta — vacío = no enviar)</label><input id="regf-plantilla" value="${esc(r.acc.plantilla)}" placeholder="las demás acciones corren igual aunque esto quede vacío"></div>
+      <div class="fld"><label>🏷 Poner etiqueta</label><select id="regf-etiquetar"><option value="">— ninguna —</option>${etqOpts}</select></div>
+      <div class="fld"><label>📣 Avisar al admin (queda en la bitácora — vacío = no avisar)</label><input id="regf-aviso" value="${esc(r.acc.aviso)}"></div>
+      <label style="display:flex;gap:7px;align-items:center;font-size:12px;cursor:pointer;margin:6px 0"><input type="checkbox" id="regf-falla" ${r.acc.falla?'checked':''}> 🚨 Registrar como FALLA OPERATIVA (sale resaltada en la bitácora)</label>
+      <label style="display:flex;gap:7px;align-items:center;font-size:12px;cursor:pointer"><input type="checkbox" id="regf-parar" ${r.acc.parar!==false?'checked':''}> 🛑 Parar aquí: si esta regla dispara, no evaluar más reglas para este cliente hoy</label>
+    </div>
+    <div class="fld"><label>📝 Nota (explícale la regla a tu yo del futuro)</label><textarea id="regf-nota" rows="2" style="resize:vertical">${esc(r.nota)}</textarea></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
+      <button class="btn btn-sm" onclick="document.getElementById('reg-modal').remove()">Cancelar</button>
+      <button class="btn btn-sm btn-primary" onclick="_regGuardarForm('${esc(r.id)}')">💾 Guardar regla</button>
+    </div>
+  </div>`
+  document.body.appendChild(div)
+}
+window._regGuardarForm=async function(id){
+  const v=(x)=>document.getElementById('regf-'+x)?.value||''
+  const chk=(x)=>!!document.getElementById('regf-'+x)?.checked
+  const nombre=v('nombre').trim()
+  if(!nombre){alert('Ponle nombre a la regla.');return}
+  const horas=Math.min(Math.max(parseInt(v('horas'))||0,0),720)
+  const nueva={
+    id:id||('r_'+Date.now().toString(36)),nombre,sec:v('sec')||'reclame',
+    activa:id?(window._regState.reglas.find(x=>x.id===id)?.activa||false):false,
+    prioridad:parseInt(v('prio'))||99,desde:v('desde')==='entrante'?'entrante':'saliente',horas,
+    cond:{enviada:v('enviada').trim(),noEnviada:v('noenviada').trim(),entrega:v('entrega')||'cualquiera',ultOut:v('ultout')||'cualquiera',etqModo:v('etqmodo')||'cualquiera',etqLista:[],palabras:v('palabras').trim(),horaDe:v('horade'),horaA:v('horaa')},
+    acc:{plantilla:v('plantilla').trim(),etiquetar:v('etiquetar'),falla:chk('falla'),aviso:v('aviso').trim(),parar:chk('parar')},
+    nota:v('nota').trim()
+  }
+  const i=window._regState.reglas.findIndex(x=>x.id===nueva.id)
+  if(i>=0){nueva.arch=window._regState.reglas[i].arch||false;window._regState.reglas[i]=nueva}
+  else window._regState.reglas.push(nueva)
+  if(await _regGuardar()){document.getElementById('reg-modal')?.remove();cargarReglasAdmin()}
+}
+// ── 🧪 SIMULADOR — a quién le pegaría esta regla AHORA MISMO, sin enviar nada ──
+// Réplica en el navegador de la evaluación del servidor (solo lecturas).
+window._regSimular=async function(id){
+  const r=window._regState.reglas.find(x=>x.id===id);if(!r)return
+  const box=document.getElementById('reg-sim-'+id);if(!box)return
+  // Helpers PROPIOS: los del Centro de Chats (_wchEsc, _wchHace…) viven dentro de su IIFE y no se ven desde aquí
+  const _esc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+  const _telCorto=(t)=>{const d=String(t||'').replace(/\D/g,'');return d.startsWith('57')&&d.length>10?d.slice(2):d}
+  const _hace=(ts)=>{if(!ts)return '—';const m=Math.round((Date.now()-new Date(ts).getTime())/60000);if(m<60)return m+' min';const h=Math.round(m/60);if(h<48)return h+' h';return Math.round(h/24)+' días'}
+  const _SELLO='~wame'
+  box.innerHTML='<div class="loading" style="font-size:11px;margin-top:6px">🧪 Simulando (solo lectura, no envía nada)…</div>'
+  try{
+    const ahora=Date.now(),corte=new Date(ahora-(r.horas||0)*3600e3).toISOString()
+    const dir=r.desde==='entrante'?'in':'out'
+    // 1) Candidatos: conversaciones cuyo último mensaje es de esa dirección y ya venció el reloj
+    const{data:convs,error:e1}=await sb.from('conversaciones').select('id,telefono,nombre,ultimo_msg_en,ultimo_msg_dir,etiqueta').eq('ultimo_msg_dir',dir).lte('ultimo_msg_en',corte).order('ultimo_msg_en',{ascending:false}).limit(300)
+    if(e1)throw e1
+    let cand=(convs||[])
+    // 2) Etiqueta
+    if(r.cond.etqModo==='sin')cand=cand.filter(c=>!c.etiqueta||c.etiqueta===_SELLO)
+    // 3) Sección: el último envío de cada teléfono decide
+    const tels=cand.map(c=>c.telefono)
+    const secDe={},mapeoDe={}
+    for(let i=0;i<tels.length;i+=150){
+      const{data:evs}=await sb.from('envios_cola').select('telefono,seccion,mapeo_id,creado_en').in('telefono',tels.slice(i,i+150)).order('creado_en',{ascending:false}).limit(1000)
+      for(const ev of(evs||[])){if(!(ev.telefono in secDe)){secDe[ev.telefono]=ev.seccion;mapeoDe[ev.telefono]=ev.mapeo_id}}
+    }
+    cand=cand.filter(c=>secDe[c.telefono]===r.sec)
+    // 4) Entrega + quién mandó el último saliente
+    if(cand.length&&(r.cond.entrega!=='cualquiera'||r.cond.ultOut!=='cualquiera'||dir==='out')){
+      const ids=cand.map(c=>c.id),lastOut={}
+      for(let i=0;i<ids.length;i+=150){
+        const{data:outs}=await sb.from('mensajes').select('conversacion_id,usuario_id,estado,ts').in('conversacion_id',ids.slice(i,i+150)).eq('direccion','out').order('ts',{ascending:false}).limit(1200)
+        for(const m of(outs||[])){if(!(m.conversacion_id in lastOut))lastOut[m.conversacion_id]=m}
+      }
+      cand=cand.filter(c=>{
+        const lo=lastOut[c.id]
+        if(r.cond.entrega==='entregada'&&!(lo&&(lo.estado==='delivered'||lo.estado==='read')))return false
+        if(r.cond.entrega==='fallida'&&!(lo&&lo.estado==='failed'))return false
+        if(r.cond.ultOut==='auto'&&!(lo&&!lo.usuario_id))return false
+        if(r.cond.ultOut==='humano'&&!(lo&&lo.usuario_id))return false
+        return true
+      })
+    }
+    // 5) Palabras del último entrante
+    if(cand.length&&r.cond.palabras){
+      const pal=r.cond.palabras.split(',').map(x=>x.trim().toLowerCase()).filter(Boolean)
+      const ids=cand.map(c=>c.id),lastIn={}
+      for(let i=0;i<ids.length;i+=150){
+        const{data:ins}=await sb.from('mensajes').select('conversacion_id,cuerpo,ts').in('conversacion_id',ids.slice(i,i+150)).eq('direccion','in').order('ts',{ascending:false}).limit(1200)
+        for(const m of(ins||[])){if(!(m.conversacion_id in lastIn))lastIn[m.conversacion_id]=m}
+      }
+      cand=cand.filter(c=>{const t=String((lastIn[c.id]||{}).cuerpo||'').toLowerCase();return pal.some(p=>t.includes(p))})
+    }
+    // 6) Plantillas ya enviadas / por enviar (últimos 14 días)
+    if(cand.length&&(r.cond.enviada||r.cond.noEnviada)){
+      const d14=new Date(ahora-14*864e5).toISOString().slice(0,10)
+      const tt=cand.map(c=>c.telefono),tuvo={},tiene2={}
+      for(let i=0;i<tt.length;i+=150){
+        const nombres=[r.cond.enviada,r.cond.noEnviada].filter(Boolean)
+        const{data:evs}=await sb.from('envios_cola').select('telefono,plantilla,estado').in('telefono',tt.slice(i,i+150)).in('plantilla',nombres).gte('fecha',d14).limit(2000)
+        for(const ev of(evs||[])){
+          if(ev.plantilla===r.cond.enviada&&ev.estado==='enviado')tuvo[ev.telefono]=1
+          if(ev.plantilla===r.cond.noEnviada&&(ev.estado==='enviado'||ev.estado==='pendiente'))tiene2[ev.telefono]=1
+        }
+      }
+      cand=cand.filter(c=>(!r.cond.enviada||tuvo[c.telefono])&&(!r.cond.noEnviada||!tiene2[c.telefono]))
+    }
+    // 7) Horario (informativo: se evalúa a la hora en que el servidor corra)
+    let horaNota=''
+    if(r.cond.horaDe&&r.cond.horaA){
+      const hb=new Date().toLocaleTimeString('en-GB',{timeZone:'America/Bogota',hour:'2-digit',minute:'2-digit'})
+      const dentro=hb>=r.cond.horaDe&&hb<=r.cond.horaA
+      horaNota=`<div style="font-size:10.5px;color:var(--muted);margin-top:3px">🕐 Franja ${r.cond.horaDe}–${r.cond.horaA} Bogotá — ahora son las ${hb}: ${dentro?'DENTRO (dispararía ya)':'FUERA (esperaría a la franja)'}</div>`
+    }
+    box.innerHTML=`<div style="margin-top:7px;background:rgba(56,189,248,.08);border:1px dashed #38bdf8;border-radius:9px;padding:8px 11px">
+      <div style="font-size:11.5px;font-weight:800;color:#38bdf8">🧪 Simulación — le pegaría a ${cand.length} cliente(s) AHORA. No se envió nada.</div>
+      ${horaNota}
+      ${cand.length?`<div style="max-height:170px;overflow-y:auto;margin-top:5px">${cand.slice(0,60).map(c=>`<div style="font-size:11px;padding:2px 0;border-bottom:1px solid var(--border)">${_esc(c.nombre||'Sin nombre')} · ${_esc(_telCorto(c.telefono))} · último msj hace ${_hace(c.ultimo_msg_en)}</div>`).join('')}${cand.length>60?`<div style="font-size:10.5px;color:var(--muted);padding:3px 0">… y ${cand.length-60} más</div>`:''}</div>`:'<div style="font-size:11px;color:var(--muted);margin-top:4px">Nadie cumple todas las condiciones en este momento.</div>'}
+      <div style="font-size:10px;color:var(--muted);margin-top:5px">Los frenos del motor (tope por cliente/día, antibucle, dedupe) se aplican encima de esta lista al momento real del disparo.</div>
+      <button class="btn-sm btn-outline" style="font-size:10.5px;margin-top:5px" onclick="document.getElementById('reg-sim-${id}').innerHTML=''">✕ Cerrar simulación</button>
+    </div>`
+    logAction('wa_regla_simulada',{regla:id,coincidencias:cand.length}).catch(()=>{})
+  }catch(e){box.innerHTML='<div class="alert alert-red" style="font-size:11px;margin-top:6px">❌ Simulación falló: '+_esc(e.message||String(e))+'</div>'}
 }
 
 // (28jul26) 🌐 Crea la sección de TEXTOS GENERALES con un clic (mismo patrón
@@ -18826,6 +19213,7 @@ async function waEncolarSeccionAuto(seccion,itemsRaw){
       const parametros=vars.map(tag=>_waValorReal(tag,m))
       const telFull=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
       if(_cerr&&_cerr.has(telFull))continue // (F3) cerrado vigente en el chat → no disparar
+      if(m.id==null)continue // 🛡️ (Mejora #8) sin pedido no se encola: mapeo_id null esquiva el índice único y multiplica copias
       const{error}=await sb.from('envios_cola').insert({
         mapeo_id:m.id,telefono:telFull,nombre:m.nombre||null,
         seccion,tipo:null,plantilla:tpl.nombre,parametros,origen:'cruce'
@@ -18886,8 +19274,10 @@ async function waEncolarNovedadesAuto(items){
       const conv=_waTplConvertir(proto.msg)
       const parametros=conv.vars.map(tag=>_waValorReal(tag,m))
       const telFull=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+      const _mapIdN=m.id||m.mapeoId||null
+      if(_mapIdN==null)continue // 🛡️ (Mejora #8) sin pedido no se encola: mapeo_id null esquiva el índice único (así nacieron las 6 copias del 28jul26)
       const{error}=await sb.from('envios_cola').insert({
-        mapeo_id:m.id||m.mapeoId||null,telefono:telFull,nombre:m.nombre||null,
+        mapeo_id:_mapIdN,telefono:telFull,nombre:m.nombre||null,
         seccion:'novedades',tipo:m.cat.tipo,plantilla,parametros,origen:'cruce'
       })
       window._waEncoladoHoy.set.add(clave)
@@ -19564,6 +19954,8 @@ window.waDespacharItem=async(seccion,raw)=>{
     const parametros=vars.map(tag=>_waValorReal(tag,m))
     const telFull=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
     if(!confirm('▶️ Despachar por API:\n\nPlantilla: '+tpl.nombre+'\nA: '+(m.nombre||'')+' ('+telFull+')\n\n¿Enviar?'))return
+    // 🛡️ (Mejora #8) Sin mapeo_id el índice único NO aplica → dedupe por teléfono contra la BASE
+    if(m.id==null&&await _waYaEncoladoHoy(telFull,tpl.nombre)){waToast('⚠️ Esa plantilla ya está encolada o enviada HOY a este teléfono. No se duplica.','aviso');return}
     const{data:fila,error}=await sb.from('envios_cola').insert({
       mapeo_id:m.id,telefono:telFull,nombre:m.nombre||null,
       seccion,tipo:null,plantilla:tpl.nombre,parametros,
@@ -19679,14 +20071,43 @@ async function cargarWaCola(){
     const{data,error}=await sb.from('envios_cola').select('*').eq('fecha',hoyBog).order('creado_en',{ascending:false}).limit(200)
     if(error)throw error
     const rows=data||[]
-    const cnt=(e)=>rows.filter(r=>r.estado===e).length
+    // (28jul26 · Mejora #5) CONTEOS REALES con count exact — antes se contaba
+    // dentro de las 200 filas más recientes y los números mentían (decía 0
+    // enviados y 200 pendientes cuando había 2 y 510).
+    const _cReal={enviado:0,pendiente:0,sin_plantilla:0,fallido:0,cancelado:0}
+    try{
+      const _cQ=async(e)=>{const{count}=await sb.from('envios_cola').select('id',{count:'exact',head:true}).eq('fecha',hoyBog).eq('estado',e);return count||0}
+      const _cr=await Promise.all([_cQ('enviado'),_cQ('pendiente'),_cQ('sin_plantilla'),_cQ('fallido'),_cQ('cancelado')])
+      _cReal.enviado=_cr[0];_cReal.pendiente=_cr[1];_cReal.sin_plantilla=_cr[2];_cReal.fallido=_cr[3];_cReal.cancelado=_cr[4]
+    }catch(_){const f=(e)=>rows.filter(r=>r.estado===e).length;_cReal.enviado=f('enviado');_cReal.pendiente=f('pendiente');_cReal.sin_plantilla=f('sin_plantilla');_cReal.fallido=f('fallido');_cReal.cancelado=f('cancelado')}
+    const cnt=(e)=>_cReal[e]||0
+    // (28jul26 · Mejora #7) 🫀 SEMÁFORO DEL DESPACHADOR — wa-dispatch escribe su
+    // latido en config 'wa_dispatch_latido' en CADA corrida. Si lleva >15 min
+    // mudo, alarma roja: hoy un 401 silencioso frenó 510 envíos un día entero.
+    let _latHtml=''
+    try{
+      const _latRaw=await getConfig('wa_dispatch_latido')
+      if(_latRaw){
+        const _lat=JSON.parse(_latRaw)
+        const _min=Math.round((Date.now()-new Date(_lat.ts).getTime())/60000)
+        const _vivo=_min<=15
+        _latHtml=`<div style="background:${_vivo?'rgba(34,197,94,.10)':'rgba(239,68,68,.12)'};border:1px solid ${_vivo?'var(--green)':'var(--red)'};border-radius:10px;padding:9px 12px;margin-bottom:10px;font-size:12px">
+          <strong style="color:${_vivo?'var(--green)':'var(--red)'}">${_vivo?'🫀 Despachador VIVO':'🚨 Despachador MUDO'}</strong>
+          · última corrida hace ${_min} min · procesó ${_lat.procesados??'?'} · envió ${_lat.enviados??'?'}${_lat.motor_eval!=null?` · motor: ${_lat.motor_eval} regla(s) evaluadas`:''}${_lat.error?` · <span style="color:var(--red)">${_waEsc(_lat.error)}</span>`:''}
+          ${_vivo?'':'<div style="margin-top:4px;color:var(--red);font-weight:700">⚠️ Lleva más de 15 min sin reportar. Revisa: Verify JWT desmarcado en wa-dispatch, el cron wa-dispatch-5min, y net._http_response en Supabase.</div>'}
+        </div>`
+      }else{
+        _latHtml=`<div style="background:rgba(148,163,184,.08);border:1px dashed var(--border);border-radius:10px;padding:9px 12px;margin-bottom:10px;font-size:12px;color:var(--muted)">🫀 Sin latido del despachador todavía — se registra solo cuando la versión nueva de wa-dispatch esté desplegada y corra su primera vez.</div>`
+      }
+    }catch(_){}
     const chip=(e)=>({pendiente:'🕓',sin_plantilla:'⚠️',enviado:'✅',fallido:'❌',cancelado:'🚫'})[e]||e
-    el.innerHTML=`<div class="cards-row c4" style="margin-bottom:12px">
+    el.innerHTML=`${_latHtml}<div class="cards-row c4" style="margin-bottom:12px">
       <div class="card" style="border-left:3px solid var(--green)"><div class="card-label">✅ Enviados hoy</div><div class="card-val" style="color:var(--green)">${cnt('enviado')}</div></div>
       <div class="card" style="border-left:3px solid var(--blue)"><div class="card-label">🕓 Pendientes</div><div class="card-val" style="color:var(--blue)">${cnt('pendiente')}</div></div>
       <div class="card" style="border-left:3px solid var(--amber)"><div class="card-label">⚠️ Sin plantilla</div><div class="card-val" style="color:var(--amber)">${cnt('sin_plantilla')}</div></div>
-      <div class="card" style="border-left:3px solid var(--red)"><div class="card-label">❌ Fallidos</div><div class="card-val" style="color:var(--red)">${cnt('fallido')}</div></div>
+      <div class="card" style="border-left:3px solid var(--red)"><div class="card-label">❌ Fallidos · 🚫 ${cnt('cancelado')} cancel.</div><div class="card-val" style="color:var(--red)">${cnt('fallido')}</div></div>
     </div>
+    ${rows.length>=200?`<div style="font-size:10.5px;color:var(--muted);margin-bottom:8px">📊 Los contadores de arriba son de TODA la cola de hoy (conteo real). La lista de abajo muestra las 200 filas más recientes.</div>`:''}`+`
     ${cnt('sin_plantilla')>0?`<div class="alert alert-amber" style="margin-bottom:10px">⚠️ Hay envíos esperando plantilla. Créala en Textos, apruébala en la card de Plantillas, y se reintentan solos.</div>`:''}
     ${rows.length?`<div style="max-height:280px;overflow-y:auto">${rows.slice(0,30).map(r=>`
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:11.5px;border-bottom:1px solid var(--border);padding:6px 2px;flex-wrap:wrap">
@@ -39976,6 +40397,12 @@ try{if(hbTrabajoPendiente())history.pushState({hbGuard:1},'',location.href)}catc
 
 // ── Rieles automáticos: clave interna FIJA (la usa la lógica) + decorado editable ──
 const WCH_RIELES_DEF={
+  // (28jul26 · Mejora #2) 📤 Disparada se parte por ENTREGA REAL (mensajes.estado del último saliente):
+  //   sent → ⏳ Sin confirmar · delivered/read → ✅ Entregada · failed → ❌ No entregada.
+  // 'disparada' queda como cajón residual: encolada o sin dato de estado aún.
+  sinconf:{n:'Sin confirmar',e:'⏳',c:'#eab308'},
+  entregada:{n:'Entregada',e:'✅',c:'#22c55e'},
+  noentrega:{n:'No entregada',e:'❌',c:'#ef4444'},
   disparada:{n:'Disparada',e:'📤',c:'#64748b'},
   respondio:{n:'Respondió',e:'🆕',c:'#f59e0b'},
   conversando:{n:'En conversación',e:'💬',c:'#22d3ee'}, // (28jul26) escribió y YA hubo respuesta humana antes
@@ -40068,6 +40495,9 @@ async function _wchCatLoad(force){
       ],
       cancelados:[
         {id:'s_ca_no',n:'Ya dijo que NO',e:'🚫',c:'#ef4444',cierre:true,arch:false}
+      ],
+      reclame:[ // (28jul26 · Motor de reglas) alarma operativa: el cliente escribió y quedó 24h sin atención — el motor la estampa; el auxiliar la ve ROJA y atiende de una
+        {id:'s_re_sinat24',n:'Sin atención 24h',e:'⚠️',c:'#ef4444',cierre:false,arch:false}
       ]
     }
     for(const _sk in _defsSec){
@@ -40158,9 +40588,22 @@ function _wchDerivar(c){
     return {tipo:'riel',clave:'respondio',ts:c.ultimo_msg_en}
   }
   if(c.ultimo_msg_dir==='out'){
-    // salió el último mensaje: ¿humano (atendida) o automático (sigue disparada)?
+    // salió el último mensaje: ¿humano (atendida) o automático?
     if(c._lastOutHum)return {tipo:'riel',clave:'atendida',ts:c.ultimo_msg_en}
+    // (28jul26 · Mejora #2) automático → clasificar por ENTREGA REAL (mensajes.estado):
+    // failed → ❌ · delivered/read → ✅ · sent/accepted → ⏳ · sin dato → 📤 (como siempre)
+    const _de=c._lastOutEstado
+    if(_de==='failed')return {tipo:'riel',clave:'noentrega',ts:c.ultimo_msg_en,err:c._lastOutErr||null}
+    if(_de==='delivered'||_de==='read')return {tipo:'riel',clave:'entregada',ts:c.ultimo_msg_en}
+    if(_de==='sent'||_de==='accepted')return {tipo:'riel',clave:'sinconf',ts:c.ultimo_msg_en}
     return {tipo:'riel',clave:'disparada',ts:c.ultimo_msg_en}
+  }
+  // (28jul26 · Mejora #3) fila sintética (encolada sin conversación): el estado
+  // REAL del envío manda — enviado→⏳ (Meta aceptó, sin confirmación) ·
+  // fallido→❌ · pendiente/sin_plantilla/cancelado→📤 (el texto de la tarjeta dice cuál).
+  if(c._sinConv&&c._envEstado){
+    if(c._envEstado==='fallido')return {tipo:'riel',clave:'noentrega',ts:null}
+    if(c._envEstado==='enviado')return {tipo:'riel',clave:'sinconf',ts:null}
   }
   return {tipo:'riel',clave:'disparada',ts:null} // encolada/sin mensajes aún
 }
@@ -40296,9 +40739,13 @@ async function _wchCargar(){
       }catch(_){}
     }else{
       // 1) Envíos de la sección del día seleccionado
-      const{data:envs,error:e1}=await sb.from('envios_cola').select('telefono,seccion,fecha').eq('seccion',sec).eq('fecha',diaSel).limit(1500)
+      // (Mejora #3) también su ESTADO — el más reciente por teléfono, para que la
+      // tarjeta sin hilo diga la verdad (🕓 en cola / ❌ falló / 🚫 cancelado) en
+      // vez de caer siempre en "Disparada".
+      const{data:envs,error:e1}=await sb.from('envios_cola').select('telefono,seccion,fecha,estado,creado_en').eq('seccion',sec).eq('fecha',diaSel).order('creado_en',{ascending:false}).limit(1500)
       if(e1)throw e1
-      for(const ev of(envs||[])){const t=_wchTel(ev.telefono);if(t){tels.add(t);secDe[t]=ev.seccion}}
+      const _envEstDe={}
+      for(const ev of(envs||[])){const t=_wchTel(ev.telefono);if(t){tels.add(t);secDe[t]=ev.seccion;if(!(t in _envEstDe))_envEstDe[t]=ev.estado}}
       // (28jul26) 🗂️ Vista FECHA: también entra la actividad OPERATIVA de ese día
       // (resoluciones/avisos/programaciones/gestiones) — misma fuente que la sección.
       let _opDia={}
@@ -40332,7 +40779,7 @@ async function _wchCargar(){
       const yaIds=new Set(base.map(c=>c.id))
       // Encolados hoy que aún no tienen conversación (fila sintética: estado 📤)
       const telsCon=new Set(base.map(c=>c.telefono))
-      for(const t of telArr){if(!telsCon.has(t))base.push({id:null,telefono:t,_sinConv:true,_tieneEnvio:true})}
+      for(const t of telArr){if(!telsCon.has(t))base.push({id:null,telefono:t,_sinConv:true,_tieneEnvio:true,_envEstado:_envEstDe[t]||null})}
       if(!fecha){for(const c of vivas){if(!yaIds.has(c.id)&&secDe[c.telefono]===sec){base.push(c);yaIds.add(c.id)}}}
       // (28jul26 · F2) CASCADA DE RASTRO — solo en vista HOY y solo para lo que
       // envios_cola no cubrió. Trae a SU sección a los históricos (resueltos antes
@@ -40426,7 +40873,7 @@ async function _wchEnriquecer(convs,secDe){
   const ids=convs.filter(c=>c.id).map(c=>c.id)
   const lastOut={}
   for(let i=0;i<ids.length;i+=150){
-    const{data:outs}=await sb.from('mensajes').select('conversacion_id,ts,usuario_id').in('conversacion_id',ids.slice(i,i+150)).eq('direccion','out').order('ts',{ascending:false}).limit(1200)
+    const{data:outs}=await sb.from('mensajes').select('conversacion_id,ts,usuario_id,estado,error_detalle').in('conversacion_id',ids.slice(i,i+150)).eq('direccion','out').order('ts',{ascending:false}).limit(1200)
     for(const m of(outs||[])){if(!(m.conversacion_id in lastOut))lastOut[m.conversacion_id]=m}
   }
   // (28jul26) UNA sola consulta más por lote para dos preguntas:
@@ -40447,6 +40894,8 @@ async function _wchEnriquecer(convs,secDe){
   for(const c of convs){
     const lo=c.id?lastOut[c.id]:null
     c._lastOutHum=!!(lo&&lo.usuario_id)
+    c._lastOutEstado=(lo&&lo.estado)||null // (Mejora #2) sent/delivered/read/failed del último saliente
+    c._lastOutErr=(lo&&lo.error_detalle)||null
     c._algunOutHum=!!(c.id&&conHum.has(c.id))
     c._algunIn=!!(c.id&&conIn.has(c.id))
     c._numIn=c.id?(numIn[c.id]||0):0
@@ -40463,7 +40912,7 @@ function _wchAplicarVista(){
     lista=lista.filter(c=>{
       const e=c._est
       if(e.tipo==='manual'){const et=_wchEtqPorId(e.id);return !(et&&et.cierre)}
-      if(e.clave==='disparada'){const h=_wchHrs(e.ts);return h==null||h<diasOcultar*24}
+      if(e.clave==='disparada'||e.clave==='sinconf'||e.clave==='entregada'){const h=_wchHrs(e.ts);return h==null||h<diasOcultar*24} // (Mejora #2) los salientes quietos se ocultan viejos; ❌ noentrega NUNCA se oculta: es acción pendiente
       return true
     })
   }
@@ -40472,7 +40921,7 @@ function _wchAplicarVista(){
   }
   const b=(st.busca||'').trim().toLowerCase()
   if(b)lista=lista.filter(c=>(c.telefono||'').includes(b.replace(/\D/g,''))&&b.replace(/\D/g,'')||String(c.nombre||'').toLowerCase().includes(b)||(c.telefono||'').includes(b))
-  const peso={respondio:0,conversando:1,atendida:2,volvio:3,volvio_viejo:4,wame:5,disparada:6} // (28jul26) 🆕→💬→🟣→🔁→🕰️→📲/manuales→📤
+  const peso={respondio:0,conversando:1,atendida:2,volvio:3,volvio_viejo:4,wame:5,noentrega:6,sinconf:7,disparada:8,entregada:9} // (28jul26 · Mejora #2) 🆕→💬→🟣→🔁→🕰️→📲/manuales→❌→⏳→📤→✅
   lista.sort((a,b2)=>{
     const pa=a._est.tipo==='manual'?5:peso[a._est.clave],pb=b2._est.tipo==='manual'?5:peso[b2._est.clave]
     if(pa!==pb)return pa-pb
@@ -41201,7 +41650,7 @@ async function _wchTabsBadges(){
 // ── FRANJA (tubería) — se construye UNA vez por sección; contadores se actualizan EN EL SITIO ──
 function _wchChipsOrden(){
   const st=window._wchState,cat=st.cat
-  const rieles=['disparada','respondio','conversando','atendida','volvio','volvio_viejo','wame'].map(k=>({tipo:'riel',clave:k,...cat.rieles[k]}))
+  const rieles=['sinconf','entregada','noentrega','disparada','respondio','conversando','atendida','volvio','volvio_viejo','wame'].map(k=>({tipo:'riel',clave:k,...cat.rieles[k]})) // (Mejora #2) el flujo real: ⏳→✅/❌→📤 residual→🆕→💬→🟣→🔁→🕰️→📲
   // (28jul26) 🗓️ etapa CERO de Pend.Conf: pedidos pendientes SIN fecha programada.
   // DERIVADA (el sistema la calcula sola — nadie la pone a mano, así el contador
   // nunca miente). Va ANTES de Disparada: sin fecha no hay plantilla de 2 días antes.
@@ -41379,13 +41828,13 @@ async function _wchNoDispCargar(){
   const st=window._wchState
   try{
     const fechas=st.fecha?[st.fecha]:[today(),_daysAgo(1)]
-    const{data,error}=await sb.from('envios_cola').select('id,telefono,nombre,plantilla,estado,error_detalle,fecha,creado_en').eq('seccion',st.sec).in('fecha',fechas).in('estado',['pendiente','sin_plantilla','fallido']).order('creado_en',{ascending:false}).limit(300)
+    const{data,error}=await sb.from('envios_cola').select('id,telefono,nombre,plantilla,estado,error_detalle,fecha,creado_en').eq('seccion',st.sec).in('fecha',fechas).in('estado',['pendiente','sin_plantilla','fallido','cancelado']).order('creado_en',{ascending:false}).limit(300) // (Mejora #3) + cancelado: antes se colaba por ambos lados
     if(error)throw error
     const items=data||[]
     window._wchNoDispState={items}
     document.querySelectorAll('[data-wchn="nodisp"]').forEach(cnt=>{cnt.textContent=items.length})
     if(!items.length){box.innerHTML='<div style="background:rgba(34,197,94,.10);border:1px solid var(--green);border-radius:10px;padding:11px;font-size:12.5px;color:var(--green);text-align:center;margin-bottom:8px">✅ Todo lo encolado de '+(st.fecha?('el '+st.fecha):'HOY y AYER')+' salió disparado — cero errores en silencio.</div>';return}
-    const chipE=(e)=>({pendiente:'🕓 pendiente (aún en cola)',sin_plantilla:'⚠️ sin plantilla aprobada',fallido:'❌ falló'})[e]||e
+    const chipE=(e)=>({pendiente:'🕓 pendiente (aún en cola)',sin_plantilla:'⚠️ sin plantilla aprobada',fallido:'❌ falló',cancelado:'🚫 cancelado'})[e]||e
     box.innerHTML=`<div style="background:rgba(239,68,68,.10);border:1px solid var(--red);border-radius:10px;padding:9px 11px;margin-bottom:8px">
       <div style="font-size:12px;font-weight:800;color:var(--red)">⚠️ ${items.length} envío(s) encolado(s) que NO han salido (${st.fecha?('el '+st.fecha):'hoy y ayer'}). Para días anteriores usa el selector de 📅 fecha de arriba.</div>
     </div>`+items.map(it=>{
@@ -41498,11 +41947,11 @@ function _wchListaRender(){
           <button onclick="navigator.clipboard.writeText('${_wchTelCorto(tel)}');this.textContent='✅';setTimeout(()=>this.textContent='📋',900)" title="Copiar número" style="background:none;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;padding:1px 5px;color:var(--text)">📋</button>
           ${noL}<span data-wchchip="${_wchEsc(String(c.id||c.telefono||''))}" style="display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap">${chip}</span>${reintro}
         </div>
-        <div style="font-size:10.5px;color:var(--muted)">${c.ultimo_msg_en?('hace '+_wchHace(c.ultimo_msg_en)):(c._sinConv?(c._opDia?'sin conversación (gestión de sección)':'encolado, sin conversación aún'):'')}</div>
+        <div style="font-size:10.5px;color:var(--muted)">${c.ultimo_msg_en?('hace '+_wchHace(c.ultimo_msg_en)):(c._sinConv?(c._envEstado?({pendiente:'🕓 en cola, aún NO se ha enviado',sin_plantilla:'⚠️ esperando plantilla aprobada — NO enviado',fallido:'<span style="color:var(--red);font-weight:700">❌ el envío FALLÓ</span>',cancelado:'🚫 envío cancelado',enviado:'⏳ enviado, sin confirmación de entrega aún'})[c._envEstado]||('estado: '+_wchEsc(c._envEstado)):(c._opDia?'sin conversación (gestión de sección)':'encolado, sin conversación aún')):'')}</div>
       </div>
       ${c._opDia&&c._opDia.length?`<div style="margin-top:6px;padding:6px 9px;background:rgba(255,255,255,.03);border:1px dashed var(--border);border-radius:8px;font-size:10.5px;color:var(--muted)">🗂️ Ese día: ${c._opDia.slice(0,3).map(ev=>`<span style="color:var(--text)">${_wchEsc(ev.txt)}</span>${ev.usuario?' <span style="opacity:.7">por '+_wchEsc(ev.usuario)+'</span>':''} <span style="opacity:.6">${_horaBog(ev.ts)}</span>`).join(' · ')}${c._opDia.length>3?' · +'+(c._opDia.length-3)+' más':''}</div>`:''}
       <div style="display:flex;gap:6px;margin-top:7px;flex-wrap:wrap">
-        ${c.id?`<button class="btn-sm btn-primary" onclick="_wchChatAbrir('${c.id}')">👁 Ver conversación</button>`:(c._opDia?`<button class="btn-sm btn-outline" data-gtel="${_wchEsc(String(c.telefono||''))}" data-gsec="${c._sec||st.sec}" data-gnom="${_wchEsc(c.nombre||'')}" onclick="_wchTplModal(this)">📨 Plantillas</button>`:`<span style="font-size:11px;color:var(--muted);align-self:center">El hilo aparece cuando salga o entre el primer mensaje.</span>`)}
+        ${c.id?`<button class="btn-sm btn-primary" onclick="_wchChatAbrir('${c.id}')">👁 Ver conversación</button>`:`<button class="btn-sm btn-primary" onclick="_wchChatAbrirTel('${tel}','${_wchEsc(String(c.nombre||'')).replace(/'/g,'')}')" title="Abre el panel de conversación — si aún no hay hilo, lo crea vacío listo para escribir">👁 Ver conversación</button>${c._opDia?`<button class="btn-sm btn-outline" data-gtel="${_wchEsc(String(c.telefono||''))}" data-gsec="${c._sec||st.sec}" data-gnom="${_wchEsc(c.nombre||'')}" onclick="_wchTplModal(this)">📨 Plantillas</button>`:''}`}
         <button class="btn-sm btn-outline" onclick="_wchWaMe('${c.id||''}','${tel}',true)" title="Abre WhatsApp con el protocolo de la sección copiado">📱 WhatsApp</button>
         <button class="btn-sm btn-outline" onclick="_wchWaMe('${c.id||''}','${tel}',false)" title="Abre el chat limpio para llamar">📞 Llamar</button>
       </div>
@@ -41533,6 +41982,39 @@ window._wchWaMe=async function(convId,tel,conTexto){
   }
 }
 
+// ── 👁 (28jul26 · Mejora #1) VER CONVERSACIÓN SIN HILO AÚN ──────────────────
+// Las tarjetas encoladas sin fila en `conversaciones` (id null) ahora también
+// abren el MISMO panel de siempre. Resuelve por teléfono: si el hilo ya nació
+// (p. ej. el despachador lo creó hace un minuto), lo abre; si no, crea la fila
+// vacía con el MISMO patrón que usa wa-dispatch (telefono + nombre +
+// origen 'nexo') y abre el panel listo para escribir. Tolerante a RLS: si el
+// insert no confirma, avisa claro y no rompe nada.
+window._wchChatAbrirTel=async function(tel,nombre){
+  const st=window._wchState
+  const telFull=_wchTel(tel)
+  if(!telFull){try{waToast('❌ Teléfono inválido.','error')}catch(_){alert('Teléfono inválido.')}return}
+  try{
+    // 1) ¿Ya existe el hilo? (puede haber nacido después de pintar la lista)
+    let cid=null,fila=null
+    const{data:ya}=await sb.from('conversaciones').select('id,telefono,nombre,ultimo_msg_en,ultimo_msg_dir,ventana_24h_hasta,no_leidos,requiere_reintro,etiqueta,etiqueta_en,origen,wa_numero_id').eq('telefono',telFull).order('id',{ascending:true}).limit(1)
+    if(ya&&ya.length){cid=ya[0].id;fila=ya[0]}
+    else{
+      // 2) No existe → nace vacío (mismo patrón de wa-dispatch/wa-send)
+      const{data:nueva,error:eIns}=await sb.from('conversaciones').insert({telefono:telFull,nombre:nombre||null,origen:'nexo'}).select('id,telefono,nombre,ultimo_msg_en,ultimo_msg_dir,ventana_24h_hasta,no_leidos,requiere_reintro,etiqueta,etiqueta_en,origen,wa_numero_id').single()
+      if(eIns||!nueva||!nueva.id)throw new Error((eIns&&eIns.message)||'la base no confirmó la conversación (¿RLS de INSERT en conversaciones?)')
+      cid=nueva.id;fila=nueva
+    }
+    // 3) Meterla al estado en memoria (reemplaza la sintética de ese teléfono) y abrir
+    const sint=st.convs.find(x=>!x.id&&_wchTel(x.telefono)===telFull)
+    if(sint){Object.assign(sint,fila);sint._sinConv=false;sint._est=_wchDerivar(sint)}
+    else if(!st.convs.find(x=>x.id===cid)){fila._est=_wchDerivar(fila);st.convs.push(fila)}
+    _wchAplicarVista();_wchListaRender()
+    await window._wchChatAbrir(cid)
+  }catch(e){
+    const msg=e&&e.message?e.message:String(e)
+    try{waToast('❌ No se pudo abrir: '+msg,'error')}catch(_){alert('❌ No se pudo abrir la conversación: '+msg)}
+  }
+}
 // ── MODAL 2 — la conversación ──
 window._wchChatAbrir=async function(convId){
   const st=window._wchState
@@ -42279,7 +42761,7 @@ window._wchEnviarTpl=async function(convId,tel,nombreTpl,esReintro){
   }
   let parametros
   try{
-    const{data:tp}=await sb.from('wa_plantillas').select('variables').eq('nombre',nombreTpl).limit(1)
+    const{data:tp}=await sb.from('wa_plantillas').select('variables').eq('nombre',nombreTpl).order('estado',{ascending:true}).limit(1) // (Mejora #6) APPROVED gana ante duplicados por WABA — limit(1) sin order era moneda al aire
     const vars=(tp&&tp[0]&&Array.isArray(tp[0].variables))?tp[0].variables:[]
     parametros=vars.map(tag=>{
       if(tag==='[NOMBRE]')return (c&&c.nombre)||'cliente'

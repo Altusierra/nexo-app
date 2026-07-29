@@ -13570,6 +13570,7 @@ async function cargarNovedadesPorFecha(){
         }
       }
       return{
+        id:it.mapeo_id||null, // 🔗 (29jul26) vínculo al pedido: sin esto el encolador salta la fila en silencio
         tel:it.telefono,orden_id:it.orden_id,guia:it.guia,nombre:it.cliente_nombre,
         carrier:it.carrier,ciudad:it.ciudad,depto:it.depto,direccion:it.direccion,
         producto:it.producto,causal:it.causal,aclaracion:it.aclaracion,
@@ -13986,6 +13987,7 @@ window.procesarNovedadesXlsx=async()=>{
 
       // Traer items actuales del reporte
       const{data:existingItems}=await _sbFetchAll((_f,_t)=>sb.from('novedades_items').select('id,telefono,orden_id').eq('reporte_id',reporteId).order('id',{ascending:true}).range(_f,_t))
+      const _mapIds=await _nxResolverMapeoIds(items) // 🔗 (29jul26) el vínculo al pedido se resuelve UNA vez, aquí en la ingesta
       const existingByKey={}
       for(const ei of (existingItems||[])){
         const k=(ei.telefono||'')+'|'+(ei.orden_id||'')
@@ -14001,7 +14003,7 @@ window.procesarNovedadesXlsx=async()=>{
         if(seenKeys[k])continue
         seenKeys[k]=true
         const row={
-          reporte_id:reporteId,fecha_lote:fechaLote,
+          reporte_id:reporteId,fecha_lote:fechaLote,mapeo_id:_nxMapeoIdDe(_mapIds,it), // 🔗 (29jul26)
           telefono:it.tel,orden_id:it.ordenId||null,guia:it.guia||null,
           cliente_nombre:it.nombre||null,carrier:it.carrier||null,
           ciudad:it.ciudad||null,depto:it.depto||null,direccion:it.direccion||null,
@@ -14048,8 +14050,9 @@ window.procesarNovedadesXlsx=async()=>{
       if(repErr){msg.innerHTML=`<div class="alert alert-red">Error guardando reporte: ${repErr.message}</div>`;return}
       reporteId=newRep.id
 
+      const _mapIdsN=await _nxResolverMapeoIds(items) // 🔗 (29jul26) vínculo resuelto en la ingesta
       const itemsInsert=items.map(it=>({
-        reporte_id:reporteId,fecha_lote:fechaLote,
+        reporte_id:reporteId,fecha_lote:fechaLote,mapeo_id:_nxMapeoIdDe(_mapIdsN,it), // 🔗 (29jul26)
         telefono:it.tel,orden_id:it.ordenId||null,guia:it.guia||null,
         cliente_nombre:it.nombre||null,carrier:it.carrier||null,
         ciudad:it.ciudad||null,depto:it.depto||null,direccion:it.direccion||null,
@@ -14900,6 +14903,7 @@ async function cargarReclamePorFecha(){
       const env=enviosMap[k]||{count:0,ultimo:null,usuario:null}
       const res=resueltasMap[k]||null
       return{
+        id:it.mapeo_id||null, // 🔗 (29jul26) vínculo al pedido: sin esto el encolador salta la fila en silencio
         tel:it.telefono,guia:it.guia,nombre:it.cliente_nombre,
         carrier:it.carrier,ciudad:it.ciudad,depto:it.depto,direccion:it.direccion,
         producto:prodByTel[it.telefono]||it.producto,cantidad:it.cantidad,orden_id:it.orden_id,precio_dropi:precioByTel[it.telefono]??null,
@@ -15222,6 +15226,7 @@ window.procesarReclameXlsx=async()=>{
 
       // Traer items actuales del reporte
       const{data:existingItems}=await _sbFetchAll((_f,_t)=>sb.from('reclame_items').select('id,telefono,guia').eq('reporte_id',reporteId).order('id',{ascending:true}).range(_f,_t))
+      const _mapIds=await _nxResolverMapeoIds(items) // 🔗 (29jul26) el vínculo al pedido se resuelve UNA vez, aquí en la ingesta
       const existingByKey={}
       for(const ei of (existingItems||[])){
         const k=(ei.telefono||'')+'|'+(ei.guia||'')
@@ -15237,7 +15242,7 @@ window.procesarReclameXlsx=async()=>{
         if(seenKeys[k])continue
         seenKeys[k]=true
         const row={
-          reporte_id:reporteId,fecha_lote:fechaLote,
+          reporte_id:reporteId,fecha_lote:fechaLote,mapeo_id:_nxMapeoIdDe(_mapIds,it), // 🔗 (29jul26)
           telefono:it.tel,orden_id:it.ordenId||null,guia:it.guia||null,
           cliente_nombre:it.nombre||null,carrier:it.carrier||null,
           ciudad:it.ciudad||null,depto:it.depto||null,direccion:it.direccion||null,
@@ -15281,8 +15286,9 @@ window.procesarReclameXlsx=async()=>{
       if(repErr){msg.innerHTML=`<div class="alert alert-red">Error guardando: ${repErr.message}</div>`;return}
       reporteId=newRep.id
 
+      const _mapIdsN=await _nxResolverMapeoIds(items) // 🔗 (29jul26) vínculo resuelto en la ingesta
       const itemsInsert=items.map(it=>({
-        reporte_id:reporteId,fecha_lote:fechaLote,
+        reporte_id:reporteId,fecha_lote:fechaLote,mapeo_id:_nxMapeoIdDe(_mapIdsN,it), // 🔗 (29jul26)
         telefono:it.tel,orden_id:it.ordenId||null,guia:it.guia||null,
         cliente_nombre:it.nombre||null,carrier:it.carrier||null,
         ciudad:it.ciudad||null,depto:it.depto||null,direccion:it.direccion||null,
@@ -19292,6 +19298,46 @@ window.waF3Cargar=async function(){
 }
 // ── 🤖 ENCOLADOR AUTOMÁTICO (4 secciones) ──
 // Normaliza items de cualquier sección al formato que entiende _waValorReal
+// ── 🔗 RESOLVER DE MAPEO_ID (29jul26) — LA RAÍZ DEL INCIDENTE DEL 28jul ──────
+// novedades_items y reclame_items nacían del Excel SIN saber a qué pedido
+// pertenecían. Cada lector lo reinventaba (o no lo hacía), así que el encolador
+// recibía mapeo_id=null y el guardia de la Mejora #8 saltaba el 100% de los
+// pedidos EN SILENCIO: 0 encolados, 0 errores, 0 rastro.
+// Aquí el vínculo se resuelve UNA vez, en la INGESTA, y todo aguas abajo lo
+// hereda. Llave principal: orden_id → mapeos.dropi_order_id (exacta: 1 pedido =
+// 1 mapeo). Respaldo: teléfono → mapeo más reciente, para filas sin orden_id.
+// Devuelve un Map con dos tipos de llave: 'o:'+orden y 't:'+tel10.
+async function _nxResolverMapeoIds(items){
+  const res=new Map()
+  try{
+    const ordenes=[...new Set((items||[]).map(i=>String(i.ordenId||i.orden_id||'').trim()).filter(Boolean))]
+    for(let i=0;i<ordenes.length;i+=150){
+      const{data}=await sb.from('mapeos').select('id,dropi_order_id').in('dropi_order_id',ordenes.slice(i,i+150))
+      for(const m of(data||[])){const k='o:'+String(m.dropi_order_id||'').trim();if(k!=='o:'&&!res.has(k))res.set(k,m.id)}
+    }
+    // Respaldo por teléfono SOLO para lo que no quedó resuelto por orden
+    const faltan=(items||[]).filter(i=>{const o=String(i.ordenId||i.orden_id||'').trim();return !o||!res.has('o:'+o)})
+    const tels=[...new Set(faltan.map(i=>{const d=String(i.tel||i.telefono||'').replace(/\D/g,'');return d?(d.startsWith('57')?d.slice(2):d):''}).filter(Boolean))]
+    const vars=[...new Set(tels.flatMap(t=>[t,'57'+t]))]
+    for(let i=0;i<vars.length;i+=150){
+      const{data}=await sb.from('mapeos').select('id,telefono,created_at').in('telefono',vars.slice(i,i+150)).order('created_at',{ascending:false}).limit(1000)
+      for(const m of(data||[])){
+        const d=String(m.telefono||'').replace(/\D/g,''),k='t:'+(d.startsWith('57')?d.slice(2):d)
+        if(!res.has(k))res.set(k,m.id)
+      }
+    }
+  }catch(e){console.warn('[resolver mapeo_id]',e.message||e)}
+  return res
+}
+// Lee del Map lo que corresponde a UN item (orden primero, teléfono de respaldo)
+function _nxMapeoIdDe(mapa,it){
+  if(!mapa)return null
+  const o=String(it.ordenId||it.orden_id||'').trim()
+  if(o&&mapa.has('o:'+o))return mapa.get('o:'+o)
+  const d=String(it.tel||it.telefono||'').replace(/\D/g,'')
+  const t=d.startsWith('57')?d.slice(2):d
+  return(t&&mapa.get('t:'+t))||null
+}
 function _waNormItem(m){
   return{
     id:m.id||m.mapeo_id||m.mapeoId||null,
@@ -19323,7 +19369,7 @@ async function waEncolarSeccionAuto(seccion,itemsRaw){
     // (28jul26 · F3) Chats CERRADOS VIGENTES (Resuelta en el chat, sin respuesta posterior) → no se les dispara
     let _cerr=null
     try{_cerr=await _waTelsCerradosVigentes((itemsRaw||[]).map(r=>{const d=String(r.tel||r.telefono||'').replace(/\D/g,'');return d?(d.startsWith('57')?d:('57'+d)):''}))}catch(_){}
-    let encolados=0,i=0
+    let encolados=0,i=0,_sinMapeo=0 // 🔎 (29jul26) los saltos dejan de ser invisibles
     const _saltados=[] // (28jul26) 🟢 rastro de saltos: clientes cerrados/resueltos que NO se encolan — quedan como fila cancelada con motivo, para que "¿por qué a este no le salió?" siempre tenga respuesta
     for(const raw of (itemsRaw||[])){
       if(raw.resol?.accion==='resuelta'||raw.resuelta||raw.confirmado)continue
@@ -19337,7 +19383,7 @@ async function waEncolarSeccionAuto(seccion,itemsRaw){
       const parametros=vars.map(tag=>_waValorReal(tag,m))
       const telFull=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
       if(_cerr&&_cerr.has(telFull)){_saltados.push({tel:telFull,nombre:m.nombre||null,plantilla:tpl.nombre,mapeo:m.id||null});continue} // (F3) cerrado vigente en el chat → no disparar (queda rastro)
-      if(m.id==null)continue // 🛡️ (Mejora #8) sin pedido no se encola: mapeo_id null esquiva el índice único y multiplica copias
+      if(m.id==null){_sinMapeo++;continue} // 🛡️ (Mejora #8) sin pedido no se encola: mapeo_id null esquiva el índice único y multiplica copias
       const{error}=await sb.from('envios_cola').insert({
         mapeo_id:m.id,telefono:telFull,nombre:m.nombre||null,
         seccion,tipo:null,plantilla:tpl.nombre,parametros,origen:'cruce'
@@ -19349,7 +19395,13 @@ async function waEncolarSeccionAuto(seccion,itemsRaw){
     try{await _waRastroSaltados(seccion,_saltados)}catch(_){} // tolerante: si falla, el encolado normal no se afecta
     if(encolados>0){
       waToast('🤖 '+encolados+' pedido(s) de '+seccion+' encolados para envío automático.','ok')
-      logAction('wa_encolado_auto',{seccion,encolados}).catch(()=>{})
+      logAction('wa_encolado_auto',{seccion,encolados,sin_mapeo:_sinMapeo}).catch(()=>{})
+    }
+    // 🔎 (29jul26) SILENCIO NUNCA MÁS: si no se encoló nada porque falta el vínculo
+    // al pedido, se DICE. El 28jul se cayeron 510 envíos sin una sola señal.
+    if(encolados===0&&_sinMapeo>0){
+      waToast('⚠️ 0 encolados en '+seccion+': '+_sinMapeo+' pedido(s) sin mapeo_id. Vuelve a subir el Excel para reconstruir el vínculo.','warn')
+      logAction('wa_encolado_bloqueado',{seccion,sin_mapeo:_sinMapeo}).catch(()=>{})
     }
   }catch(e){console.error('[encolador '+seccion+']',e)}
   finally{window._waEncolando=false}
@@ -19409,7 +19461,7 @@ async function waEncolarNovedadesAuto(items){
     // (28jul26 · F3) Chats CERRADOS VIGENTES → no se les dispara
     let _cerrN=null
     try{_cerrN=await _waTelsCerradosVigentes((items||[]).map(m=>{const d=String(m.tel||'').replace(/\D/g,'');return d?(d.startsWith('57')?d:('57'+d)):''}))}catch(_){}
-    let encolados=0
+    let encolados=0,_sinMapeo=0 // 🔎 (29jul26) los saltos dejan de ser invisibles
     for(const m of (items||[])){
       if(m.resol?.accion==='resuelta')continue
       const proto=NOV_PROTO[m.cat.idx]
@@ -19425,7 +19477,7 @@ async function waEncolarNovedadesAuto(items){
       const parametros=conv.vars.map(tag=>_waValorReal(tag,m))
       const telFull=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
       const _mapIdN=m.id||m.mapeoId||null
-      if(_mapIdN==null)continue // 🛡️ (Mejora #8) sin pedido no se encola: mapeo_id null esquiva el índice único (así nacieron las 6 copias del 28jul26)
+      if(_mapIdN==null){_sinMapeo++;continue} // 🛡️ (Mejora #8) sin pedido no se encola: mapeo_id null esquiva el índice único (así nacieron las 6 copias del 28jul26)
       const{error}=await sb.from('envios_cola').insert({
         mapeo_id:_mapIdN,telefono:telFull,nombre:m.nombre||null,
         seccion:'novedades',tipo:m.cat.tipo,plantilla,parametros,origen:'cruce'
@@ -19436,7 +19488,12 @@ async function waEncolarNovedadesAuto(items){
     }
     if(encolados>0){
       waToast('🤖 '+encolados+' novedad(es) encoladas para envío automático. El sistema las despacha en los próximos 5 min.','ok')
-      logAction('wa_encolado_auto',{encolados}).catch(()=>{})
+      logAction('wa_encolado_auto',{encolados,sin_mapeo:_sinMapeo}).catch(()=>{})
+    }
+    // 🔎 (29jul26) SILENCIO NUNCA MÁS (ver gemelo en waEncolarSeccionAuto)
+    if(encolados===0&&_sinMapeo>0){
+      waToast('⚠️ 0 novedades encoladas: '+_sinMapeo+' pedido(s) sin mapeo_id. Vuelve a subir el Excel para reconstruir el vínculo.','warn')
+      logAction('wa_encolado_bloqueado',{seccion:'novedades',sin_mapeo:_sinMapeo}).catch(()=>{})
     }
     try{if(window._waSaltN&&window._waSaltN.length){await _waRastroSaltados('novedades',window._waSaltN);window._waSaltN=[]}}catch(_){} // 🟢 rastro de saltos (tolerante)
   }catch(e){console.error('[encolador]',e)}

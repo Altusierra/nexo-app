@@ -865,6 +865,27 @@ const NAV={
 // vuelve al instante. Fuente de verdad: config wa_modo_centro; espejo en
 // localStorage para que el menú pinte sin esperar la nube.
 const NX_MODO_CENTRO_OCULTA=['aux-reservado','aux-novedades','aux-reclame']
+// 🏠 (29jul26) MODO CENTRO POR BLOQUE — las 3 páginas VUELVEN al menú.
+// Por qué cambió: esconder la página entera también le escondía al auxiliar el
+// formulario de subir Excel, y ese formulario es el que dispara el encolador
+// (procesarNovedadesXlsx → cargarNovedadesPorFecha → waEncolarNovedadesAuto).
+// Sin página no hay ingesta, y sin ingesta el motor de mensajería queda mudo.
+// Ahora la página se ve, pero al AUXILIAR se le oculta la GESTIÓN de adentro y
+// se le deja solo la INGESTA. El admin ve todo. Apagar Modo Centro devuelve todo
+// al instante. Sigue siendo visibilidad: no se toca ni una línea de lógica.
+// Para cambiar qué se oculta, edita SOLO este mapa (id del elemento → oculto).
+const NX_MODO_CENTRO_BLOQUES={
+  'aux-novedades':['nov-gestion-fecha','nov-content','nov-gestion-hist','nov-hist'],
+  'aux-reclame':['rec-gestion-fecha','rec-content'],
+  'aux-reservado':['resv-intro','resv-paso1','resv-paso2','resv-paso3'] // queda visible SOLO el PASO 4 (sube el Excel)
+}
+function _nxCentroBloquesOn(){return currentRol()==='auxiliar'&&_modoCentroOn()}
+function _nxCentroOcultarBloques(pagina){
+  const ids=NX_MODO_CENTRO_BLOQUES[pagina]
+  if(!ids)return
+  const on=_nxCentroBloquesOn()
+  ids.forEach(id=>{const el=document.getElementById(id);if(el)el.style.display=on?'none':''}) // '' devuelve el display natural del elemento
+}
 function _modoCentroOn(){try{return localStorage.getItem('nx_modo_centro')==='1'}catch(_){return false}}
 async function _modoCentroSync(){ // al entrar: si la nube dice distinto al espejo, corrige y repinta
   try{
@@ -878,7 +899,10 @@ async function _modoCentroSync(){ // al entrar: si la nube dice distinto al espe
 function renderNav(){
   const rol=currentRol()
   let items=(NAV[rol]||NAV.auxiliar).filter(i=>!i.hidden) // NUEVO (2jul26): omite ítems hidden (cajones Dashboard)
-  if(rol==='auxiliar'&&_modoCentroOn())items=items.filter(i=>!NX_MODO_CENTRO_OCULTA.includes(i.id)) // (28jul26) 🏠 Modo Centro: gestión oculta al auxiliar; ingesta se queda
+  // (29jul26) 🏠 Modo Centro ya NO esconde estas 3 páginas del menú: el auxiliar
+  // necesita entrar a subir el Excel (ahí vive el disparador del encolador).
+  // Lo que se oculta ahora es la GESTIÓN de adentro → _nxCentroOcultarBloques().
+  // NX_MODO_CENTRO_OCULTA se conserva como la lista de páginas que reciben ese trato.
   const cnt=window._auxCounts||null
   const badgeMap={'aux-novedades':['novedades','red'],'aux-reservado':['confirmar','amber'],'aux-reclame':['reclame','amber'],'aux-seguimiento':['transito','blue']}
   document.getElementById('sb-nav').innerHTML=
@@ -1000,6 +1024,12 @@ function render(page){
   }
   // Botón flotante Dropi: siempre visible para el auxiliar en todas sus secciones
   setTimeout(()=>{try{auxInjectDropiBtn()}catch(e){}},0)
+  // 🏠 (29jul26) Modo Centro por bloque: la página se ve, la gestión de adentro no.
+  // Va al final y en setTimeout porque los contenedores ya existen en la plantilla
+  // (con su "Cargando…") y el display:none sobrevive a los innerHTML posteriores.
+  setTimeout(()=>{try{_nxCentroOcultarBloques(page)}catch(e){}},0)
+  // 📊 (29jul26) si quedaron pendientes de hoy, las barritas vuelven solas (una sola vez)
+  setTimeout(()=>{try{_nxWaBarrasRevivir&&_nxWaBarrasRevivir()}catch(e){}},0)
 }
 
 // ── UTILS ──────────────────────────────────────────────────
@@ -10930,6 +10960,9 @@ window.procesarXlsxPendientes=async()=>{
     const sinMsgHoy=items.filter(i=>(i.envios_hoy||0)===0).length
     if(msg)msg.innerHTML=`<div class="alert alert-green">✅ ${items.length} pendiente(s) de confirmación en el archivo · ${sinMsgHoy} sin mensaje hoy</div>${_autoNota}${tablaOk?'':`<div class="alert alert-yellow" style="margin-top:6px">⚠️ La tabla <code>mensajes_enviados</code> no existe aún en Supabase — la lista funciona pero SIN contador. Pídele a Claude el SQL o córrelo desde el traspaso.</div>`}`
     logAction('xlsxpend_procesado',{total:items.length,sin_msg_hoy:sinMsgHoy}).catch(()=>{})
+    // 📊 (29jul26) barra de progreso del envío. Si la sección no puede disparar
+    // (sin número o auto apagado) la barra lo DICE en vez de girar en vano.
+    try{const _pb=await _waPuedeEnviarSeccion('reservado');window._nxWaBarraAbrir('reservado',_pb.ok?null:_pb.motivo)}catch(_){}
     window._xlsxPendRender()
   }catch(e){
     if(msg)msg.innerHTML=`<div class="alert alert-red">Error procesando: ${(e&&e.message)||e}</div>`
@@ -11001,6 +11034,7 @@ window.enviarMensajeXlsxPend=async(idx)=>{
 async function pageAuxReservado(c){
   c.innerHTML=`<div class="page-title">🔍 Confirmar y recuperar pedidos</div>
     <div class="page-sub">Confirma los pedidos antes de que salgan y recupera los que quedaron colgados.</div>
+    <div id="resv-intro">
     <div class="aux-steps">
       <div class="aux-step"><span class="n">1</span><span class="st">Busca por teléfono<small>En el buscador morado de arriba</small></span></div>
       <div class="aux-step"><span class="n">2</span><span class="st">Manda mensaje<small>En la mañana y al medio día</small></span></div>
@@ -11015,10 +11049,11 @@ async function pageAuxReservado(c){
       </div>
     </div>
     <div class="aux-banner amber"><span>⏰</span><span>Manda los mensajes <b>2 veces al día</b>: en la mañana y al medio día.</span></div>
+    </div>
     <!-- Buscador propio de Reservados eliminado: ahora se usa el buscador universal morado de arriba.
          Al buscar estando en esta sección, abre el popup con confirmar/cancelar/programar (window.buscarOrden(tel)). -->
 
-    <div style="margin-top:28px;padding-top:18px;border-top:1px solid var(--border)">
+    <div id="resv-paso1" style="margin-top:28px;padding-top:18px;border-top:1px solid var(--border)">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
         <span style="font-size:20px">📅</span>
         <div style="font-size:18px;font-weight:700">PASO 1 — Confirmar los que ya tienen fecha</div>
@@ -11044,7 +11079,7 @@ async function pageAuxReservado(c){
       <div id="conf-content"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div></div>
     </div>
 
-    <div style="margin-top:28px;padding-top:18px;border-top:1px solid var(--border)">
+    <div id="resv-paso2" style="margin-top:28px;padding-top:18px;border-top:1px solid var(--border)">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
         <span style="font-size:20px">⏳</span>
         <div style="font-size:18px;font-weight:700">PASO 2 — Recuperar los que NO tienen fecha</div>
@@ -11054,7 +11089,7 @@ async function pageAuxReservado(c){
       <div id="psf-content"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div></div>
     </div>
 
-    <div style="margin-top:28px;padding-top:18px;border-top:1px solid var(--border)">
+    <div id="resv-paso3" style="margin-top:28px;padding-top:18px;border-top:1px solid var(--border)">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
         <span style="font-size:20px">🔴</span>
         <div style="font-size:18px;font-weight:700">PASO 3 — Recuperar los CANCELADOS</div>
@@ -13464,7 +13499,7 @@ async function pageAuxNovedades(c){
       </div>
       <div id="nov-msg" style="margin-top:10px"></div>
     </div>
-    <div class="card" style="margin-bottom:16px;padding:12px">
+    <div class="card" id="nov-gestion-fecha" style="margin-bottom:16px;padding:12px">
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
         <div class="fld" style="margin:0"><label style="font-size:11px">Ver novedades del día</label>
           <input type="date" id="nov-fecha" value="${today()}" style="font-size:12px;padding:6px 8px" onchange="cargarNovedadesPorFecha()"></div>
@@ -13472,9 +13507,11 @@ async function pageAuxNovedades(c){
       </div>
     </div>
     <div id="nov-content"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando...</div></div>
+    <div id="nov-gestion-hist">
     <div style="margin:24px 0;border-top:1px solid var(--border)"></div>
     <div class="page-title" style="font-size:16px">📊 Historial de lotes</div>
     <div class="page-sub">Resoluciones por lote — todas las subidas históricas</div>
+    </div>
     <div id="nov-hist"><div style="padding:20px;text-align:center;color:var(--muted)">Cargando historial...</div></div>`
   await cargarNovedadesProtocolos()
   cargarNovedadesPorFecha()
@@ -14081,6 +14118,9 @@ window.procesarNovedadesXlsx=async()=>{
     setTimeout(()=>{const _nc=document.getElementById('nov-content');if(_nc)_nc.scrollIntoView({behavior:'smooth',block:'start'})},400)
 
     logAction('novedades_procesadas',{total:items.length,fecha_lote:fechaLote,modo,actualizadas:countUpdated,nuevas:countInserted}).catch(()=>{})
+    // 📊 (29jul26) barra de progreso del envío. Si la sección no puede disparar
+    // (sin número o auto apagado) la barra lo DICE en vez de girar en vano.
+    try{const _pb=await _waPuedeEnviarSeccion('novedades');window._nxWaBarraAbrir('novedades',_pb.ok?null:_pb.motivo)}catch(_){}
   }catch(e){
     msg.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
   }
@@ -14838,7 +14878,7 @@ async function pageAuxReclame(c){
       </div>
       <div id="rec-msg" style="margin-top:10px"></div>
     </div>
-    <div class="card" style="margin-bottom:16px;padding:12px">
+    <div class="card" id="rec-gestion-fecha" style="margin-bottom:16px;padding:12px">
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
         <div class="fld" style="margin:0"><label style="font-size:11px">Ver lote del día</label>
           <input type="date" id="rec-fecha" value="${today()}" style="font-size:12px;padding:6px 8px" onchange="cargarReclamePorFecha()"></div>
@@ -15312,6 +15352,9 @@ window.procesarReclameXlsx=async()=>{
     cargarReclamePorFecha()
     setTimeout(()=>{const _rc=document.getElementById('rec-content');if(_rc)_rc.scrollIntoView({behavior:'smooth',block:'start'})},400)
     logAction('reclame_procesado',{total:items.length,fecha_lote:fechaLote,modo,actualizados:countUpdated,nuevos:countInserted}).catch(()=>{})
+    // 📊 (29jul26) barra de progreso del envío. Si la sección no puede disparar
+    // (sin número o auto apagado) la barra lo DICE en vez de girar en vano.
+    try{const _pb=await _waPuedeEnviarSeccion('reclame');window._nxWaBarraAbrir('reclame',_pb.ok?null:_pb.motivo)}catch(_){}
   }catch(e){
     msg.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
   }
@@ -19358,7 +19401,17 @@ async function waEncolarSeccionAuto(seccion,itemsRaw){
     const cfg=await _waSecCfgLoad()
     const c=cfg&&cfg[seccion]
     if(!c||(!c.auto_on&&!c.por_plantilla))return
-    const wabaSec=await _waWabaDeSeccion(seccion) // 🛡️ solo plantillas de LA CUENTA del número que envía (evita 132001)
+    // 🔎 (29jul26) CHEQUEO PREVIO — sin número válido NO se encola nada (ver _waPuedeEnviarSeccion).
+    // Antes se encolaba igual y cada fila moría en 'fallido' sin posibilidad de reintento.
+    const _pre=await _waPuedeEnviarSeccion(seccion)
+    if(!_pre.ok){
+      if(_pre.codigo!=='auto_off'){
+        waToast('⚠️ No se encoló ningún mensaje en '+seccion+': '+_pre.motivo+'.','aviso')
+        logAction('wa_encolado_bloqueado',{seccion,codigo:_pre.codigo}).catch(()=>{})
+      }
+      return
+    }
+    const wabaSec=_pre.num.waba_id // 🛡️ ya validado arriba: la cuenta del número que envía (evita 132001)
     let q=sb.from('wa_plantillas').select('nombre,variables').eq('seccion',seccion).eq('estado','APPROVED')
     if(wabaSec)q=q.eq('waba_id',wabaSec)
     if(c.por_plantilla&&!c.auto_on)q=q.eq('auto_on',true)
@@ -19446,10 +19499,19 @@ async function waEncolarNovedadesAuto(items){
     const cfg=await _waSecCfgLoad()
     const c=cfg&&cfg.novedades
     if(!c||(!c.auto_on&&!c.por_plantilla))return // switch apagado = no pasa nada
+    // 🔎 (29jul26) CHEQUEO PREVIO — gemelo del de waEncolarSeccionAuto
+    const _preN=await _waPuedeEnviarSeccion('novedades')
+    if(!_preN.ok){
+      if(_preN.codigo!=='auto_off'){
+        waToast('⚠️ No se encoló ninguna novedad: '+_preN.motivo+'.','aviso')
+        logAction('wa_encolado_bloqueado',{seccion:'novedades',codigo:_preN.codigo}).catch(()=>{})
+      }
+      return
+    }
     // Si es Por tipo: solo los tipos cuya plantilla tiene auto_on
     let autoTpls=null
     if(c.por_plantilla&&!c.auto_on){
-      const wabaNov=await _waWabaDeSeccion('novedades') // 🛡️ misma cuenta que el número emisor
+      const wabaNov=_preN.num.waba_id // 🛡️ ya validado: misma cuenta que el número emisor
       let qA=sb.from('wa_plantillas').select('nombre').eq('seccion','novedades').eq('auto_on',true)
       if(wabaNov)qA=qA.eq('waba_id',wabaNov)
       const{data}=await qA
@@ -19571,6 +19633,261 @@ window.waBotonQuitar=function(btn){
   const w=campo.parentElement
   campo.remove()
   if(w)w.querySelectorAll('input[data-bt]').forEach((i,k)=>{i.placeholder='🔘 Botón '+(k+1)+' (máx 25)'})
+}
+
+// ── 🔎 (29jul26) NÚMERO REAL DE UNA SECCIÓN + CHEQUEO PREVIO ─────────────────
+// Espejo en el navegador de numeroDeSeccion() de wa-dispatch. Existe porque
+// _waWabaDeSeccion (abajo) solo devuelve el waba_id y su fallback acepta
+// CUALQUIER string: una sección SIN número asignado agarraba el waba_id de otro
+// número (ej. el placeholder 'REEMPLAZAR_WABA_ID' de Cancelados), filtraba
+// plantillas contra un WABA que no existe, obtenía 0 y se salía CALLADO.
+// LA LLAVE ES phone_number_id, no el portafolio: dos secciones pueden vivir en
+// el MISMO portafolio con números distintos (Novedades y Reclame, hoy).
+const _WA_WABA_OK=(v)=>/^\d{5,}$/.test(String(v||'').trim()) // un WABA ID real es numérico y largo
+async function _waNumeroDeSeccion(seccion){
+  try{
+    const{data}=await sb.from('wa_numeros').select('id,etiqueta,phone_number_id,waba_id,seccion,secciones').eq('modo','api').eq('estado','activo')
+    const nums=data||[]
+    return nums.find(x=>(Array.isArray(x.secciones)&&x.secciones.includes(seccion))||x.seccion===seccion)||null
+  }catch(_){return null}
+}
+// ¿Esta sección puede disparar AHORA? Devuelve el motivo EXACTO cuando no puede.
+// Se llama ANTES de encolar, a propósito: encolar sin número deja cada fila en
+// 'fallido' con intentos=1, y el día que asignes el número YA NO se reintentan
+// solas — quedan de basura en la cola y hay que revivirlas a mano.
+async function _waPuedeEnviarSeccion(seccion){
+  const cfg=await _waSecCfgLoad().catch(()=>null)
+  const c=cfg&&cfg[seccion]
+  if(!c||(!c.auto_on&&!c.por_plantilla))return{ok:false,codigo:'auto_off',motivo:'el envío automático está apagado para esta sección (préndelo en Mensajería → Modos de envío por sección)'}
+  const num=await _waNumeroDeSeccion(seccion)
+  if(!num||!num.phone_number_id)return{ok:false,codigo:'sin_numero',motivo:'esta sección todavía no tiene número de WhatsApp asignado (asígnalo en Mensajería → Números)'}
+  if(!_WA_WABA_OK(num.waba_id))return{ok:false,codigo:'waba_invalido',motivo:'el número «'+(num.etiqueta||num.phone_number_id)+'» tiene un WABA ID inválido ('+(num.waba_id||'vacío')+')'}
+  return{ok:true,num}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 📊 (29jul26) BARRITAS DE PROGRESO DE ENVÍO — una por Excel subido
+// Una barra POR SECCIÓN, flotante, arrastrable, minimizable. NO se puede cerrar
+// mientras haya mensajes pendientes (con válvula de escape: si la cola no se
+// mueve en 15 min, la ✕ se desbloquea y dice por qué — una barra que no cierra
+// ni avanza termina en un navegador cerrado a la fuerza).
+// FUENTE DE VERDAD: envios_cola. Nada vive solo en memoria, así que la barra
+// sobrevive a cambiar de sección Y a recargar el navegador (_nxWaBarrasRevivir).
+// UN SOLO poll para todas las barras: 1 consulta cada 20s, no una por barra.
+// ═══════════════════════════════════════════════════════════════════════════
+const _NXB_LBL={novedades:'⚠️ Novedades',reclame:'📦 Reclame',reservado:'🔍 Pend. Confirmación',cancelados:'🔴 Cancelados'}
+const _NXB_ESTANCADA_MS=15*60*1000 // 15 min sin moverse = se desbloquea la ✕
+window._nxBarras=window._nxBarras||{}   // seccion → estado de su barra
+window._nxBarrasTimer=window._nxBarrasTimer||null
+
+function _nxbHoy(){return new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})}
+function _nxbEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+// Abre (o revive) la barra de una sección. No consulta nada: el poll hace el trabajo.
+window._nxWaBarraAbrir=function(seccion,motivoBloqueo){
+  const b=window._nxBarras[seccion]||{}
+  window._nxBarras[seccion]=Object.assign({seccion,min:false,x:null,y:null,total:0,pend:0,env:0,conMeta:0,fall:0,canc:0,ultPend:null,ultCambio:Date.now(),arrancada:Date.now(),bloqueo:null,fin:false},b,{cerrada:false})
+  if(motivoBloqueo)window._nxBarras[seccion].bloqueo=motivoBloqueo
+  _nxWaBarraPintar(seccion)
+  _nxWaBarrasArrancarPoll()
+}
+window._nxWaBarraMin=function(seccion){const b=window._nxBarras[seccion];if(!b)return;b.min=!b.min;_nxWaBarraPintar(seccion)}
+window._nxWaBarraCerrar=function(seccion){
+  const b=window._nxBarras[seccion];if(!b)return
+  if(_nxbCierreBloqueado(b)){
+    try{waToast('🔒 No se puede cerrar mientras se están enviando los mensajes. Puedes <b>minimizarla</b> (▢) o moverla de sitio.','aviso')}catch(_){}
+    return
+  }
+  b.cerrada=true
+  const el=document.getElementById('nxb-'+seccion);if(el)el.remove()
+  if(!Object.values(window._nxBarras).some(x=>!x.cerrada))_nxWaBarrasPararPoll()
+}
+function _nxbEstancada(b){return b.pend>0&&(Date.now()-b.ultCambio)>_NXB_ESTANCADA_MS}
+function _nxbCierreBloqueado(b){
+  if(b.bloqueo)return false      // nunca arrancó (sin número / auto apagado): se puede cerrar
+  if(b.pend<=0)return false      // terminó
+  return !_nxbEstancada(b)       // atascada = se libera la ✕
+}
+
+function _nxWaBarrasArrancarPoll(){
+  if(window._nxBarrasTimer)return
+  _nxWaBarrasPoll()
+  window._nxBarrasTimer=setInterval(_nxWaBarrasPoll,20000)
+}
+function _nxWaBarrasPararPoll(){if(window._nxBarrasTimer){clearInterval(window._nxBarrasTimer);window._nxBarrasTimer=null}}
+
+// UNA sola consulta para todas las barras. El ETA se calcula sobre la cola TOTAL
+// del día (todas las secciones comparten el mismo cron y el mismo lote), no sobre
+// la sección propia: si no, la última barra parece congelada sin estarlo.
+async function _nxWaBarrasPoll(){
+  const activas=Object.keys(window._nxBarras).filter(s=>!window._nxBarras[s].cerrada)
+  if(!activas.length){_nxWaBarrasPararPoll();return}
+  let filas=[]
+  try{
+    const{data,error}=await sb.from('envios_cola').select('seccion,estado,wa_message_id,error_detalle').eq('fecha',_nxbHoy()).limit(3000)
+    if(error)throw new Error(error.message)
+    filas=data||[]
+  }catch(e){
+    activas.forEach(s=>{window._nxBarras[s].errRed='No se pudo leer la cola: '+e.message;_nxWaBarraPintar(s)})
+    return
+  }
+  const pendTotal=filas.filter(r=>r.estado==='pendiente'||r.estado==='sin_plantilla').length
+  activas.forEach(s=>{
+    const b=window._nxBarras[s]
+    const mias=filas.filter(r=>r.seccion===s)
+    b.errRed=null
+    b.total=mias.length
+    b.pend=mias.filter(r=>r.estado==='pendiente'||r.estado==='sin_plantilla').length
+    b.env=mias.filter(r=>r.estado==='enviado').length
+    b.conMeta=mias.filter(r=>r.estado==='enviado'&&r.wa_message_id).length
+    b.fall=mias.filter(r=>r.estado==='fallido').length
+    b.canc=mias.filter(r=>r.estado==='cancelado').length
+    b.pendTotal=pendTotal
+    b.motivos=[...new Set(mias.filter(r=>r.estado==='fallido'&&r.error_detalle).map(r=>r.error_detalle))].slice(0,3)
+    if(b.ultPend===null||b.pend!==b.ultPend){b.ultPend=b.pend;b.ultCambio=Date.now()}
+    if(b.total>0&&b.pend===0)b.fin=true
+    _nxWaBarraPintar(s)
+  })
+}
+
+function _nxWaBarraPintar(seccion){
+  const b=window._nxBarras[seccion]
+  if(!b||b.cerrada)return
+  let el=document.getElementById('nxb-'+seccion)
+  if(!el){
+    el=document.createElement('div');el.id='nxb-'+seccion
+    const n=Object.keys(window._nxBarras).filter(s=>!window._nxBarras[s].cerrada).indexOf(seccion)
+    el.style.cssText='position:fixed;z-index:99997;right:16px;bottom:'+(16+n*104)+'px;width:330px;max-width:92vw'
+    document.body.appendChild(el)
+  }
+  if(b.x!=null&&b.y!=null){el.style.left=b.x+'px';el.style.top=b.y+'px';el.style.right='auto';el.style.bottom='auto'}
+  const lbl=_NXB_LBL[seccion]||seccion
+  const hechos=b.env+b.fall+b.canc
+  const pct=b.total>0?Math.round(hechos*100/b.total):0
+  const bloq=_nxbCierreBloqueado(b)
+  const cerrarEstilo=bloq?'opacity:.45;cursor:not-allowed':'cursor:pointer'
+  // Minimizada: pastilla chiquita
+  if(b.min){
+    el.innerHTML=`<div style="background:var(--card);border:1px solid var(--purple);border-radius:12px;padding:7px 11px;display:flex;gap:9px;align-items:center;box-shadow:0 8px 30px rgba(0,0,0,.5);font-size:12px">
+      <span>${lbl} <b>${hechos}/${b.total||0}</b>${b.fin?' ✅':''}</span>
+      <button onclick="_nxWaBarraMin('${seccion}')" title="Restaurar" style="cursor:pointer;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:2px 8px;font-size:11px">▢</button>
+      <button onclick="_nxWaBarraCerrar('${seccion}')" title="${bloq?'Bloqueado: todavía se están enviando':'Cerrar'}" style="${cerrarEstilo};background:rgba(239,68,68,.12);border:1px solid var(--red);color:var(--red);border-radius:6px;padding:2px 8px;font-size:11px">✕</button>
+    </div>`
+    return
+  }
+  // Bloqueada de nacimiento: nunca encoló nada (sin número / auto apagado)
+  if(b.bloqueo){
+    el.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 10px 34px rgba(0,0,0,.55);overflow:hidden">
+      <div class="nxb-head" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 11px;background:var(--card2);border-bottom:1px solid var(--border);cursor:move">
+        <span style="font-weight:800;font-size:12.5px">${lbl}</span>
+        <span style="display:flex;gap:5px">
+          <button onclick="_nxWaBarraMin('${seccion}')" title="Minimizar" style="cursor:pointer;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:2px 7px;font-size:11px">▁</button>
+          <button onclick="_nxWaBarraCerrar('${seccion}')" title="Cerrar" style="cursor:pointer;background:rgba(239,68,68,.12);border:1px solid var(--red);color:var(--red);border-radius:6px;padding:2px 7px;font-size:11px">✕</button>
+        </span>
+      </div>
+      <div style="padding:11px;font-size:12px;line-height:1.65;color:var(--text)">
+        <div style="font-weight:700;margin-bottom:4px">📄 Archivo procesado, pero NO se encoló ningún mensaje</div>
+        <div style="color:var(--muted)">${_nxbEsc(b.bloqueo)}</div>
+      </div>
+    </div>`
+    _nxbWireDrag(seccion,el)
+    return
+  }
+  // Fase visible: encolando (aún no hay filas) · enviando · terminado
+  let fase,color
+  if(b.total===0){fase='⏳ Encolando…';color='var(--accent)'}
+  else if(b.pend>0){fase='📤 Enviando… '+pct+'%';color='var(--accent)'}
+  else if(b.fall>0){fase='⚠️ Terminó con fallos';color='var(--amber)'}
+  else{fase='✅ Todas enviadas';color='var(--green)'}
+  // ETA: sobre la cola TOTAL del día. Ritmo observado, con respaldo de 6/min (30 cada 5 min).
+  let eta=''
+  if(b.pend>0){
+    const min=Math.ceil((b.pendTotal||b.pend)/6)
+    eta=min<=1?'≈ menos de 1 min':'≈ '+min+' min'
+    if((b.pendTotal||0)>b.pend)eta+=' (hay '+b.pendTotal+' en la cola, de todas las secciones)'
+  }
+  const est=_nxbEstancada(b)
+  el.innerHTML=`<div style="background:var(--card);border:1px solid ${est?'var(--red)':'var(--border)'};border-radius:12px;box-shadow:0 10px 34px rgba(0,0,0,.55);overflow:hidden">
+    <div class="nxb-head" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 11px;background:var(--card2);border-bottom:1px solid var(--border);cursor:move" title="Arrastra para mover">
+      <span style="font-weight:800;font-size:12.5px">${lbl}</span>
+      <span style="display:flex;gap:5px">
+        <button onclick="_nxWaBarraMin('${seccion}')" title="Minimizar" style="cursor:pointer;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:2px 7px;font-size:11px">▁</button>
+        <button onclick="_nxWaBarraCerrar('${seccion}')" title="${bloq?'Bloqueado: todavía se están enviando. Minimiza con ▁':'Cerrar'}" style="${cerrarEstilo};background:rgba(239,68,68,.12);border:1px solid var(--red);color:var(--red);border-radius:6px;padding:2px 7px;font-size:11px">✕</button>
+      </span>
+    </div>
+    <div style="padding:10px 11px 12px">
+      <div style="display:flex;justify-content:space-between;font-size:11.5px;margin-bottom:6px">
+        <span style="font-weight:700;color:${color}">${fase}</span>
+        <span style="color:var(--muted)">${hechos}/${b.total||0}</span>
+      </div>
+      <div style="height:9px;border-radius:99px;background:var(--card2);overflow:hidden;border:1px solid var(--border)">
+        <div style="height:100%;width:${pct}%;background:${color};transition:width .5s"></div>
+      </div>
+      ${eta?`<div style="font-size:11px;color:var(--muted);margin-top:6px">${eta}</div>`:''}
+      ${b.fin?`<div style="font-size:11.5px;margin-top:7px;line-height:1.6">
+        <b style="color:var(--green)">${b.conMeta}/${b.env}</b> con confirmación de Meta${b.env!==b.conMeta?' <span style="color:var(--amber)">(⚠️ '+(b.env-b.conMeta)+' sin confirmar)</span>':''}
+        ${b.fall>0?'<br><span style="color:var(--red)">❌ '+b.fall+' fallidas</span>'+(b.motivos&&b.motivos.length?'<div style="color:var(--muted);font-size:10.5px;margin-top:3px">'+b.motivos.map(m=>'· '+_nxbEsc(m)).join('<br>')+'</div>':''):''}
+        ${b.canc>0?'<br><span style="color:var(--muted)">🚫 '+b.canc+' no se enviaron (duplicado o cuota)</span>':''}
+      </div>`:''}
+      ${est?`<div style="font-size:11px;color:var(--red);margin-top:7px;line-height:1.6">🔴 La cola no se mueve desde hace más de 15 minutos. El despachador puede estar caído — avísale al admin. Ya puedes cerrar esta ventana.</div>`:''}
+      ${b.errRed?`<div style="font-size:11px;color:var(--amber);margin-top:7px">⚠️ ${_nxbEsc(b.errRed)}</div>`:''}
+    </div>
+  </div>`
+  _nxbWireDrag(seccion,el)
+}
+
+// Arrastrar por la cabecera, con MOUSE y con DEDO. Cada barra guarda su posición.
+// touch-action:none es obligatorio: sin eso el navegador se queda el gesto y hace
+// scroll de la página en vez de mover la barra.
+function _nxbWireDrag(seccion,el){
+  const h=el.querySelector('.nxb-head')
+  if(!h||h._nxbWired)return
+  h._nxbWired=true
+  try{h.style.touchAction='none'}catch(_){}
+  const arrancar=(px,py,esTouch)=>{
+    const b=window._nxBarras[seccion];if(!b)return
+    const r=el.getBoundingClientRect()
+    const dx=px-r.left,dy=py-r.top
+    const colocar=(cx,cy)=>{
+      b.x=Math.max(0,Math.min(window.innerWidth-60,cx-dx))
+      b.y=Math.max(0,Math.min(window.innerHeight-40,cy-dy))
+      el.style.left=b.x+'px';el.style.top=b.y+'px';el.style.right='auto';el.style.bottom='auto'
+    }
+    const moverM=(e)=>colocar(e.clientX,e.clientY)
+    const moverT=(e)=>{const t=e.touches&&e.touches[0];if(t){colocar(t.clientX,t.clientY);e.preventDefault()}} // preventDefault AQUÍ, no en touchstart: si no, los botones dejan de responder al toque
+    const soltar=()=>{
+      document.removeEventListener('mousemove',moverM);document.removeEventListener('mouseup',soltar)
+      document.removeEventListener('touchmove',moverT);document.removeEventListener('touchend',soltar);document.removeEventListener('touchcancel',soltar)
+    }
+    if(esTouch){
+      document.addEventListener('touchmove',moverT,{passive:false}) // passive:false o el preventDefault se ignora
+      document.addEventListener('touchend',soltar);document.addEventListener('touchcancel',soltar)
+    }else{
+      document.addEventListener('mousemove',moverM);document.addEventListener('mouseup',soltar)
+    }
+  }
+  h.onmousedown=(ev)=>{
+    if(ev.target&&ev.target.tagName==='BUTTON')return
+    arrancar(ev.clientX,ev.clientY,false)
+    ev.preventDefault()
+  }
+  h.ontouchstart=(ev)=>{
+    if(ev.target&&ev.target.tagName==='BUTTON')return
+    const t=ev.touches&&ev.touches[0];if(!t)return
+    arrancar(t.clientX,t.clientY,true)
+  }
+}
+
+// Al abrir NEXO: si quedaron pendientes de hoy, las barras vuelven solas.
+// Por esto la ✕ bloqueada no es la única protección: ni cerrar el navegador la pierde.
+window._nxWaBarrasRevivir=async function(){
+  if(window._nxBarrasRevividas)return
+  window._nxBarrasRevividas=true
+  try{
+    const{data}=await sb.from('envios_cola').select('seccion').eq('fecha',_nxbHoy()).in('estado',['pendiente','sin_plantilla']).limit(3000)
+    const secs=[...new Set((data||[]).map(r=>r.seccion))]
+    secs.forEach(s=>{if(_NXB_LBL[s])window._nxWaBarraAbrir(s)})
+  }catch(_){}
 }
 
 // ── Cuenta de WhatsApp (WABA) del número activo de una sección ──
@@ -41521,7 +41838,7 @@ window._wchAbrir=async function(){
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
         <input type="date" id="wch-fecha" style="font-size:12px;padding:5px 8px" title="Ver lo que se movió un día (trae también lo oculto)" onchange="_wchFechaCambio(this.value)">
         <button class="btn-sm btn-outline" id="wch-hoy-btn" onclick="_wchFechaCambio('')" title="Volver a la vista viva de HOY" style="display:none">⭐ Hoy</button>
-        <button class="btn-sm btn-primary" onclick="_nxPlusAbrir()" title="Subir cualquier Excel de Dropi: el sistema verifica que sea de la sección que dices antes de procesar">➕ Subir Excel</button>
+        <button class="btn-sm btn-primary" id="wch-subir-excel"${_nxCentroBloquesOn()?' style="display:none"':''} onclick="_nxPlusAbrir()" title="Subir cualquier Excel de Dropi: el sistema verifica que sea de la sección que dices antes de procesar">➕ Subir Excel</button>
         <button class="btn-sm btn-outline" onclick="_wchRecargar()">🔄</button>
         <button onclick="_wchCerrar()" title="Cerrar el Centro de Chats" style="width:30px;height:30px;border-radius:8px;border:none;background:#e81123;color:#fff;font-size:14px;font-weight:800;cursor:pointer;flex:0 0 auto;line-height:1;box-shadow:0 2px 6px rgba(0,0,0,.35)">✕</button>
       </div>

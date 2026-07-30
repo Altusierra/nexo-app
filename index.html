@@ -41298,10 +41298,109 @@ async function _wchOpDia(sec,fecha){
   }catch(_){}
   return out
 }
+// ── 📋 (30jul26) NÚMEROS YA COPIADOS — marca verde que NO se borra ───────────
+// Al copiar un número, su botón 📋 queda VERDE y así se queda: aguanta recargas,
+// cambios de sección, cierre de sesión y cambio de equipo. Guardado COMPARTIDO en
+// `config` → el auxiliar copia en su computador y el admin lo ve desde el suyo.
+// Blindado contra los tres males ya documentados de este archivo:
+//   1) RLS SILENCIOSO → se verifica el ECO de ida y vuelta; si no cuadra, TOAST
+//      visible (nunca un fallo callado) y la marca local igual sobrevive.
+//   2) AUXILIARES PISÁNDOSE → se guarda con MERGE (leer nube → fusionar → escribir);
+//      jamás se sube el mapa local a ciegas. Gana el PRIMERO que copió el número.
+//   3) CRECIMIENTO SIN FRENO → poda por antigüedad (CC_COP_DIAS) y tope duro
+//      (CC_COP_MAX), así el JSON nunca se desborda.
+// La marca se pinta AL INSTANTE desde memoria + localStorage: la nube nunca frena
+// al auxiliar, y el guardado va con debounce para no golpear la base en cada clic.
+const CC_COP_KEY='cc_tel_copiados'
+const CC_COP_DIAS=30   // se olvidan los copiados de hace más de un mes
+const CC_COP_MAX=4000  // tope duro de números guardados (los más recientes)
+window._ccCop=window._ccCop||{mapa:null,pend:{},timer:null,ts:0,aviso:false}
+const _ccCopTel=(t)=>{const d=String(t||'').replace(/\D/g,'');return d.startsWith('57')&&d.length>10?d.slice(2):d}
+function _ccCopPodar(m){
+  const corte=Date.now()-CC_COP_DIAS*864e5
+  const ent=Object.entries(m||{}).filter(([k,v])=>k&&v&&v.ts&&new Date(v.ts).getTime()>=corte)
+  ent.sort((a,b)=>new Date(b[1].ts)-new Date(a[1].ts))
+  const o={};for(const[k,v]of ent.slice(0,CC_COP_MAX))o[k]=v;return o
+}
+function _ccCopLeerLocal(){try{return JSON.parse(localStorage.getItem(CC_COP_KEY)||'{}')||{}}catch(_){return{}}}
+function _ccCopGuardarLocal(m){try{localStorage.setItem(CC_COP_KEY,JSON.stringify(m))}catch(_){}}
+// Carga (nube ∪ local). Si la nube no responde, el local manda: la marca nunca se pierde.
+async function _ccCopCargar(){
+  const s=window._ccCop
+  let nube=null
+  try{const raw=await getConfig(CC_COP_KEY);if(raw)nube=JSON.parse(raw)}catch(_){}
+  const unido=Object.assign({},_ccCopLeerLocal())
+  for(const k in(nube||{}))if(!unido[k]||new Date(nube[k].ts)<new Date(unido[k].ts))unido[k]=nube[k] // gana el PRIMERO
+  s.mapa=_ccCopPodar(unido);s.ts=Date.now()
+  _ccCopGuardarLocal(s.mapa)
+  return s.mapa
+}
+function _ccCopFecha(ts){try{return new Date(ts).toLocaleString('es-CO',{day:'numeric',month:'short',hour:'numeric',minute:'2-digit',timeZone:'America/Bogota'})}catch(_){return''}}
+// Botón 📋 ya pintado según su estado (verde = ese número ya se copió alguna vez)
+function _ccCopBtnHTML(tel){
+  const k=_ccCopTel(tel)
+  const m=((window._ccCop&&window._ccCop.mapa)||{})[k]
+  const t=m?('✅ Número ya copiado'+(m.u?' por '+m.u:'')+(m.ts?' · '+_ccCopFecha(m.ts):'')+' — esta marca no se borra'):'Copiar número'
+  const col=m?'#22c55e':'var(--border)'
+  return `<button data-cctel="${_wchEsc(k)}" onclick="_ccCopiar('${_wchEsc(k)}',this)" title="${_wchEsc(t)}" style="background:${m?'rgba(34,197,94,.18)':'none'};border:1px solid ${col};border-radius:6px;font-size:10px;cursor:pointer;padding:1px 5px;color:${m?'#22c55e':'var(--text)'}">📋</button>`
+}
+// Repinta EN EL SITIO todos los botones de ese número (tarjeta de la lista +
+// cabecera del chat abierto) sin rearmar nada — el auxiliar no pierde el scroll.
+function _ccCopRepintar(k){
+  const m=((window._ccCop&&window._ccCop.mapa)||{})[k];if(!m)return
+  const t='✅ Número ya copiado'+(m.u?' por '+m.u:'')+(m.ts?' · '+_ccCopFecha(m.ts):'')+' — esta marca no se borra'
+  document.querySelectorAll('[data-cctel="'+k+'"]').forEach(b=>{
+    b.style.background='rgba(34,197,94,.18)';b.style.border='1px solid #22c55e';b.style.color='#22c55e';b.title=t
+  })
+}
+window._ccCopiar=async function(tel,btn){
+  const k=_ccCopTel(tel)
+  if(!k)return // número vacío o inválido: ni se copia ni se marca (nada en falso)
+  try{await navigator.clipboard.writeText(k)}
+  catch(e){try{waToast('❌ El navegador no dejó copiar: '+(e.message||e),'error')}catch(_){alert('No pude copiar el número: '+k)}return}
+  const s=window._ccCop
+  s.mapa=s.mapa||_ccCopLeerLocal()
+  if(!s.mapa[k]){ // gana el PRIMERO que lo copió: no se sobrescribe el registro
+    let quien='';try{quien=(currentMe()&&currentMe().nombre)||''}catch(_){}
+    s.mapa[k]={u:quien,ts:new Date().toISOString()}
+    s.pend[k]=s.mapa[k]
+    _ccCopGuardarLocal(s.mapa)
+    _ccCopGuardarPronto()
+  }
+  _ccCopRepintar(k)
+}
+function _ccCopGuardarPronto(){
+  const s=window._ccCop
+  if(s.timer)clearTimeout(s.timer)
+  s.timer=setTimeout(()=>{s.timer=null;_ccCopSubir()},1200) // debounce: copiar 20 seguidos = 1 sola escritura
+}
+async function _ccCopSubir(){
+  const s=window._ccCop
+  const pend=s.pend;s.pend={}
+  if(!Object.keys(pend).length)return
+  try{
+    let nube={}
+    try{const raw=await getConfig(CC_COP_KEY);if(raw)nube=JSON.parse(raw)||{}}catch(_){}
+    for(const k in pend)if(!nube[k])nube[k]=pend[k] // MERGE: jamás pisar lo que otro auxiliar ya escribió
+    const fin=_ccCopPodar(nube)
+    const js=JSON.stringify(fin)
+    const{error}=await sb.from('config').upsert({clave:CC_COP_KEY,valor:js,updated_at:new Date().toISOString()},{onConflict:'clave'})
+    if(error)throw new Error(error.message)
+    const eco=await getConfig(CC_COP_KEY) // ⚠️ lección RLS: un upsert puede "aceptar" sin escribir
+    if(eco!==js)throw new Error('la nube no devolvió lo guardado (¿RLS de config para '+CC_COP_KEY+'?)')
+    s.mapa=_ccCopPodar(Object.assign({},s.mapa,fin));_ccCopGuardarLocal(s.mapa)
+    s.aviso=false
+  }catch(e){
+    Object.assign(s.pend,pend) // vuelven a la cola: el próximo copiado reintenta
+    if(!s.aviso){s.aviso=true;try{waToast('⚠️ Las marcas 📋 quedaron SOLO en este equipo — la nube no las aceptó: '+_wchEsc(e.message||String(e)),'error')}catch(_){}}
+  }
+}
+
 // Vista FECHA: todo lo que SE MOVIÓ ese día (envío o mensaje), incluyendo ocultos.
 async function _wchCargar(){
   const st=window._wchState
   await _wchCatLoad()
+  try{if(!window._ccCop.mapa||(Date.now()-window._ccCop.ts)>30000)await _ccCopCargar()}catch(_){} // 📋 marcas de copiado (refresco máx. cada 30s)
   const sec=st.sec,fecha=st.fecha // null = hoy/vivo
   const diaSel=fecha||_wchHoy()
   try{
@@ -41342,9 +41441,16 @@ async function _wchCargar(){
         try{_opDia=await _wchOpDia(sec,fecha)}catch(_){}
         for(const k in _opDia){if(!tels.has(k)){tels.add(k);secDe[k]=sec}}
       }
-      // 2) En vista HOY se suma lo VIVO de días previos que pertenece a esta sección
+      // 2) Lo VIVO de días previos que pertenece a esta sección.
+      // (30jul26) Antes esto solo se cargaba en vista HOY. Ahora TAMBIÉN en vista
+      // FECHA, porque las píldoras 📞 Llamar · 🆕 Respondió · 🟣 Atendida · 🔁 Volvió ·
+      // 🕰️ Volvió (viejo) son TRABAJO PENDIENTE, no archivo: alguien está esperando y
+      // no pueden desaparecer solo porque el auxiliar cambió el día del calendario.
+      // Lo que entra de más en vista FECHA queda marcado con _ccSiempre y
+      // _wchAplicarVista deja pasar SOLO esos cinco estados — el resto del día sigue
+      // siendo exactamente el archivo de siempre.
       let vivas=[]
-      if(!fecha){
+      {
         const{data:conVida,error:e2}=await sb.from('conversaciones').select('id,telefono,nombre,ultimo_msg_en,ultimo_msg_dir,ventana_24h_hasta,no_leidos,requiere_reintro,etiqueta,etiqueta_en,origen,wa_numero_id').or('ultimo_msg_dir.eq.in,etiqueta.not.is.null').neq('origen','cliente').order('ultimo_msg_en',{ascending:false}).limit(400)
         if(e2)throw e2
         vivas=conVida||[]
@@ -41369,7 +41475,7 @@ async function _wchCargar(){
       // Encolados hoy que aún no tienen conversación (fila sintética: estado 📤)
       const telsCon=new Set(base.map(c=>c.telefono))
       for(const t of telArr){if(!telsCon.has(t))base.push({id:null,telefono:t,_sinConv:true,_tieneEnvio:true,_envEstado:_envEstDe[t]||null})}
-      if(!fecha){for(const c of vivas){if(!yaIds.has(c.id)&&secDe[c.telefono]===sec){base.push(c);yaIds.add(c.id)}}}
+      for(const c of vivas){if(!yaIds.has(c.id)&&secDe[c.telefono]===sec){if(fecha)c._ccSiempre=true;base.push(c);yaIds.add(c.id)}} // (30jul26) en vista FECHA entran marcadas: solo sobreviven las 5 píldoras de trabajo pendiente
       // (28jul26 · F2) CASCADA DE RASTRO — solo en vista HOY y solo para lo que
       // envios_cola no cubrió. Trae a SU sección a los históricos (resueltos antes
       // de la API) aunque su conversación sea origen 'cliente'. Cada sección
@@ -41493,6 +41599,16 @@ async function _wchEnriquecer(convs,secDe){
   return convs
 }
 // Filtra según vista (hoy = vivo; fecha = archivo del día) + chip + búsqueda, y ordena por urgencia
+// (30jul26) Las CINCO píldoras que NUNCA dependen del día, porque son TRABAJO
+// PENDIENTE (alguien está esperando), no archivo: 📞 Llamar · 🆕 Respondió ·
+// 🟣 Atendida · 🔁 Volvió · 🕰️ Volvió (viejo).
+// 📞 Llamar no es un riel suelto: agrupa ❌ no entregada y ⏳ sin confirmar ya
+// envejecida — por eso se pregunta por el GRUPO, igual que hace la franja.
+function _wchSiempreVisible(c){
+  const e=c&&c._est;if(!e||e.tipo!=='riel')return false
+  if(e.clave==='respondio'||e.clave==='atendida'||e.clave==='volvio'||e.clave==='volvio_viejo')return true
+  return _wchGrupoDe(c)==='g_llamar'
+}
 function _wchAplicarVista(){
   const st=window._wchState
   const diasOcultar=nxSysVal('ccDiasSinResp')||2
@@ -41505,6 +41621,11 @@ function _wchAplicarVista(){
       if(e.clave==='wame'){const h=_wchHrs(e.ts);return h==null||h<24} // (28jul26) 📞 ya gestionada (sello): se oculta al DÍA SIGUIENTE — si el cliente contesta, reaparece sola como 🆕
       return true
     })
+  }else{
+    // (30jul26) Vista FECHA = archivo de ESE día. Lo que se sumó de más (_ccSiempre)
+    // solo se queda si cae en una de las CINCO píldoras de trabajo pendiente; todo lo
+    // demás no pertenece a ese día y se va. El archivo del día no se altera.
+    lista=lista.filter(c=>!c._ccSiempre||_wchSiempreVisible(c))
   }
   if(st.filtroEtq){
     // (28jul26) los grupos del auxiliar filtran por _wchGrupoDe; el resto, como siempre
@@ -41554,11 +41675,17 @@ function _wchM1Izquierda(){
 // escribió y esa ventana está detrás: hay que revisarla.
 function _wchChatActivar(convId){
   const st=window._wchState
+  const _ccCambio=st.activo!==convId // (30jul26) solo repintar la lista si de VERDAD cambió
   st.activo=convId
   st.chatMeta=st.chatMeta||{}
   const m=st.chatMeta[convId]=st.chatMeta[convId]||{}
   m.dot=false;m.vistoTs=Date.now()
   _wchDockRender()
+  // ⬜ (30jul26) El borde blanco de la tarjeta SIGUE a la conversación activa: al
+  // saltar con las pestañitas numeradas (o al traer una ventana al frente) la marca
+  // se mueve sola. El guardia _ccCambio evita repintar la lista en cada clic dentro
+  // de la MISMA ventana (cada pointerdown pasa por aquí) — cero costo cuando no cambia.
+  if(_ccCambio){try{_wchListaRender()}catch(_){}}
 }
 window._wchDockClick=function(convId){
   const d=document.getElementById('wch-chat-'+convId)
@@ -42608,13 +42735,18 @@ function _wchListaRender(){
     const tel=_wchTel(c.telefono)
     const reintro=c.requiere_reintro?`<span style="background:rgba(245,158,11,.15);border:1px solid #f59e0b;color:#f59e0b;border-radius:6px;padding:1px 6px;font-size:10px;font-weight:700">🔄 Número cambió</span>`:''
     const noL=c.no_leidos>0?`<span style="background:#ef4444;color:#fff;border-radius:999px;min-width:17px;height:17px;line-height:17px;font-size:10px;text-align:center;padding:0 3px;font-weight:800">${c.no_leidos}</span>`:''
-    return `<div data-wchid="${_wchEsc(String(c.id||c.telefono||''))}" style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:9px 11px;margin-bottom:7px">
+    // ⬜ (30jul26) La tarjeta de la conversación ABIERTA Y AL FRENTE se marca con el
+    // MISMO borde blanco iluminado de la píldora activa, para saber de un vistazo en
+    // cuál se está trabajando. Se exige que la ventana exista de verdad (no basta con
+    // st.activo) para que al cerrarla no quede un borde fantasma.
+    const _ccAbierta=!!(c.id&&st.activo===c.id&&document.getElementById('wch-chat-'+c.id))
+    return `<div data-wchid="${_wchEsc(String(c.id||c.telefono||''))}" style="background:var(--card2);${_ccAbierta?'border:1.5px solid #ffffff;box-shadow:0 0 0 2px rgba(255,255,255,.16),0 0 9px rgba(255,255,255,.5);':'border:1px solid var(--border);'}border-radius:10px;padding:9px 11px;margin-bottom:7px">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
         <div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap;min-width:0">
           ${_wchAvatar(c.nombre,tel,30)}
           <strong style="font-size:12.5px">${_wchEsc(c.nombre||'Sin nombre')}</strong>
           <span style="font-size:11.5px;color:var(--muted)">${_wchEsc(_wchTelCorto(tel))}</span>
-          <button onclick="navigator.clipboard.writeText('${_wchTelCorto(tel)}');this.textContent='✅';setTimeout(()=>this.textContent='📋',900)" title="Copiar número" style="background:none;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;padding:1px 5px;color:var(--text)">📋</button>
+          ${_ccCopBtnHTML(tel)}
           ${noL}<span data-wchchip="${_wchEsc(String(c.id||c.telefono||''))}" style="display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap">${chip}</span>${reintro}
         </div>
         <div style="font-size:10.5px;color:var(--muted)">${c.ultimo_msg_en?('hace '+_wchHace(c.ultimo_msg_en)):(c._sinConv?(c._envEstado?({pendiente:'🕓 en cola, aún NO se ha enviado',sin_plantilla:'⚠️ esperando plantilla aprobada — NO enviado',fallido:'<span style="color:var(--red);font-weight:700">❌ el envío FALLÓ</span>',cancelado:'🚫 envío cancelado',enviado:'⏳ enviado, sin confirmación de entrega aún'})[c._envEstado]||('estado: '+_wchEsc(c._envEstado)):(c._opDia?'sin conversación (gestión de sección)':'encolado, sin conversación aún')):'')}</div>
@@ -42727,6 +42859,15 @@ window._wchChatAbrir=async function(convId){
   const _esVol=!!(c&&c._est&&c._est.tipo==='riel'&&(c._est.clave==='volvio'||c._est.clave==='volvio_viejo'))
   const etqs=_wchEtqsDe(st.sec).filter(x=>x.id!=='g_final_volvio'||_esVol||(c&&c.etiqueta==='g_final_volvio'))
   const etqActual=c&&c.etiqueta&&c.etiqueta!==WCH_SELLO_WAME?c.etiqueta:''
+  // 🟢 (30jul26) Conversación YA CERRADA por su etiqueta (🟢 Resuelta o cualquier otra
+  // marcada "cierra" en el editor de tubería): el select NO puede ofrecer "— Etiqueta —"
+  // ni "✖ Quitar etiqueta", porque las DOS la DESCIERRAN de un clic y la devuelven a la
+  // cola sin que nadie se dé cuenta. Quedan solo la etiqueta de cierre puesta y las demás
+  // de la sección (recategorizar sí se puede; descerrar por accidente, no).
+  // Se exige además que la etiqueta actual SÍ esté en la lista pintada: si no lo estuviera,
+  // quitar el "— Etiqueta —" dejaría el select mostrando una opción que no es la suya.
+  const _etqActDef=etqActual?_wchEtqPorId(etqActual):null
+  const _ccCerrada=!!(_etqActDef&&_etqActDef.cierre&&etqs.some(x=>x.id===etqActual))
   const esRe=!!(c&&c.requiere_reintro) // 🚫 número bloqueado → identidad roja limpia: franja de 3px + insignia
   div.innerHTML=`<div style="background:var(--card);border:1px solid ${esRe?'#ef4444':'var(--border)'};border-top:${esRe?'4px solid #ef4444':'1px solid var(--border)'};border-radius:14px;width:100%;height:100%;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 44px rgba(0,0,0,.55)">
     <div id="wch-ch-head-${convId}" style="display:flex;justify-content:space-between;align-items:center;padding:11px 14px;border-bottom:1px solid var(--border);gap:8px;flex-wrap:wrap;background:var(--card2)">
@@ -42734,7 +42875,7 @@ window._wchChatAbrir=async function(convId){
       ${_wchAvatar(c&&c.nombre,tel,38)}
       <div style="min-width:0">
         <div style="font-weight:800;font-size:13.5px">${_wchEsc((c&&c.nombre)||'Conversación')} ${esRe?`<span id="wch-rebadge-${convId}" style="background:rgba(239,68,68,.14);border:1px solid #ef4444;color:#ef4444;border-radius:999px;padding:1px 8px;font-size:10px;font-weight:800;vertical-align:middle">🔄 Número nuevo</span> `:''}<span style="color:var(--muted);font-weight:400;font-size:11.5px">${_wchEsc(_wchTelCorto(tel))}</span>
-          <button onclick="navigator.clipboard.writeText('${_wchTelCorto(tel)}');this.textContent='✅';setTimeout(()=>this.textContent='📋',900)" style="background:none;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;padding:1px 5px;color:var(--text)">📋</button>
+          ${_ccCopBtnHTML(tel)}
         </div>
         <div id="wch-vent-${convId}" style="font-size:10.5px;margin-top:2px"></div>
         <div id="wch-llego-${convId}" style="font-size:10px;color:var(--muted);margin-top:1px"></div>
@@ -42746,9 +42887,9 @@ window._wchChatAbrir=async function(convId){
         <button onclick="_wchWaMe('${convId}','${tel}',true)" title="Abrir en WhatsApp con el protocolo copiado" style="background:none;border:none;font-size:17px;cursor:pointer;padding:2px 4px">📱</button>
         <button onclick="_wchWaMe('${convId}','${tel}',false)" title="Llamar (abre el chat limpio)" style="background:none;border:none;font-size:17px;cursor:pointer;padding:2px 4px">📞</button>
         <select id="wch-etq-${convId}" onchange="_wchEtqSel('${convId}',this)" style="font-size:11.5px;padding:4px 6px;max-width:150px">
-          <option value="">— Etiqueta —</option>
+          ${_ccCerrada?'':`<option value="">— Etiqueta —</option>`}
           ${etqs.map(x=>`<option value="${x.id}" ${x.id===etqActual?'selected':''}>${x.e||''} ${_wchEsc(x.n)}${x.cierre?' (cierra)':''}</option>`).join('')}
-          ${etqActual?`<option value="~quitar">✖ Quitar etiqueta</option>`:''}
+          ${etqActual&&!_ccCerrada?`<option value="~quitar">✖ Quitar etiqueta</option>`:''}
         </select>
         <button onclick="_wchChatCerrar('${convId}')" title="Cerrar esta conversación" style="width:30px;height:30px;border-radius:8px;border:none;background:#e81123;color:#fff;font-size:14px;font-weight:800;cursor:pointer;flex:0 0 auto;line-height:1;box-shadow:0 2px 6px rgba(0,0,0,.35)">✕</button>
       </div>
@@ -42794,6 +42935,7 @@ window._wchChatCerrar=function(convId){
   if(st.activo===convId)st.activo=null
   const d=document.getElementById('wch-chat-'+convId);if(d)d.remove()
   _wchDockRender()
+  try{_wchListaRender()}catch(_){} // ⬜ (30jul26) la ventana ya no existe → su tarjeta pierde el borde blanco
 }
 // ── 🔄 REINTRODUCCIÓN (número bloqueado → número nuevo) ──
 // Arma el saludo con lo REAL del hilo: nombre, producto del pedido y una cita

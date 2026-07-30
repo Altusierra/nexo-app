@@ -43196,6 +43196,87 @@ async function _wchMediaPendientes(el){
     }
   }
 }
+// ── 5) 👤 CONTACTOS que comparte el cliente: el NÚMERO a la vista.
+// El webhook ya guarda todo en mensajes.raw. NO se trae en el query del hilo
+// (ese corre cada 3s y el vcard en base64 pesa): se pide UNA sola vez por
+// mensaje y queda cacheado, porque el raw nunca cambia.
+window._wchRawCache=window._wchRawCache||{}
+function _wchRawObj(r){
+  if(!r)return null
+  if(typeof r==='string'){try{return JSON.parse(r)}catch(_){return null}}
+  return (typeof r==='object')?r:null
+}
+// Saca [{nom, tels:[{num,wa,tipo}]}] del raw. Tolerante: si Meta cambia algo,
+// devuelve lo que pueda en vez de romperse.
+function _wchContactosDe(raw){
+  const o=_wchRawObj(raw);if(!o)return []
+  const cs=Array.isArray(o.contacts)?o.contacts:[]
+  return cs.map(c=>{
+    const n=(c&&c.name)||{}
+    const nom=String(n.formatted_name||[n.first_name,n.last_name].filter(Boolean).join(' ')||'').trim()
+    const vistos={},tels=[]
+    ;(Array.isArray(c&&c.phones)?c.phones:[]).forEach(p=>{
+      const num=String((p&&(p.phone||p.wa_id))||'').trim()
+      if(!num)return
+      const k=num.replace(/\D/g,'')
+      if(!k||vistos[k])return
+      vistos[k]=1
+      tels.push({num:num,wa:String((p&&p.wa_id)||'').replace(/\D/g,''),tipo:String((p&&p.type)||'').trim()})
+    })
+    return{nom:nom,tels:tels}
+  }).filter(c=>c.nom||c.tels.length)
+}
+function _wchContactoHTML(cs){
+  if(!cs.length)return '<em style="color:var(--muted);font-size:11px">Contacto compartido sin número.</em>'
+  const btn='background:rgba(255,255,255,.08);border:1px solid var(--border);border-radius:6px;color:#e9edef;font-size:11px;cursor:pointer;padding:2px 7px;text-decoration:none;line-height:1.6;display:inline-block'
+  return cs.map(c=>{
+    const filas=c.tels.map(t=>{
+      const limpio=String(t.num).replace(/[^\d+]/g,'')
+      const d=String(t.wa||limpio).replace(/\D/g,'')
+      return `<div style="display:flex;align-items:center;gap:6px;margin-top:5px;flex-wrap:wrap">
+        <span style="font-size:13.5px;font-weight:800;letter-spacing:.3px;color:#fff">${_wchEsc(t.num)}</span>
+        ${t.tipo?`<span style="font-size:9px;color:var(--muted);text-transform:lowercase">${_wchEsc(t.tipo)}</span>`:''}
+        <button onclick="event.stopPropagation();navigator.clipboard.writeText('${_wchEsc(limpio)}');this.textContent='✅';setTimeout(()=>{this.textContent='📋'},900)" title="Copiar el número" style="${btn}">📋</button>
+        <a href="tel:${_wchEsc(limpio)}" title="Llamar" style="${btn}">📞</a>
+        ${d?`<a href="https://wa.me/${_wchEsc(d)}" target="_blank" rel="noopener noreferrer" title="Abrir WhatsApp con este número" style="${btn}">📱</a>`:''}
+      </div>`
+    }).join('')
+    return `<div style="margin-top:5px;background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:9px;padding:8px 10px">
+      <div style="font-size:12px;font-weight:800;color:#fff">👤 ${_wchEsc(c.nom||'Contacto')}</div>
+      ${filas||'<div style="font-size:11px;color:var(--muted);margin-top:4px">Sin número en la tarjeta.</div>'}
+    </div>`
+  }).join('')
+}
+// Bloque para la burbuja: si el raw ya está cacheado sale pintado de una.
+function _wchContactoBloque(m){
+  if(!m||String(m.tipo||'').toLowerCase()!=='contacts')return ''
+  const ya=Object.prototype.hasOwnProperty.call(window._wchRawCache,m.id)
+  const dentro=ya?_wchContactoHTML(_wchContactosDe(window._wchRawCache[m.id]))
+    :'<span style="font-size:10.5px;color:var(--muted)">👤 abriendo contacto…</span>'
+  return `<div id="wchc_${_wchEsc(m.id)}" data-wchraw="${_wchEsc(m.id)}" data-wchrlisto="${ya?'1':'0'}">${dentro}</div>`
+}
+// Pide en UNA sola consulta los raw que falten y pinta esos bloques.
+async function _wchContactosPendientes(el){
+  if(!el)return
+  const pend=[...el.querySelectorAll('[data-wchraw][data-wchrlisto="0"]')]
+  if(!pend.length)return
+  const ids=[...new Set(pend.map(d=>d.getAttribute('data-wchraw')))]
+  try{
+    const{data,error}=await sb.from('mensajes').select('id,raw').in('id',ids)
+    if(error)throw new Error(error.message)
+    ;(data||[]).forEach(r=>{window._wchRawCache[r.id]=r.raw||null})
+    ids.forEach(id=>{if(!Object.prototype.hasOwnProperty.call(window._wchRawCache,id))window._wchRawCache[id]=null})
+  }catch(_){
+    pend.forEach(c=>{if(c.isConnected)c.innerHTML='<span style="font-size:10.5px;color:#ef4444">No pude leer el contacto.</span>'})
+    return
+  }
+  pend.forEach(cont=>{
+    if(!cont.isConnected)return
+    cont.innerHTML=_wchContactoHTML(_wchContactosDe(window._wchRawCache[cont.getAttribute('data-wchraw')]))
+    cont.setAttribute('data-wchrlisto','1')
+  })
+}
+
 async function _wchHiloPintar(convId){
   const el=document.getElementById('wch-hilo-'+convId);if(!el)return
   try{await _wchTplCuerposCargar()}catch(_){} // cuerpos de plantilla (cacheados) antes de pintar
@@ -43253,13 +43334,15 @@ async function _wchHiloPintar(convId){
     // se pintan solos dentro de la burbuja. Si alguno no carga, vuelve el botón.
     let media=''
     if(m.media_path)media=_wchMediaBloque(m)
+    const contacto=_wchContactoBloque(m) // (30jul26) 👤 tarjeta de contacto → número a la vista
     return `<div class="wch-msg" data-txt="${_wchEsc(busca.toLowerCase())}" style="display:flex;${lado?'':'justify-content:flex-end;'}margin-bottom:7px">
       <div style="max-width:82%;background:${lado?'#202c33':'#005c4b'};border:none;border-radius:10px;padding:7px 10px;color:#e9edef">
         <div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">${lado?'📥 Cliente':'📤 '+(m.usuario_id?'Humano':'Auto')}${m.plantilla?' · 📋':''} · ${hora}${!lado&&m.estado?' '+(m.estado==='failed'?'<span style="color:#ef4444;font-weight:800" title="No se pudo enviar">❗ NO SE ENVIÓ</span>':(m.estado==='read'?'<span style="color:#53bdeb;letter-spacing:-2px" title="Leído">✓✓</span>':((m.estado==='delivered')?'<span style="color:#8696a0;letter-spacing:-2px" title="Entregado">✓✓</span>':((m.estado==='sent'||m.estado==='accepted')?'<span style="color:#8696a0" title="Enviado — aún no le llega">✓</span>':_wchEsc(m.estado))))):''}</div>
-        ${tplHead}<div style="font-size:12.5px;white-space:pre-wrap">${cuerpo?_wchLinkify(cuerpo):(media?'':'<em style="color:var(--muted)">['+_wchEsc(m.tipo)+']</em>')}</div>${media}${(!lado&&(m.estado==='failed'||m.error_detalle))?_wchErrBloque(m.error_detalle,m.id):''}
+        ${tplHead}<div style="font-size:12.5px;white-space:pre-wrap">${cuerpo?_wchLinkify(cuerpo):((media||contacto)?'':'<em style="color:var(--muted)">['+_wchEsc(m.tipo)+']</em>')}</div>${media}${contacto}${(!lado&&(m.estado==='failed'||m.error_detalle))?_wchErrBloque(m.error_detalle,m.id):''}
       </div></div>`
   }).join('')
   try{_wchMediaPendientes(el)}catch(_){} // (30jul26) los adjuntos sin URL todavía se pintan al llegar
+  try{_wchContactosPendientes(el)}catch(_){} // (30jul26) y los contactos compartidos, en una sola consulta
   const b=(document.getElementById('wch-chatbusca-'+convId)||{}).value||''
   if(b)_wchChatFiltrar(convId,b)
   if(abajo)el.scrollTop=el.scrollHeight

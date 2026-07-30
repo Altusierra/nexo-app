@@ -18681,7 +18681,7 @@ async function pageAdminMensajeria(c){
 window._nxPillOrden=window._nxPillOrden||null
 function _nxPillDefault(sec){
   // Espejo del orden de fábrica de _wchChipsOrden (grupos + rieles + etiquetas de la sección)
-  const base=['nodisp','g_llamar','g_camino','respondio','conversando','atendida','volvio','volvio_viejo','wame']
+  const base=['nodisp','g_llamar','g_camino','respondio','conversando','atendida','atendida_24','volvio','volvio_viejo','atendida_volvio','atendida_volvio_24','wame']
   if(sec==='reservado')base.unshift('porprog')
   let etqs=[]
   try{
@@ -18691,7 +18691,7 @@ function _nxPillDefault(sec){
   return [...base,...etqs]
 }
 function _nxPillNombre(k){
-  const fijos={nodisp:['⚠️','Avisar admin','#ef4444'],porprog:['🗓️','Por programar','#f59e0b'],g_llamar:['📞','Llamar','#ef4444'],g_camino:['📨','En camino','#38bdf8'],respondio:['🆕','Respondió','#f59e0b'],conversando:['💬','En conversación','#22d3ee'],atendida:['🟣','Atendida','#a855f7'],volvio:['🔁','Volvió','#f97316'],volvio_viejo:['🕰️','Volvió (viejo)','#94a3b8'],wame:['📲','Por wa.me','#0ea5e9']}
+  const fijos={nodisp:['⚠️','Avisar admin','#ef4444'],porprog:['🗓️','Por programar','#f59e0b'],g_llamar:['📞','Llamar','#ef4444'],g_camino:['📨','En camino','#38bdf8'],respondio:['🆕','Respondió','#f59e0b'],conversando:['💬','En conversación','#22d3ee'],atendida:['🟣','Atendida','#a855f7'],volvio:['🔁','Volvió','#f97316'],volvio_viejo:['🕰️','Volvió (viejo)','#94a3b8'],atendida_volvio:['🔁','Atendida · volvió','#c084fc'],atendida_24:['⏰','Atendida +24h','#f59e0b'],atendida_volvio_24:['⏰','Atendida · volvió +24h','#fb923c'],wame:['📲','Por wa.me','#0ea5e9']}
   if(fijos[k])return fijos[k]
   try{
     const cat=window._wchState&&window._wchState.cat
@@ -40996,6 +40996,13 @@ const WCH_RIELES_DEF={
   respondio:{n:'Respondió',e:'🆕',c:'#f59e0b'},
   conversando:{n:'En conversación',e:'💬',c:'#22d3ee'}, // (28jul26) escribió y YA hubo respuesta humana antes
   atendida:{n:'Atendida',e:'🟣',c:'#a855f7'},
+  atendida_volvio:{n:'Atendida · volvió',e:'🔁',c:'#c084fc'},
+  // (30jul26) ⏰ Los dos "+24h": el auxiliar YA contestó, el cliente NUNCA respondió y la
+  // ventana de WhatsApp se cerró. Ojo: aquí ya NO entra texto libre — solo una plantilla
+  // aprobada reabre la puerta. Por eso van aparte de 🟣 Atendida / 🔁 Atendida · volvió:
+  // la acción que toca es distinta.
+  atendida_24:{n:'Atendida +24h',e:'⏰',c:'#f59e0b'},
+  atendida_volvio_24:{n:'Atendida · volvió +24h',e:'⏰',c:'#fb923c'}, // (30jul26) el aux YA atendió a uno que había VUELTO y sigue esperando respuesta: no se mezcla con 🟣 Atendida porque va en un flujo mucho más avanzado. Cierra con 🔁 Resuelta · volvió.
   volvio:{n:'Volvió',e:'🔁',c:'#f97316'},               // (28jul26) estaba CERRADO y volvió a escribir
   volvio_viejo:{n:'Volvió (viejo)',e:'🕰️',c:'#94a3b8'}, // (28jul26) idem pero pasado el corte ccDiasVuelve
   wame:{n:'Por wa.me',e:'📲',c:'#0ea5e9'}
@@ -41132,6 +41139,39 @@ function _wchCierreTapado(c){
   if(!et||!et.cierre)return null
   return{id:c.etiqueta,n:et.n||'',e:et.e||'',col:et.c||'#22c55e',ts:c.etiqueta_en||null}
 }
+// (30jul26) ¿Ya se cerró la ventana de 24h de WhatsApp? De aquí en adelante NO se puede
+// escribir texto libre: solo una plantilla aprobada reabre la puerta. Se lee de
+// ventana_24h_hasta (lo que dice Meta) con el MISMO criterio que el letrero verde de la
+// cabecera del chat: si la hora tope ya pasó, está cerrada. Si esa columna viene vacía se
+// cae al reloj del último mensaje — sin ventana registrada, 24h después está cerrada seguro.
+function _wchVentanaCerrada(c){
+  if(!c)return false
+  if(c.ventana_24h_hasta){const h=_wchHrs(c.ventana_24h_hasta);return h!=null&&h>=0}
+  const h=_wchHrs(c.ultimo_msg_en)
+  return h!=null&&h>=24
+}
+// (30jul26) ¿Esta conversación viene de un REINGRESO REAL? Devuelve de dónde volvió
+// (🏷️ etiqueta de cierre tapada · ✅ resuelta en la tabla de su sección · 🚫 dijo que NO)
+// y SOLO si el cliente escribió DESPUÉS de ese cierre. Esa es la diferencia fina: que
+// exista un cierre viejo no basta — si al cerrado le escribimos NOSOTROS y él nunca
+// volvió, NO es un reingreso. Sin dato del último entrante (_lastInTs) devuelve null,
+// o sea que ante la duda cae en 🟣 Atendida de siempre: nunca inventa el riel nuevo.
+function _wchReingresoDe(c){
+  if(!c)return null
+  const tIn=c._lastInTs?new Date(c._lastInTs).getTime():NaN
+  if(!isFinite(tIn))return null
+  const cerr=_wchCierreTapado(c)
+  if(cerr&&cerr.ts){const t=new Date(cerr.ts).getTime();if(isFinite(t)&&t<tIn)return cerr}
+  if(c._resolSec&&c._resolSec.ts&&(c._algunOutHum||(c._numIn||0)>1)){
+    const t=new Date(c._resolSec.ts).getTime()
+    if(isFinite(t)&&t<tIn){
+      const sN=(WCH_SECS.find(s=>s.k===c._resolSec.sec)||{}).n||c._resolSec.sec
+      return {n:'Resuelta · '+sN,e:'✅',col:'#22c55e',ts:c._resolSec.ts,tabla:true}
+    }
+  }
+  if(c._dijoNo&&c._dijoNo.ts){const t=new Date(c._dijoNo.ts).getTime();if(isFinite(t)&&t<tIn)return {n:'Ya dijo que NO',e:'🚫',col:'#ef4444',ts:c._dijoNo.ts,tabla:true}}
+  return null
+}
 // ── DERIVACIÓN DE ESTADO — el evento más reciente manda ──
 // c: {etiqueta, etiqueta_en, ultimo_msg_en, ultimo_msg_dir, _lastOutHum, _tieneEnvio}
 // Devuelve {tipo:'riel'|'manual', clave|id, ts}
@@ -41173,12 +41213,29 @@ function _wchDerivar(c){
       }
     }
     // ¿ALGUNA vez le contestó un humano? → hilo vivo (💬). Si no, es lead crudo (🆕).
-    if(c._algunOutHum)return {tipo:'riel',clave:'conversando',ts:c.ultimo_msg_en}
+    // (30jul26) 💬 En conversación con la VENTANA YA VENCIDA pasa a ⏰ Atendida +24h.
+    // Motivo operativo: el cliente escribió hace más de 24h y esa puerta ya se cerró —
+    // por texto libre NO se le puede contestar, solo con plantilla. Es la misma acción
+    // que la de los demás "+24h", así que van juntas en la misma píldora.
+    // 🆕 Respondió NO se toca: ahí nadie ha contestado nunca y llamarla "Atendida" sería
+    // mentir. Se queda en su píldora con su ⚠️.
+    if(c._algunOutHum)return {tipo:'riel',clave:_wchVentanaCerrada(c)?'atendida_24':'conversando',ts:c.ultimo_msg_en}
     return {tipo:'riel',clave:'respondio',ts:c.ultimo_msg_en}
   }
   if(c.ultimo_msg_dir==='out'){
     // salió el último mensaje: ¿humano (atendida) o automático?
-    if(c._lastOutHum)return {tipo:'riel',clave:'atendida',ts:c.ultimo_msg_en}
+    if(c._lastOutHum){
+      // (30jul26) 🔁 ATENDIDA · VOLVIÓ — el auxiliar YA le contestó a alguien que había
+      // VUELTO, pero todavía no le pone 🔁 Resuelta · volvió porque sigue esperando
+      // respuesta. Antes caía en 🟣 Atendida y se mezclaba con el flujo normal; estos
+      // clientes van en un flujo MUCHO más avanzado y no pueden confundirse.
+      // (30jul26) ⏰ …y si además se venció la ventana de 24h, pasa sola a su "+24h":
+      // el auxiliar contestó, el cliente nunca respondió y ya no hay texto libre.
+      const _rein=_wchReingresoDe(c)
+      const _v24=_wchVentanaCerrada(c)
+      if(_rein)return {tipo:'riel',clave:_v24?'atendida_volvio_24':'atendida_volvio',ts:c.ultimo_msg_en,de:_rein}
+      return {tipo:'riel',clave:_v24?'atendida_24':'atendida',ts:c.ultimo_msg_en}
+    }
     // (28jul26 · Mejora #2) automático → clasificar por ENTREGA REAL (mensajes.estado):
     // failed → ❌ · delivered/read → ✅ · sent/accepted → ⏳ · sin dato → 📤 (como siempre)
     const _de=c._lastOutEstado
@@ -41575,13 +41632,15 @@ async function _wchEnriquecer(convs,secDe){
   //   💬 ¿ALGUNA vez le contestó un humano? (no solo el último) → riel En conversación
   //   🔇 ¿tiene algún mensaje entrante en toda su vida?          → sufijo "sin contestar"
   // Si el cliente ya escribió lo último, _algunIn se sabe sin preguntar.
-  const conHum=new Set(),conIn=new Set(),numIn={} // (F2) numIn: cuántos entrantes tiene en su vida
+  const conHum=new Set(),conIn=new Set(),numIn={},lastIn={} // (F2) numIn: cuántos entrantes tiene en su vida · (30jul26) lastIn: CUÁNDO escribió por última vez (para 🔁 Atendida · volvió)
   for(const c of convs){if(c.id&&c.ultimo_msg_dir==='in')conIn.add(c.id)}
   try{
     for(let i=0;i<ids.length;i+=150){
-      const{data:mm}=await sb.from('mensajes').select('conversacion_id,direccion,usuario_id').in('conversacion_id',ids.slice(i,i+150)).or('direccion.eq.in,usuario_id.not.is.null').limit(3000)
+      const{data:mm}=await sb.from('mensajes').select('conversacion_id,direccion,usuario_id,ts').in('conversacion_id',ids.slice(i,i+150)).or('direccion.eq.in,usuario_id.not.is.null').order('ts',{ascending:false}).limit(3000) // (30jul26) +ts: MISMA consulta, una columna más — cero viajes extra. Y ORDEN por ts: el tope de 3000 filas existía desde antes pero recortaba al azar; ahora se queda con las MÁS NUEVAS, que es justo lo que necesita el último entrante.
       for(const m of(mm||[])){
-        if(m.direccion==='in'){conIn.add(m.conversacion_id);numIn[m.conversacion_id]=(numIn[m.conversacion_id]||0)+1}
+        if(m.direccion==='in'){conIn.add(m.conversacion_id);numIn[m.conversacion_id]=(numIn[m.conversacion_id]||0)+1
+          const _t=m.ts?new Date(m.ts).getTime():NaN // (30jul26) el entrante MÁS NUEVO manda
+          if(isFinite(_t)&&(!lastIn[m.conversacion_id]||_t>lastIn[m.conversacion_id]))lastIn[m.conversacion_id]=_t}
         else if(m.usuario_id)conHum.add(m.conversacion_id)
       }
     }
@@ -41594,6 +41653,7 @@ async function _wchEnriquecer(convs,secDe){
     c._algunOutHum=!!(c.id&&conHum.has(c.id))
     c._algunIn=!!(c.id&&conIn.has(c.id))
     c._numIn=c.id?(numIn[c.id]||0):0
+    c._lastInTs=(c.id&&lastIn[c.id])?new Date(lastIn[c.id]).toISOString():null // (30jul26) cuándo escribió el cliente por última vez
     c._est=_wchDerivar(c)
   }
   return convs
@@ -41606,7 +41666,7 @@ async function _wchEnriquecer(convs,secDe){
 // envejecida — por eso se pregunta por el GRUPO, igual que hace la franja.
 function _wchSiempreVisible(c){
   const e=c&&c._est;if(!e||e.tipo!=='riel')return false
-  if(e.clave==='respondio'||e.clave==='atendida'||e.clave==='volvio'||e.clave==='volvio_viejo')return true
+  if(e.clave==='respondio'||e.clave==='conversando'||e.clave==='atendida'||e.clave==='volvio'||e.clave==='volvio_viejo'||e.clave==='atendida_volvio'||e.clave==='atendida_24'||e.clave==='atendida_volvio_24')return true // (30jul26) 💬 En conversación entra: también es trabajo pendiente (el cliente escribió y espera) // (30jul26) atendida_volvio entra porque es un TROZO de 🟣 Atendida: si no, partirla haría desaparecer casos que antes sí se veían
   return _wchGrupoDe(c)==='g_llamar'
 }
 function _wchAplicarVista(){
@@ -41634,7 +41694,7 @@ function _wchAplicarVista(){
   }
   const b=(st.busca||'').trim().toLowerCase()
   if(b)lista=lista.filter(c=>(c.telefono||'').includes(b.replace(/\D/g,''))&&b.replace(/\D/g,'')||String(c.nombre||'').toLowerCase().includes(b)||(c.telefono||'').includes(b))
-  const peso={respondio:0,conversando:1,atendida:2,volvio:3,volvio_viejo:4,wame:5,noentrega:6,sinconf:7,disparada:8,entregada:9} // (28jul26 · Mejora #2) 🆕→💬→🟣→🔁→🕰️→📲/manuales→❌→⏳→📤→✅
+  const peso={respondio:0,conversando:1,atendida:2,atendida_24:2.5,volvio:3,volvio_viejo:4,atendida_volvio:4.5,atendida_volvio_24:4.75,wame:5,noentrega:6,sinconf:7,disparada:8,entregada:9} // (30jul26) 🔁 Atendida·volvió va pegada a la familia Volvió, antes de 📲 // (28jul26 · Mejora #2) 🆕→💬→🟣→🔁→🕰️→📲/manuales→❌→⏳→📤→✅
   lista.sort((a,b2)=>{
     const pa=a._est.tipo==='manual'?5:peso[a._est.clave],pb=b2._est.tipo==='manual'?5:peso[b2._est.clave]
     if(pa!==pb)return pa-pb
@@ -42368,7 +42428,7 @@ async function _wchLatido(){
       c.no_leidos=r.no_leidos;c.ventana_24h_hasta=r.ventana_24h_hasta
       c.requiere_reintro=r.requiere_reintro;c.etiqueta=r.etiqueta;c.etiqueta_en=r.etiqueta_en
       if(r.nombre)c.nombre=r.nombre
-      if(r.ultimo_msg_dir==='in')c._algunIn=true // (28jul26) escribió → ya tiene entrante de por vida
+      if(r.ultimo_msg_dir==='in'){c._algunIn=true;c._lastInTs=r.ultimo_msg_en} // (28jul26) escribió → ya tiene entrante de por vida · (30jul26) y CUÁNDO: así al contestarle cae de una en 🔁 Atendida·volvió, sin esperar los 60s
       if(r.ultimo_msg_dir==='out')pedirOut.push(r.id)
       tocadas.push(c)
     }
@@ -42430,7 +42490,7 @@ function _wchChipsOrden(){
   const rieles=[
     {tipo:'grupo',clave:'g_llamar',n:'Llamar',e:'📞',c:'#ef4444'},
     {tipo:'grupo',clave:'g_camino',n:'En camino',e:'📨',c:'#38bdf8'},
-    ...['respondio','conversando','atendida','volvio','volvio_viejo','wame'].map(k=>({tipo:'riel',clave:k,...cat.rieles[k]}))
+    ...['respondio','conversando','atendida','atendida_24','volvio','volvio_viejo','atendida_volvio','atendida_volvio_24','wame'].map(k=>({tipo:'riel',clave:k,...cat.rieles[k]})) // (30jul26) 🔁 Atendida·volvió cierra la familia Volvió
   ]
   // (28jul26) 🗓️ etapa CERO de Pend.Conf: pedidos pendientes SIN fecha programada.
   // DERIVADA (el sistema la calcula sola — nadie la pone a mano, así el contador
@@ -43478,7 +43538,18 @@ async function _wchHiloPintar(convId){
         if(tU>tC||cS.ultimo_msg_dir!==ult.direccion){
           if(tU>tC)cS.ultimo_msg_en=ult.ts
           cS.ultimo_msg_dir=ult.direccion
-          if(ult.direccion==='in')cS._algunIn=true // (28jul26) para 💬/🔇 al vuelo
+          if(ult.direccion==='in'){cS._algunIn=true // (28jul26) para 💬/🔇 al vuelo
+            // ⏰ (30jul26) REGLA DE META (verificada): la ventana de 24h se REINICIA con
+            // CADA mensaje del cliente y se cuenta desde el ÚLTIMO, no desde el primero.
+            // wa-webhook ya la reescribe así en la BD (ventana_24h_hasta = ts + 24h).
+            // Aquí se refleja de una (3s) con la MISMA fórmula, porque el latido tarda
+            // hasta 12s: sin esto, si el auxiliar contesta en ese hueco, la conversación
+            // caería en ⏰ Atendida +24h leyendo una ventana VIEJA que ya caducó, cuando
+            // en realidad el cliente acaba de reabrirla. Al llegar el latido, la BD manda.
+            cS._lastInTs=ult.ts
+            cS.ventana_24h_hasta=new Date(new Date(ult.ts).getTime()+24*3600*1000).toISOString()
+            _wchVentanaPintar(convId,cS) // y el letrero de la cabecera deja de mentir
+          }
           if(ult.direccion==='out'){cS._lastOutHum=!!ult.usuario_id;if(ult.usuario_id)cS._algunOutHum=true}
           const sl=e=>e?((e.tipo==='manual'?'m:'+e.id:'r:'+e.clave)+'|'+(e.ts||'')):''
           const antes=sl(cS._est)

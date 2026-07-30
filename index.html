@@ -19168,7 +19168,12 @@ async function _waF3CfgLoad(force){
 async function _waCierresIds(){
   const w=window._waCierresCache=window._waCierresCache||{t:0,ids:null}
   if(w.ids&&Date.now()-w.t<300000)return w.ids
-  const ids=new Set(['g_final','g_final_volvio']) // los 2 cierres de fábrica siempre cuentan
+  // (30jul26) Los cierres de FÁBRICA siempre cuentan, estén o no en el catálogo guardado.
+  // Esto lee `config`, no el catálogo en memoria, así que sin esta línea los dos cierres
+  // nuevos de ventana vencida no contarían hasta que el admin guardara la tubería — y el
+  // encolador le volvería a disparar a un cliente ya cerrado. g_final_volvio se queda por
+  // las conversaciones viejas que aún la tengan puesta.
+  const ids=new Set(['g_final','g_final_volvio','g_final_24_at','g_final_24_vo'])
   try{
     const raw=await getConfig('cc_etiquetas')
     if(raw){
@@ -41016,7 +41021,14 @@ const WCH_SECS=[
   {k:'entrantes',n:'Entrantes',e:'📥'}
 ]
 const WCH_CAT_DEF=()=>({v:1,rieles:JSON.parse(JSON.stringify(WCH_RIELES_DEF)),
-  globales:[{id:'g_final',n:'Resuelta',e:'🟢',c:'#22c55e',cierre:true,arch:false}], // (30jul26) 🔁 "Resuelta · volvió" ELIMINADA: el cierre es UNO solo. Todo lo resuelto que vuelva a escribir cae por sí mismo en 🔁 Volvió (cierre tapado), así que un cierre aparte no aportaba nada y ensuciaba el select.
+  globales:[{id:'g_final',n:'Resuelta',e:'🟢',c:'#22c55e',cierre:true,arch:false}, // (30jul26) 🔁 "Resuelta · volvió" ELIMINADA: el cierre normal es UNO solo. Todo lo resuelto que vuelva a escribir cae por sí mismo en 🔁 Volvió (cierre tapado), así que un cierre aparte no aportaba nada y ensuciaba el select.
+    // (30jul26) ⏰ Los DOS cierres de VENTANA VENCIDA. Pasadas las 24h la única vía de
+    // contacto es una plantilla aprobada por WhatsApp; cuando el auxiliar la manda, la
+    // conversación se etiqueta SOLA con el cierre de SU flujo. Van SEPARADAS a propósito:
+    // así el contador dice de qué cola venía cada demora — atendida y el cliente no volvió
+    // (⏰) vs. un reingreso que se dejó vencer (🔁) — y toda la app queda coherente.
+    {id:'g_final_24_at',n:'Resuelta · Atendida +24h',e:'⏰',c:'#f59e0b',cierre:true,arch:false},
+    {id:'g_final_24_vo',n:'Resuelta · Volvió +24h',e:'🔁',c:'#fb923c',cierre:true,arch:false}],
   secciones:{novedades:[],reservado:[],cancelados:[],reclame:[],entrantes:[]}})
 
 // ── Estado en memoria ──
@@ -41076,6 +41088,25 @@ async function _wchCatLoad(force){
   try{
     const _iv=(cat.globales||[]).findIndex(x=>x&&x.id==='g_final_volvio')
     if(_iv>=0)cat.globales.splice(_iv,1)
+  }catch(_){}
+  // (30jul26) Migración suave de los DOS cierres de VENTANA VENCIDA: si el catálogo
+  // guardado todavía no los tiene, se agregan detrás de g_final. Solo se AGREGAN —
+  // nada se pisa: si el admin los renombra, les cambia color o los archiva, se respeta
+  // (viven por su ID, igual que todas). Sin esto, quien ya tenga catálogo guardado
+  // nunca los vería y el auto-cierre no tendría a qué etiqueta apuntar.
+  try{
+    const _def24=[
+      {id:'g_final_24_at',n:'Resuelta · Atendida +24h',e:'⏰',c:'#f59e0b',cierre:true,arch:false},
+      {id:'g_final_24_vo',n:'Resuelta · Volvió +24h',e:'🔁',c:'#fb923c',cierre:true,arch:false}
+    ]
+    cat.globales=cat.globales||[]
+    let _pos=cat.globales.findIndex(x=>x&&x.id==='g_final')
+    for(const _d of _def24){
+      const _ya=cat.globales.findIndex(x=>x&&x.id===_d.id)
+      if(_ya>=0){_pos=_ya;continue} // ya está (puede venir renombrada): se respeta y la siguiente va detrás de ella
+      const _cp=JSON.parse(JSON.stringify(_d))
+      if(_pos>=0){cat.globales.splice(_pos+1,0,_cp);_pos++}else cat.globales.push(_cp)
+    }
   }catch(_){}
   // (28jul26 · Flujo Pend.Conf) 4 etiquetas de SECCIÓN auto-creadas — solo se AGREGAN
   // si faltan; renombres/archivados del admin se respetan (viven por su ID):
@@ -41150,6 +41181,21 @@ function _wchVentanaCerrada(c){
   const h=_wchHrs(c.ultimo_msg_en)
   return h!=null&&h>=24
 }
+// (30jul26) 🔁 PRECEDENCIA ÚNICA DE LA FAMILIA "VOLVIÓ" — un solo sitio para los TRES
+// caminos de reingreso (cierre tapado · resuelta en la tabla de su sección · dijo que NO),
+// para que no se puedan desincronizar nunca. El orden lo decidió el dueño:
+//   1) el cierre tiene más de ccDiasVuelve días → 🕰️ Volvió (+7DIAS). MANDA SIEMPRE,
+//      aunque la ventana también esté vencida: un reingreso viejo es su propio caso.
+//   2) la ventana de 24h ya se cerró           → ⏰ Volvió (+24h). Aquí solo se puede
+//      mandar plantilla, así que comparte píldora y acción con los demás "+24h".
+//   3) el resto                                 → 🔁 Volvió.
+// Es el mismo espejo que ya existía en la rama saliente (💬 → ⏰ Atendida +24h): misma
+// acción posible = misma píldora. Antes 'volvio' NO se partía por ventana y por eso los
+// reingresos vencidos se quedaban ahí para siempre, sin que nadie notara la demora.
+function _wchRielVolvio(dias,c){
+  if(dias>(nxSysVal('ccDiasVuelve')||7))return 'volvio_viejo'
+  return _wchVentanaCerrada(c)?'atendida_volvio_24':'volvio'
+}
 // (30jul26) ¿Esta conversación viene de un REINGRESO REAL? Devuelve de dónde volvió
 // (🏷️ etiqueta de cierre tapada · ✅ resuelta en la tabla de su sección · 🚫 dijo que NO)
 // y SOLO si el cliente escribió DESPUÉS de ese cierre. Esa es la diferencia fina: que
@@ -41190,7 +41236,7 @@ function _wchDerivar(c){
     if(cerr){
       const tC=cerr.ts?new Date(cerr.ts).getTime():0
       const dias=tC?((Date.now()-tC)/864e5):0
-      return {tipo:'riel',clave:dias>(nxSysVal('ccDiasVuelve')||7)?'volvio_viejo':'volvio',ts:c.ultimo_msg_en,de:cerr}
+      return {tipo:'riel',clave:_wchRielVolvio(dias,c),ts:c.ultimo_msg_en,de:cerr}
     }
     // (28jul26 · F2) Resuelta en su TABLA de sección (histórico sin etiqueta) y volvió a
     // escribir. Solo es REINGRESO si ya hubo ida y vuelta real (algún humano le contestó
@@ -41201,7 +41247,7 @@ function _wchDerivar(c){
       if(isFinite(tR)&&(tMsg==null||tR<tMsg)&&(c._algunOutHum||(c._numIn||0)>1)){
         const diasR=(Date.now()-tR)/864e5
         const sNR=(WCH_SECS.find(s=>s.k===c._resolSec.sec)||{}).n||c._resolSec.sec
-        return {tipo:'riel',clave:diasR>(nxSysVal('ccDiasVuelve')||7)?'volvio_viejo':'volvio',ts:c.ultimo_msg_en,de:{n:'Resuelta · '+sNR,e:'✅',col:'#22c55e',ts:c._resolSec.ts,tabla:true}}
+        return {tipo:'riel',clave:_wchRielVolvio(diasR,c),ts:c.ultimo_msg_en,de:{n:'Resuelta · '+sNR,e:'✅',col:'#22c55e',ts:c._resolSec.ts,tabla:true}}
       }
     }
     // (28jul26) 🚫 dijo que NO y escribió DESPUÉS → reingreso (si escribe, algo quiere)
@@ -41209,7 +41255,7 @@ function _wchDerivar(c){
       const tN=new Date(c._dijoNo.ts).getTime()
       if(isFinite(tN)&&(tMsg==null||tN<tMsg)){
         const diasN=(Date.now()-tN)/864e5
-        return {tipo:'riel',clave:diasN>(nxSysVal('ccDiasVuelve')||7)?'volvio_viejo':'volvio',ts:c.ultimo_msg_en,de:{n:'Ya dijo que NO',e:'🚫',col:'#ef4444',ts:c._dijoNo.ts,tabla:true}}
+        return {tipo:'riel',clave:_wchRielVolvio(diasN,c),ts:c.ultimo_msg_en,de:{n:'Ya dijo que NO',e:'🚫',col:'#ef4444',ts:c._dijoNo.ts,tabla:true}}
       }
     }
     // ¿ALGUNA vez le contestó un humano? → hilo vivo (💬). Si no, es lead crudo (🆕).
@@ -42294,12 +42340,15 @@ window._wchTplEnviarDirecto=async function(contId){
     }
     const d=String(st.tel||'').replace(/\D/g,'')
     const telFull=d.startsWith('57')?d:('57'+d)
+    // ⏰ (30jul26) foto del estado ANTES de enviar — este camino también tiene que cerrar
+    // solo, o el auto-cierre se escapa por las sugerencias 📨 y la medición queda coja.
+    const _est24Ant=(()=>{try{const _cv=st.convId?(window._wchState.convs||[]).find(x=>x&&x.id===st.convId):null;return (_cv&&_cv._est)?_cv._est:null}catch(_){return null}})()
     if(out)out.innerHTML='<span style="color:var(--muted)">Enviando plantilla…</span>'
     const{data:res,error}=await sb.functions.invoke('wa-send',{body:{action:'send_template',numero_id:num.id,telefono:telFull,template_name:st.sel.nombre,parametros:st.sel.params}})
     if(error||!res||!res.ok)throw new Error(await _wchErrMsg(res,error))
     if(out)out.innerHTML='<span style="color:#22c55e">✅ Plantilla enviada</span>'
     logAction('wch_tpl_enviada_preview',{tel:telFull,plantilla:st.sel.nombre,seccion:st.secWch,sin_conversacion:!st.convId}).catch(()=>{})
-    if(st.convId){_wchHiloPintar(st.convId)}
+    if(st.convId){_wchHiloPintar(st.convId);await _wchCierre24Auto(st.convId,_est24Ant)}
     else{ // pedido SIN conversación: el webhook la crea — se busca y se abre el chat real
       setTimeout(async()=>{
         try{
@@ -42974,6 +43023,23 @@ window._wchChatAbrir=async function(convId){
   // quitar el "— Etiqueta —" dejaría el select mostrando una opción que no es la suya.
   const _etqActDef=etqActual?_wchEtqPorId(etqActual):null
   const _ccCerrada=!!(_etqActDef&&_etqActDef.cierre&&etqs.some(x=>x.id===etqActual))
+  // 🔒 (30jul26) VENTANA VENCIDA = SELECT BLOQUEADO. En ⏰ Atendida (+24h) y ⏰ Volvió (+24h)
+  // el cliente lleva más de 24h sin escribir: WhatsApp ya no deja texto libre y la ÚNICA
+  // vía es una plantilla aprobada. Si el auxiliar pudiera cerrar a mano, la demora se
+  // borraría del tablero sin que nadie hubiera contactado al cliente — justo lo que se
+  // quiere medir. Así que aquí no se ofrece NINGUNA etiqueta manual: en el lugar del
+  // select va un candado, y la salida es el botón de plantilla que ya vive abajo, en el
+  // bloque de sugerencias 🔒 "Fuera de ventana". Al enviarla, _wchCierre24Auto etiqueta sola.
+  const _cc24=!!(c&&c._est&&c._est.tipo==='riel'&&(c._est.clave==='atendida_24'||c._est.clave==='atendida_volvio_24'))
+  // El control de etiqueta se arma ACÁ (no dentro del innerHTML) para no anidar otro
+  // nivel de plantillas: el select de siempre queda intacto, palabra por palabra.
+  const _etqCtrl=_cc24
+    ?`<span title="Pasaron más de 24h desde el último mensaje del cliente: WhatsApp ya no permite texto libre. Envía una plantilla aprobada (botones 📋 de abajo, botón 📨 de la cabecera) y la conversación se cierra sola con la etiqueta que le toca." style="display:inline-flex;align-items:center;gap:4px;border:1px dashed #f59e0b;color:#f59e0b;background:rgba(245,158,11,.10);border-radius:8px;padding:4px 8px;font-size:10.5px;font-weight:800;line-height:1.15;max-width:150px;cursor:help;user-select:none">🔒 Solo plantilla</span>`
+    :`<select id="wch-etq-${convId}" onchange="_wchEtqSel('${convId}',this)" style="font-size:11.5px;padding:4px 6px;max-width:150px">
+          ${_ccCerrada?'':`<option value="">— Etiqueta —</option>`}
+          ${etqs.map(x=>`<option value="${x.id}" ${x.id===etqActual?'selected':''}>${x.e||''} ${_wchEsc(x.n)}${x.cierre?' (cierra)':''}</option>`).join('')}
+          ${etqActual&&!_ccCerrada?`<option value="~quitar">✖ Quitar etiqueta</option>`:''}
+        </select>`
   const esRe=!!(c&&c.requiere_reintro) // 🚫 número bloqueado → identidad roja limpia: franja de 3px + insignia
   div.innerHTML=`<div style="background:var(--card);border:1px solid ${esRe?'#ef4444':'var(--border)'};border-top:${esRe?'4px solid #ef4444':'1px solid var(--border)'};border-radius:14px;width:100%;height:100%;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 44px rgba(0,0,0,.55)">
     <div id="wch-ch-head-${convId}" style="display:flex;justify-content:space-between;align-items:center;padding:11px 14px;border-bottom:1px solid var(--border);gap:8px;flex-wrap:wrap;background:var(--card2)">
@@ -42992,11 +43058,7 @@ window._wchChatAbrir=async function(convId){
         <button onclick="_wchProtoAbrir('${convId}','${tel}')" title="Copiar protocolo de respuesta para Dropi (con los datos del pedido)" style="background:none;border:none;font-size:17px;cursor:pointer;padding:2px 4px">📋</button>
         <button onclick="_wchWaMe('${convId}','${tel}',true)" title="Abrir en WhatsApp con el protocolo copiado" style="background:none;border:none;font-size:17px;cursor:pointer;padding:2px 4px">📱</button>
         <button onclick="_wchWaMe('${convId}','${tel}',false)" title="Llamar (abre el chat limpio)" style="background:none;border:none;font-size:17px;cursor:pointer;padding:2px 4px">📞</button>
-        <select id="wch-etq-${convId}" onchange="_wchEtqSel('${convId}',this)" style="font-size:11.5px;padding:4px 6px;max-width:150px">
-          ${_ccCerrada?'':`<option value="">— Etiqueta —</option>`}
-          ${etqs.map(x=>`<option value="${x.id}" ${x.id===etqActual?'selected':''}>${x.e||''} ${_wchEsc(x.n)}${x.cierre?' (cierra)':''}</option>`).join('')}
-          ${etqActual&&!_ccCerrada?`<option value="~quitar">✖ Quitar etiqueta</option>`:''}
-        </select>
+        ${_etqCtrl}
         <button onclick="_wchChatCerrar('${convId}')" title="Cerrar esta conversación" style="width:30px;height:30px;border-radius:8px;border:none;background:#e81123;color:#fff;font-size:14px;font-weight:800;cursor:pointer;flex:0 0 auto;line-height:1;box-shadow:0 2px 6px rgba(0,0,0,.35)">✕</button>
       </div>
     </div>
@@ -44088,6 +44150,29 @@ window._wchEnviarTexto=async function(convId,tel){
     if(out)out.innerHTML='<span style="color:#ef4444">❌ '+_wchEsc(m)+'</span>'
   }
 }
+// ⏰ (30jul26) AUTO-CIERRE DE VENTANA VENCIDA — el auxiliar no hace NADA más.
+// Fuera de las 24h la única vía de contacto es una plantilla aprobada. Apenas Meta la
+// acepta, la conversación se etiqueta SOLA con el cierre de SU flujo, y así el dueño mide
+// cuántas se dejaron vencer y de qué cola venían:
+//   ⏰ Atendida (+24h)  → ⏰ Resuelta · Atendida +24h  (g_final_24_at)
+//   ⏰ Volvió   (+24h)  → 🔁 Resuelta · Volvió  +24h  (g_final_24_vo)
+// TRES candados a propósito:
+//   · Se lee el estado de ANTES de enviar: el envío ya movió ultimo_msg_* y re-derivar
+//     aquí daría 🟣 Atendida, que no dice nada de la demora.
+//   · Cualquier otro estado NO se toca: mandar plantilla dentro de ventana sigue siendo
+//     un envío normal y no cierra nada.
+//   · Si la etiqueta no está en el catálogo (el admin la archivó), no se inventa nada.
+// El motor wa-dispatch no pasa por acá: nunca cerrará un chat que nadie atendió.
+async function _wchCierre24Auto(convId,estAntes){
+  try{
+    if(!convId||!estAntes||estAntes.tipo!=='riel')return
+    const _id=estAntes.clave==='atendida_24'?'g_final_24_at':(estAntes.clave==='atendida_volvio_24'?'g_final_24_vo':null)
+    if(!_id)return
+    if(!_wchEtqPorId(_id))return
+    await window._wchEtiquetar(convId,_id)
+    try{logAction('wch_cierre24_auto',{conv:convId,etiqueta:_id,desde:estAntes.clave})}catch(_){}
+  }catch(_){}
+}
 window._wchEnviarTpl=async function(convId,tel,nombreTpl,esReintro){
   const out=document.getElementById('wch-enviomsg-'+convId)
   const num=await _wchNumeroDe(window._wchState.sec,window._wchState.convs.find(x=>x.id===convId))
@@ -44111,6 +44196,7 @@ window._wchEnviarTpl=async function(convId,tel,nombreTpl,esReintro){
     })
   }catch(_){parametros=[]}
   if(!confirm('📨 Enviar plantilla:\n\n'+nombreTpl+'\nA: '+((c&&c.nombre)||'')+' ('+tel+')\n\n¿Enviar?'))return
+  const _est24Antes=(c&&c._est)?c._est:null // ⏰ (30jul26) foto del estado ANTES de enviar: abajo el envío lo pisa
   if(out)out.innerHTML='<span style="color:var(--muted)">Enviando plantilla…</span>'
   try{
     const{data:res,error}=await sb.functions.invoke('wa-send',{body:{action:'send_template',numero_id:num.id,telefono:tel,template_name:nombreTpl,parametros}})
@@ -44123,6 +44209,10 @@ window._wchEnviarTpl=async function(convId,tel,nombreTpl,esReintro){
     }
     _wchHiloPintar(convId)
     if(c){c.ultimo_msg_en=new Date().toISOString();c.ultimo_msg_dir='out';c._lastOutHum=true;c._est=_wchDerivar(c);_wchAplicarVista();_wchListaRender();_wchFranjaContadores()}
+    // ⏰ (30jul26) Si venía de ventana vencida, se cierra sola. Va AL FINAL para que el
+    // envío ya esté pintado, y NUNCA en una reintroducción: esa plantilla no cierra nada,
+    // solo se presenta de nuevo cuando cambió el número.
+    if(!esReintro)await _wchCierre24Auto(convId,_est24Antes)
   }catch(e){if(out)out.innerHTML='<span style="color:#ef4444">❌ '+_wchEsc(e.message||String(e))+'</span>'}
 }
 

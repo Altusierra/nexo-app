@@ -42736,7 +42736,7 @@ window._wchChatAbrir=async function(convId){
         <button onclick="_wchProtoAbrir('${convId}','${tel}')" title="Copiar protocolo de respuesta para Dropi (con los datos del pedido)" style="background:none;border:none;font-size:17px;cursor:pointer;padding:2px 4px">📋</button>
         <button onclick="_wchWaMe('${convId}','${tel}',true)" title="Abrir en WhatsApp con el protocolo copiado" style="background:none;border:none;font-size:17px;cursor:pointer;padding:2px 4px">📱</button>
         <button onclick="_wchWaMe('${convId}','${tel}',false)" title="Llamar (abre el chat limpio)" style="background:none;border:none;font-size:17px;cursor:pointer;padding:2px 4px">📞</button>
-        <select id="wch-etq-${convId}" onchange="_wchEtiquetar('${convId}',this.value)" style="font-size:11.5px;padding:4px 6px;max-width:150px">
+        <select id="wch-etq-${convId}" onchange="_wchEtqSel('${convId}',this)" style="font-size:11.5px;padding:4px 6px;max-width:150px">
           <option value="">— Etiqueta —</option>
           ${etqs.map(x=>`<option value="${x.id}" ${x.id===etqActual?'selected':''}>${x.e||''} ${_wchEsc(x.n)}${x.cierre?' (cierra)':''}</option>`).join('')}
           ${etqActual?`<option value="~quitar">✖ Quitar etiqueta</option>`:''}
@@ -43363,6 +43363,52 @@ window._wchMedia=async function(path,mime,contId){
     else if((mime||'').startsWith('audio/'))cont.innerHTML=`<audio controls src="${url}" style="max-width:230px;height:32px"></audio>`
     else cont.innerHTML=`<a href="${url}" target="_blank" rel="noopener" class="btn-sm btn-outline" style="font-size:10.5px">⬇️ Abrir adjunto</a>`
   }catch(e){cont.innerHTML=`<span style="color:#ef4444;font-size:10.5px">No pude abrir el adjunto: ${_wchEsc(e.message)}</span>`}
+}
+
+// ── 🛡️ GUARDIA "PRIMERO RESPONDE" (30jul26) ────────────────────────────────
+// Acuerdo operativo: una conversación en 🆕 Respondió significa que el CLIENTE
+// escribió y NADIE le ha contestado todavía. Ponerle una etiqueta manual la SACA
+// del riel (en _wchDerivar la etiqueta manda cuando es el evento más reciente) y
+// el cliente queda colgado sin respuesta. Por eso:
+//   · ventana 24h ABIERTA + sin respuesta humana → BLOQUEA y avisa.
+//   · ya le respondió (manual, plantilla o adjunto: el riel ya habría pasado solo
+//     a 🟣 Atendida / 💬 En conversación)            → pasa derecho, sin avisos.
+//   · ventana 24h CERRADA (>24h)                     → pasa derecho: fuera de
+//     ventana solo entra plantilla, no hay nada que contestar en caliente.
+// El disparo AUTOMÁTICO que originó la conversación NO cuenta como respuesta
+// (sale sin usuario_id → _algunOutHum/_lastOutHum quedan en false).
+// Verificación 100% EN MEMORIA (cero viajes a Supabase): no retrasa al auxiliar.
+// A prueba de fallos: ante cualquier error interno NO bloquea (nunca frenar al
+// auxiliar por un problema nuestro). Devuelve el aviso a mostrar, o null.
+function _wchEtqBloqueo(convId,val){
+  try{
+    if(!val||val==='~quitar')return null // "— Etiqueta —" y "✖ Quitar" NO la sacan del riel
+    const st=window._wchState;if(!st||!Array.isArray(st.convs))return null
+    const c=st.convs.find(x=>x.id===convId);if(!c)return null
+    const e=c._est||_wchDerivar(c)
+    if(!e||e.tipo!=='riel'||e.clave!=='respondio')return null // solo aplica al riel 🆕 Respondió
+    if(c._algunOutHum||c._lastOutHum)return null              // ya hubo respuesta humana
+    const h=c.ventana_24h_hasta?_wchHrs(c.ventana_24h_hasta):null
+    if(!(h!=null&&h<0))return null                            // ventana CERRADA → etiquetar libre
+    return '✋ Primero responde al cliente y luego puedes cambiar la etiqueta.\n\n'
+      +'Esta conversación está en 🆕 Respondió con la ventana de 24h ABIERTA: el cliente escribió y todavía nadie le ha contestado.\n\n'
+      +'Contéstale desde este chat (texto libre o una de las plantillas sugeridas 📨). Al responder pasa sola a 🟣 Atendida y ahí sí podrás etiquetarla.'
+  }catch(_){return null}
+}
+// El <select> de la cabecera del chat entra por aquí. Si la guardia bloquea: el
+// selector vuelve SOLO a su valor anterior (nada se guarda, nada se pinta) y el
+// cursor cae en el campo de mensaje para que contestar sea el siguiente clic.
+window._wchEtqSel=function(convId,sel){
+  if(!sel)return
+  const val=sel.value
+  const aviso=_wchEtqBloqueo(convId,val)
+  if(!aviso){window._wchEtiquetar(convId,val);return}
+  try{
+    const c=((window._wchState&&window._wchState.convs)||[]).find(x=>x.id===convId)
+    sel.value=(c&&c.etiqueta&&c.etiqueta!==WCH_SELLO_WAME)?c.etiqueta:''
+  }catch(_){sel.value=''}
+  alert(aviso)
+  try{const t=document.getElementById('wch-envio-'+convId);if(t)t.focus()}catch(_){}
 }
 
 // ── ETIQUETAR (movimiento en vivo + reversa si el guardado silencioso falla) ──

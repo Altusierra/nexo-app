@@ -41016,8 +41016,7 @@ const WCH_SECS=[
   {k:'entrantes',n:'Entrantes',e:'📥'}
 ]
 const WCH_CAT_DEF=()=>({v:1,rieles:JSON.parse(JSON.stringify(WCH_RIELES_DEF)),
-  globales:[{id:'g_final',n:'Resuelta',e:'🟢',c:'#22c55e',cierre:true,arch:false},
-    {id:'g_final_volvio',n:'Resuelta · volvió',e:'🔁',c:'#f97316',cierre:true,arch:false}], // (28jul26) cierre para REINGRESOS: contador propio; al elegirla el select SÍ dispara (valor distinto a g_final)
+  globales:[{id:'g_final',n:'Resuelta',e:'🟢',c:'#22c55e',cierre:true,arch:false}], // (30jul26) 🔁 "Resuelta · volvió" ELIMINADA: el cierre es UNO solo. Todo lo resuelto que vuelva a escribir cae por sí mismo en 🔁 Volvió (cierre tapado), así que un cierre aparte no aportaba nada y ensuciaba el select.
   secciones:{novedades:[],reservado:[],cancelados:[],reclame:[],entrantes:[]}})
 
 // ── Estado en memoria ──
@@ -41067,15 +41066,16 @@ async function _wchCatLoad(force){
   // botón ✅ Resuelta de Novedades/Reclame. Solo si nadie le puso nombre propio: si el
   // auxiliar ya lo renombró, se respeta. El id (g_final) NUNCA cambia → cero datos tocados.
   try{const _gf=(cat.globales||[]).find(x=>x.id==='g_final');if(_gf&&_gf.n==='Finalizado')_gf.n='Resuelta'}catch(_){}
-  // (28jul26) Migración suave: si el catálogo guardado aún no tiene la etiqueta de cierre
-  // para REINGRESOS, se agrega detrás de g_final. Solo se AGREGA — nada se pisa; si el
-  // admin la renombra o archiva después, se respeta (vive por su ID g_final_volvio).
+  // (30jul26) Migración INVERSA: antes esto SEMBRABA 🔁 "Resuelta · volvió"; ahora la
+  // RETIRA. El cierre pasa a ser UNO solo (🟢 Resuelta) porque un chat resuelto que
+  // vuelve a escribir ya cae solo en 🔁 Volvió por el cierre tapado — no hacía falta
+  // una etiqueta de cierre aparte. Se saca del catálogo EN MEMORIA, así desaparece del
+  // select, de la franja de píldoras y del editor de tubería. El catálogo guardado en
+  // config NO se pisa aquí: se limpia solo la próxima vez que el admin guarde. Nada
+  // más del catálogo se toca. Tolerante: si algo falla, queda como estaba.
   try{
-    if(!(cat.globales||[]).find(x=>x&&x.id==='g_final_volvio')){
-      const _i=(cat.globales||[]).findIndex(x=>x&&x.id==='g_final')
-      const _nv={id:'g_final_volvio',n:'Resuelta · volvió',e:'🔁',c:'#f97316',cierre:true,arch:false}
-      if(_i>=0)cat.globales.splice(_i+1,0,_nv);else (cat.globales=cat.globales||[]).push(_nv)
-    }
+    const _iv=(cat.globales||[]).findIndex(x=>x&&x.id==='g_final_volvio')
+    if(_iv>=0)cat.globales.splice(_iv,1)
   }catch(_){}
   // (28jul26 · Flujo Pend.Conf) 4 etiquetas de SECCIÓN auto-creadas — solo se AGREGAN
   // si faltan; renombres/archivados del admin se respetan (viven por su ID):
@@ -41468,7 +41468,21 @@ async function _wchCargar(){
       if(fecha)q=q.gte('ultimo_msg_en',fecha+'T00:00:00-05:00').lte('ultimo_msg_en',fecha+'T23:59:59-05:00')
       const{data,error}=await q
       if(error)throw error
-      st.convs=await _wchEnriquecer(data||[],{})
+      // (30jul26) 📥 RESCATE DE TRABAJO PENDIENTE EN VISTA FECHA — antes Entrantes era
+      // la ÚNICA sección que se quedaba sin él: al mover el calendario, un 🔁 Volvió de
+      // otro día DESAPARECÍA, aunque alguien siguiera esperando respuesta. Las demás
+      // secciones ya lo traían (bloque "vivas"). Aquí se hace igual: se suman las
+      // conversaciones de cliente que están vivas (escribió último o tiene etiqueta),
+      // marcadas con _ccSiempre, y _wchAplicarVista deja pasar SOLO las píldoras de
+      // trabajo pendiente. El archivo del día NO se altera. Tolerante: si falla, queda
+      // exactamente como antes.
+      let _filasEnt=data||[]
+      if(fecha)try{
+        const _yaEnt=new Set(_filasEnt.map(c=>c.id))
+        const{data:_vivEnt}=await sb.from('conversaciones').select('id,telefono,nombre,ultimo_msg_en,ultimo_msg_dir,ventana_24h_hasta,no_leidos,requiere_reintro,etiqueta,etiqueta_en,origen,wa_numero_id').eq('origen','cliente').or('ultimo_msg_dir.eq.in,etiqueta.not.is.null').order('ultimo_msg_en',{ascending:false}).limit(400)
+        for(const _cv of(_vivEnt||[])){if(_cv&&!_yaEnt.has(_cv.id)){_cv._ccSiempre=true;_filasEnt.push(_cv);_yaEnt.add(_cv.id)}}
+      }catch(_){}
+      st.convs=await _wchEnriquecer(_filasEnt,{})
       // (28jul26 · F2) Un cliente con RASTRO operativo (reclame/novedades/confirmación)
       // pertenece a SU sección — no es un entrante nuevo. Aquí se filtra y su tarjeta
       // aparece en la sección correcta (con 🔁/🕰️ si estaba resuelto). Tolerante:
@@ -43935,17 +43949,18 @@ async function _wchSugerencias(convId,c){
   const st=window._wchState
   const abierta=c&&c.ventana_24h_hasta&&_wchHrs(c.ventana_24h_hasta)<0
   let html=''
-  // (28jul26) REINGRESO a la vista: cierre de un clic con SU etiqueta (g_final_volvio).
-  // Así el contador separa cierres limpios de reingresos ya atendidos, y como el valor
-  // es DISTINTO a g_final, el select nunca se atasca. El select sigue libre para lo demás.
+  // (28jul26) REINGRESO a la vista: cierre de un clic, sin bajar al select.
+  // (30jul26) Ya NO cierra con g_final_volvio (esa etiqueta se eliminó): cierra con
+  // 🟢 Resuelta, el único cierre que queda. El botón de un clic NO se pierde y el
+  // letrero naranja "🔁 Cliente que VOLVIÓ · venía de …" sigue igual de informativo.
   try{
     const _e=c&&c._est
     if(_e&&_e.tipo==='riel'&&(_e.clave==='volvio'||_e.clave==='volvio_viejo')){
-      const _ev=_wchEtqPorId('g_final_volvio')
+      const _ev=_wchEtqPorId('g_final')
       const _de=_e.de?` · venía de ${_wchEsc((_e.de.e||'')+' '+(_e.de.n||''))}`:''
       html+=`<div style="background:rgba(249,115,22,.08);border:1px solid #f97316;border-radius:8px;padding:6px 9px;margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span style="font-size:10.5px;color:#f97316;font-weight:800">🔁 Cliente que VOLVIÓ${_de}</span>
-        ${_ev?`<button class="btn-sm" style="background:#f97316;color:#fff;border:none;border-radius:7px;font-size:11px;font-weight:800;padding:4px 10px;cursor:pointer" onclick="_wchEtiquetar('${convId}','g_final_volvio');this.closest('div').style.opacity='.45'" title="Cierra este reingreso con su propia etiqueta (cuenta aparte de las Resueltas normales)">✅ ${_wchEsc(_ev.e||'🔁')} ${_wchEsc(_ev.n)}</button>`:''}
+        ${_ev?`<button class="btn-sm" style="background:#f97316;color:#fff;border:none;border-radius:7px;font-size:11px;font-weight:800;padding:4px 10px;cursor:pointer" onclick="_wchEtiquetar('${convId}','g_final');this.closest('div').style.opacity='.45'" title="Cierra este reingreso de un clic con 🟢 Resuelta, sin bajar al select">✅ ${_wchEsc(_ev.e||'🟢')} ${_wchEsc(_ev.n)}</button>`:''}
       </div>`
     }
   }catch(_){}

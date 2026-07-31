@@ -13625,7 +13625,7 @@ async function cargarNovedadesPorFecha(){
     window._novCache={fechaActiva:fecha,items:enriched,reporteId:rep.id}
     renderNovedadesContent(rep,enriched)
     // 🤖 MOTOR: si Novedades tiene Auto ON, encola solo (no bloquea la UI; el cron despacha)
-    try{waEncolarNovedadesAuto(enriched)}catch(_){}
+    try{waEncolarNovedadesAuto(enriched,fecha)}catch(_){}
   }catch(e){
     if(_seq===window._novFechaSeq)el.innerHTML=`<div class="alert alert-red">Error cargando: ${e.message}</div>` // 🎟️ portero también en el error
   }
@@ -19207,6 +19207,43 @@ async function _waTelsCerradosVigentes(tels){
   }
   return out
 }
+// 💬 (30jul26) Teléfonos con conversación VIVA Y DENTRO DE VENTANA → el encolador los salta.
+// Es la regla NUEVA, y es la INVERSA de la de arriba. Solo la usa Novedades; Reclame sigue
+// con _waTelsCerradosVigentes tal cual, sin enterarse.
+//   · sin conversación            → dispara (no hay nadie atendiéndolo)
+//   · cierre VIGENTE puesto       → dispara (el evento de hoy es nuevo; el cierre era del anterior)
+//   · ventana de 24h vencida      → dispara (la única vía es plantilla, que es justo lo que sale)
+//   · viva y dentro de ventana    → SE SALTA (el auxiliar está hablando con él ahora mismo;
+//                                   dispararle encima es pisarle la conversación)
+// "Cierre vigente" = etiqueta marcada "cierra" Y el cliente NO escribió después: si escribió,
+// es un reingreso, la conversación volvió a estar viva y manda la ventana.
+async function _waTelsVivosEnVentana(tels){
+  const out=new Set()
+  const cfg=await _waF3CfgLoad()
+  if(!cfg.skip)return out // mismo switch de siempre: apagado = no se salta nada
+  const cierres=await _waCierresIds()
+  const lista=[...new Set((tels||[]).filter(Boolean))]
+  for(let i=0;i<lista.length;i+=150){
+    try{
+      const{data}=await sb.from('conversaciones').select('telefono,etiqueta,etiqueta_en,ultimo_msg_en,ultimo_msg_dir,ventana_24h_hasta').in('telefono',lista.slice(i,i+150)).limit(500)
+      for(const c of(data||[])){
+        const tM=c.ultimo_msg_en?new Date(c.ultimo_msg_en).getTime():0
+        // Ventana cerrada — MISMO criterio que _wchVentanaCerrada del Centro de Chats
+        let vencida
+        if(c.ventana_24h_hasta){const tV=new Date(c.ventana_24h_hasta).getTime();vencida=isFinite(tV)&&tV<=Date.now()}
+        else vencida=!tM||(Date.now()-tM)>=864e5
+        if(vencida)continue // vencida → dispara
+        const tE=c.etiqueta_en?new Date(c.etiqueta_en).getTime():0
+        if(c.etiqueta&&cierres.has(c.etiqueta)){
+          const reabierto=c.ultimo_msg_dir==='in'&&tM>tE
+          if(!reabierto)continue // cierre vigente → dispara
+        }
+        out.add(String(c.telefono)) // viva y dentro de ventana → se salta
+      }
+    }catch(_){} // tolerante: si falla, no se bloquea nada
+  }
+  return out
+}
 // Estampa la etiqueta de cierre (Resuelta) en el chat del teléfono. Fire-and-forget.
 window._waEstamparCierre=async function(tel){  try{
     const cfg=await _waF3CfgLoad()
@@ -19512,7 +19549,7 @@ function _waSoltarCandado(seccion){
   window._waEncolandoSec=window._waEncolandoSec||{}
   window._waEncolandoSec[seccion]=false
 }
-async function waEncolarNovedadesAuto(items){
+async function waEncolarNovedadesAuto(items,loteFecha){
   try{await _waTplNombresCargar()}catch(_){} // ✏️ sobrenombres antes de encolar
   if(!_waTomarCandado('novedades')){console.warn('[encolador novedades] ya hay uno corriendo — se salta esta pasada');return} // 🔒 candado POR SECCIÓN
   try{
@@ -19541,16 +19578,36 @@ async function waEncolarNovedadesAuto(items){
     const hoyKey=new Date().toISOString().slice(0,10)
     if(!window._waEncoladoHoy||window._waEncoladoHoy.dia!==hoyKey)window._waEncoladoHoy={dia:hoyKey,set:new Set()}
     // (28jul26 · F3) Chats CERRADOS VIGENTES → no se les dispara
+    // (30jul26) DADO VUELTA para Novedades: ya NO se salta el cerrado, se salta el VIVO
+    // dentro de ventana. Si el pedido vuelve en el Excel de hoy es un evento nuevo, así
+    // que un cierre de ayer no puede callar la plantilla; lo que sí la calla es que el
+    // auxiliar esté hablando con el cliente en este momento. Reclame (19465) sigue con la
+    // función de antes, intacta.
     let _cerrN=null
-    try{_cerrN=await _waTelsCerradosVigentes((items||[]).map(m=>{const d=String(m.tel||'').replace(/\D/g,'');return d?(d.startsWith('57')?d:('57'+d)):''}))}catch(_){}
+    try{_cerrN=await _waTelsVivosEnVentana((items||[]).map(m=>{const d=String(m.tel||'').replace(/\D/g,'');return d?(d.startsWith('57')?d:('57'+d)):''}))}catch(_){}
+    // 📦 (30jul26) LOTE NUEVO = EVENTO NUEVO. Dropi borra del archivo lo que se resuelve
+    // ALLÁ; lo que sigue abierto vuelve en el Excel del día siguiente, a veces con la
+    // fecha del evento original sin refrescar. Por eso el corte NO se hace contra la
+    // fecha de la novedad sino contra la fecha del LOTE: una resolución solo frena si se
+    // hizo el mismo día del lote o después. La de ayer ya no manda sobre el archivo de
+    // hoy → vuelve a salir plantilla. Si no llega fecha de lote (llamada vieja) o viene
+    // mal, se cae al comportamiento de siempre: la resolución frena.
+    const _tsLote=(()=>{const t=loteFecha?new Date(String(loteFecha)+'T00:00:00').getTime():NaN;return isFinite(t)?t:null})()
+    const _resolVigente=(m)=>{
+      if(!(m&&m.resol&&m.resol.accion==='resuelta'))return false
+      if(_tsLote==null)return true
+      const tR=m.resol.cuando?new Date(m.resol.cuando).getTime():NaN
+      if(!isFinite(tR))return true
+      return tR>=_tsLote
+    }
     let encolados=0,_sinMapeo=0 // 🔎 (29jul26) los saltos dejan de ser invisibles
     for(const m of (items||[])){
-      if(m.resol?.accion==='resuelta')continue
+      if(_resolVigente(m))continue
       const proto=NOV_PROTO[m.cat.idx]
       if(!proto||!proto.msg)continue
       const telLimpio=String(m.tel||'').replace(/\D/g,'')
       if(telLimpio.length<10)continue
-      if(_cerrN&&_cerrN.has(telLimpio.startsWith('57')?telLimpio:('57'+telLimpio))){try{(window._waSaltN=window._waSaltN||[]).push({tel:telLimpio.startsWith('57')?telLimpio:('57'+telLimpio),nombre:m.nombre||null,plantilla:_waNombreTpl('novedades',m.cat.tipo,m.cat.idx),mapeo:m.id||m.mapeoId||null})}catch(_){};continue} // (F3) cerrado vigente (queda rastro)
+      if(_cerrN&&_cerrN.has(telLimpio.startsWith('57')?telLimpio:('57'+telLimpio))){try{(window._waSaltN=window._waSaltN||[]).push({tel:telLimpio.startsWith('57')?telLimpio:('57'+telLimpio),nombre:m.nombre||null,plantilla:_waNombreTpl('novedades',m.cat.tipo,m.cat.idx),mapeo:m.id||m.mapeoId||null})}catch(_){};continue} // (F3) (30jul26) ahora el rastro es por CONVERSACIÓN VIVA en ventana, no por cerrado
       const plantilla=_waNombreTpl('novedades',m.cat.tipo,m.cat.idx) // 🏷️ único por tarjeta + ✏️ sobrenombres
       if(autoTpls&&!autoTpls.has(plantilla))continue
       const clave=telLimpio+'|'+plantilla
@@ -41678,6 +41735,8 @@ async function _wchCargar(){
     return
   }
   st._err=null
+  // ⏰ (30jul26) antes de pintar: repara lo que el motor disparó estando la ventana vencida
+  await _wchReconciliar24(st.convs)
   _wchAplicarVista()
 }
 // Completa _lastOutHum (¿el último saliente fue humano?) y deriva estado + visibilidad
@@ -41714,9 +41773,51 @@ async function _wchEnriquecer(convs,secDe){
     c._algunIn=!!(c.id&&conIn.has(c.id))
     c._numIn=c.id?(numIn[c.id]||0):0
     c._lastInTs=(c.id&&lastIn[c.id])?new Date(lastIn[c.id]).toISOString():null // (30jul26) cuándo escribió el cliente por última vez
+    c._lastOutTs=(lo&&lo.ts)?lo.ts:null // (30jul26) y cuándo salió lo último nuestro — el reconciliador compara las dos
     c._est=_wchDerivar(c)
   }
   return convs
+}
+// ⏰ (30jul26) RECONCILIADOR DE VENTANA VENCIDA. El motor (wa-dispatch) corre en el
+// servidor: cuando ÉL manda la plantilla, aquí no hay nadie para etiquetar, y como sus
+// envíos salen sin usuario_id el chat cae en ⏸️ En espera — una píldora que significa
+// "no ha salido nada", justo lo contrario de lo que pasó, y la demora se vuelve invisible.
+// Esto lo repara al abrir el Centro de Chats, sin tocar la Edge Function: todo se
+// reconstruye de lo que ya está en la base.
+// Se etiqueta SOLO cuando se cumplen las cuatro:
+//   1. el estado derivado es ⏸️ En espera  → no hay ninguna etiqueta vigente que pisar
+//   2. el último saliente NO es humano     → lo mandó el motor, no el auxiliar
+//   3. el cliente había escrito antes      → hubo conversación de verdad
+//   4. entre ese entrante y el envío pasaron 24h+ → estaba VENCIDA cuando salió
+// Y la etiqueta sale del mismo criterio del Centro: si venía de un cierre tapado es
+// reingreso (🔁), si no es flujo normal (⏰). Nunca pisa trabajo manual del auxiliar y
+// nunca escribe si ya hay etiqueta vigente. Tope de 40 por pasada para no hacer una
+// escritura masiva desde una pantalla de lectura. Tolerante: si falla, no rompe la carga.
+async function _wchReconciliar24(convs){
+  try{
+    const cand={g_final_24_at:[],g_final_24_vo:[]}
+    for(const c of(convs||[])){
+      if(!c||!c.id)continue
+      if(!c._est||c._est.tipo!=='riel'||c._est.clave!=='disparada')continue // 1
+      if(c._lastOutHum)continue                                            // 2
+      const tO=c._lastOutTs?new Date(c._lastOutTs).getTime():NaN
+      const tI=c._lastInTs?new Date(c._lastInTs).getTime():NaN
+      if(!isFinite(tO)||!isFinite(tI))continue                             // 3
+      if(tO-tI<864e5)continue                                              // 4
+      const _id=_wchReingresoDe(c)?'g_final_24_vo':'g_final_24_at'
+      if(!_wchEtqPorId(_id))continue // el admin la archivó: no se inventa nada
+      if(cand[_id].length<40)cand[_id].push(c)
+    }
+    const ahora=new Date().toISOString()
+    for(const _id of Object.keys(cand)){
+      const lote=cand[_id];if(!lote.length)continue
+      const{data,error}=await sb.from('conversaciones').update({etiqueta:_id,etiqueta_en:ahora}).in('id',lote.map(c=>c.id)).select('id')
+      if(error||!data||!data.length)continue // la base no confirmó → no se toca la copia en memoria
+      const ok=new Set(data.map(r=>r.id))
+      for(const c of lote){if(!ok.has(c.id))continue;c.etiqueta=_id;c.etiqueta_en=ahora;c._est=_wchDerivar(c)}
+      try{logAction('wch_reconciliado_24',{etiqueta:_id,n:data.length})}catch(_){}
+    }
+  }catch(_){} // nunca frena la carga del Centro
 }
 // Filtra según vista (hoy = vivo; fecha = archivo del día) + chip + búsqueda, y ordena por urgencia
 // (30jul26) Las CINCO píldoras que NUNCA dependen del día, porque son TRABAJO

@@ -41472,10 +41472,21 @@ window._ccReingresoRender=async function(){
   // (31jul26) Solo los rieles DERIVADOS pueden ser destino: los 4 grupos (grupo:true)
   // son cajones que agrupa la franja, y el sistema nunca manda una conversación ahí.
   const rielOpts=(sel)=>Object.keys(WCH_RIELES_DEF).filter(k=>!WCH_RIELES_DEF[k].grupo).map(k=>{const r=(cat.rieles||{})[k]||WCH_RIELES_DEF[k];return `<option value="${k}" ${k===sel?'selected':''}>${r.e} ${_wchEsc(r.n)}</option>`}).join('')
-  // Todas las etiquetas que existen (globales + de cada sección), para el selector
-  const todasEtq=[...(cat.globales||[]).filter(x=>!x.arch).map(x=>({...x,amb:'🌐'})),
-    ...WCH_SECS.flatMap(s=>((cat.secciones||{})[s.k]||[]).filter(x=>!x.arch).map(x=>({...x,amb:s.e})))]
-  const etqNom=(id)=>{const f=todasEtq.find(x=>x.id===id);return f?((f.e||'🏷️')+' '+f.n):id}
+  // (31jul26) 🗂️ ÁMBITO REAL de cada etiqueta. Antes se guardaba solo un emojicito y
+  // todas caían revueltas en un mismo desplegable: no se distinguía una etiqueta que
+  // vive en TODAS las secciones de una que solo existe en Cancelados. Ahora cada una
+  // sabe de dónde es, y el selector las separa por ámbito y por si ya cierran o no.
+  const _etqAmb=[{k:'global',e:'🌐',n:'Globales',d:'existen en TODAS las secciones'}]
+    .concat(WCH_SECS.map(s=>({k:s.k,e:s.e,n:s.n,d:'solo existen en '+s.n})))
+  const todasEtq=[]
+  ;(cat.globales||[]).filter(x=>!x.arch).forEach(x=>todasEtq.push({...x,amb:'global'}))
+  WCH_SECS.forEach(s=>((cat.secciones||{})[s.k]||[]).filter(x=>!x.arch).forEach(x=>todasEtq.push({...x,amb:s.k})))
+  const ambN=(k)=>{const f=_etqAmb.find(a=>a.k===k);return f?(f.e+' '+f.n):k}
+  const etqDe=(id)=>todasEtq.find(x=>x.id===id)||null
+  const etqNom=(id)=>{const f=etqDe(id);return f?((f.e||'🏷️')+' '+f.n):id}
+  // Qué etiquetas puede usar una regla según DÓNDE vive: una regla de Novedades solo
+  // ve las globales y las de Novedades — ofrecerle las de Cancelados no tendría sentido.
+  const visiblesDe=(secKey)=>secKey==='global'?todasEtq:todasEtq.filter(x=>x.amb==='global'||x.amb===secKey)
   const suprimen=_ccRRSuprimenGlobal()
   const mias=cfg.reglas.filter(r=>(r.sec||'global')===tab)
 
@@ -41501,10 +41512,45 @@ window._ccReingresoRender=async function(){
         <span style="color:var(--muted)">En esas secciones hay una regla propia que manda por encima de esta. En las demás secciones esta regla sigue mandando normalmente.</span>
       </div>`
     }
+    const _secR=r.sec||'global'
     const chips=(Array.isArray(r.etqs)&&r.etqs.length)
-      ? r.etqs.map(id=>`<span style="display:inline-flex;align-items:center;gap:5px;background:var(--card);border:1px solid var(--border);border-radius:999px;padding:3px 9px;font-size:11px;font-weight:700">${_wchEsc(etqNom(id))} <button onclick="_ccRRQuitarEtq('${r.id}','${id}')" title="Quitar de esta regla" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:12px;padding:0;line-height:1">×</button></span>`).join('')
+      ? r.etqs.map(id=>{
+          const x=etqDe(id)
+          const ambE=x?((_etqAmb.find(a=>a.k===x.amb)||{}).e||'🏷️'):'❓'
+          const cierraYa=!!(x&&x.cierre)
+          return `<span title="${_wchEsc(x?(ambN(x.amb)+' · '+(cierraYa?'ya tenía la casilla «cierra»':'NO tiene la casilla «cierra»: esta regla es lo único que la hace cerrar')):'Esta etiqueta ya no existe en el catálogo')}" style="display:inline-flex;align-items:center;gap:5px;background:var(--card);border:1px solid ${cierraYa?'var(--border)':'var(--amber)'};border-radius:999px;padding:3px 9px;font-size:11px;font-weight:700">${ambE} ${_wchEsc(etqNom(id))}${x&&!cierraYa?' <span style="color:var(--amber);font-weight:800" title="No tiene la casilla «cierra»">➕</span>':''}${x?'':' <span style="color:var(--red)">⚠️</span>'} <button onclick="_ccRRQuitarEtq('${r.id}','${id}')" title="Quitar de esta regla" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:12px;padding:0;line-height:1">×</button></span>`
+        }).join('')
       : `<span style="font-size:11.5px;color:var(--muted);font-style:italic">— vacío = <strong style="font-style:normal">todas</strong> las etiquetas que tengan marcada la casilla «cierra» —</span>`
-    const libres=todasEtq.filter(x=>!(r.etqs||[]).includes(x.id))
+    // 🗂️ SELECTOR AGRUPADO: primero por ámbito (globales, luego cada sección), y dentro
+    // separando lo que YA cierra de lo que todavía no. Así se ve de un vistazo que
+    // agregar una «Resuelta» no suma nada nuevo — solo ESTRECHA la regla a ella sola.
+    const _usadas=new Set(r.etqs||[])
+    const _pool=visiblesDe(_secR).filter(x=>!_usadas.has(x.id))
+    let _grupos=''
+    for(const a of _etqAmb){
+      const g=_pool.filter(x=>x.amb===a.k)
+      if(!g.length)continue
+      const _op=(x,pre)=>`<option value="${x.id}">${pre} ${x.e||'🏷️'} ${_wchEsc(x.n)}</option>`
+      const ya=g.filter(x=>x.cierre).map(x=>_op(x,'✅ ya cierra ·')).join('')
+      const no=g.filter(x=>!x.cierre).map(x=>_op(x,'➕ aún NO cierra ·')).join('')
+      const extra=(a.k!=='global'&&_secR==='global')?' ⚠️ solo pegaría en esa sección':''
+      _grupos+=`<optgroup label="${_wchEsc(a.e+' '+a.n+' — '+a.d+extra)}">${ya}${no}</optgroup>`
+    }
+    const selEtq=_pool.length?`<select onchange="if(this.value)_ccRRAgregarEtq('${r.id}',this.value);this.selectedIndex=0" style="font-size:11px;padding:3px 6px;max-width:100%"><option value="">➕ agregar etiqueta…</option>${_grupos}</select>`:''
+    // ⚠️ AVISO DE ESTRECHAMIENTO: en cuanto listas una, la regla deja de cubrir a todas.
+    let avisoEtq=''
+    if(Array.isArray(r.etqs)&&r.etqs.length){
+      const _cierran=visiblesDe(_secR).filter(x=>x.cierre)
+      const _fuera=_cierran.filter(x=>!r.etqs.includes(x.id))
+      const _destinoFuera=esGlobal
+        ?'se quedan SIN regla (vuelven al comportamiento de fábrica: 🔁 Volvió con el corte de los Valores del Centro)'
+        :'se rigen por la regla 🌐 Global'
+      avisoEtq=`<div style="background:rgba(245,158,11,.11);border:1px solid var(--amber);border-radius:9px;padding:8px 10px;margin:7px 0 0 20px;font-size:11.5px;line-height:1.6">
+        <strong style="color:var(--amber)">⚠️ Esta regla YA NO aplica a todas las que cierran — solo a ${r.etqs.length===1?'la que está':'las '+r.etqs.length+' que están'} en la lista.</strong><br>
+        ${_fuera.length?`Las otras <strong>${_fuera.length}</strong> (${_wchEsc(_fuera.map(x=>(x.e||'')+' '+x.n).join(' · '))}) ${_destinoFuera}.`:'No queda ninguna otra etiqueta de cierre por fuera.'}<br>
+        <span style="color:var(--muted)">Quita todas las de la lista con la ✕ y la regla vuelve a cubrir <strong>todas</strong> las que tengan la casilla «cierra».</span>
+      </div>`
+    }
     return `<div style="background:var(--card2);border:1px solid var(--border);border-left:4px solid ${r.activa!==false?'var(--green)':'var(--border)'};border-radius:12px;padding:12px 14px;margin-bottom:10px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
         <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1">
@@ -41521,8 +41567,9 @@ window._ccReingresoRender=async function(){
           <div style="font-weight:800;margin-bottom:5px">1️⃣ SI la conversación quedó con esta etiqueta:</div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding-left:20px">
             ${chips}
-            ${libres.length?`<select onchange="if(this.value)_ccRRAgregarEtq('${r.id}',this.value);this.selectedIndex=0" style="font-size:11px;padding:3px 6px"><option value="">➕ agregar etiqueta…</option>${libres.map(x=>`<option value="${x.id}">${x.amb} ${x.e||'🏷️'} ${_wchEsc(x.n)}</option>`).join('')}</select>`:''}
+            ${selEtq}
           </div>
+          ${avisoEtq}
         </div>
         <div style="margin-bottom:9px">
           <div style="font-weight:800;margin-bottom:5px">2️⃣ Y el cliente VUELVE A ESCRIBIR → la conversación cae en:</div>

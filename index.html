@@ -43245,6 +43245,182 @@ window._wchReintroLlenar=async function(convId){
   st.reintroPend[convId]=true // al enviar este texto, la bandera 🔄 se apaga sola
 }
 
+// ── 🎯 (31jul26) EL CHAT RECONOCE SU PROPIA NOVEDAD ───────────────────────
+// No se inventa lógica nueva: la MISMA plantilla que ya disparó el motor de
+// WhatsApp lleva el idx de la tarjeta dentro de su nombre
+// (nexo_novedades_{slug}_{idx}_v1) y ese nombre queda guardado en el mensaje.
+// Leyéndolo al revés, el chat sabe a qué novedad corresponde el hilo y muestra
+// SOLO sus dos pasos: 🟢 Paso 1 (mensaje al cliente) y 🔵 Paso 2 (respuesta a
+// la transportadora). Si no logra identificarla, cae a la lista de tipos de
+// siempre y ahí, al elegir, deja solo la píldora azul del Paso 2.
+window._wchProtoTxt=window._wchProtoTxt||{}
+
+// Mapa { nombre de plantilla → idx de la tarjeta }. Incluye el nombre
+// automático, el sobrenombre actual y los históricos (versiones anteriores),
+// para que un hilo viejo se siga reconociendo aunque la plantilla se renombrara.
+window._wchProtoMapa=function(){
+  const mapa={}
+  const put=(n,idx)=>{const s=String(n==null?'':n).trim();if(s&&mapa[s]==null)mapa[s]=Number(idx)}
+  const nom=window._waTplNombres||{}
+  Object.keys(NOV_PROTO||{}).forEach(k=>{
+    const idx=Number(k);if(isNaN(idx))return
+    const titulo=(NOV_PROTO[k]||{}).titulo||('novedad_'+k)
+    let auto=''
+    try{auto=_waNombreTplAuto('novedades',titulo,idx)}catch(_){}
+    if(!auto)return
+    put(auto,idx)
+    const v=nom[auto]
+    if(typeof v==='string')put(v,idx)
+    else if(v&&typeof v==='object'){
+      put(v.n,idx)
+      ;(Array.isArray(v.h)?v.h:[]).forEach(h=>put(h,idx))
+      try{Object.keys(v.t||{}).forEach(h=>put(h,idx))}catch(_){}
+    }
+  })
+  return mapa
+}
+// nombre de plantilla → idx. 1) coincidencia exacta  2) el sufijo _{idx}_v{n}
+// que _waNombreTplAuto SIEMPRE le pone (red de seguridad si el mapa falla).
+window._wchProtoIdxDeNombre=function(nombre,mapa){
+  const n=String(nombre==null?'':nombre).trim()
+  if(!n)return null
+  if(mapa&&mapa[n]!=null&&!isNaN(mapa[n]))return mapa[n]
+  const mm=n.match(/^nexo_novedades_.*_(\d+)_v\d+$/)
+  if(mm){const i=Number(mm[1]);if((NOV_PROTO||{})[i])return i}
+  return null
+}
+// Detecta la novedad del hilo. Orden: 1) plantilla ya enviada en la conversación
+// (la más reciente manda), 2) la cola de envíos de ese teléfono. Null = no hay match.
+window._wchProtoDetectar=async function(convId,tel){
+  try{if(typeof _waTplNombresCargar==='function')await _waTplNombresCargar()}catch(_){}
+  const mapa=window._wchProtoMapa()
+  try{
+    const{data}=await sb.from('mensajes').select('plantilla,ts')
+      .eq('conversacion_id',convId).not('plantilla','is',null)
+      .order('ts',{ascending:false}).limit(25)
+    for(const r of(data||[])){
+      const i=window._wchProtoIdxDeNombre(r.plantilla,mapa)
+      if(i!=null)return{idx:i,via:'la plantilla que ya salió en este chat'}
+    }
+  }catch(_){}
+  try{
+    const corto=_wchTelCorto(tel)
+    if(corto){
+      const{data}=await sb.from('envios_cola').select('plantilla,tipo')
+        .eq('seccion','novedades').like('telefono','%'+corto)
+        .order('id',{ascending:false}).limit(10)
+      for(const r of(data||[])){
+        const i=window._wchProtoIdxDeNombre(r.plantilla,mapa)
+        if(i!=null)return{idx:i,via:'la cola de envíos de este número'}
+      }
+      for(const r of(data||[])){
+        const t=String(r.tipo||'').trim().toLowerCase()
+        if(!t)continue
+        const k=Object.keys(NOV_PROTO||{}).find(x=>String((NOV_PROTO[x]||{}).titulo||'').trim().toLowerCase()===t)
+        if(k!=null)return{idx:Number(k),via:'la cola de envíos de este número'}
+      }
+    }
+  }catch(_){}
+  return null
+}
+// Datos reales del pedido (mapeo más reciente por teléfono) para rellenar los pasos.
+window._wchProtoPedido=async function(convId,tel){
+  let m=null
+  try{
+    const corto=_wchTelCorto(tel)
+    const{data}=await sb.from('mapeos').select('nombre_cliente,producto,producto_id,cantidad,ciudad,transportadora,telefono,fecha,precio_dropi').like('telefono','%'+corto).order('id',{ascending:false}).limit(1)
+    m=data&&data[0]||null
+  }catch(_){}
+  const conv=((window._wchState||{}).convs||[]).find(x=>x.id===convId)
+  const nombre=(m&&m.nombre_cliente)||(conv&&conv.nombre)||'[NOMBRE]'
+  const prod=(m&&((typeof resolveProdName==='function'&&(resolveProdName(m.producto)||{}).nombre)||m.producto))||'[PRODUCTO]'
+  const cant=m&&m.cantidad?(m.cantidad+' unidad'+(m.cantidad>1?'es':'')):'[CANTIDAD]'
+  const transp=(m&&m.transportadora)||'[TRANSPORTADORA]'
+  let tot=null,sal=null
+  try{if(m&&typeof _cancTotal==='function')tot=_cancTotal(m)}catch(_){}
+  try{if(m&&typeof _cancSaldo==='function')sal=_cancSaldo(m)}catch(_){}
+  return{m,nombre,prod,cant,transp,ciudad:(m&&m.ciudad)||'[CIUDAD]',telCorto:_wchTelCorto(tel)||'[TELÉFONO]',tot,sal}
+}
+// [DÍA], [MAÑANA / TARDE] y [DIRECCIÓN COMPLETA] se dejan tal cual: eso es lo
+// que el cliente acuerda y lo escribe el auxiliar al pegar en Dropi.
+window._wchProtoRellenar=function(txt,d){
+  let s=String(txt==null?'':txt)
+  try{
+    s=s.replace(/\[NOMBRE\]/g,d.nombre)
+      .replace(/\[PRODUCTO\]/g,d.prod)
+      .replace(/\[CANTIDAD\]/g,d.cant)
+      .replace(/\[CIUDAD\]/g,d.ciudad)
+      .replace(/\[TRANSPORTADORA\]/g,d.transp)
+      .replace(/\[CARRIER\]/g,d.transp)
+      .replace(/\[TELÉFONO\]|\[TELEFONO\]/g,d.telCorto)
+      .replace(/\[TOTAL\]/g,d.tot!=null?('$'+fmt(d.tot)):'[TOTAL]')
+      .replace(/\[SALDO\]/g,d.sal!=null?('$'+fmt(d.sal)):'[SALDO]')
+  }catch(_){}
+  return s
+}
+// 🟢🔵 LAS PÍLDORAS. soloP2=true deja únicamente la azul (caso fallback).
+window._wchProtoPills=async function(convId,tel,idx,soloP2,via){
+  const p=document.getElementById('wch-proto-'+convId);if(!p)return
+  const proto=(NOV_PROTO||{})[idx]
+  if(!proto){return window._wchProtoLista(convId,tel)}
+  p.style.display='block'
+  p.innerHTML='<div class="loading" style="font-size:11px">Armando el protocolo con los datos del pedido…</div>'
+  const d=await window._wchProtoPedido(convId,tel)
+  const p1=String(proto.msg||'').trim()?window._wchProtoRellenar(proto.msg,d):''
+  const p2=String(proto.resp||'').trim()?window._wchProtoRellenar(proto.resp,d):''
+  window._wchProtoTxt[convId]={p1,p2,titulo:proto.titulo||('Tipo '+idx)}
+  const prev=(t)=>{const s=String(t||'').replace(/\s+/g,' ').trim();return s.length>58?(s.slice(0,58)+'…'):s}
+  const pill=(paso,txt,rot,bg)=>`<button onclick="_wchProtoPillCopiar('${convId}','${paso}')" title="${_wchEsc(txt)}" style="display:inline-flex;align-items:center;gap:6px;max-width:100%;background:${bg};border:1.5px solid #fff;color:#fff;border-radius:999px;padding:6px 13px;font-size:10.5px;font-weight:800;cursor:pointer;line-height:1.2;box-shadow:0 2px 7px rgba(0,0,0,.32)">📋 ${rot}<span style="font-weight:500;opacity:.88;max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_wchEsc(prev(txt))}</span></button>`
+  const pills=[]
+  if(!soloP2&&p1)pills.push(pill('p1',p1,'Paso 1 · Cliente','#16a34a'))
+  if(p2)pills.push(pill('p2',p2,'Paso 2 · Transportadora','#4f46e5'))
+  if(!pills.length){
+    p.innerHTML='<div style="font-size:11px;color:var(--muted);background:var(--card);border:1px dashed var(--border);border-radius:8px;padding:7px 9px">Esta novedad no tiene textos configurados (Textos → Novedades). <button class="btn-sm btn-outline" style="font-size:10px" onclick="_wchProtoLista(\'' + convId + '\',\'' + tel + '\')">Elegir otro tipo</button></div>'
+    return
+  }
+  p.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:8px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px">
+      <span style="font-size:10.5px;font-weight:800;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📋 ${_wchEsc(proto.titulo||('Tipo '+idx))}${via?`<span style="color:var(--muted);font-weight:400"> · detectado por ${_wchEsc(via)}</span>`:''}</span>
+      <span style="flex:0 0 auto;display:flex;gap:5px;align-items:center">
+        <button onclick="_wchProtoLista('${convId}','${tel}')" title="Elegir otro tipo de novedad a mano" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:7px;padding:2px 7px;font-size:10px;cursor:pointer">↩ otro</button>
+        <button onclick="document.getElementById('wch-proto-${convId}').style.display='none'" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px">✕</button>
+      </span>
+    </div>
+    <div style="display:flex;gap:7px;flex-wrap:wrap">${pills.join('')}</div>
+    <div id="wch-protomsg-${convId}" style="margin-top:6px;font-size:10.5px">${d.m?'':'<span style="color:var(--amber)">⚠️ Sin pedido en el sistema para este número: quedaron los comodines.</span>'}</div>
+  </div>`
+}
+window._wchProtoPillCopiar=async function(convId,paso){
+  const c=(window._wchProtoTxt||{})[convId];if(!c)return
+  const txt=paso==='p1'?c.p1:c.p2
+  const out=document.getElementById('wch-protomsg-'+convId)
+  if(!txt)return
+  const rot=paso==='p1'?'Paso 1 (mensaje al cliente)':'Paso 2 (respuesta a la transportadora)'
+  try{
+    await navigator.clipboard.writeText(txt)
+    if(out)out.innerHTML='<span style="color:#22c55e">✅ '+rot+' copiado. Pégalo con Ctrl+V.</span>'
+    try{waToast('📋 '+rot+' copiado.','ok')}catch(_){}
+  }catch(e){
+    if(out)out.innerHTML='<span style="color:#ef4444">No pude copiar: '+_wchEsc(e.message||String(e))+'</span>'
+  }
+}
+// Lista de tipos (el camino de siempre). Al elegir uno deja SOLO la píldora azul.
+window._wchProtoLista=async function(convId,tel){
+  const p=document.getElementById('wch-proto-'+convId);if(!p)return
+  p.style.display='block'
+  try{if(typeof cargarNovedadesProtocolos==='function')await cargarNovedadesProtocolos()}catch(_){}
+  const tipos=Object.keys(NOV_PROTO||{}).filter(k=>NOV_PROTO[k]&&String(NOV_PROTO[k].resp||'').trim())
+  if(!tipos.length){p.innerHTML='<div style="font-size:11px;color:var(--muted);background:var(--card);border:1px dashed var(--border);border-radius:8px;padding:7px 9px">No hay protocolos internos configurados (Textos → Novedades).</div>';return}
+  p.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:8px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+      <span style="font-size:10.5px;font-weight:800">📋 No pude identificar la novedad de este chat — elige el tipo y te dejo el Paso 2 listo:</span>
+      <button onclick="document.getElementById('wch-proto-${convId}').style.display='none'" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px">✕</button>
+    </div>
+    <div style="display:flex;gap:4px;flex-wrap:wrap">${tipos.map(k=>`<button class="btn-sm btn-outline" style="font-size:10.5px" onclick="_wchProtoPills('${convId}','${tel}','${k}',true)">${_wchEsc(NOV_PROTO[k].titulo||('Tipo '+k))}</button>`).join('')}</div>
+    <div id="wch-protomsg-${convId}" style="margin-top:5px;font-size:10.5px"></div>
+  </div>`
+}
+
 // ── 📋 PROTOCOLO DROPI: copia el protocolo de respuesta INTERNO de la novedad,
 // ya relleno con los datos del pedido del cliente (mapeo más reciente por teléfono).
 // [DÍA], [MAÑANA / TARDE] y [DIRECCIÓN COMPLETA] quedan como están: son lo que
@@ -43253,19 +43429,19 @@ window._wchProtoAbrir=async function(convId,tel){
   const p=document.getElementById('wch-proto-'+convId);if(!p)return
   if(p.style.display!=='none'){p.style.display='none';return}
   p.style.display='block'
-  p.innerHTML='<div class="loading" style="font-size:11px">Cargando protocolos…</div>'
+  p.innerHTML='<div class="loading" style="font-size:11px">Buscando la novedad de este chat…</div>'
   try{if(typeof cargarNovedadesProtocolos==='function')await cargarNovedadesProtocolos()}catch(_){}
-  const tipos=Object.keys(NOV_PROTO||{}).filter(k=>NOV_PROTO[k]&&String(NOV_PROTO[k].resp||'').trim())
-  if(!tipos.length){p.innerHTML='<div style="font-size:11px;color:var(--muted);background:var(--card);border:1px dashed var(--border);border-radius:8px;padding:7px 9px">No hay protocolos internos configurados (Textos → Novedades).</div>';return}
-  p.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:8px">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
-      <span style="font-size:10.5px;font-weight:800">📋 Protocolo para Dropi — elige el tipo y se copia solo (con los datos del pedido):</span>
-      <button onclick="document.getElementById('wch-proto-${convId}').style.display='none'" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px">✕</button>
-    </div>
-    <div style="display:flex;gap:4px;flex-wrap:wrap">${tipos.map(k=>`<button class="btn-sm btn-outline" style="font-size:10.5px" onclick="_wchProtoCopiar('${convId}','${tel}','${k}')">${_wchEsc(NOV_PROTO[k].titulo||('Tipo '+k))}</button>`).join('')}</div>
-    <div id="wch-protomsg-${convId}" style="margin-top:5px;font-size:10.5px"></div>
-  </div>`
+  // 🎯 ¿Este hilo ya tiene su novedad identificada? → directo a sus dos píldoras.
+  let det=null
+  try{det=await window._wchProtoDetectar(convId,tel)}catch(_){}
+  if(det&&det.idx!=null&&(NOV_PROTO||{})[det.idx]){
+    await window._wchProtoPills(convId,tel,det.idx,false,det.via)
+    return
+  }
+  // Sin match → lista de tipos de siempre (al elegir, solo la píldora azul del Paso 2).
+  await window._wchProtoLista(convId,tel)
 }
+
 window._wchProtoCopiar=async function(convId,tel,idx){
   const out=document.getElementById('wch-protomsg-'+convId)
   const proto=(NOV_PROTO||{})[idx]

@@ -18725,6 +18725,9 @@ async function pageAdminMensajeria(c){
         <div id="wam-reingreso"><div class="loading">Cargando...</div></div>
       </div>
       <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div id="wam-transicion"><div class="loading">Cargando...</div></div>
+      </div>
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
         <div style="font-size:13px;font-weight:800;margin-bottom:6px">🔗 Puentes chat ↔ secciones</div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:8px">CERRADO VIGENTE = el chat tiene etiqueta 🟢 Resuelta (o cualquier etiqueta de cierre) y el cliente NO ha escrito después. Si el cliente volvió a escribir (🔁 Volvió), SÍ recibe mensajes.</div>
         <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;cursor:pointer;margin-bottom:8px"><input type="checkbox" id="wam-f3-skip" checked onchange="waF3Guardar()" style="margin-top:2px"><span><strong>🚫 No disparar a chats cerrados</strong> — el encolador automático salta a los clientes cuyo chat está CERRADO VIGENTE, marcados desde el chat o desde la sección.</span></label>
@@ -18759,6 +18762,7 @@ async function pageAdminMensajeria(c){
   try{window._wchEditorRender&&window._wchEditorRender()}catch(e){console.warn('editor etiquetas:',e)} // 🏷 (26jul26)
   try{cargarReglasAdmin()}catch(_){} // ⚡ (31jul26) el motor de reglas vive ahora en el paso 4
   try{window._ccReingresoRender&&window._ccReingresoRender()}catch(e){console.warn('reglas reingreso:',e)} // 🔁 (31jul26) paso 6
+  try{window._ccTransicionRender&&window._ccTransicionRender()}catch(e){console.warn('reglas transición:',e)} // 🔀 (31jul26) paso 6
   try{_wamSemaforo()}catch(_){}
   setTimeout(()=>{try{_wamSemaforo()}catch(_){}},1500) // segunda pasada: las cargas son asíncronas
 }
@@ -41647,6 +41651,246 @@ window._ccRRBorrar=async function(id){
   await _ccRRAplicar()
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 🔀 REGLAS DE TRANSICIÓN DE ETIQUETA (31jul26)
+// ---------------------------------------------------------------------------
+// QUÉ RESUELVE: "cuando la conversación está en TAL estado, ¿qué etiquetas
+// puede ponerle el auxiliar?". Tres respuestas posibles:
+//   · cualquiera → el selector de siempre, sin recortes
+//   · solo estas → el selector solo ofrece las que tú elijas
+//   · 🔒 candado → no hay selector; sale un cartel con tu mensaje
+// Más un interruptor aparte: "no dejar descerrar" (esconde «— Etiqueta —» y
+// «✖ Quitar etiqueta» para que nadie devuelva a la cola algo ya cerrado).
+//
+// ⚙️ LAS DE FÁBRICA NO SE TOCAN. La app ya traía 4 reglas escritas en código
+// desde antes de este panel. Se muestran para que se entiendan, con su ficha
+// de "qué hace / por qué existe / qué pasaría si se pudiera apagar", pero NO
+// tienen botón de apagar ni de borrar: son las que sostienen que un número no
+// se queme y que una demora no desaparezca del tablero sin haber contactado a
+// nadie. Tus reglas se suman a ellas; nunca las reemplazan.
+//
+// PRECEDENCIA: 1) fábrica (siempre gana) · 2) regla tuya de la sección ·
+// 3) regla tuya global · 4) nada → el selector de siempre.
+// Persistencia: config 'cc_reglas_transicion', con verificación ida y vuelta.
+// ═══════════════════════════════════════════════════════════════════════════
+const CC_TR_KEY='cc_reglas_transicion'
+// Las 4 de fábrica, tal como estaban en el código antes de este panel.
+const CC_TR_FABRICA=[
+  {id:'f_cc24',emoji:'🔒',nombre:'Fuera de ventana → candado «Solo plantilla»',
+   donde:'En ⏰ Atendida (+24h) y ⏰ Atendida Volvió (+24h)',
+   hace:'Le quita al auxiliar el selector de etiquetas y en su lugar pone un cartel: 🔒 Solo plantilla. La única salida es enviar una plantilla aprobada.',
+   porque:'Pasadas las 24h, WhatsApp NO deja escribir texto libre. Si el auxiliar pudiera cerrar la conversación a mano, la demora desaparecería del tablero sin que NADIE hubiera contactado al cliente — y eso es justo lo que se quiere medir.',
+   siApagara:'El auxiliar podría marcar «Resuelta» sin haberle escrito nunca al cliente. El tablero diría que todo está al día mientras la gente sigue esperando. Por eso no se puede apagar.',
+   codigo:'_cc24'},
+  {id:'f_cerrada',emoji:'🚪',nombre:'Lo cerrado no se descierra de un clic',
+   donde:'En cualquier conversación que ya tenga una etiqueta con la casilla «cierra»',
+   hace:'El selector esconde «— Etiqueta —» y «✖ Quitar etiqueta». Cambiarla por otra etiqueta sí se puede; dejarla sin ninguna, no.',
+   porque:'Esas dos opciones DESCIERRAN la conversación de un solo clic y la devuelven a la cola sin que nadie se dé cuenta. Casi siempre es un resbalón del mouse, no una decisión.',
+   siApagara:'Un clic accidental devolvería a la cola conversaciones ya resueltas, inflando el trabajo pendiente con casos que ya estaban listos.',
+   codigo:'_ccCerrada'},
+  {id:'f_volvio',emoji:'🔁',nombre:'El cierre de reingreso solo desde un reingreso',
+   donde:'La etiqueta de cierre propia de la familia Volvió',
+   hace:'Solo aparece en el selector si la conversación está en 🔁 Volvió o 🕰️ Volvió (+7DIAS), o si ya la tenía puesta.',
+   porque:'Es un cierre que significa «este cliente había vuelto y se resolvió». Ponérselo a una conversación que nunca volvió sería una mentira en las métricas.',
+   siApagara:'Se podría cerrar como «reingreso resuelto» algo que nunca fue un reingreso, y el conteo de recuperados quedaría inflado.',
+   codigo:'_esVol'},
+  {id:'f_cierre24auto',emoji:'🤖',nombre:'La plantilla fuera de ventana cierra sola',
+   donde:'Al enviar una plantilla desde ⏰ Atendida (+24h) o ⏰ Atendida Volvió (+24h)',
+   hace:'Apenas sale la plantilla, la conversación se etiqueta SOLA: desde ⏰ Atendida (+24h) queda en «Resuelta · Atendida +24h»; desde ⏰ Volvió (+24h), en «Resuelta · Volvió +24h».',
+   porque:'Es el par natural del candado de la regla 1: si la única salida es la plantilla, al enviarla el caso queda cerrado sin que el auxiliar tenga que acordarse de nada.',
+   siApagara:'Las conversaciones se quedarían en ⏰ para siempre aunque ya se les hubiera escrito, y el candado las dejaría sin salida posible.',
+   codigo:'_wchCierre24Auto',soloLectura:'Esta corre dentro del motor de envío, no en el selector. Aquí solo se explica.'}
+]
+window._ccTR=window._ccTR||null
+function _ccTRDefaults(){return {v:1,reglas:[]}}
+async function _ccTRCargar(force){
+  if(window._ccTR&&!force)return window._ccTR
+  let o=null
+  try{const raw=await getConfig(CC_TR_KEY);if(raw){const p=JSON.parse(raw);if(p&&p.v)o=p}}catch(_){}
+  if(!o)o=_ccTRDefaults()
+  if(!Array.isArray(o.reglas))o.reglas=[]
+  window._ccTR=o
+  return o
+}
+async function _ccTRGuardar(){
+  const js=JSON.stringify(window._ccTR||_ccTRDefaults())
+  const{error}=await sb.from('config').upsert({clave:CC_TR_KEY,valor:js,updated_at:new Date().toISOString()},{onConflict:'clave'})
+  if(error)return {ok:false,msg:error.message}
+  let eco=null;try{eco=await getConfig(CC_TR_KEY)}catch(_){}
+  if(eco!==js)return {ok:false,msg:'la nube no devolvió lo guardado (¿RLS en config para '+CC_TR_KEY+'?)'}
+  return {ok:true}
+}
+// ── EL CORAZÓN: ¿qué regla TUYA aplica al estado actual de esta conversación? ──
+// estadoClave = clave del riel (volvio, atendida…) o id de la etiqueta manual puesta.
+// Precedencia: regla activa de la sección → regla activa global → null.
+function _ccTRAplicable(sec,estadoClave,etiquetaId){
+  const cfg=window._ccTR;if(!cfg||!Array.isArray(cfg.reglas))return null
+  const calza=(r)=>{
+    if(!r||r.activa===false)return false
+    const d=Array.isArray(r.desde)?r.desde:[]
+    if(!d.length)return false // sin "desde" no aplica a nada (evita reglas que capturan todo por error)
+    return (estadoClave&&d.includes(estadoClave))||(etiquetaId&&d.includes(etiquetaId))
+  }
+  const propia=cfg.reglas.find(r=>r.sec===sec&&calza(r))
+  if(propia)return propia
+  return cfg.reglas.find(r=>(r.sec==='global'||!r.sec)&&calza(r))||null
+}
+
+// ── 🖥️ PANEL (💬 Mensajería → Paso 6) ────────────────────────────────────
+window._ccTRTab=window._ccTRTab||'global'
+window._ccTransicionRender=async function(){
+  const el=document.getElementById('wam-transicion');if(!el)return
+  const cfg=await _ccTRCargar()
+  const cat=await _wchCatLoad()
+  const tab=window._ccTRTab||'global'
+  const secs=[['global','🌐','Global','Aplica en TODAS las secciones que no tengan regla propia']].concat(WCH_SECS.map(s=>[s.k,s.e,s.n,'Solo en '+s.n]))
+  const nomSec=(k)=>{const f=secs.find(x=>x[0]===k);return f?(f[1]+' '+f[2]):k}
+  const rielN=(k)=>{const r=(cat.rieles||{})[k]||WCH_RIELES_DEF[k]||{};return (r.e||'')+' '+(r.n||k)}
+  const etqsTodas=[]
+  ;(cat.globales||[]).filter(x=>!x.arch).forEach(x=>etqsTodas.push({...x,amb:'global'}))
+  WCH_SECS.forEach(s=>((cat.secciones||{})[s.k]||[]).filter(x=>!x.arch).forEach(x=>etqsTodas.push({...x,amb:s.k})))
+  const etqN=(id)=>{const f=etqsTodas.find(x=>x.id===id);return f?((f.e||'🏷️')+' '+f.n):id}
+  const nomEstado=(k)=>((cat.rieles||{})[k]||WCH_RIELES_DEF[k])?rielN(k):etqN(k)
+  const visiblesDe=(sk)=>sk==='global'?etqsTodas:etqsTodas.filter(x=>x.amb==='global'||x.amb===sk)
+
+  // ⚙️ Tarjetas de fábrica: SOLO LECTURA, con su desglose de por qué no se tocan.
+  const fabrica=CC_TR_FABRICA.map(f=>`<div style="background:var(--card2);border:1px solid var(--border);border-left:4px solid #64748b;border-radius:12px;padding:11px 13px;margin-bottom:9px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+      <div style="font-size:13px;font-weight:800;min-width:0;flex:1">${f.emoji} ${_wchEsc(f.nombre)}</div>
+      <span title="Esta regla la trae la aplicación de fábrica: se puede ver y entender, pero no apagar ni borrar." style="flex:0 0 auto;display:inline-flex;align-items:center;gap:4px;border:1px solid #64748b;color:#94a3b8;background:rgba(100,116,139,.12);border-radius:999px;padding:2px 9px;font-size:10px;font-weight:800;cursor:help">🔒 de fábrica · solo lectura</span>
+    </div>
+    <div style="font-size:11.5px;color:var(--muted);margin-top:4px">📍 ${_wchEsc(f.donde)}</div>
+    <details style="margin-top:6px">
+      <summary style="cursor:pointer;font-size:11px;color:var(--muted);list-style:none">📖 ¿Qué hace y por qué no se puede apagar? — ábrelo</summary>
+      <div style="font-size:11.5px;line-height:1.7;padding:8px 4px 2px">
+        <div style="margin-bottom:6px"><strong style="color:var(--green)">✅ QUÉ HACE</strong><br>${_wchEsc(f.hace)}</div>
+        <div style="margin-bottom:6px"><strong style="color:var(--blue)">🎯 POR QUÉ EXISTE</strong><br>${_wchEsc(f.porque)}</div>
+        <div style="background:rgba(239,68,68,.10);border:1px solid var(--red);border-radius:8px;padding:7px 9px">
+          <strong style="color:var(--red)">🚫 QUÉ PASARÍA SI SE PUDIERA APAGAR</strong><br>${_wchEsc(f.siApagara)}<br>
+          <span style="color:var(--muted)">Por eso no tiene botón de apagar ni de borrar.${f.soloLectura?' '+_wchEsc(f.soloLectura):''}</span>
+        </div>
+        <div style="font-size:10.5px;color:var(--muted);margin-top:6px">🔧 En el código vive como <code>${_wchEsc(f.codigo)}</code>. Tus reglas de abajo se SUMAN a esta; nunca la reemplazan.</div>
+      </div>
+    </details>
+  </div>`).join('')
+
+  const mias=cfg.reglas.filter(r=>(r.sec||'global')===tab)
+  const tarjeta=(r)=>{
+    const modo=r.modo||'cualquiera'
+    const pool=visiblesDe(r.sec||'global')
+    const estadosLibres=Object.keys(WCH_RIELES_DEF).filter(k=>!WCH_RIELES_DEF[k].grupo&&!(r.desde||[]).includes(k))
+    const etqLibresDesde=pool.filter(x=>!(r.desde||[]).includes(x.id))
+    const permLibres=pool.filter(x=>!(r.permitidas||[]).includes(x.id))
+    const chip=(txt,onQuitar,tit)=>`<span title="${_wchEsc(tit||'')}" style="display:inline-flex;align-items:center;gap:5px;background:var(--card);border:1px solid var(--border);border-radius:999px;padding:3px 9px;font-size:11px;font-weight:700">${_wchEsc(txt)} <button onclick="${onQuitar}" title="Quitar" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:12px;padding:0;line-height:1">×</button></span>`
+    const desdeChips=(r.desde||[]).length
+      ? (r.desde||[]).map(k=>chip(nomEstado(k),`_ccTRQuitarDesde('${r.id}','${k}')`,'Estado en el que tiene que estar la conversación')).join('')
+      : `<span style="font-size:11.5px;color:var(--amber);font-style:italic">⚠️ vacío = esta regla NO hace nada. Agrégale al menos un estado.</span>`
+    const rb=(v,txt,tit)=>`<label title="${_wchEsc(tit)}" style="display:inline-flex;align-items:center;gap:5px;font-size:11.5px;cursor:pointer;margin-right:12px"><input type="radio" name="trm-${r.id}" ${modo===v?'checked':''} onchange="_ccTRCampo('${r.id}','modo','${v}')"> ${txt}</label>`
+    return `<div style="background:var(--card2);border:1px solid var(--border);border-left:4px solid ${r.activa!==false?'var(--green)':'var(--border)'};border-radius:12px;padding:12px 14px;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+        <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1">
+          <span style="font-size:15px">${r.activa!==false?'🟢':'⚪'}</span>
+          <input value="${_wchEsc(r.nombre||'')}" placeholder="Ponle un nombre a esta regla" style="flex:1;min-width:120px;font-size:13px;font-weight:800" onchange="_ccTRCampo('${r.id}','nombre',this.value)">
+        </div>
+        <div style="display:flex;gap:5px;flex:0 0 auto">
+          <button class="btn-sm btn-outline" style="font-size:11px" onclick="_ccTRToggle('${r.id}')">${r.activa!==false?'⏸️ apagar':'▶️ prender'}</button>
+          <button class="btn-sm btn-outline" style="font-size:11px;color:var(--red)" onclick="_ccTRBorrar('${r.id}')" title="Borrar esta regla">🗑️</button>
+        </div>
+      </div>
+      <div style="background:var(--card);border-radius:9px;padding:11px 12px;font-size:12.5px;line-height:2">
+        <div style="margin-bottom:9px">
+          <div style="font-weight:800;margin-bottom:5px">1️⃣ CUANDO la conversación esté en:</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding-left:20px">
+            ${desdeChips}
+            <select onchange="if(this.value)_ccTRAgregarDesde('${r.id}',this.value);this.selectedIndex=0" style="font-size:11px;padding:3px 6px"><option value="">➕ agregar estado…</option>
+              ${estadosLibres.length?`<optgroup label="🚦 Píldoras del sistema (las mueve la app sola)">${estadosLibres.map(k=>`<option value="${k}">${_wchEsc(rielN(k))}</option>`).join('')}</optgroup>`:''}
+              ${etqLibresDesde.length?`<optgroup label="🏷️ Etiquetas puestas a mano">${etqLibresDesde.map(x=>`<option value="${x.id}">${x.e||'🏷️'} ${_wchEsc(x.n)}</option>`).join('')}</optgroup>`:''}
+            </select>
+          </div>
+        </div>
+        <div style="margin-bottom:9px">
+          <div style="font-weight:800;margin-bottom:5px">2️⃣ El auxiliar PUEDE ponerle:</div>
+          <div style="padding-left:20px">
+            ${rb('cualquiera','Cualquier etiqueta','El selector sale completo, como siempre.')}
+            ${rb('solo','SOLO estas ↓','El selector solo ofrece las etiquetas que elijas abajo.')}
+            ${rb('candado','🔒 Ninguna — candado','Se quita el selector y sale un cartel con tu mensaje.')}
+          </div>
+          ${modo==='solo'?`<div style="padding-left:20px;margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            ${(r.permitidas||[]).length?(r.permitidas||[]).map(id=>chip(etqN(id),`_ccTRQuitarPermitida('${r.id}','${id}')`,'Etiqueta que SÍ se puede poner')).join(''):'<span style="font-size:11.5px;color:var(--amber);font-style:italic">⚠️ vacío = el auxiliar no podrá poner NINGUNA. Si eso es lo que quieres, usa mejor el modo candado.</span>'}
+            ${permLibres.length?`<select onchange="if(this.value)_ccTRAgregarPermitida('${r.id}',this.value);this.selectedIndex=0" style="font-size:11px;padding:3px 6px"><option value="">➕ permitir etiqueta…</option>${permLibres.map(x=>`<option value="${x.id}">${x.e||'🏷️'} ${_wchEsc(x.n)}${x.cierre?' (cierra)':''}</option>`).join('')}</select>`:''}
+          </div>`:''}
+          ${modo==='candado'?`<div style="padding-left:20px;margin-top:6px">
+            <input value="${_wchEsc(r.mensaje||'')}" placeholder="Mensaje del candado — explícale al auxiliar qué hacer en su lugar" style="width:100%;max-width:520px;font-size:11.5px" onchange="_ccTRCampo('${r.id}','mensaje',this.value)">
+          </div>`:''}
+        </div>
+        <div>
+          <label style="display:flex;align-items:flex-start;gap:7px;font-size:12px;cursor:pointer;padding-left:20px"><input type="checkbox" ${r.noDescerrar?'checked':''} onchange="_ccTRCampo('${r.id}','noDescerrar',this.checked)" style="margin-top:4px"><span><strong>3️⃣ Además: no dejar DESCERRAR</strong><br><span style="font-size:11px;color:var(--muted);line-height:1.5">Esconde «— Etiqueta —» y «✖ Quitar etiqueta» del selector. Cambiar por otra etiqueta sí se puede; dejarla sin ninguna, no. Sirve para que un clic accidental no devuelva a la cola algo ya resuelto.</span></span></label>
+        </div>
+      </div>
+      <div style="background:rgba(148,163,184,.10);border:1px dashed var(--border);border-radius:9px;padding:8px 10px;margin-top:9px;font-size:11.5px;line-height:1.6">
+        <strong>📖 Cómo queda esta regla, en una frase:</strong><br>
+        ${(r.desde||[]).length
+          ? `Cuando una conversación de <strong>${nomSec(r.sec||'global')}</strong> esté en ${_wchEsc((r.desde||[]).map(nomEstado).join(' o '))}, el auxiliar ${modo==='candado'?'<strong>no verá selector de etiquetas</strong>, sino un cartel con tu mensaje':(modo==='solo'?`solo podrá ponerle ${(r.permitidas||[]).length?'<strong>'+_wchEsc((r.permitidas||[]).map(etqN).join(' · '))+'</strong>':'<strong>ninguna etiqueta</strong> (la lista está vacía)'}`:'podrá ponerle <strong>cualquier etiqueta</strong> de la sección')}${r.noDescerrar?', y <strong>no podrá quitarle la etiqueta</strong> ni dejarla en blanco':''}.`
+          : '<span style="color:var(--amber)">Sin estados en el punto 1️⃣ esta regla no se aplica a nada. Agrégale al menos uno.</span>'}
+        <br><span style="color:var(--muted)">⚙️ Las 4 reglas de fábrica de arriba mandan siempre por encima de esta.</span>
+      </div>
+    </div>`
+  }
+
+  el.innerHTML=`<div style="font-size:13px;font-weight:800;margin-bottom:4px">🔀 Reglas de transición de etiqueta</div>
+    <div style="background:linear-gradient(135deg,var(--blue-bg),var(--purple-bg));border:1px solid var(--accent);border-radius:11px;padding:11px 13px;margin-bottom:11px;font-size:12px;line-height:1.7">
+      <strong>¿Qué es esto?</strong> Decide <strong>qué etiquetas puede ponerle el auxiliar</strong> a una conversación según el estado en el que esté. Sirve para que no se cierre algo que todavía no se ha atendido.<br>
+      <strong>¿Cómo se lee?</strong> «<em>Cuando esté en ⏰ Atendida (+24h), el auxiliar no puede ponerle ninguna etiqueta — solo enviar plantilla</em>».<br>
+      <span style="color:var(--muted)">⚙️ Arriba están las <strong>4 reglas de fábrica</strong>: se pueden mirar y entender, pero no apagar. Abajo van las tuyas, que se suman a ellas.</span>
+    </div>
+    <details style="margin-bottom:12px" open>
+      <summary style="cursor:pointer;font-size:12.5px;font-weight:800;list-style:none;background:var(--card2);border:1px solid var(--border);border-radius:999px;padding:7px 14px;display:inline-flex;align-items:center;gap:8px">⚙️ Las ${CC_TR_FABRICA.length} reglas que la app ya trae de fábrica <span style="color:var(--muted);font-weight:400;font-size:11.5px">· solo lectura — toca para ver</span></summary>
+      <div style="padding:10px 0 0">${fabrica}</div>
+    </details>
+    <div style="font-size:12.5px;font-weight:800;margin:14px 0 7px">➕ Tus reglas</div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:11px">${secs.map(s=>{
+      const n=cfg.reglas.filter(r=>(r.sec||'global')===s[0]).length
+      const act=cfg.reglas.filter(r=>(r.sec||'global')===s[0]&&r.activa!==false).length
+      return `<button class="btn-sm ${tab===s[0]?'btn-primary':'btn-outline'}" style="font-size:11px" title="${s[3]}" onclick="window._ccTRTab='${s[0]}';_ccTransicionRender()">${s[1]} ${s[2]}${n?` <span style="opacity:.75">(${act}/${n})</span>`:''}</button>`
+    }).join('')}</div>
+    ${mias.length?mias.map(tarjeta).join(''):`<div style="font-size:12px;color:var(--muted);background:var(--card2);border:1px dashed var(--border);border-radius:10px;padding:14px;margin-bottom:10px;line-height:1.7">
+      No hay reglas tuyas en ${nomSec(tab)}. Sin ellas, el selector de etiquetas se comporta como siempre y solo mandan las 4 de fábrica.
+    </div>`}
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn-sm btn-primary" onclick="_ccTRNueva('${tab}')">➕ Nueva regla en ${nomSec(tab)}</button>
+      <span id="cc-tr-msg" style="font-size:11.5px"></span>
+    </div>`
+}
+async function _ccTRAplicarCambio(){
+  const r=await _ccTRGuardar()
+  const m=document.getElementById('cc-tr-msg')
+  if(m)m.innerHTML=r.ok?'<span style="color:#22c55e">✅ Guardado y verificado</span>':'<span style="color:#ef4444">❌ NO se guardó: '+_wchEsc(r.msg)+'</span>'
+  if(!r.ok)await _ccTRCargar(true)
+  await window._ccTransicionRender()
+}
+function _ccTRPorId(id){const c=window._ccTR;return c&&(c.reglas||[]).find(r=>r.id===id)}
+window._ccTRCampo=async function(id,campo,v){const r=_ccTRPorId(id);if(!r)return;r[campo]=v;await _ccTRAplicarCambio()}
+window._ccTRToggle=async function(id){const r=_ccTRPorId(id);if(!r)return;r.activa=(r.activa===false);await _ccTRAplicarCambio()}
+window._ccTRAgregarDesde=async function(id,k){const r=_ccTRPorId(id);if(!r)return;if(!Array.isArray(r.desde))r.desde=[];if(!r.desde.includes(k))r.desde.push(k);await _ccTRAplicarCambio()}
+window._ccTRQuitarDesde=async function(id,k){const r=_ccTRPorId(id);if(!r||!Array.isArray(r.desde))return;r.desde=r.desde.filter(x=>x!==k);await _ccTRAplicarCambio()}
+window._ccTRAgregarPermitida=async function(id,k){const r=_ccTRPorId(id);if(!r)return;if(!Array.isArray(r.permitidas))r.permitidas=[];if(!r.permitidas.includes(k))r.permitidas.push(k);await _ccTRAplicarCambio()}
+window._ccTRQuitarPermitida=async function(id,k){const r=_ccTRPorId(id);if(!r||!Array.isArray(r.permitidas))return;r.permitidas=r.permitidas.filter(x=>x!==k);await _ccTRAplicarCambio()}
+window._ccTRNueva=async function(sec){
+  const c=window._ccTR;if(!c)return
+  if(!Array.isArray(c.reglas))c.reglas=[]
+  c.reglas.push({id:'tr_'+Math.random().toString(36).slice(2,8)+Date.now().toString(36).slice(-3),
+    nombre:sec==='global'?'Nueva regla global':'Regla propia de esta sección',
+    sec:sec,activa:true,desde:[],modo:'cualquiera',permitidas:[],mensaje:'',noDescerrar:false})
+  await _ccTRAplicarCambio()
+}
+window._ccTRBorrar=async function(id){
+  const r=_ccTRPorId(id);if(!r)return
+  if(!confirm('¿Borrar la regla «'+(r.nombre||'sin nombre')+'»?\n\nEl selector de etiquetas vuelve a comportarse como siempre en esos estados.\nLas 4 reglas de fábrica siguen mandando igual: esas nunca se tocan.'))return
+  const c=window._ccTR
+  c.reglas=(c.reglas||[]).filter(x=>x.id!==id)
+  await _ccTRAplicarCambio()
+}
+
 // (28jul26) ¿La conversación traía una etiqueta de CIERRE que quedó TAPADA por un
 // mensaje más nuevo? Devuelve de dónde venía (para el chip "venía de…") o null.
 // La etiqueta NO se borra nunca — solo deja de mandar por ser más vieja que el mensaje.
@@ -42012,6 +42256,7 @@ async function _wchCargar(){
   const st=window._wchState
   await _wchCatLoad()
   try{await _ccRRCargar()}catch(_){} // 🔁 (31jul26) reglas de cierre y reingreso (cacheadas: una sola consulta)
+  try{await _ccTRCargar()}catch(_){}  // 🔀 (31jul26) reglas de transición de etiqueta (cacheadas)
   try{if(!window._ccCop.mapa||(Date.now()-window._ccCop.ts)>30000)await _ccCopCargar()}catch(_){} // 📋 marcas de copiado (refresco máx. cada 30s)
   const sec=st.sec,fecha=st.fecha // null = hoy/vivo
   const diaSel=fecha||_wchHoy()
@@ -42711,6 +42956,7 @@ window._wchAbrir=async function(){
   _wchDrag(div,div.querySelector('#wch-m1-head')) // se cierra SOLO con ✕
   await _wchCatLoad()
   try{await _ccRRCargar()}catch(_){} // 🔁 (31jul26) reglas de cierre y reingreso listas antes del primer render
+  try{await _ccTRCargar()}catch(_){}  // 🔀 (31jul26) reglas de transición listas antes del primer render
   _wchTabsRender()
   await _wchRecargar()
   if(st.timer)clearInterval(st.timer)
@@ -43597,15 +43843,35 @@ window._wchChatAbrir=async function(convId){
   // select va un candado, y la salida es el botón de plantilla que ya vive abajo, en el
   // bloque de sugerencias 🔒 "Fuera de ventana". Al enviarla, _wchCierre24Auto etiqueta sola.
   const _cc24=!!(c&&c._est&&c._est.tipo==='riel'&&(c._est.clave==='atendida_24'||c._est.clave==='atendida_volvio_24'))
+  // 🔀 (31jul26) REGLAS DE TRANSICIÓN DEL USUARIO (💬 Mensajería → Paso 6). Se aplican
+  // DESPUÉS de las de fábrica: si _cc24 ya puso candado, esto no lo puede levantar.
+  // Sin reglas configuradas todo queda EXACTAMENTE como estaba — riesgo cero.
+  let _trR=null
+  try{
+    const _estClave=(c&&c._est&&c._est.tipo==='riel')?c._est.clave:null
+    _trR=_ccTRAplicable(st.sec,_estClave,etqActual||null)
+  }catch(_){}
+  const _trCandado=!!(_trR&&_trR.modo==='candado')
+  const _trNoDes=!!(_trR&&_trR.noDescerrar)
+  // modo "solo estas": el selector se recorta a las permitidas (+ la que ya tiene puesta,
+  // para que el select nunca muestre una opción que no es la suya).
+  let _etqsF=etqs
+  if(_trR&&_trR.modo==='solo'){
+    const _ok=new Set(Array.isArray(_trR.permitidas)?_trR.permitidas:[])
+    _etqsF=etqs.filter(x=>_ok.has(x.id)||x.id===etqActual)
+  }
+  const _noVaciar=_ccCerrada||_trNoDes // 🚪 fábrica O tu interruptor: cualquiera de los dos basta
   // El control de etiqueta se arma ACÁ (no dentro del innerHTML) para no anidar otro
   // nivel de plantillas: el select de siempre queda intacto, palabra por palabra.
   const _etqCtrl=_cc24
     ?`<span title="Pasaron más de 24h desde el último mensaje del cliente: WhatsApp ya no permite texto libre. Envía una plantilla aprobada (botones 📋 de abajo, botón 📨 de la cabecera) y la conversación se cierra sola con la etiqueta que le toca." style="display:inline-flex;align-items:center;gap:4px;border:1px dashed #f59e0b;color:#f59e0b;background:rgba(245,158,11,.10);border-radius:8px;padding:4px 8px;font-size:10.5px;font-weight:800;line-height:1.15;max-width:150px;cursor:help;user-select:none">🔒 Solo plantilla</span>`
+    :(_trCandado
+    ?`<span title="${_wchEsc((_trR.mensaje||'Aquí no se puede etiquetar a mano.')+' — Regla «'+(_trR.nombre||'sin nombre')+'» (Mensajería → Paso 6)')}" style="display:inline-flex;align-items:center;gap:4px;border:1px dashed #f59e0b;color:#f59e0b;background:rgba(245,158,11,.10);border-radius:8px;padding:4px 8px;font-size:10.5px;font-weight:800;line-height:1.15;max-width:150px;cursor:help;user-select:none">🔒 Bloqueado</span>`
     :`<select id="wch-etq-${convId}" onchange="_wchEtqSel('${convId}',this)" style="font-size:11.5px;padding:4px 6px;max-width:150px">
-          ${_ccCerrada?'':`<option value="">— Etiqueta —</option>`}
-          ${etqs.map(x=>`<option value="${x.id}" ${x.id===etqActual?'selected':''}>${x.e||''} ${_wchEsc(x.n)}${x.cierre?' (cierra)':''}</option>`).join('')}
-          ${etqActual&&!_ccCerrada?`<option value="~quitar">✖ Quitar etiqueta</option>`:''}
-        </select>`
+          ${_noVaciar?'':`<option value="">— Etiqueta —</option>`}
+          ${_etqsF.map(x=>`<option value="${x.id}" ${x.id===etqActual?'selected':''}>${x.e||''} ${_wchEsc(x.n)}${x.cierre?' (cierra)':''}</option>`).join('')}
+          ${etqActual&&!_noVaciar?`<option value="~quitar">✖ Quitar etiqueta</option>`:''}
+        </select>`)
   const esRe=!!(c&&c.requiere_reintro) // 🚫 número bloqueado → identidad roja limpia: franja de 3px + insignia
   div.innerHTML=`<div style="background:var(--card);border:1px solid ${esRe?'#ef4444':'var(--border)'};border-top:${esRe?'4px solid #ef4444':'1px solid var(--border)'};border-radius:14px;width:100%;height:100%;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 44px rgba(0,0,0,.55)">
     <div id="wch-ch-head-${convId}" style="display:flex;justify-content:space-between;align-items:center;padding:11px 14px;border-bottom:1px solid var(--border);gap:8px;flex-wrap:wrap;background:var(--card2)">
@@ -45035,6 +45301,7 @@ async function _wchSincronizarNombres(){
   try{if(typeof _wchListaRender==='function'&&document.getElementById('wch-modal'))_wchListaRender()}catch(_){}
   try{if(window.nxPillOrdenRender&&document.getElementById('wam-po-lista'))await window.nxPillOrdenRender()}catch(_){}
   try{if(window._ccReingresoRender&&document.getElementById('wam-reingreso'))await window._ccReingresoRender()}catch(_){}
+  try{if(window._ccTransicionRender&&document.getElementById('wam-transicion'))await window._ccTransicionRender()}catch(_){}
 }
 window._wchEdRiel=async function(k,campo,v){
   if(!window._wchState.cat.rieles[k])window._wchState.cat.rieles[k]={}

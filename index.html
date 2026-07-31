@@ -18015,12 +18015,14 @@ async function pageAdminTextos(c){
     <div class="page-sub">Edita los mensajes que se envían a los clientes y cuántos se mandan por día. Los cambios aplican cuando el auxiliar recarga la app.</div>
     ${_txtBarraGlobal()}
     <div id="txt-msg" style="margin-bottom:12px"></div>
-    <div id="txt-reglas" style="margin-bottom:18px"></div>
     <div id="txt-list"><div class="loading">Cargando...</div></div>
     <div id="txt-novedades" style="margin-top:8px"></div>`
   cargarTextosAdmin()
   cargarNovedadesAdmin()
-  try{cargarReglasAdmin()}catch(_){}
+  // ⚡ (31jul26) Las reglas de disparo automático se MUDARON a 💬 Mensajería → Paso 4.
+  // Aquí no se borró NADA del motor: cargarReglasAdmin y todas sus funciones siguen
+  // vivas e intactas; simplemente ya no existe el contenedor 'txt-reglas' en esta
+  // página, y esa función arranca con `if(!el)return`, así que no hace nada aquí.
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -18586,26 +18588,144 @@ window.waToast=(html,tipo)=>{
   setTimeout(()=>{const d=document.getElementById('wa-toast');if(d===div)d.remove()},tipo==='error'?8000:4000)
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 💬 MENSAJERÍA — SEMÁFORO DE 6 PASOS (31jul26)
+// Antes era una tira de 6 tarjetas abiertas y había que bajar mucho para todo.
+// Ahora es UN SOLO CAMINO en orden: se conecta Meta → se asigna un número →
+// se aprueban los textos → se decide cuándo salen → salen por la cola → el chat
+// se etiqueta solo. Cada paso nace CERRADO y se abre solo el que necesitas.
+// ⚠️ REGLA DE ORO DE ESTA REESCRITURA: los 20 contenedores conservan su MISMO
+// id y los 10 botones su MISMO handler — solo cambia dónde están puestos. Nada
+// del código que ya funciona se tocó: cargarWaMensajeria, cargarWaModos,
+// cargarWaCola, cargarReglasAdmin y _wchEditorRender siguen buscando lo mismo.
+// ═══════════════════════════════════════════════════════════════════════════
+const WAM_PASOS=[
+  ['1','🔑','Conexión con Meta','Las llaves. Sin esto no sale ni un mensaje.'],
+  ['2','📱','Números de WhatsApp','Qué número atiende cada sección.'],
+  ['3','📋','Plantillas aprobadas','Los textos que Meta autorizó enviar.'],
+  ['4','⚙️','Cuándo se envía','A mano, automático, y las reglas que disparan solas.'],
+  ['5','📬','Cola de envíos','Lo que está saliendo ahora mismo.'],
+  ['6','🏷','El chat después del envío','Etiquetas y qué pasa cuando el cliente responde.'],
+]
+// Abre un paso y lo trae a la vista (las píldoras de arriba llaman aquí)
+window.wamIr=function(n){
+  const d=document.getElementById('wam-paso-'+n);if(!d)return
+  d.open=true
+  try{d.scrollIntoView({behavior:'smooth',block:'start'})}catch(_){d.scrollIntoView()}
+  try{_wamSemaforo()}catch(_){}
+}
+// 🚦 Las luces. Se repintan solas cada vez que algo carga.
+//   🟢 listo · 🟡 falta algo · ⚪ sin tocar todavía
+window._wamSemaforo=function(){
+  const st=window._waState||{}
+  const apps=st.apps||[], nums=st.nums||[]
+  const luz={}
+  // 1 · Conexión con Meta: hay app con token Y con secret
+  const appsOk=apps.filter(a=>a.tiene_token&&a.tiene_secret&&a.estado!=='inactivo')
+  luz['1']=!apps.length?['⚪','Sin apps todavía']:(appsOk.length?['🟢',appsOk.length+' app(s) conectada(s)']:['🟡','Falta token o secret'])
+  // 2 · Números: hay al menos uno activo asignado a alguna sección
+  const numAct=nums.filter(n=>n.estado==='activo')
+  const numAsig=numAct.filter(n=>Array.isArray(n.secciones)&&n.secciones.length)
+  const numMal=nums.filter(n=>n.estado==='bloqueado'||['YELLOW','RED'].includes(String(n.quality||'').toUpperCase()))
+  luz['2']=!nums.length?['⚪','Sin números todavía']:(numMal.length?['🟡',numMal.length+' con problema de calidad']:(numAsig.length?['🟢',numAsig.length+' número(s) atendiendo']:['🟡','Ninguno asignado a una sección']))
+  // 3 · Plantillas: se sabe al abrir el paso (necesita elegir número), así que
+  // aquí solo se dice si ya hay dónde aprobarlas.
+  luz['3']=numAct.length?['🟢','Listo para aprobar textos']:['⚪','Primero activa un número']
+  // 4 · Cuándo se envía: el motor de reglas encendido o apagado
+  const cfg=window._regState
+  luz['4']=!cfg?['⚪','Cargando…']:(cfg.on?['🟢','Motor de reglas ENCENDIDO']:['🟡','Motor de reglas apagado'])
+  // 5 · Cola: informativa, siempre disponible
+  luz['5']=['🟢','Siempre a la mano']
+  // 6 · Chat: hay catálogo de etiquetas cargado
+  const cat=(window._wchState||{}).cat
+  luz['6']=cat?['🟢','Etiquetas y reglas listas']:['⚪','Cargando…']
+  for(const p of WAM_PASOS){
+    const n=p[0]
+    const par=luz[n]||['⚪','']
+    const e=par[0], t=par[1]
+    const l1=document.getElementById('wam-luz-'+n);if(l1)l1.textContent=e
+    const l2=document.getElementById('wam-luzp-'+n);if(l2)l2.textContent=e
+    const sub=document.getElementById('wam-luzsub-'+n);if(sub)sub.textContent='· '+t
+    const pil=document.getElementById('wam-pill-'+n)
+    if(pil)pil.style.borderColor=e==='🟢'?'var(--green)':(e==='🟡'?'var(--amber)':'var(--border)')
+  }
+}
 async function pageAdminMensajeria(c){
+  const _pill=(n,e,t)=>`<button id="wam-pill-${n}" onclick="wamIr('${n}')" title="${t}" style="display:inline-flex;align-items:center;gap:6px;background:var(--card2);border:1.5px solid var(--border);color:var(--text);border-radius:999px;padding:6px 13px;font-size:11.5px;font-weight:800;cursor:pointer;line-height:1.2"><span id="wam-luz-${n}">⚪</span> ${n}. ${e} ${t}</button>`
+  const _paso=(n,e,t,sub,cuerpo)=>`<details id="wam-paso-${n}" class="card" style="margin-bottom:12px;padding:0;overflow:hidden">
+    <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:11px;padding:13px 16px;background:var(--card2)">
+      <span style="font-size:19px;flex:0 0 auto">${e}</span>
+      <span style="min-width:0;flex:1">
+        <span style="font-size:14.5px;font-weight:800;display:block">Paso ${n} · ${t}</span>
+        <span style="font-size:11px;color:var(--muted);display:block;margin-top:1px">${sub} <span id="wam-luzsub-${n}" style="font-weight:700"></span></span>
+      </span>
+      <span style="font-size:16px;flex:0 0 auto" id="wam-luzp-${n}">⚪</span>
+      <span style="font-size:11px;color:var(--muted);flex:0 0 auto">abrir ▾</span>
+    </summary>
+    <div style="padding:14px 16px 16px;border-top:1px solid var(--border)">${cuerpo}</div>
+  </details>`
   c.innerHTML=`<div class="page-title">💬 Mensajería</div>
-    <div class="page-sub">Números de WhatsApp API y apps de Meta. Asigna cada número a una sección; si se bloquea uno, asigna otro y el flujo sigue sin que el auxiliar se entere.</div>
+    <div class="page-sub">Todo lo de WhatsApp vive aquí, en orden. Sigue los pasos de arriba a abajo: cada uno depende del anterior.</div>
+    <div style="background:linear-gradient(135deg,var(--blue-bg),var(--purple-bg));border:2px solid var(--accent);border-radius:14px;padding:13px 16px;margin:0 0 14px">
+      <div style="font-size:13px;font-weight:800;margin-bottom:5px">🚦 El camino completo, en una línea</div>
+      <div style="font-size:12.5px;line-height:1.7">Conectas <strong>Meta</strong> 🔑 → le asignas un <strong>número</strong> 📱 a cada sección → Meta aprueba tus <strong>textos</strong> 📋 → decides <strong>cuándo salen</strong> ⚙️ → salen por la <strong>cola</strong> 📬 → y el <strong>chat se etiqueta solo</strong> 🏷.</div>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:7px">🟢 ese paso está listo · 🟡 le falta algo · ⚪ todavía no lo has tocado. Toca una píldora para saltar a su paso.</div>
+    </div>
+    <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:16px">${WAM_PASOS.map(p=>_pill(p[0],p[1],p[2])).join('')}</div>
     <div id="wam-msg" style="margin-bottom:12px"></div>
     <div id="wam-alerta-calidad"></div>
-    <div class="card" style="margin-bottom:18px">
-      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">
-        <div style="font-size:15px;font-weight:800">📱 Números</div>
+
+    ${_paso('1','🔑','Conexión con Meta','Las llaves de tu cuenta. Sin esto no sale ni un mensaje.',`
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+        <div style="font-size:12px;color:var(--muted);max-width:640px">Aquí van tus <strong>apps / portafolios de Meta</strong>. El Token y el App Secret son de solo-escritura: se guardan pero nunca se muestran. Deja el campo vacío para conservar el valor actual.</div>
+        <button class="btn btn-sm" onclick="waAgregarApp()">➕ Agregar app</button>
+      </div>
+      <div id="wam-apps"><div class="loading">Cargando...</div></div>
+      <div id="wam-webhook"></div>`)}
+
+    ${_paso('2','📱','Números de WhatsApp','Qué número atiende cada sección. Si uno se bloquea, asignas otro y el flujo sigue.',`
+      <div style="display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-bottom:10px">
         <button class="btn btn-sm" onclick="waVerifMasivo()" title="Revisa TODOS los números y envía a verificación lo que falte en cada cuenta de WhatsApp">📤 Verificación masiva</button>
         <button class="btn btn-sm" onclick="waAgregarNumero()">➕ Agregar número</button>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Una sección solo puede tener UN número activo por modo. Al asignar una sección ocupada, el número anterior se libera solo (pasa al banco de reemplazo).</div>
-      <div id="wam-numeros"><div class="loading">Cargando...</div></div>
-    </div>
-    <div class="card" style="margin-bottom:18px">
-      <div style="font-size:15px;font-weight:800;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">⚙️ Modos de envío por sección</div>
+      <div id="wam-numeros"><div class="loading">Cargando...</div></div>`)}
+
+    ${_paso('3','📋','Plantillas aprobadas','Meta tiene que autorizar cada texto antes de que se pueda enviar.',`
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+        <div style="font-size:12px;color:var(--muted);max-width:600px">Toma los textos de <strong>Textos / Mensajes</strong> de la sección de ese número, los convierte al formato de Meta y los manda a aprobación. Nombre: nexo_{sección}_{variante}_v1.</div>
+        <select id="wam-tpl-numero" onchange="cargarWaPlantillasCard()" style="min-width:200px;font-size:12px"><option value="">— Elige un número —</option></select>
+      </div>
+      <div id="wam-tpl-lista"><div style="color:var(--muted);font-size:12px">Elige un número arriba para ver sus plantillas.</div></div>`)}
+
+    ${_paso('4','⚙️','Cuándo se envía','A mano, automático, o con reglas que disparan solas.',`
+      <div style="font-size:13px;font-weight:800;margin-bottom:4px">🎛️ Modos de envío por sección</div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:10px">🤖 Automático: el sistema envía solo cada 5 min (interno). ▶️ Despachar: el auxiliar ve un botón que envía por API. 📱 Manual: el auxiliar ve el botón de WhatsApp de siempre. 🔀 Por tipo: cada plantilla manda con sus propios switches.</div>
       <div id="wam-modos"><div class="loading">Cargando...</div></div>
-      <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
-        <div style="font-size:13px;font-weight:800;margin-bottom:6px">🔗 Puentes chat ↔ secciones (28jul26)</div>
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div id="txt-reglas"></div>
+      </div>
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div style="font-size:13px;font-weight:800;margin-bottom:4px">🎚️ Valores del Centro de Chats</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Los mismos controles del Centro de Control — se editan desde cualquiera de los dos y quedan sincronizados al instante. El auxiliar los recibe al entrar o recargar.</div>
+        <div id="wam-sysvals"><div class="loading">Cargando...</div></div>
+      </div>`)}
+
+    ${_paso('5','📬','Cola de envíos','Lo que está saliendo ahora mismo y lo que ya salió.',`
+      <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+        <button class="btn btn-sm" onclick="cargarWaCola()">🔄 Actualizar</button>
+      </div>
+      <div id="wam-cola"><div class="loading">Cargando...</div></div>`)}
+
+    ${_paso('6','🏷','El chat después del envío','Cómo se etiqueta solo y qué pasa cuando el cliente responde.',`
+      <div style="font-size:13px;font-weight:800;margin-bottom:4px">🏷 Etiquetas del Centro de Chats (la tubería)</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">La tubería que ve el auxiliar: rieles automáticos (los mueve el sistema) + tus etiquetas globales + extras por sección. Cada etiqueta vive por su ID: renombrar nunca altera datos ni métricas.</div>
+      <div id="wam-etiquetas"><div class="loading">Cargando...</div></div>
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div id="wam-reingreso"><div class="loading">Cargando...</div></div>
+      </div>
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div style="font-size:13px;font-weight:800;margin-bottom:6px">🔗 Puentes chat ↔ secciones</div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:8px">CERRADO VIGENTE = el chat tiene etiqueta 🟢 Resuelta (o cualquier etiqueta de cierre) y el cliente NO ha escrito después. Si el cliente volvió a escribir (🔁 Volvió), SÍ recibe mensajes.</div>
         <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;cursor:pointer;margin-bottom:8px"><input type="checkbox" id="wam-f3-skip" checked onchange="waF3Guardar()" style="margin-top:2px"><span><strong>🚫 No disparar a chats cerrados</strong> — el encolador automático salta a los clientes cuyo chat está CERRADO VIGENTE, marcados desde el chat o desde la sección.</span></label>
         <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;cursor:pointer"><input type="checkbox" id="wam-f3-estampa" checked onchange="waF3Guardar()" style="margin-top:2px"><span><strong>✅ Resuelta estampa el chat</strong> — el botón ✅ Resuelta de Novedades y Reclame también deja el chat en 🟢 Resuelta con el mismo clic (un solo gesto del auxiliar, los dos lados al día).</span></label>
@@ -18619,12 +18739,7 @@ async function pageAdminMensajeria(c){
           <div id="wam-sync-msg" style="font-size:11px;margin-top:6px"></div>
         </div>
       </div>
-      <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
-        <div style="font-size:13px;font-weight:800;margin-bottom:4px">🎚️ Valores del Centro de Chats</div>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Los mismos controles del Centro de Control — se editan desde cualquiera de los dos y quedan sincronizados al instante. El auxiliar los recibe al entrar o recargar.</div>
-        <div id="wam-sysvals"><div class="loading">Cargando...</div></div>
-      </div>
-      <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
         <div style="font-size:13px;font-weight:800;margin-bottom:4px">🧲 Orden de las píldoras del Centro de Chats</div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Arrastra las píldoras al orden que quieras — CADA SECCIÓN guarda el suyo. El auxiliar lo ve al recargar. Las etiquetas nuevas que crees después aparecen al final hasta que las acomodes.</div>
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
@@ -18637,41 +18752,15 @@ async function pageAdminMensajeria(c){
         </div>
         <div id="wam-po-lista" style="display:flex;flex-direction:column;gap:4px;max-width:420px"></div>
         <div id="wam-po-msg" style="font-size:11px;margin-top:6px"></div>
-      </div>
-    </div>
-    <div class="card" style="margin-bottom:18px">
-      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">
-        <div style="font-size:15px;font-weight:800">📬 Cola de envíos</div>
-        <button class="btn btn-sm" onclick="cargarWaCola()">🔄 Actualizar</button>
-      </div>
-      <div id="wam-cola"><div class="loading">Cargando...</div></div>
-    </div>
-    <div class="card" style="margin-bottom:18px">
-      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">
-        <div style="font-size:15px;font-weight:800">📋 Plantillas para aprobar en Meta</div>
-        <select id="wam-tpl-numero" onchange="cargarWaPlantillasCard()" style="min-width:200px;font-size:12px"><option value="">— Elige un número —</option></select>
-      </div>
-      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Toma los textos de <strong>Textos / Mensajes</strong> de la sección de ese número, los convierte al formato de Meta y los manda a aprobación. Nombre: nexo_{sección}_{variante}_v1.</div>
-      <div id="wam-tpl-lista"><div style="color:var(--muted);font-size:12px">Elige un número arriba para ver sus plantillas.</div></div>
-    </div>
-    <div class="card" style="margin-bottom:18px">
-      <div style="font-size:15px;font-weight:800;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">🏷 Etiquetas del Centro de Chats (tubería)</div>
-      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">La tubería que ve el auxiliar: rieles automáticos (los mueve el sistema) + tus etiquetas globales + extras por sección. Cada etiqueta vive por su ID: renombrar nunca altera datos ni métricas.</div>
-      <div id="wam-etiquetas"><div class="loading">Cargando...</div></div>
-    </div>
-    <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:12px">
-        <div style="font-size:15px;font-weight:800">🔑 Apps / Portafolios de Meta</div>
-        <button class="btn btn-sm" onclick="waAgregarApp()">➕ Agregar app</button>
-      </div>
-      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">El Token y el App Secret son de solo-escritura: se guardan pero nunca se muestran. Deja el campo vacío para conservar el valor actual.</div>
-      <div id="wam-apps"><div class="loading">Cargando...</div></div>
-      <div id="wam-webhook"></div>
-    </div>`
+      </div>`)}`
   cargarWaMensajeria()
   cargarWaModos()
   cargarWaCola()
   try{window._wchEditorRender&&window._wchEditorRender()}catch(e){console.warn('editor etiquetas:',e)} // 🏷 (26jul26)
+  try{cargarReglasAdmin()}catch(_){} // ⚡ (31jul26) el motor de reglas vive ahora en el paso 4
+  try{window._ccReingresoRender&&window._ccReingresoRender()}catch(e){console.warn('reglas reingreso:',e)} // 🔁 (31jul26) paso 6
+  try{_wamSemaforo()}catch(_){}
+  setTimeout(()=>{try{_wamSemaforo()}catch(_){}},1500) // segunda pasada: las cargas son asíncronas
 }
 
 // ═══ 🧲 (28jul26) ORDEN DE PÍLDORAS DEL CENTRO — drag & drop por sección ═══
@@ -41218,13 +41307,232 @@ function _wchEtqPorId(id){
   return null
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 🔁 REGLAS DE CIERRE Y REINGRESO (31jul26)
+// ---------------------------------------------------------------------------
+// QUÉ RESUELVE, en cristiano: hasta hoy, "una conversación cerrada que vuelve a
+// escribir cae en 🔁 Volvió" estaba escrito a mano en el código. Si mañana el
+// dueño quería que OTRA etiqueta se comportara igual, o que en Novedades el
+// corte fueran 3 días y en Cancelados 15, había que tocar código. Ahora no.
+//
+// UNA REGLA SE LEE COMO UNA FRASE:
+//   "SI la conversación quedó en [Resuelta] y el cliente vuelve a escribir,
+//    cae en [🔁 Volvió]; pero si ese cierre tiene más de [7] días, cae en
+//    [🕰️ Volvió (viejo)]."
+//
+// ÁMBITOS: cada sección tiene las suyas y además existen las 🌐 GLOBALES.
+//   · Si la sección tiene regla activa → MANDA LA DE LA SECCIÓN.
+//   · Si no tiene → manda la global.
+//   · Si no hay ninguna → el sistema se comporta EXACTAMENTE como antes de
+//     este módulo (etiqueta con casilla "cierra" + ccDiasVuelve). CERO RIESGO.
+//
+// Persistencia: config 'cc_reglas_reingreso', patrón de siempre con
+// verificación de ida y vuelta (un upsert puede "aceptar" sin escribir si RLS).
+// ═══════════════════════════════════════════════════════════════════════════
+const CC_RR_KEY='cc_reglas_reingreso'
+// Semilla: UNA sola regla global que copia palabra por palabra lo que el
+// sistema ya hacía. Sembrarla no cambia ningún comportamiento.
+function _ccRRDefaults(){
+  return {v:1,reglas:[
+    {id:'rr_global',nombre:'Cierre normal',sec:'global',activa:true,
+     etqs:[],dias:7,destino:'volvio',destinoViejo:'volvio_viejo',
+     nota:'La regla de siempre: cualquier etiqueta marcada con la casilla "cierra" hace que, si el cliente vuelve a escribir, la conversación caiga en 🔁 Volvió. Si ese cierre ya tiene más de 7 días, cae en 🕰️ Volvió (viejo) porque es un caso distinto: no es urgente, es un cliente que reapareció.'}
+  ]}
+}
+window._ccRR=window._ccRR||null
+async function _ccRRCargar(force){
+  if(window._ccRR&&!force)return window._ccRR
+  let o=null
+  try{const raw=await getConfig(CC_RR_KEY);if(raw){const p=JSON.parse(raw);if(p&&p.v)o=p}}catch(_){}
+  if(!o)o=_ccRRDefaults()
+  if(!Array.isArray(o.reglas))o.reglas=[]
+  window._ccRR=o
+  return o
+}
+async function _ccRRGuardar(){
+  const js=JSON.stringify(window._ccRR||_ccRRDefaults())
+  const{error}=await sb.from('config').upsert({clave:CC_RR_KEY,valor:js,updated_at:new Date().toISOString()},{onConflict:'clave'})
+  if(error)return {ok:false,msg:error.message}
+  let eco=null;try{eco=await getConfig(CC_RR_KEY)}catch(_){}
+  if(eco!==js)return {ok:false,msg:'la nube no devolvió lo guardado (¿RLS en config para '+CC_RR_KEY+'?)'}
+  return {ok:true}
+}
+// ── EL CORAZÓN: ¿qué regla manda para esta sección y esta etiqueta? ──
+// Precedencia: 1) regla ACTIVA de la sección  2) regla ACTIVA global  3) null.
+// Una regla con etqs vacío aplica a CUALQUIER etiqueta de cierre (la de siempre).
+// Una regla con etqs llenos aplica SOLO a esas — así se puede tener un corte
+// distinto para "Resuelta" y otro para "Cancelado por cliente" en la misma sección.
+function _ccRRAplicable(sec,etqId){
+  const cfg=window._ccRR;if(!cfg||!Array.isArray(cfg.reglas))return null
+  const calza=(r)=>r&&r.activa!==false&&(!Array.isArray(r.etqs)||!r.etqs.length||(etqId&&r.etqs.includes(etqId)))
+  const propia=cfg.reglas.find(r=>r.sec===sec&&calza(r))
+  if(propia)return propia
+  const glob=cfg.reglas.find(r=>(r.sec==='global'||!r.sec)&&calza(r))
+  return glob||null
+}
+// ¿Alguna regla activa nombra explícitamente esta etiqueta? Sirve para que una
+// etiqueta SIN la casilla "cierra" también pueda comportarse como cierre si el
+// dueño la puso en una regla. Es ADITIVO: nunca le quita el cierre a nadie.
+function _ccRREsCierrePorRegla(etqId){
+  const cfg=window._ccRR;if(!cfg||!Array.isArray(cfg.reglas)||!etqId)return false
+  return cfg.reglas.some(r=>r&&r.activa!==false&&Array.isArray(r.etqs)&&r.etqs.includes(etqId))
+}
+// ¿Qué secciones están tapando a la global? (para el aviso permanente)
+function _ccRRSuprimenGlobal(){
+  const cfg=window._ccRR;if(!cfg||!Array.isArray(cfg.reglas))return []
+  return cfg.reglas.filter(r=>r&&r.activa!==false&&r.sec&&r.sec!=='global').map(r=>r.sec)
+}
+
+// ── 🖥️ PANEL (vive en 💬 Mensajería → Paso 6) ────────────────────────────
+window._ccRRTab=window._ccRRTab||'global'
+window._ccReingresoRender=async function(){
+  const el=document.getElementById('wam-reingreso');if(!el)return
+  const cfg=await _ccRRCargar()
+  const cat=await _wchCatLoad()
+  const tab=window._ccRRTab||'global'
+  const secs=[['global','🌐','Global','Aplica en TODAS las secciones que no tengan regla propia']].concat(WCH_SECS.map(s=>[s.k,s.e,s.n,'Solo en '+s.n]))
+  const nomSec=(k)=>{const f=secs.find(x=>x[0]===k);return f?(f[1]+' '+f[2]):k}
+  const rielOpts=(sel)=>Object.keys(WCH_RIELES_DEF).map(k=>{const r=(cat.rieles||{})[k]||WCH_RIELES_DEF[k];return `<option value="${k}" ${k===sel?'selected':''}>${r.e} ${_wchEsc(r.n)}</option>`}).join('')
+  // Todas las etiquetas que existen (globales + de cada sección), para el selector
+  const todasEtq=[...(cat.globales||[]).filter(x=>!x.arch).map(x=>({...x,amb:'🌐'})),
+    ...WCH_SECS.flatMap(s=>((cat.secciones||{})[s.k]||[]).filter(x=>!x.arch).map(x=>({...x,amb:s.e})))]
+  const etqNom=(id)=>{const f=todasEtq.find(x=>x.id===id);return f?((f.e||'🏷️')+' '+f.n):id}
+  const suprimen=_ccRRSuprimenGlobal()
+  const mias=cfg.reglas.filter(r=>(r.sec||'global')===tab)
+
+  const tarjeta=(r,i)=>{
+    const esGlobal=(r.sec||'global')==='global'
+    // ⚠️ AVISO PERMANENTE DE SUPRESIÓN — el pedido explícito del dueño
+    let aviso=''
+    if(!esGlobal){
+      const g=cfg.reglas.find(x=>(x.sec==='global'||!x.sec)&&x.activa!==false)
+      if(g&&r.activa!==false){
+        aviso=`<div style="background:rgba(245,158,11,.11);border:1px solid var(--amber);border-radius:9px;padding:9px 11px;margin-top:9px;font-size:11.5px;line-height:1.6">
+          <strong style="color:var(--amber)">⚠️ Esta regla está TAPANDO a la regla global «${_wchEsc(g.nombre||'sin nombre')}»</strong><br>
+          Mientras esta regla esté <strong>activa</strong>, en <strong>${nomSec(r.sec)}</strong> NO se aplica lo que dice la global: manda esta.
+          Ahora mismo la global diría <em>«${(cat.rieles[g.destino]||{}).e||''} ${_wchEsc((cat.rieles[g.destino]||{}).n||g.destino)} · corte a los ${g.dias||7} días»</em>
+          y esta dice <em>«${(cat.rieles[r.destino]||{}).e||''} ${_wchEsc((cat.rieles[r.destino]||{}).n||r.destino)} · corte a los ${r.dias||7} días»</em>.<br>
+          <span style="color:var(--muted)">Si la apagas con ⏸️ o la borras con 🗑️, la global vuelve a mandar sola en esta sección. No tienes que hacer nada más.</span>
+        </div>`
+      }
+    }else if(suprimen.length){
+      const u=[...new Set(suprimen)]
+      aviso=`<div style="background:rgba(148,163,184,.10);border:1px dashed var(--border);border-radius:9px;padding:9px 11px;margin-top:9px;font-size:11.5px;line-height:1.6">
+        <strong>🔕 Esta regla global está SUPRIMIDA en:</strong> ${u.map(nomSec).join(' · ')}<br>
+        <span style="color:var(--muted)">En esas secciones hay una regla propia que manda por encima de esta. En las demás secciones esta regla sigue mandando normalmente.</span>
+      </div>`
+    }
+    const chips=(Array.isArray(r.etqs)&&r.etqs.length)
+      ? r.etqs.map(id=>`<span style="display:inline-flex;align-items:center;gap:5px;background:var(--card);border:1px solid var(--border);border-radius:999px;padding:3px 9px;font-size:11px;font-weight:700">${_wchEsc(etqNom(id))} <button onclick="_ccRRQuitarEtq('${r.id}','${id}')" title="Quitar de esta regla" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:12px;padding:0;line-height:1">×</button></span>`).join('')
+      : `<span style="font-size:11.5px;color:var(--muted);font-style:italic">— vacío = <strong style="font-style:normal">todas</strong> las etiquetas que tengan marcada la casilla «cierra» —</span>`
+    const libres=todasEtq.filter(x=>!(r.etqs||[]).includes(x.id))
+    return `<div style="background:var(--card2);border:1px solid var(--border);border-left:4px solid ${r.activa!==false?'var(--green)':'var(--border)'};border-radius:12px;padding:12px 14px;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+        <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1">
+          <span style="font-size:15px">${r.activa!==false?'🟢':'⚪'}</span>
+          <input value="${_wchEsc(r.nombre||'')}" placeholder="Ponle un nombre a esta regla" style="flex:1;min-width:120px;font-size:13px;font-weight:800" onchange="_ccRRCampo('${r.id}','nombre',this.value)">
+        </div>
+        <div style="display:flex;gap:5px;flex:0 0 auto">
+          <button class="btn-sm btn-outline" style="font-size:11px" onclick="_ccRRToggle('${r.id}')" title="${r.activa!==false?'Apagar esta regla':'Encender esta regla'}">${r.activa!==false?'⏸️ apagar':'▶️ prender'}</button>
+          <button class="btn-sm btn-outline" style="font-size:11px;color:var(--red)" onclick="_ccRRBorrar('${r.id}')" title="Borrar esta regla">🗑️</button>
+        </div>
+      </div>
+      <div style="background:var(--card);border-radius:9px;padding:11px 12px;font-size:12.5px;line-height:2">
+        <div style="margin-bottom:9px">
+          <div style="font-weight:800;margin-bottom:5px">1️⃣ SI la conversación quedó con esta etiqueta:</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding-left:20px">
+            ${chips}
+            ${libres.length?`<select onchange="if(this.value)_ccRRAgregarEtq('${r.id}',this.value);this.selectedIndex=0" style="font-size:11px;padding:3px 6px"><option value="">➕ agregar etiqueta…</option>${libres.map(x=>`<option value="${x.id}">${x.amb} ${x.e||'🏷️'} ${_wchEsc(x.n)}</option>`).join('')}</select>`:''}
+          </div>
+        </div>
+        <div style="margin-bottom:9px">
+          <div style="font-weight:800;margin-bottom:5px">2️⃣ Y el cliente VUELVE A ESCRIBIR → la conversación cae en:</div>
+          <div style="padding-left:20px"><select onchange="_ccRRCampo('${r.id}','destino',this.value)" style="font-size:12px;padding:4px 8px">${rielOpts(r.destino||'volvio')}</select></div>
+        </div>
+        <div>
+          <div style="font-weight:800;margin-bottom:5px">3️⃣ PERO si ese cierre ya tiene más de <input type="number" min="1" max="365" value="${Number(r.dias)||7}" style="width:64px;font-size:12px;padding:3px 6px;text-align:center" onchange="_ccRRCampo('${r.id}','dias',this.value)"> días → cae en:</div>
+          <div style="padding-left:20px"><select onchange="_ccRRCampo('${r.id}','destinoViejo',this.value)" style="font-size:12px;padding:4px 8px">${rielOpts(r.destinoViejo||'volvio_viejo')}</select></div>
+        </div>
+      </div>
+      ${r.nota?`<div style="font-size:11.5px;color:var(--muted);margin-top:8px;line-height:1.6">📝 ${_wchEsc(r.nota)}</div>`:''}
+      ${aviso}
+    </div>`
+  }
+
+  el.innerHTML=`<div style="font-size:13px;font-weight:800;margin-bottom:4px">🔁 Reglas de cierre y reingreso</div>
+    <div style="background:linear-gradient(135deg,var(--blue-bg),var(--purple-bg));border:1px solid var(--accent);border-radius:11px;padding:11px 13px;margin-bottom:11px;font-size:12px;line-height:1.7">
+      <strong>¿Qué es esto?</strong> Cuando un chat ya está cerrado (por ejemplo con 🟢 Resuelta) y el cliente <strong>vuelve a escribir</strong>, el sistema tiene que decidir en qué píldora lo pone. Eso es lo que se configura aquí — sin tocar código.<br>
+      <strong>¿Cómo se lee una regla?</strong> Como una frase: «<em>SI quedó en Resuelta y vuelve a escribir → cae en 🔁 Volvió; pero si el cierre tiene más de 7 días → cae en 🕰️ Volvió (viejo)</em>».<br>
+      <strong>¿Y si quiero que otra etiqueta funcione igual?</strong> La agregas en el punto 1️⃣ de una regla. Nada más.<br>
+      <span style="color:var(--muted)">🌐 La regla <strong>Global</strong> manda en todas las secciones. Si una sección tiene su propia regla, esa gana y verás un aviso amarillo diciéndotelo.</span>
+    </div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:11px">${secs.map(s=>{
+      const n=cfg.reglas.filter(r=>(r.sec||'global')===s[0]).length
+      const act=cfg.reglas.filter(r=>(r.sec||'global')===s[0]&&r.activa!==false).length
+      return `<button class="btn-sm ${tab===s[0]?'btn-primary':'btn-outline'}" style="font-size:11px" title="${s[3]}" onclick="window._ccRRTab='${s[0]}';_ccReingresoRender()">${s[1]} ${s[2]}${n?` <span style="opacity:.75">(${act}/${n})</span>`:''}</button>`
+    }).join('')}</div>
+    ${mias.length?mias.map(tarjeta).join(''):`<div style="font-size:12px;color:var(--muted);background:var(--card2);border:1px dashed var(--border);border-radius:10px;padding:14px;margin-bottom:10px;line-height:1.7">
+      ${tab==='global'?'No hay ninguna regla global. Sin reglas, el sistema se comporta como siempre lo ha hecho: la etiqueta con casilla «cierra» manda a 🔁 Volvió, y el corte de días sale de los Valores del Centro de Chats.'
+        :'Esta sección <strong>no tiene reglas propias</strong>, así que le aplica la regla 🌐 Global tal cual. Si quieres que aquí funcione distinto (otros días, otra píldora, otras etiquetas), crea una regla con el botón de abajo.'}
+    </div>`}
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn-sm btn-primary" onclick="_ccRRNueva('${tab}')">➕ Nueva regla en ${nomSec(tab)}</button>
+      <span id="cc-rr-msg" style="font-size:11.5px"></span>
+    </div>`
+}
+async function _ccRRAplicar(){
+  const r=await _ccRRGuardar()
+  const m=document.getElementById('cc-rr-msg')
+  if(m)m.innerHTML=r.ok?'<span style="color:#22c55e">✅ Guardado y verificado</span>':'<span style="color:#ef4444">❌ NO se guardó: '+_wchEsc(r.msg)+'</span>'
+  if(!r.ok)await _ccRRCargar(true) // no dejar en pantalla una regla que la nube no aceptó
+  await window._ccReingresoRender()
+}
+function _ccRRPorId(id){const c=window._ccRR;return c&&(c.reglas||[]).find(r=>r.id===id)}
+window._ccRRCampo=async function(id,campo,v){
+  const r=_ccRRPorId(id);if(!r)return
+  r[campo]=(campo==='dias')?Math.max(1,Math.min(365,Number(v)||7)):v
+  await _ccRRAplicar()
+}
+window._ccRRToggle=async function(id){const r=_ccRRPorId(id);if(!r)return;r.activa=(r.activa===false);await _ccRRAplicar()}
+window._ccRRAgregarEtq=async function(id,etq){
+  const r=_ccRRPorId(id);if(!r)return
+  if(!Array.isArray(r.etqs))r.etqs=[]
+  if(!r.etqs.includes(etq))r.etqs.push(etq)
+  await _ccRRAplicar()
+}
+window._ccRRQuitarEtq=async function(id,etq){
+  const r=_ccRRPorId(id);if(!r||!Array.isArray(r.etqs))return
+  r.etqs=r.etqs.filter(x=>x!==etq)
+  await _ccRRAplicar()
+}
+window._ccRRNueva=async function(sec){
+  const c=window._ccRR;if(!c)return
+  if(!Array.isArray(c.reglas))c.reglas=[]
+  c.reglas.push({id:'rr_'+Math.random().toString(36).slice(2,8)+Date.now().toString(36).slice(-3),
+    nombre:sec==='global'?'Nueva regla global':'Regla propia de esta sección',
+    sec:sec,activa:true,etqs:[],dias:7,destino:'volvio',destinoViejo:'volvio_viejo',nota:''})
+  await _ccRRAplicar()
+}
+window._ccRRBorrar=async function(id){
+  const r=_ccRRPorId(id);if(!r)return
+  if(!confirm('¿Borrar la regla «'+(r.nombre||'sin nombre')+'»?\n\nSi era una regla de sección, esa sección vuelve a regirse por la regla 🌐 Global.\nSi era la global y no queda ninguna, el sistema vuelve a comportarse como antes de este panel (etiqueta con casilla «cierra» → 🔁 Volvió).'))return
+  const c=window._ccRR
+  c.reglas=(c.reglas||[]).filter(x=>x.id!==id)
+  await _ccRRAplicar()
+}
+
 // (28jul26) ¿La conversación traía una etiqueta de CIERRE que quedó TAPADA por un
 // mensaje más nuevo? Devuelve de dónde venía (para el chip "venía de…") o null.
 // La etiqueta NO se borra nunca — solo deja de mandar por ser más vieja que el mensaje.
 function _wchCierreTapado(c){
   if(!c||!c.etiqueta||c.etiqueta===WCH_SELLO_WAME)return null
   const et=_wchEtqPorId(c.etiqueta)
-  if(!et||!et.cierre)return null
+  if(!et)return null
+  // (31jul26) Cierra si tiene la casilla «cierra» (lo de siempre) O si alguna regla
+  // de reingreso la nombra explícitamente. Es ADITIVO: a nadie se le quita el cierre.
+  let _porRegla=false
+  try{_porRegla=_ccRREsCierrePorRegla(c.etiqueta)}catch(_){}
+  if(!et.cierre&&!_porRegla)return null
   return{id:c.etiqueta,n:et.n||'',e:et.e||'',col:et.c||'#22c55e',ts:c.etiqueta_en||null}
 }
 // (30jul26) ¿Ya se cerró la ventana de 24h de WhatsApp? De aquí en adelante NO se puede
@@ -41250,6 +41558,18 @@ function _wchVentanaCerrada(c){
 // acción posible = misma píldora. Antes 'volvio' NO se partía por ventana y por eso los
 // reingresos vencidos se quedaban ahí para siempre, sin que nadie notara la demora.
 function _wchRielVolvio(dias,c){
+  // (31jul26) Si hay una REGLA DE REINGRESO configurada (💬 Mensajería → Paso 6),
+  // manda ella: sus días de corte y sus dos destinos. Precedencia: la regla de la
+  // sección tapa a la global. Si no hay ninguna regla, sigue de largo y se comporta
+  // EXACTAMENTE como antes de este módulo — por eso el panel es de riesgo cero.
+  try{
+    const _sec=(window._wchState||{}).sec
+    const _r=_ccRRAplicable(_sec,c&&c.etiqueta)
+    if(_r){
+      const _d=Number(_r.dias)||7
+      return dias>_d?(_r.destinoViejo||'volvio_viejo'):(_r.destino||'volvio')
+    }
+  }catch(_){}
   if(dias>(nxSysVal('ccDiasVuelve')||7))return 'volvio_viejo'
   // (31jul26) La ventana de 24h ya NO parte esta familia. ⏰ Atendida · volvió +24h
   // significa "el AUXILIAR ya atendió a uno que volvió y pasaron 24h", y eso se decide
@@ -41565,6 +41885,7 @@ async function _ccCopSubir(){
 async function _wchCargar(){
   const st=window._wchState
   await _wchCatLoad()
+  try{await _ccRRCargar()}catch(_){} // 🔁 (31jul26) reglas de cierre y reingreso (cacheadas: una sola consulta)
   try{if(!window._ccCop.mapa||(Date.now()-window._ccCop.ts)>30000)await _ccCopCargar()}catch(_){} // 📋 marcas de copiado (refresco máx. cada 30s)
   const sec=st.sec,fecha=st.fecha // null = hoy/vivo
   const diaSel=fecha||_wchHoy()
@@ -42263,6 +42584,7 @@ window._wchAbrir=async function(){
   try{if(document.querySelector('[id^="wch-chat-"]')){_wchM1Izquierda();_wchDockRender()}}catch(_){}
   _wchDrag(div,div.querySelector('#wch-m1-head')) // se cierra SOLO con ✕
   await _wchCatLoad()
+  try{await _ccRRCargar()}catch(_){} // 🔁 (31jul26) reglas de cierre y reingreso listas antes del primer render
   _wchTabsRender()
   await _wchRecargar()
   if(st.timer)clearInterval(st.timer)
@@ -44540,7 +44862,7 @@ function _wchEdLista(arr,ambito){
     <input value="${_wchEsc(x.e||'')}" style="width:36px;text-align:center;font-size:12px" onchange="_wchEdCampo('${ambito}','${x.id}','e',this.value)">
     <input value="${_wchEsc(x.n)}" style="flex:1;font-size:12px" onchange="_wchEdCampo('${ambito}','${x.id}','n',this.value)">
     <input type="color" value="${x.c||'#888888'}" style="width:32px;height:26px;border:none;background:none;cursor:pointer" onchange="_wchEdCampo('${ambito}','${x.id}','c',this.value)">
-    <label style="font-size:10px;color:var(--muted);display:flex;gap:3px;align-items:center;white-space:nowrap" title="Al ponerla, la conversación sale de la vista por defecto"><input type="checkbox" ${x.cierre?'checked':''} onchange="_wchEdCampo('${ambito}','${x.id}','cierre',this.checked)"> cierra</label>
+    <label style="font-size:10px;color:var(--muted);display:flex;gap:3px;align-items:center;white-space:nowrap" title="QUÉ HACE ESTA CASILLA (2 cosas):&#10;1) La conversación sale de la vista por defecto — ya no estorba, el trabajo quedó hecho.&#10;2) Si el cliente VUELVE A ESCRIBIR después, la conversación reaparece sola en 🔁 Volvió (o en la píldora que digan tus reglas de 💬 Mensajería → Paso 6 · Reglas de cierre y reingreso).&#10;&#10;O sea: márcala en toda etiqueta que signifique «este caso ya se resolvió»."><input type="checkbox" ${x.cierre?'checked':''} onchange="_wchEdCampo('${ambito}','${x.id}','cierre',this.checked)"> cierra</label>
     <button class="btn-sm btn-red" style="font-size:10px;padding:2px 7px" onclick="_wchEdBorrar('${ambito}','${x.id}')">🗑️</button>
   </div>`).join('')
 }

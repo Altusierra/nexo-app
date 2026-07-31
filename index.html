@@ -18780,16 +18780,22 @@ function _nxPillDefault(sec){
   return [...base,...etqs]
 }
 function _nxPillNombre(k){
+  // (31jul26 · BUG ARREGLADO) Antes esta función devolvía el nombre ESCRITO A MANO y
+  // nunca miraba el catálogo: renombrabas «Volvió» y el Centro te obedecía, pero este
+  // panel seguía diciendo «Volvió». Ahora el orden es al revés y toda la app dice lo
+  // mismo: 1) riel del catálogo · 2) etiqueta del catálogo · 3) nombre de fábrica.
   const fijos={nodisp:['⚠️','Avisar admin','#ef4444'],porprog:['🗓️','Por programar','#f59e0b'],g_llamar:['📞','Llamar','#ef4444'],g_camino:['📨','En camino','#38bdf8'],respondio:['🆕','Respondió','#f59e0b'],conversando:['💬','En conversación','#22d3ee'],atendida:['🟣','Atendida','#a855f7'],volvio:['🔁','Volvió','#f97316'],volvio_viejo:['🕰️','Volvió (viejo)','#94a3b8'],atendida_volvio:['🔁','Atendida · volvió','#c084fc'],atendida_24:['⏰','Atendida +24h','#f59e0b'],atendida_volvio_24:['⏰','Atendida · volvió +24h','#fb923c'],wame:['📲','Por wa.me','#0ea5e9']}
-  if(fijos[k])return fijos[k]
   try{
     const cat=window._wchState&&window._wchState.cat
     if(cat){
+      const r=(cat.rieles||{})[k]
+      if(r&&r.n)return[r.e||'🏷️',r.n,r.c||'#666'] // ← el riel del catálogo MANDA
       const todas=[...(cat.globales||[]),...Object.values(cat.secciones||{}).flat()]
       const f=todas.find(x=>x&&x.id===k)
       if(f)return[f.e||'🏷️',f.n,f.c||'#666']
     }
   }catch(_){}
+  if(fijos[k])return fijos[k]
   return['🏷️',k,'#666']
 }
 window.nxPillOrdenRender=async function(){
@@ -41156,7 +41162,73 @@ const WCH_RIELES_DEF={
   atendida_volvio_24:{n:'Atendida · volvió +24h',e:'⏰',c:'#fb923c'}, // (30jul26) el aux YA atendió a uno que había VUELTO y sigue esperando respuesta: no se mezcla con 🟣 Atendida porque va en un flujo mucho más avanzado. Cierra con 🔁 Resuelta · volvió.
   volvio:{n:'Volvió',e:'🔁',c:'#f97316'},               // (28jul26) estaba CERRADO y volvió a escribir
   volvio_viejo:{n:'Volvió (viejo)',e:'🕰️',c:'#94a3b8'}, // (28jul26) idem pero pasado el corte ccDiasVuelve
-  wame:{n:'Por wa.me',e:'📲',c:'#0ea5e9'}
+  wame:{n:'Por wa.me',e:'📲',c:'#0ea5e9'},
+  // (31jul26) 🔓 LAS 4 RESCATADAS. Estas píldoras existían desde siempre pero su
+  // nombre, emoji y color estaban ESCRITOS A MANO dentro del Centro y del panel de
+  // orden — por eso no salían en el editor y no había forma de renombrarlas. Ahora
+  // viven aquí como todas las demás: una sola fuente de verdad para toda la app.
+  // Llevan grupo:true porque NO son estados que _wchDerivar calcule: son cajones que
+  // agrupan (o cuentan aparte). Por eso no aparecen como destino de una regla.
+  nodisp:{n:'Avisar admin',e:'⚠️',c:'#ef4444',grupo:true},
+  porprog:{n:'Por programar',e:'🗓️',c:'#f59e0b',grupo:true},
+  g_llamar:{n:'Llamar',e:'📞',c:'#ef4444',grupo:true},
+  g_camino:{n:'En camino',e:'📨',c:'#38bdf8',grupo:true}
+}
+// ── 📖 FICHAS: qué hace cada píldora, escrito leyendo _wchDerivar línea por línea ──
+// entra = cómo cae una conversación aquí · sale = cómo se va · quitar = qué pasa si
+// la sacas del orden o le cambias el nombre · afecta = a quién le pega el cambio.
+const WCH_RIELES_FICHA={
+  respondio:{entra:'El cliente escribió y NADIE de tu equipo le ha contestado NUNCA en este chat.',
+    sale:'En cuanto un humano le responde pasa a 💬 En conversación. Si le pones una etiqueta a mano, pasa a esa etiqueta.',
+    afecta:'Es la píldora de trabajo pendiente más urgente: es gente esperando sin que nadie la haya tocado. Si lleva más horas que el valor «ccHorasAlerta» le sale un ⚠️.'},
+  conversando:{entra:'El cliente escribió y ALGUNA vez un humano ya le había contestado. La ventana de 24h sigue abierta.',
+    sale:'Si contestas, pasa a 🟣 Atendida. Si pasan 24h sin que nadie conteste, pasa sola a ⏰ Atendida +24h. Si le pones etiqueta, pasa a esa.',
+    afecta:'También cuenta como trabajo pendiente: el cliente escribió y espera respuesta.'},
+  atendida:{entra:'El último mensaje del chat lo escribió un HUMANO de tu equipo (no el robot) y la ventana sigue abierta.',
+    sale:'Si el cliente responde vuelve a 💬 En conversación. Si pasan 24h sin respuesta, pasa sola a ⏰ Atendida +24h.',
+    afecta:'Es «ya hice mi parte, espero al cliente». No es trabajo pendiente urgente.'},
+  atendida_24:{entra:'Igual que 🟣 Atendida, pero ya pasaron las 24h de WhatsApp: el cliente nunca respondió.',
+    sale:'Solo con una PLANTILLA aprobada — el texto libre ya no entra. Al enviarla, la app la etiqueta sola con «Resuelta · Atendida +24h».',
+    afecta:'⚠️ Ojo: en esta píldora el chat muestra un candado 🔒 «Solo plantilla» en vez del selector de etiquetas, a propósito, para que nadie la cierre sin haber contactado al cliente.'},
+  atendida_volvio:{entra:'El auxiliar ya le contestó a alguien que había VUELTO a escribir después de estar cerrado, y sigue esperando su respuesta.',
+    sale:'Si el cliente responde vuelve a 💬. Si pasan 24h sin respuesta, pasa a ⏰ Atendida Volvió (+24h).',
+    afecta:'Va aparte de 🟣 Atendida a propósito: son casos en un flujo mucho más avanzado y no deben mezclarse.'},
+  atendida_volvio_24:{entra:'Igual que 🔁 Atendida · volvió, pero se vencieron las 24h. ESTA ES LA ÚNICA VÍA para llegar aquí: que el AUXILIAR haya atendido. Un reingreso que nadie tocó NO cae aquí, cae en 🔁 Volvió.',
+    sale:'Solo con plantilla aprobada. Al enviarla se etiqueta sola con «Resuelta · Volvió +24h».',
+    afecta:'También muestra el candado 🔒 «Solo plantilla» en el chat.'},
+  volvio:{entra:'La conversación estaba CERRADA (etiqueta con la casilla «cierra» marcada, o nombrada en una regla del paso 6) y el cliente volvió a escribir. El cierre tiene menos días que el corte de la regla.',
+    sale:'Si le contestas pasa a 🔁 Atendida · volvió. Si pasan los días del corte, pasa a 🕰️ Volvió (+7DIAS). Si le pones etiqueta, pasa a esa.',
+    afecta:'A dónde cae y con cuántos días de corte lo mandas TÚ desde 💬 Mensajería → Paso 6 → Reglas de cierre y reingreso.'},
+  volvio_viejo:{entra:'Lo mismo que 🔁 Volvió, pero el cierre ya tiene MÁS días que el corte configurado en su regla.',
+    sale:'Igual que 🔁 Volvió: contestándole o poniéndole etiqueta.',
+    afecta:'Existe para que un cliente que reaparece a los 3 meses no se mezcle con la urgencia de hoy. Los días los pones tú en la regla del paso 6.'},
+  wame:{entra:'Alguien abrió este chat con el botón 📱 WhatsApp (wa.me) desde NEXO. Queda el sello para saber que se atendió por fuera.',
+    sale:'Cualquier mensaje nuevo, entrante o saliente, lo tapa y la conversación vuelve a su riel natural.',
+    afecta:'Es solo un rastro: sirve para no perder de vista lo que se atendió por WhatsApp Web.'},
+  sinconf:{entra:'Salió un mensaje AUTOMÁTICO y WhatsApp dice «enviado», pero todavía no confirma que le llegó al cliente.',
+    sale:'Cuando Meta confirme la entrega pasa a ✅ Entregada; si falla, a ❌ No entregada.',
+    afecta:'Es un estado de tránsito: normalmente dura segundos o minutos.'},
+  entregada:{entra:'El mensaje automático SÍ le llegó al cliente (Meta reporta entregado o leído).',
+    sale:'Cuando el cliente responda, pasa a 🆕 Respondió o 💬 En conversación.',
+    afecta:'Es la señal de que el disparo funcionó. Si aquí no hay nadie respondiendo, el problema es el texto, no el envío.'},
+  noentrega:{entra:'Meta reporta que el mensaje FALLÓ. El número está mal, no tiene WhatsApp, o te bloqueó.',
+    sale:'Insistir por WhatsApp no sirve. Hay que llamar o corregir el número.',
+    afecta:'Cada uno aquí es plata perdida: el cliente nunca se enteró de nada.'},
+  disparada:{entra:'El mensaje está encolado o todavía no hay dato de estado. Es el cajón de «va en camino, sin noticias».',
+    sale:'En cuanto Meta responda algo, pasa a ⏳, ✅ o ❌.',
+    afecta:'Si algo se queda aquí mucho rato, revisa la Cola de envíos (paso 5).'},
+  nodisp:{entra:'Se encoló un envío y NO salió: quedó pendiente, sin plantilla aprobada, fallido o cancelado. Se muestra HOY + AYER.',
+    sale:'Cuando el envío se resuelva o se reintente, deja de contarse aquí.',
+    afecta:'🚦 Esta píldora vive en 0. Verde = todo salió. Rojo = hay disparos trabados y alguien tiene que mirarlos YA. Es la alarma del sistema, no una etiqueta de trabajo.'},
+  porprog:{entra:'Solo en ⏳ Pend. Conf.: pedidos pendientes que todavía NO tienen fecha programada.',
+    sale:'En cuanto se les asigna fecha salen de aquí solos.',
+    afecta:'Va antes que todo lo demás porque sin fecha no hay plantilla que disparar. La calcula el sistema: nadie la pone a mano y por eso el contador nunca miente.'},
+  g_llamar:{entra:'Cajón que agrupa lo que necesita una LLAMADA en vez de un mensaje.',
+    sale:'Al resolverse el caso por su vía normal.',
+    afecta:'Es un grupo de la franja, no un estado calculado: sirve para ordenar el trabajo del auxiliar.'},
+  g_camino:{entra:'Cajón que agrupa los envíos que van en camino.',
+    sale:'Al resolverse el caso por su vía normal.',
+    afecta:'Es un grupo de la franja, no un estado calculado.'}
 }
 const WCH_SELLO_WAME='~wame' // valor especial en conversaciones.etiqueta (sello, no id de catálogo)
 const WCH_SECS=[
@@ -41397,7 +41469,9 @@ window._ccReingresoRender=async function(){
   const tab=window._ccRRTab||'global'
   const secs=[['global','🌐','Global','Aplica en TODAS las secciones que no tengan regla propia']].concat(WCH_SECS.map(s=>[s.k,s.e,s.n,'Solo en '+s.n]))
   const nomSec=(k)=>{const f=secs.find(x=>x[0]===k);return f?(f[1]+' '+f[2]):k}
-  const rielOpts=(sel)=>Object.keys(WCH_RIELES_DEF).map(k=>{const r=(cat.rieles||{})[k]||WCH_RIELES_DEF[k];return `<option value="${k}" ${k===sel?'selected':''}>${r.e} ${_wchEsc(r.n)}</option>`}).join('')
+  // (31jul26) Solo los rieles DERIVADOS pueden ser destino: los 4 grupos (grupo:true)
+  // son cajones que agrupa la franja, y el sistema nunca manda una conversación ahí.
+  const rielOpts=(sel)=>Object.keys(WCH_RIELES_DEF).filter(k=>!WCH_RIELES_DEF[k].grupo).map(k=>{const r=(cat.rieles||{})[k]||WCH_RIELES_DEF[k];return `<option value="${k}" ${k===sel?'selected':''}>${r.e} ${_wchEsc(r.n)}</option>`}).join('')
   // Todas las etiquetas que existen (globales + de cada sección), para el selector
   const todasEtq=[...(cat.globales||[]).filter(x=>!x.arch).map(x=>({...x,amb:'🌐'})),
     ...WCH_SECS.flatMap(s=>((cat.secciones||{})[s.k]||[]).filter(x=>!x.arch).map(x=>({...x,amb:s.e})))]
@@ -42992,9 +43066,14 @@ function _wchChipsOrden(){
   const st=window._wchState,cat=st.cat
   // (28jul26) Grupos del auxiliar en vez de los 4 rieles de envío sueltos; los rieles
   // siguen vivos por dentro (chips de tarjeta, derivación) — solo la franja se agrupa.
+  // (31jul26) 🔓 Nombre/emoji/color de los 4 grupos salen AHORA del catálogo, no del
+  // código. Antes estaban escritos aquí a mano y renombrarlos era imposible: quedaba
+  // un nombre en el Centro y otro distinto en Mensajería. Una sola fuente de verdad.
+  const _g=(k,nd,ed,cd)=>{const r=(cat.rieles||{})[k]||{};return{n:r.n||nd,e:r.e||ed,c:r.c||cd}}
+  const _gl=_g('g_llamar','Llamar','📞','#ef4444'), _gc=_g('g_camino','En camino','📨','#38bdf8')
   const rieles=[
-    {tipo:'grupo',clave:'g_llamar',n:'Llamar',e:'📞',c:'#ef4444'},
-    {tipo:'grupo',clave:'g_camino',n:'En camino',e:'📨',c:'#38bdf8'},
+    {tipo:'grupo',clave:'g_llamar',n:_gl.n,e:_gl.e,c:_gl.c},
+    {tipo:'grupo',clave:'g_camino',n:_gc.n,e:_gc.e,c:_gc.c},
     ...['respondio','conversando','atendida','atendida_24','volvio','volvio_viejo','atendida_volvio','atendida_volvio_24','wame'].map(k=>({tipo:'riel',clave:k,...cat.rieles[k]})) // (30jul26) 🔁 Atendida·volvió cierra la familia Volvió
   ]
   // (28jul26) 🗓️ etapa CERO de Pend.Conf: pedidos pendientes SIN fecha programada.
@@ -43003,8 +43082,9 @@ function _wchChipsOrden(){
   // (28jul26) ⚠️ AVISAR ADMIN (antes "No disparados"): encolados que NO salieron
   // (pendiente/sin_plantilla/fallido/cancelado). HOY + AYER por defecto; con el
   // selector de fecha, ese día. Un disparo trabado NUNCA es un error en silencio.
-  rieles.unshift({tipo:'nodisp',clave:'nodisp',n:'Avisar admin',e:'⚠️',c:'#ef4444'})
-  if(st.sec==='reservado')rieles.unshift({tipo:'porprog',clave:'porprog',n:'Por programar',e:'🗓️',c:'#f59e0b'})
+  const _nd=_g('nodisp','Avisar admin','⚠️','#ef4444')
+  rieles.unshift({tipo:'nodisp',clave:'nodisp',n:_nd.n,e:_nd.e,c:_nd.c})
+  if(st.sec==='reservado'){const _pp=_g('porprog','Por programar','🗓️','#f59e0b');rieles.unshift({tipo:'porprog',clave:'porprog',n:_pp.n,e:_pp.e,c:_pp.c})}
   const manuales=_wchEtqsDe(st.sec).map(x=>({tipo:'manual',id:x.id,n:x.n,e:x.e,c:x.c,cierre:x.cierre,ambito:x.ambito}))
   let lista=[...rieles,...manuales]
   // (28jul26) 🧲 ORDEN GUARDADO por sección (config 'cc_pill_orden', lo arma el admin
@@ -44842,11 +44922,34 @@ window._wchEditorRender=async function(){
   let html=`<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px">${tabs.map(([k,n])=>`<button class="btn-sm ${tab===k?'btn-primary':'btn-outline'}" style="font-size:11px" onclick="window._wchEdTab='${k}';_wchEditorRender()">${n}</button>`).join('')}</div>`
   if(tab==='g'){
     html+=`<div style="font-size:11px;color:var(--muted);margin-bottom:8px">Los 4 <strong>rieles automáticos</strong> los mueve el sistema (orden fijo, solo cambias nombre/emoji/color). Las <strong>globales</strong> aparecen en TODAS las secciones; muévelas con ⬆️⬇️. Renombrar nunca toca los datos: cada etiqueta vive por su ID.</div>`
-    html+=Object.keys(WCH_RIELES_DEF).map(k=>{const r=cat.rieles[k];return `<div style="display:flex;gap:6px;align-items:center;background:var(--card2);border:1px solid ${r.c};border-radius:8px;padding:6px 9px;margin-bottom:5px">
-      <span style="font-size:10px;color:var(--muted);width:52px">riel fijo</span>
-      <input value="${_wchEsc(r.e)}" style="width:36px;text-align:center;font-size:12px" onchange="_wchEdRiel('${k}','e',this.value)">
-      <input value="${_wchEsc(r.n)}" style="flex:1;font-size:12px" onchange="_wchEdRiel('${k}','n',this.value)">
-      <input type="color" value="${r.c}" style="width:32px;height:26px;border:none;background:none;cursor:pointer" onchange="_wchEdRiel('${k}','c',this.value)">
+    html+=Object.keys(WCH_RIELES_DEF).map(k=>{
+      const r=cat.rieles[k]||WCH_RIELES_DEF[k]
+      const f=WCH_RIELES_FICHA[k]||{}
+      const esGrupo=!!WCH_RIELES_DEF[k].grupo
+      return `<div style="background:var(--card2);border:1px solid ${r.c};border-radius:9px;padding:7px 10px;margin-bottom:6px">
+      <div style="display:flex;gap:6px;align-items:center">
+        <span style="font-size:9.5px;color:var(--muted);width:52px;line-height:1.15">${esGrupo?'grupo':'riel'}<br>del sistema</span>
+        <input value="${_wchEsc(r.e)}" style="width:36px;text-align:center;font-size:12px" onchange="_wchEdRiel('${k}','e',this.value)">
+        <input value="${_wchEsc(r.n)}" style="flex:1;font-size:12px" onchange="_wchEdRiel('${k}','n',this.value)">
+        <input type="color" value="${r.c}" style="width:32px;height:26px;border:none;background:none;cursor:pointer" onchange="_wchEdRiel('${k}','c',this.value)">
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;margin-top:5px">
+        <span style="font-size:9.5px;color:var(--muted);width:52px">📝 tu nota</span>
+        <input value="${_wchEsc(r.nota||'')}" placeholder="Anota aquí lo que quieras recordar de esta píldora (opcional)" style="flex:1;font-size:11px" onchange="_wchEdRiel('${k}','nota',this.value)">
+      </div>
+      <details style="margin-top:5px">
+        <summary style="cursor:pointer;font-size:10.5px;color:var(--muted);list-style:none">📖 ¿Qué hace exactamente esta píldora? — ábrelo</summary>
+        <div style="font-size:11.5px;line-height:1.65;padding:8px 4px 2px">
+          <div style="margin-bottom:6px"><strong style="color:var(--green)">➡️ CÓMO ENTRA una conversación aquí</strong><br>${_wchEsc(f.entra||'—')}</div>
+          <div style="margin-bottom:6px"><strong style="color:var(--blue)">⬅️ CÓMO SALE de aquí</strong><br>${_wchEsc(f.sale||'—')}</div>
+          <div style="margin-bottom:6px"><strong style="color:var(--amber)">⚡ CÓMO TE AFECTA</strong><br>${_wchEsc(f.afecta||'—')}</div>
+          <div style="background:rgba(148,163,184,.10);border:1px dashed var(--border);border-radius:8px;padding:7px 9px;margin-top:7px">
+            <strong>✏️ Si le cambias el NOMBRE, el emoji o el color:</strong> cambia solo cómo se ve, en TODA la app a la vez (Centro de Chats, orden de píldoras, reglas del paso 6). Los datos NO se tocan: cada píldora vive por su clave interna <code>${k}</code>, que nunca cambia. Nada se pierde ni se recalcula.<br>
+            <strong>🧲 Si la sacas del ORDEN de píldoras:</strong> deja de verse en la franja, pero <strong>las conversaciones siguen cayendo ahí</strong> — quedan escondidas, no borradas. Vuelve a ponerla y reaparecen todas.<br>
+            <strong>🚫 Lo que NO se puede:</strong> borrar esta píldora ni crear una nueva desde aquí. ${esGrupo?'Este es un cajón que agrupa y lo arma el sistema.':'El sistema decide solo cuándo poner una conversación aquí, mirando quién escribió último, si fue humano o robot, y si la ventana de 24h sigue abierta.'} Si necesitas un estado nuevo, se hace con una <strong>regla</strong> en Paso 6, no con una píldora vacía.
+          </div>
+        </div>
+      </details>
     </div>`}).join('')
     html+=_wchEdLista(cat.globales,'g')
   }else{
@@ -44875,8 +44978,24 @@ function _wchEdLista(arr,ambito){
   </div>`).join('')
 }
 function _wchEdArr(ambito){const cat=window._wchState.cat;return ambito==='g'?cat.globales:cat.secciones[ambito]}
-window._wchEdRiel=async function(k,campo,v){window._wchState.cat.rieles[k][campo]=v;await _wchEdGuardar()}
-window._wchEdCampo=async function(ambito,id,campo,v){const x=_wchEdArr(ambito).find(y=>y.id===id);if(!x)return;x[campo]=v;await _wchEdGuardar()}
+// (31jul26) 🔄 SINCRONIZACIÓN AUTOMÁTICA. Antes se guardaba el nombre nuevo y ya: la
+// franja del Centro, el panel de orden y las reglas del paso 6 seguían mostrando el
+// nombre viejo hasta recargar la página. Ahora, apenas se guarda, todo se repinta solo
+// y la app entera dice lo mismo. Cada repintado va en su propio try: si uno de esos
+// paneles no está abierto, los demás igual se actualizan.
+async function _wchSincronizarNombres(){
+  try{if(typeof _wchFranjaRender==='function'&&document.getElementById('wch-franja'))_wchFranjaRender()}catch(_){}
+  try{if(typeof _wchListaRender==='function'&&document.getElementById('wch-modal'))_wchListaRender()}catch(_){}
+  try{if(window.nxPillOrdenRender&&document.getElementById('wam-po-lista'))await window.nxPillOrdenRender()}catch(_){}
+  try{if(window._ccReingresoRender&&document.getElementById('wam-reingreso'))await window._ccReingresoRender()}catch(_){}
+}
+window._wchEdRiel=async function(k,campo,v){
+  if(!window._wchState.cat.rieles[k])window._wchState.cat.rieles[k]={}
+  window._wchState.cat.rieles[k][campo]=v
+  await _wchEdGuardar()
+  await _wchSincronizarNombres()
+}
+window._wchEdCampo=async function(ambito,id,campo,v){const x=_wchEdArr(ambito).find(y=>y.id===id);if(!x)return;x[campo]=v;await _wchEdGuardar();await _wchSincronizarNombres()}
 window._wchEdMover=async function(ambito,id,dir){
   const arr=_wchEdArr(ambito),vivas=arr.filter(x=>!x.arch)
   const i=vivas.findIndex(x=>x.id===id),j=i+dir

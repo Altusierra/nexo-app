@@ -37675,12 +37675,232 @@ function hbPrecioRecalc(f){
   f.estado=disidentes.length?'precio':'listo'
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 🔍 BUSCADOR GLOBAL DE LA HOJA BASE (31jul26)
+// ---------------------------------------------------------------------------
+// QUÉ HACE: pegas UNO o VARIOS teléfonos y trae la fila EXACTA de cada pedido,
+// venga de la fecha que venga. Después, un botón descarga un Excel con la fila
+// de encabezados + solo esos pedidos. Si buscaste 3 números, salen 3 filas.
+//
+// POR QUÉ ES "GLOBAL": no filtra por fecha. Recorre TODAS las hojas base que se
+// hayan generado desde siempre.
+//
+// CÓMO LO HACE SIN DESCARGAR MEDIO STORAGE (el truco): cada archivo subido ya
+// guarda en `constructor_subidas.detalle.telefonos` la lista de teléfonos que
+// traía. O sea, el índice YA existe. Se busca ahí primero, se averigua en qué
+// LOTES está cada número, y solo se bajan del Storage las hojas de esos lotes.
+// Buscar 3 números casi siempre baja 1, 2 o 3 archivos — no cientos.
+//
+// COMPARACIÓN DE NÚMEROS: por los ÚLTIMOS 10 DÍGITOS. Así da igual que esté
+// guardado como 3001234567, 573001234567 o +57 300 123 4567: es el mismo señor.
+// ═══════════════════════════════════════════════════════════════════════════
+window._hbBusca=null
+// Deja un teléfono en su forma comparable: solo dígitos, últimos 10.
+function hbTelNorm(v){
+  const d=String(v==null?'':v).replace(/\D/g,'')
+  if(d.length<7)return '' // menos de 7 dígitos no es un teléfono: es un precio, una cantidad, un ID
+  return d.length>10?d.slice(-10):d
+}
+// Parte lo que pegó el auxiliar: saltos de línea, comas, punto y coma, espacios,
+// tabulaciones. Pega una columna de Excel entera y funciona igual.
+function hbTelsDeTexto(txt){
+  const out=[],vistos=new Set()
+  String(txt||'').split(/[\s,;|]+/).forEach(p=>{
+    const n=hbTelNorm(p)
+    if(n&&!vistos.has(n)){vistos.add(n);out.push(n)}
+  })
+  return out
+}
+// Trae el índice de teléfonos de TODAS las subidas. Pagina de 1000 en 1000
+// porque Supabase corta ahí; el tope evita quedarse colgado si algún día hay
+// una cantidad absurda de registros (y avisa, en vez de mentir en silencio).
+async function hbIndiceTelefonos(){
+  const filas=[];let desde=0;const PAG=1000,TOPE=30
+  for(let i=0;i<TOPE;i++){
+    const{data,error}=await sb.from('constructor_subidas')
+      .select('lote_id,fecha_lote,archivo_nombre,detalle,tipo,storage_path,created_at')
+      .order('id',{ascending:false}).range(desde,desde+PAG-1)
+    if(error)throw new Error('leyendo constructor_subidas: '+error.message)
+    filas.push(...(data||[]))
+    if(!data||data.length<PAG)return{filas,completo:true}
+    desde+=PAG
+  }
+  return{filas,completo:false}
+}
+window.hbBuscarPedidos=async function(){
+  const inp=document.getElementById('hb-bq')
+  const out=document.getElementById('hb-bres')
+  if(!inp||!out)return
+  const tels=hbTelsDeTexto(inp.value)
+  if(!tels.length){out.innerHTML='<div style="font-size:12.5px;color:var(--amber)">Escribe o pega al menos un teléfono. Puedes pegar varios: uno por línea, separados por comas o pegados desde una columna de Excel.</div>';return}
+  out.innerHTML='<div class="loading">Buscando '+tels.length+' teléfono(s) en TODAS las hojas base…</div>'
+  window._hbBusca=null
+  try{
+    const{filas,completo}=await hbIndiceTelefonos()
+    // 1) ¿En qué lotes aparece cada teléfono? El índice vive en los registros de
+    //    tipo 'export' (un registro por archivo original subido).
+    const buscados=new Set(tels)
+    const lotes=new Map() // lote_id → {fecha, hojaPath, hojaNombre, tels:Set}
+    for(const r of filas){
+      if(r.tipo!=='export')continue
+      let lista=[]
+      try{const d=(typeof r.detalle==='string')?JSON.parse(r.detalle):r.detalle;lista=(d&&Array.isArray(d.telefonos))?d.telefonos:[]}catch(_){}
+      for(const t of lista){
+        const n=hbTelNorm(t)
+        if(!n||!buscados.has(n))continue
+        const k=r.lote_id||('sin_lote_'+r.fecha_lote)
+        if(!lotes.has(k))lotes.set(k,{lote:k,fecha:r.fecha_lote,tels:new Set(),hojaPath:null,hojaNombre:null})
+        lotes.get(k).tels.add(n)
+      }
+    }
+    // 2) La hoja base de cada lote (mismo lote_id, tipo 'hoja_base')
+    for(const r of filas){
+      if(r.tipo!=='hoja_base')continue
+      const k=r.lote_id||('sin_lote_'+r.fecha_lote)
+      const L=lotes.get(k)
+      if(L&&!L.hojaPath){L.hojaPath=r.storage_path||null;L.hojaNombre=r.archivo_nombre||null}
+    }
+    if(!lotes.size){
+      out.innerHTML=`<div style="background:var(--card2);border:1px dashed var(--border);border-radius:10px;padding:12px;font-size:12.5px;line-height:1.7">
+        <strong>No encontré ninguno de esos ${tels.length} teléfono(s)</strong> en las hojas base subidas.<br>
+        <span style="color:var(--muted)">Revisa que el número esté completo. La búsqueda compara los últimos 10 dígitos, así que da igual si lleva 57 adelante o espacios.${completo?'':' ⚠️ Además, hay tantísimos registros que no pude revisarlos todos.'}</span>
+      </div>`
+      return
+    }
+    // 3) Bajar SOLO las hojas de esos lotes y sacar las filas que coinciden
+    const encontrados=[],sinHoja=[]
+    let headers=null,headersDe=''
+    const avisos=[]
+    for(const L of lotes.values()){
+      if(!L.hojaPath){sinHoja.push(L);continue}
+      let wb=null
+      try{
+        const{data,error}=await sb.storage.from(HB_BUCKET).download(L.hojaPath)
+        if(error||!data)throw new Error(error?.message||'sin datos')
+        wb=XLSX.read(await data.arrayBuffer(),{type:'array'})
+      }catch(e){avisos.push('No pude abrir la hoja del '+(L.fecha||'?')+': '+(e&&e.message||e));continue}
+      const hoja=wb.Sheets[wb.SheetNames[0]]
+      if(!hoja)continue
+      const aoa=XLSX.utils.sheet_to_json(hoja,{header:1,defval:'',raw:false})
+      if(!aoa.length)continue
+      const hs=(aoa[0]||[]).map(x=>String(x==null?'':x))
+      if(!headers){headers=hs;headersDe=L.hojaNombre||L.hojaPath}
+      else if(hs.join('|')!==headers.join('|')&&!avisos.some(a=>a.startsWith('Las hojas'))){
+        avisos.push('Las hojas de distintas fechas no tienen las mismas columnas. Uso las de «'+headersDe+'» y acomodo el resto por el NOMBRE de cada columna; lo que no exista queda vacío.')
+      }
+      for(let i=1;i<aoa.length;i++){
+        const fila=aoa[i]||[]
+        // Se busca en TODA la fila, no en una columna fija: la posición del teléfono
+        // es configurable en el Constructor y puede haber cambiado con el tiempo.
+        let hit=null
+        for(const cel of fila){const n=hbTelNorm(cel);if(n&&buscados.has(n)){hit=n;break}}
+        if(!hit)continue
+        encontrados.push({tel:hit,fila,headers:hs,fecha:L.fecha,hoja:L.hojaNombre||L.hojaPath,lote:L.lote})
+      }
+    }
+    const hallados=new Set(encontrados.map(x=>x.tel))
+    const faltantes=tels.filter(t=>!hallados.has(t))
+    window._hbBusca={tels,encontrados,headers,faltantes,avisos,sinHoja}
+    hbBuscarRender()
+  }catch(e){
+    out.innerHTML='<div style="font-size:12.5px;color:var(--red)">❌ '+hbEsc(e&&e.message||e)+'</div>'
+  }
+}
+function hbBuscarRender(){
+  const out=document.getElementById('hb-bres');if(!out)return
+  const B=window._hbBusca;if(!B){out.innerHTML='';return}
+  const{tels,encontrados,headers,faltantes,avisos,sinHoja}=B
+  if(!encontrados.length){
+    out.innerHTML='<div style="font-size:12.5px;color:var(--amber)">Los teléfonos están en las subidas, pero no logré sacar sus filas de las hojas.'+(avisos.length?'<br>'+avisos.map(hbEsc).join('<br>'):'')+'</div>'
+    return
+  }
+  // La tabla muestra las primeras 9 columnas para que quepa; el Excel lleva TODAS.
+  const MAX=9
+  const hs=(headers||[]).slice(0,MAX)
+  const filas=encontrados.map((e,i)=>{
+    const idx=(headers||[]).map(h=>(e.headers||[]).indexOf(h))
+    const cel=idx.slice(0,MAX).map(j=>j>=0?(e.fila[j]==null?'':e.fila[j]):'')
+    return `<tr>
+      <td style="padding:5px 7px;border-bottom:1px solid var(--border);white-space:nowrap"><span style="background:var(--card);border:1px solid var(--border);border-radius:999px;padding:2px 8px;font-size:10.5px;font-weight:800">${hbEsc(e.tel)}</span></td>
+      <td style="padding:5px 7px;border-bottom:1px solid var(--border);font-size:10.5px;color:var(--muted);white-space:nowrap">${hbEsc(e.fecha||'—')}</td>
+      ${cel.map(v=>`<td style="padding:5px 7px;border-bottom:1px solid var(--border);font-size:11px;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${hbEsc(v)}">${hbEsc(v)}</td>`).join('')}
+    </tr>`
+  }).join('')
+  const repes=encontrados.length>new Set(encontrados.map(e=>e.tel)).size
+  out.innerHTML=`
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:9px">
+      <div style="font-size:12.5px;line-height:1.6">
+        <strong>${encontrados.length} fila(s)</strong> de ${new Set(encontrados.map(e=>e.tel)).size} teléfono(s), de ${new Set(encontrados.map(e=>e.fecha)).size} fecha(s) distinta(s).
+        ${repes?'<br><span style="color:var(--amber)">Algún teléfono aparece más de una vez (recompra o resubida): salen TODAS sus filas.</span>':''}
+        ${faltantes.length?`<br><span style="color:var(--amber)">No aparecieron: ${faltantes.map(hbEsc).join(' · ')}</span>`:''}
+        ${sinHoja.length?`<br><span style="color:var(--amber)">${sinHoja.length} lote(s) sin hoja guardada en el respaldo — de esos no puedo sacar la fila.</span>`:''}
+        ${avisos.length?`<br><span style="color:var(--muted)">${avisos.map(hbEsc).join('<br>')}</span>`:''}
+      </div>
+      <div style="display:flex;gap:7px;flex:0 0 auto">
+        <button class="btn btn-sm btn-primary" onclick="hbBuscarDescargar()" title="Descarga un Excel con la fila de encabezados + solo estos pedidos">⬇️ Descargar hoja base (${encontrados.length})</button>
+        <button class="btn btn-sm" onclick="hbBuscarLimpiar()">✖ Limpiar</button>
+      </div>
+    </div>
+    <div style="overflow-x:auto;border:1px solid var(--border);border-radius:9px">
+      <table style="width:100%;border-collapse:collapse;font-size:11px">
+        <thead><tr style="background:var(--card2)">
+          <th style="padding:6px 7px;text-align:left;white-space:nowrap;font-size:10.5px">📞 Teléfono</th>
+          <th style="padding:6px 7px;text-align:left;white-space:nowrap;font-size:10.5px">📅 Fecha</th>
+          ${hs.map(h=>`<th style="padding:6px 7px;text-align:left;white-space:nowrap;font-size:10.5px;max-width:170px;overflow:hidden;text-overflow:ellipsis">${hbEsc(h)}</th>`).join('')}
+        </tr></thead>
+        <tbody>${filas}</tbody>
+      </table>
+    </div>
+    ${(headers||[]).length>MAX?`<div style="font-size:10.5px;color:var(--muted);margin-top:5px">Aquí se ven las primeras ${MAX} columnas para que quepan en pantalla. El Excel que descargues lleva las ${(headers||[]).length} completas.</div>`:''}`
+}
+window.hbBuscarLimpiar=function(){
+  window._hbBusca=null
+  const i=document.getElementById('hb-bq');if(i)i.value=''
+  const o=document.getElementById('hb-bres');if(o)o.innerHTML=''
+  if(i)i.focus()
+}
+// ⬇️ El Excel: fila 1 = los mismos encabezados de la hoja base · después, una fila
+// por pedido encontrado. Las filas se acomodan POR NOMBRE de columna, así que si
+// una hoja vieja tenía las columnas en otro orden, igual caen donde deben.
+window.hbBuscarDescargar=function(){
+  const B=window._hbBusca
+  if(!B||!B.encontrados||!B.encontrados.length){alert('No hay filas para descargar. Busca primero.');return}
+  const headers=B.headers||[]
+  const aoa=[headers.slice()]
+  for(const e of B.encontrados){
+    const fila=headers.map(h=>{
+      const j=(e.headers||[]).indexOf(h)
+      return j>=0?(e.fila[j]==null?'':e.fila[j]):''
+    })
+    aoa.push(fila)
+  }
+  try{
+    const ws=XLSX.utils.aoa_to_sheet(aoa)
+    const wb=XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb,ws,'Hoja Base')
+    const n=B.encontrados.length
+    XLSX.writeFile(wb,`HOJA_BASE_BUSQUEDA_${n}_pedido${n===1?'':'s'}_${today()}.xlsx`)
+  }catch(e){alert('No pude armar el Excel: '+(e&&e.message||e))}
+}
+
 // ── 8. ESTADO GLOBAL + PÁGINA DEL AUXILIAR ──────────────────────────────────
 window._hb=null
 async function pageAuxHojaBase(c){
   c.innerHTML=`
   <div class="page-title">📗 Hoja Base (Seller Chat)</div>
   <div class="page-sub">Sube los Excel de Seller Chat y NEXO arma la hoja base sola: ordena columnas, llena ID Dropi, agente y producto, valida y envía los IDs a Reportes Diarios.</div>
+  <div class="card" style="margin-top:12px;border:2px solid var(--accent)">
+    <div class="section-title">🔍 Buscar pedidos en la hoja base <span style="font-weight:400;color:var(--muted);font-size:12px">· busca en TODAS las fechas</span></div>
+    <div style="font-size:12.5px;color:var(--muted);line-height:1.7;margin-bottom:9px">
+      Pega <strong>uno o varios teléfonos</strong> y te traigo la fila exacta de cada pedido, sin importar el día en que se subió. Después puedes descargar un Excel con <strong>los encabezados + solo esos pedidos</strong>: si buscas 3 números, salen 3 filas.<br>
+      <span style="font-size:11.5px">Sirve pegar una columna entera de Excel, o números separados por comas, espacios o saltos de línea. Compara los últimos 10 dígitos, así que da igual si traen 57 adelante o espacios en medio.</span>
+    </div>
+    <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
+      <textarea id="hb-bq" rows="2" placeholder="3001234567&#10;3109876543, 3151112233" style="flex:1;min-width:240px;font-size:13px;padding:8px 10px;resize:vertical;font-family:inherit" onkeydown="if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();hbBuscarPedidos()}"></textarea>
+      <button class="btn btn-primary" onclick="hbBuscarPedidos()" style="flex:0 0 auto">🔍 Buscar</button>
+    </div>
+    <div id="hb-bres" style="margin-top:11px"></div>
+  </div>
   <div class="card" style="margin-top:12px">
     <div class="section-title">📛 Cómo nombrar cada archivo (obligatorio)</div>
     <div style="font-size:14px;line-height:1.8"><!-- FASE 6 (6jul26) · M15.A: formato con SECUENCIA de tanda -->

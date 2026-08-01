@@ -18026,10 +18026,12 @@ async function pageAdminTextos(c){
     <div class="page-sub">Edita los mensajes que se envían a los clientes y cuántos se mandan por día. Los cambios aplican cuando el auxiliar recarga la app.</div>
     ${_txtBarraGlobal()}
     <div id="txt-msg" style="margin-bottom:12px"></div>
+    <div id="txt-rapidas"></div>
     <div id="txt-list"><div class="loading">Cargando...</div></div>
     <div id="txt-novedades" style="margin-top:8px"></div>`
   cargarTextosAdmin()
   cargarNovedadesAdmin()
+  try{window._ccRapRender&&window._ccRapRender()}catch(e){console.warn('respuestas rápidas:',e)} // ⚡ (31jul26)
   // ⚡ (31jul26) Las reglas de disparo automático se MUDARON a 💬 Mensajería → Paso 4.
   // Aquí no se borró NADA del motor: cargarReglasAdmin y todas sus funciones siguen
   // vivas e intactas; simplemente ya no existe el contenedor 'txt-reglas' en esta
@@ -41620,6 +41622,220 @@ function _wchEtqPorId(id){
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ⚡ RESPUESTAS RÁPIDAS DEL CHAT (31jul26)
+// ---------------------------------------------------------------------------
+// QUÉ SON: frases que el auxiliar usa TODO el día ("ya lo estamos revisando",
+// "confírmame tu dirección"…). Un clic y el texto queda escrito en el campo de
+// mensaje; el auxiliar solo revisa y le da enviar.
+//
+// ⚠️ NO SON PLANTILLAS DE META. Son TEXTO LIBRE, así que solo funcionan cuando
+// la ventana de 24h está ABIERTA (🟢) — o sea, cuando el cliente ya escribió y
+// hay conversación viva. Si la ventana está cerrada (🔒), WhatsApp no deja
+// mandar texto libre y el botón lo dice claramente en vez de fallar.
+//
+// DÓNDE SE CONFIGURAN: 📝 Textos / Mensajes → ⚡ Respuestas rápidas del chat.
+// Hay una pestaña por sección (Novedades, Reclame, Pend. Conf., Cancelados,
+// Entrantes) más 🌐 Todas, que salen en cualquier sección.
+//
+// Se guardan en config 'cc_respuestas_rapidas', con verificación de ida y
+// vuelta — no hace falta crear ninguna tabla nueva.
+// ═══════════════════════════════════════════════════════════════════════════
+const CC_RR_RAP_KEY='cc_respuestas_rapidas'
+window._ccRap=window._ccRap||null
+function _ccRapDefaults(){return {v:1,items:[]}}
+async function _ccRapCargar(force){
+  if(window._ccRap&&!force)return window._ccRap
+  let o=null
+  try{const raw=await getConfig(CC_RR_RAP_KEY);if(raw){const p=JSON.parse(raw);if(p&&p.v)o=p}}catch(_){}
+  if(!o)o=_ccRapDefaults()
+  if(!Array.isArray(o.items))o.items=[]
+  window._ccRap=o
+  return o
+}
+async function _ccRapGuardar(){
+  const js=JSON.stringify(window._ccRap||_ccRapDefaults())
+  const{error}=await sb.from('config').upsert({clave:CC_RR_RAP_KEY,valor:js,updated_at:new Date().toISOString()},{onConflict:'clave'})
+  if(error)return {ok:false,msg:error.message}
+  let eco=null;try{eco=await getConfig(CC_RR_RAP_KEY)}catch(_){}
+  if(eco!==js)return {ok:false,msg:'la nube no devolvió lo guardado (¿RLS en config para '+CC_RR_RAP_KEY+'?)'}
+  return {ok:true}
+}
+// Las que le tocan a una sección: las 🌐 de todas + las propias, en ese orden.
+function _ccRapDe(sec){
+  const c=window._ccRap
+  if(!c||!Array.isArray(c.items))return[]
+  const viva=(x)=>x&&x.activo!==false&&String(x.texto||'').trim()
+  return[...c.items.filter(x=>viva(x)&&(x.sec==='global'||!x.sec)),
+         ...c.items.filter(x=>viva(x)&&x.sec===sec)]
+}
+
+// ── 🖥️ PANEL DE ADMINISTRACIÓN (📝 Textos / Mensajes) ────────────────────
+window._ccRapTab=window._ccRapTab||'global'
+window._ccRapRender=async function(){
+  const el=document.getElementById('txt-rapidas');if(!el)return
+  const cfg=await _ccRapCargar()
+  const tab=window._ccRapTab||'global'
+  const secs=[['global','🌐','Todas las secciones','Estas salen en TODOS los chats, sin importar la sección']]
+    .concat(WCH_SECS.map(s=>[s.k,s.e,s.n,'Solo salen en los chats de '+s.n]))
+  const nomSec=(k)=>{const f=secs.find(x=>x[0]===k);return f?(f[1]+' '+f[2]):k}
+  const mias=cfg.items.filter(x=>(x.sec||'global')===tab)
+  const esc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  const escA=(s)=>esc(s).replace(/"/g,'&quot;')
+  const tarjeta=(r)=>`<div style="background:var(--card2);border:1px solid var(--border);border-left:3px solid ${r.activo!==false?'var(--green)':'var(--border)'};border-radius:10px;padding:11px 12px;margin-bottom:9px">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:7px;flex-wrap:wrap">
+      <span style="font-size:14px">${r.activo!==false?'🟢':'⚪'}</span>
+      <input value="${escA(r.etiqueta||'')}" placeholder="Nombre corto del botón (ej: Ya lo estamos revisando)" style="flex:1;min-width:150px;font-size:12.5px;font-weight:700" onchange="_ccRapCampo('${r.id}','etiqueta',this.value)">
+      <div style="display:flex;gap:5px;flex:0 0 auto">
+        <button class="btn-sm btn-outline" style="font-size:11px" onclick="_ccRapMover('${r.id}',-1)" title="Subir — el orden aquí es el orden que ve el auxiliar">↑</button>
+        <button class="btn-sm btn-outline" style="font-size:11px" onclick="_ccRapMover('${r.id}',1)" title="Bajar">↓</button>
+        <button class="btn-sm btn-outline" style="font-size:11px" onclick="_ccRapToggle('${r.id}')" title="${r.activo!==false?'Apagar: deja de salir en el chat':'Prender: vuelve a salir en el chat'}">${r.activo!==false?'⏸️':'▶️'}</button>
+        <button class="btn-sm btn-outline" style="font-size:11px;color:var(--red)" onclick="_ccRapBorrar('${r.id}')" title="Borrar">🗑️</button>
+      </div>
+    </div>
+    <textarea id="rap-tx-${r.id}" rows="3" placeholder="El mensaje completo que se va a escribir en el campo del chat…" style="width:100%;box-sizing:border-box;font-size:12px;line-height:1.5;padding:8px 10px;resize:vertical" onchange="_ccRapCampo('${r.id}','texto',this.value)">${esc(r.texto||'')}</textarea>
+    <div style="font-size:10.5px;color:var(--muted);margin-top:5px">👆 Toca un comodín para meterlo donde tengas el cursor. Se cambia solo por el dato real del cliente al hacer clic en el chat:</div>
+    <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">${WCH_COMODINES.map(c=>`<button onclick="_ccRapComodin('${r.id}','${c.tag}')" title="${escA(c.d+' — ej: '+c.ej)}" style="background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:999px;padding:2px 8px;font-size:10px;font-weight:700;cursor:pointer;font-family:monospace">${esc(c.tag)}</button>`).join('')}</div>
+  </div>`
+  el.innerHTML=`<div class="card" style="margin-bottom:18px;border:2px solid var(--accent)">
+    <div class="section-title">⚡ Respuestas rápidas del chat</div>
+    <div style="background:linear-gradient(135deg,var(--blue-bg),var(--purple-bg));border:1px solid var(--accent);border-radius:11px;padding:11px 13px;margin-bottom:12px;font-size:12.5px;line-height:1.75">
+      <strong>¿Qué son?</strong> Las frases que el auxiliar escribe todo el día. En el chat aparece un botón <strong>⚡</strong> al lado del de pegar: lo toca, elige una, y el mensaje queda escrito en el campo. Solo le da <strong>enviar</strong>.<br>
+      <strong>¿En qué se diferencian de los textos de arriba?</strong> Los de arriba son <strong>plantillas aprobadas por Meta</strong> y sirven para arrancar una conversación o para clientes fuera de las 24h. Estas de aquí son <strong>texto libre</strong>: solo funcionan con el cliente que YA respondió y tiene la ventana verde 🟢 abierta.<br>
+      <strong>¿Se envían solas?</strong> No. Solo escriben el texto en el campo. El auxiliar lee, corrige si quiere, y envía.<br>
+      <span style="color:var(--muted)">🌐 Las de «Todas las secciones» salen en cualquier chat. Las de una sección salen solo ahí, después de las globales.</span>
+    </div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:12px">${secs.map(s=>{
+      const n=cfg.items.filter(x=>(x.sec||'global')===s[0]).length
+      const act=cfg.items.filter(x=>(x.sec||'global')===s[0]&&x.activo!==false).length
+      return `<button class="btn-sm ${tab===s[0]?'btn-primary':'btn-outline'}" style="font-size:11.5px" title="${s[3]}" onclick="window._ccRapTab='${s[0]}';_ccRapRender()">${s[1]} ${s[2]}${n?` <span style="opacity:.75">(${act}/${n})</span>`:''}</button>`
+    }).join('')}</div>
+    <div style="font-size:11.5px;color:var(--muted);margin-bottom:9px">📍 Estás editando: <strong style="color:var(--text)">${nomSec(tab)}</strong> — ${secs.find(s=>s[0]===tab)[3]}.</div>
+    ${mias.length?mias.map(tarjeta).join(''):`<div style="font-size:12px;color:var(--muted);background:var(--card2);border:1px dashed var(--border);border-radius:10px;padding:14px;margin-bottom:10px;line-height:1.7">
+      Todavía no hay respuestas rápidas en ${nomSec(tab)}. Crea la primera con el botón de abajo: ponle un nombre corto (lo que verá el auxiliar) y el mensaje completo.
+    </div>`}
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn-sm btn-primary" onclick="_ccRapNueva('${tab}')">➕ Nueva respuesta rápida en ${nomSec(tab)}</button>
+      <span id="cc-rap-msg" style="font-size:11.5px"></span>
+    </div>
+  </div>`
+}
+async function _ccRapAplicar(){
+  const r=await _ccRapGuardar()
+  const m=document.getElementById('cc-rap-msg')
+  if(m)m.innerHTML=r.ok?'<span style="color:#22c55e">✅ Guardado y verificado</span>':'<span style="color:#ef4444">❌ NO se guardó: '+_wchEsc(r.msg||'')+'</span>'
+  if(!r.ok)await _ccRapCargar(true)
+  await window._ccRapRender()
+}
+function _ccRapPorId(id){const c=window._ccRap;return c&&(c.items||[]).find(x=>x.id===id)}
+window._ccRapCampo=async function(id,campo,v){const r=_ccRapPorId(id);if(!r)return;r[campo]=v;await _ccRapAplicar()}
+window._ccRapToggle=async function(id){const r=_ccRapPorId(id);if(!r)return;r.activo=(r.activo===false);await _ccRapAplicar()}
+window._ccRapNueva=async function(sec){
+  const c=window._ccRap;if(!c)return
+  if(!Array.isArray(c.items))c.items=[]
+  c.items.push({id:'rap_'+Math.random().toString(36).slice(2,8)+Date.now().toString(36).slice(-3),sec:sec,etiqueta:'',texto:'',activo:true})
+  await _ccRapAplicar()
+}
+// 🏷️ Mete el comodín donde el admin tenga el cursor (o al final si no ha tocado
+// el texto). No pisa nada de lo ya escrito, y guarda al instante.
+window._ccRapComodin=async function(id,tag){
+  const ta=document.getElementById('rap-tx-'+id)
+  const r=_ccRapPorId(id)
+  if(!ta||!r)return
+  const ini=(typeof ta.selectionStart==='number')?ta.selectionStart:ta.value.length
+  const fin=(typeof ta.selectionEnd==='number')?ta.selectionEnd:ta.value.length
+  ta.value=ta.value.slice(0,ini)+tag+ta.value.slice(fin)
+  const pos=ini+tag.length
+  try{ta.setSelectionRange(pos,pos)}catch(_){}
+  ta.focus()
+  r.texto=ta.value
+  const res=await _ccRapGuardar()
+  const m=document.getElementById('cc-rap-msg')
+  if(m)m.innerHTML=res.ok?'<span style="color:#22c55e">✅ '+tag+' agregado y guardado</span>':'<span style="color:#ef4444">❌ NO se guardó: '+_wchEsc(res.msg||'')+'</span>'
+  if(!res.ok){await _ccRapCargar(true);await window._ccRapRender()}
+}
+window._ccRapBorrar=async function(id){
+  const r=_ccRapPorId(id);if(!r)return
+  if(!confirm('¿Borrar la respuesta rápida «'+(r.etiqueta||'sin nombre')+'»?\n\nDeja de aparecer en el chat. Nada más se ve afectado.'))return
+  const c=window._ccRap
+  c.items=(c.items||[]).filter(x=>x.id!==id)
+  await _ccRapAplicar()
+}
+// Sube o baja dentro de su MISMA sección: el orden de aquí es el que ve el auxiliar.
+window._ccRapMover=async function(id,dir){
+  const c=window._ccRap;if(!c||!Array.isArray(c.items))return
+  const r=_ccRapPorId(id);if(!r)return
+  const sec=r.sec||'global'
+  const mismos=c.items.filter(x=>(x.sec||'global')===sec)
+  const i=mismos.indexOf(r), j=i+dir
+  if(i<0||j<0||j>=mismos.length)return
+  const otro=mismos[j]
+  const ia=c.items.indexOf(r), ib=c.items.indexOf(otro)
+  c.items[ia]=otro;c.items[ib]=r
+  await _ccRapAplicar()
+}
+
+// ── ⚡ PANEL EN EL CHAT (botón al lado del 📋 de pegar) ────────────────────
+window._ccRapAbrir=async function(convId){
+  const p=document.getElementById('wch-rap-'+convId);if(!p)return
+  if(p.style.display!=='none'){p.style.display='none';return}
+  p.style.display='block'
+  p.innerHTML='<div class="loading" style="font-size:11px">Buscando tus respuestas rápidas…</div>'
+  await _ccRapCargar()
+  const st=window._wchState
+  const c=(st.convs||[]).find(x=>x.id===convId)
+  const lista=_ccRapDe(st.sec)
+  const cerrada=_wchVentanaCerrada(c)
+  const cerrar=`<button onclick="document.getElementById('wch-rap-${convId}').style.display='none'" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;flex:0 0 auto">✕</button>`
+  if(!lista.length){
+    p.innerHTML=`<div style="background:var(--card);border:1px dashed var(--border);border-radius:10px;padding:9px 11px;font-size:11.5px;line-height:1.6;display:flex;justify-content:space-between;gap:8px;align-items:flex-start">
+      <span>Todavía no hay respuestas rápidas para esta sección.<br><span style="color:var(--muted)">Se crean en 📝 Textos / Mensajes → ⚡ Respuestas rápidas del chat.</span></span>${cerrar}
+    </div>`
+    return
+  }
+  // Los comodines se rellenan con los datos reales del pedido, pero SOLO se
+  // consulta la BD si alguna respuesta los usa (si no, esto es instantáneo).
+  let d=null
+  if(lista.some(x=>_wchTieneComodin(x.texto))){
+    try{d=await window._wchProtoPedido(convId,(c&&c.telefono)||'')}catch(_){}
+  }
+  const prev=(t)=>{const s=String(t||'').replace(/\s+/g,' ').trim();return s.length>70?(s.slice(0,70)+'…'):s}
+  window._ccRapTxt=window._ccRapTxt||{}
+  window._ccRapTxt[convId]={}
+  const btns=lista.map((x,i)=>{
+    let txt=String(x.texto||'')
+    if(d){try{txt=window._wchProtoRellenar(txt,d)}catch(_){}}
+    window._ccRapTxt[convId][x.id]=txt
+    const rot=String(x.etiqueta||'').trim()||('Respuesta '+(i+1))
+    return `<button onclick="_ccRapPoner('${convId}','${x.id}')" title="${_wchEsc(txt)}" style="display:block;width:100%;text-align:left;background:var(--card2);border:1px solid var(--border);border-radius:9px;padding:7px 10px;font-size:11.5px;cursor:pointer;color:var(--text);margin-bottom:5px;line-height:1.4">
+      <span style="font-weight:800">⚡ ${_wchEsc(rot)}</span><br><span style="color:var(--muted);font-size:10.5px">${_wchEsc(prev(txt))}</span>
+    </button>`
+  }).join('')
+  p.innerHTML=`<div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:9px 10px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:7px">
+      <span style="font-size:10.5px;font-weight:800;min-width:0">⚡ Respuestas rápidas <span style="color:var(--muted);font-weight:400">· un clic las escribe abajo; tú revisas y envías</span></span>${cerrar}
+    </div>
+    ${cerrada?`<div style="background:rgba(245,158,11,.11);border:1px solid var(--amber);border-radius:8px;padding:7px 9px;font-size:11px;line-height:1.55;margin-bottom:7px">
+      🔒 <strong>Ojo:</strong> este cliente lleva más de 24h sin escribir, así que WhatsApp NO deja mandar texto libre. Estas respuestas se van a escribir igual, pero el envío fallará. Para este caso hay que usar una <strong>plantilla aprobada</strong> (botón 📨 de arriba).
+    </div>`:''}
+    <div style="max-height:220px;overflow-y:auto">${btns}</div>
+  </div>`
+}
+// El clic: escribe el texto en el campo de mensaje. NO envía nada.
+window._ccRapPoner=function(convId,id){
+  const txt=((window._ccRapTxt||{})[convId]||{})[id]
+  const i=document.getElementById('wch-envio-'+convId)
+  if(!i||!txt)return
+  // Si el auxiliar ya venía escribiendo, se agrega al final en vez de borrarle lo suyo.
+  const ya=String(i.value||'')
+  i.value=ya.trim()?(ya.replace(/\s+$/,'')+'\n'+txt):txt
+  try{i.setSelectionRange(i.value.length,i.value.length)}catch(_){}
+  i.focus()
+  try{_wchTxtGrow(i)}catch(_){}
+  try{_wchBtnModo(convId)}catch(_){} // el 🎤 pasa a ➤ solo
+  const p=document.getElementById('wch-rap-'+convId);if(p)p.style.display='none'
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 🔁 REGLAS DE CIERRE Y REINGRESO (31jul26)
 // ---------------------------------------------------------------------------
 // QUÉ RESUELVE, en cristiano: hasta hoy, "una conversación cerrada que vuelve a
@@ -42488,6 +42704,7 @@ async function _wchCargar(){
   await _wchCatLoad()
   try{await _ccRRCargar()}catch(_){} // 🔁 (31jul26) reglas de cierre y reingreso (cacheadas: una sola consulta)
   try{await _ccTRCargar()}catch(_){}  // 🔀 (31jul26) reglas de transición de etiqueta (cacheadas)
+  try{await _ccRapCargar()}catch(_){} // ⚡ (31jul26) respuestas rápidas del chat (cacheadas)
   try{if(!window._ccCop.mapa||(Date.now()-window._ccCop.ts)>30000)await _ccCopCargar()}catch(_){} // 📋 marcas de copiado (refresco máx. cada 30s)
   const sec=st.sec,fecha=st.fecha // null = hoy/vivo
   const diaSel=fecha||_wchHoy()
@@ -43220,6 +43437,7 @@ window._wchAbrir=async function(){
   await _wchCatLoad()
   try{await _ccRRCargar()}catch(_){} // 🔁 (31jul26) reglas de cierre y reingreso listas antes del primer render
   try{await _ccTRCargar()}catch(_){}  // 🔀 (31jul26) reglas de transición listas antes del primer render
+  try{await _ccRapCargar()}catch(_){} // ⚡ (31jul26) respuestas rápidas listas para el botón ⚡
   _wchTabsRender()
   await _wchRecargar()
   if(st.timer)clearInterval(st.timer)
@@ -44163,6 +44381,7 @@ window._wchChatAbrir=async function(convId){
     <div id="wch-sug-${convId}" style="padding:6px 14px 0;display:none"></div><!-- (28jul26) nace OCULTO — el botón 📨 de la cabecera lo muestra/oculta para no robar espacio al hilo -->
     <div id="wch-hilo-${convId}" style="flex:1;overflow-y:auto;padding:10px 14px"><div class="loading">Cargando…</div></div>
     <div style="border-top:1px solid var(--border);padding:8px 10px;background:var(--card2)">
+      <div id="wch-rap-${convId}" style="display:none;margin-bottom:6px"></div>
       <div id="wch-emojis-${convId}" style="display:none;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:8px;margin-bottom:6px;max-height:240px"></div>
       <input type="file" id="wch-file-${convId}" style="display:none" onchange="_wchArchivoElegido('${convId}','${tel}',this)">
       <div style="display:flex;gap:7px;align-items:flex-end">
@@ -44171,6 +44390,7 @@ window._wchChatAbrir=async function(convId){
           <button onclick="_wchEmojiToggle('${convId}')" title="Emojis" style="background:none;border:none;font-size:19px;cursor:pointer;padding:0 5px 8px 0;line-height:1;flex:0 0 auto">😊</button>
           <textarea id="wch-envio-${convId}" placeholder="Mensaje" rows="1" style="flex:1;min-width:0;font-size:13px;line-height:1.35;padding:8px 4px;border:none;background:none;outline:none;color:var(--text);resize:none;overflow-y:auto;max-height:110px;font-family:inherit" oninput="_wchTxtGrow(this);_wchBtnModo('${convId}')" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();_wchEnviarTexto('${convId}','${tel}')}"></textarea>
         </div>
+        <button id="wch-rapbtn-${convId}" onclick="_ccRapAbrir('${convId}')" title="Respuestas rápidas: las frases que usas todo el día. Un clic la escribe abajo, tú revisas y envías. Se configuran en 📝 Textos / Mensajes → ⚡ Respuestas rápidas del chat." style="width:30px;height:30px;border-radius:50%;border:1px solid var(--border);background:var(--card);color:var(--text);font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex:0 0 auto;padding:0;line-height:1;margin-bottom:6px">⚡</button>
         <button id="wch-pegar-${convId}" onclick="_wchPegarEnvio('${convId}',this)" title="Pegar lo que tengas copiado en el campo de mensaje (lo agrega al final de lo que ya haya escrito). Si el navegador no da permiso, deja el cursor listo para Ctrl+V." style="width:30px;height:30px;border-radius:50%;border:1px solid var(--border);background:var(--card);color:var(--text);font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex:0 0 auto;padding:0;line-height:1;margin-bottom:6px">📋</button>
         <button id="wch-btnenv-${convId}" onclick="_wchEnviarOMic('${convId}','${tel}')" title="Vacío = grabar audio · Con texto = enviar" style="width:42px;height:42px;border-radius:50%;border:none;background:#00a884;color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex:0 0 auto;box-shadow:0 2px 8px rgba(0,0,0,.4)">🎤</button>
       </div>
@@ -44345,7 +44565,7 @@ window._wchProtoPedido=async function(convId,tel){
   let m=null
   try{
     const corto=_wchTelCorto(tel)
-    const{data}=await sb.from('mapeos').select('nombre_cliente,producto,producto_id,cantidad,ciudad,transportadora,telefono,fecha,precio_dropi,producto_id_dropi').like('telefono','%'+corto).order('id',{ascending:false}).limit(1)
+    const{data}=await sb.from('mapeos').select('nombre_cliente,producto,producto_id,cantidad,ciudad,transportadora,telefono,fecha,precio_dropi,producto_id_dropi,direccion,numero_guia,departamento').like('telefono','%'+corto).order('id',{ascending:false}).limit(1)
     m=data&&data[0]||null
   }catch(_){}
   const conv=((window._wchState||{}).convs||[]).find(x=>x.id===convId)
@@ -44375,22 +44595,55 @@ window._wchProtoPedido=async function(convId,tel){
     }
     if(p){prodDesc=String(p.descripcion==null?'':p.descripcion).trim();prodNom=p.alias_visible||p.nombre||''}
   }catch(_){}
-  return{m,nombre,prod,cant,transp,ciudad:(m&&m.ciudad)||'[CIUDAD]',telCorto:_wchTelCorto(tel)||'[TELÉFONO]',tot,sal,prodDesc,prodNom}
+  return{m,nombre,prod,cant,transp,ciudad:(m&&m.ciudad)||'[CIUDAD]',telCorto:_wchTelCorto(tel)||'[TELÉFONO]',tot,sal,prodDesc,prodNom,
+    direccion:(m&&m.direccion)||'',guia:(m&&m.numero_guia)||'',depto:(m&&m.departamento)||''}
 }
 // [DÍA], [MAÑANA / TARDE] y [DIRECCIÓN COMPLETA] se dejan tal cual: eso es lo
 // que el cliente acuerda y lo escribe el auxiliar al pegar en Dropi.
+// 🏷️ (31jul26) CATÁLOGO ÚNICO DE COMODINES. Una sola lista para todo: los rellena
+// _wchProtoRellenar, los muestra el panel de Textos como chips clicables, y sirve
+// para detectar si un texto los usa. Agregar uno nuevo aquí lo habilita en TODAS
+// partes de una vez — protocolo, respuestas rápidas y descripción de producto.
+const WCH_COMODINES=[
+  {tag:'[NOMBRE]',      d:'Nombre completo del cliente',        ej:'Nubia Rodríguez'},
+  {tag:'[PRIMER_NOMBRE]',d:'Solo el primer nombre — más natural',ej:'Nubia'},
+  {tag:'[PRODUCTO]',    d:'Producto que pidió',                 ej:'Semilla Negra'},
+  {tag:'[CANTIDAD]',    d:'Cuántas unidades pidió',             ej:'2 unidades'},
+  {tag:'[TOTAL]',       d:'Valor total del pedido',             ej:'$164.900'},
+  {tag:'[SALDO]',       d:'Lo que queda por pagar',             ej:'$149.900'},
+  {tag:'[CIUDAD]',      d:'Ciudad de entrega',                  ej:'Medellín'},
+  {tag:'[DEPARTAMENTO]',d:'Departamento de entrega',            ej:'Antioquia'},
+  {tag:'[DIRECCION]',   d:'Dirección de entrega',               ej:'Cra 4 #12-30'},
+  {tag:'[TRANSPORTADORA]',d:'Quién lleva el pedido',            ej:'Interrapidísimo'},
+  {tag:'[GUIA]',        d:'Número de guía del envío',           ej:'240012345678'},
+  {tag:'[TELEFONO]',    d:'Teléfono del cliente',               ej:'3001234567'},
+]
+// ¿Este texto usa algún comodín? Se mira contra el catálogo, no con un regex a
+// ciegas: así un corchete suelto ("[sic]", "[ver foto]") no dispara consultas de más.
+function _wchTieneComodin(txt){
+  const s=String(txt==null?'':txt)
+  return WCH_COMODINES.some(c=>s.includes(c.tag))||/\[(TELÉFONO|DIRECCIÓN|GUÍA)\]/.test(s)
+}
 window._wchProtoRellenar=function(txt,d){
   let s=String(txt==null?'':txt)
+  const _ok=(v)=>{const t=String(v==null?'':v).trim();return t||null}
   try{
-    s=s.replace(/\[NOMBRE\]/g,d.nombre)
-      .replace(/\[PRODUCTO\]/g,d.prod)
-      .replace(/\[CANTIDAD\]/g,d.cant)
-      .replace(/\[CIUDAD\]/g,d.ciudad)
-      .replace(/\[TRANSPORTADORA\]/g,d.transp)
-      .replace(/\[CARRIER\]/g,d.transp)
-      .replace(/\[TELÉFONO\]|\[TELEFONO\]/g,d.telCorto)
-      .replace(/\[TOTAL\]/g,d.tot!=null?('$'+fmt(d.tot)):'[TOTAL]')
-      .replace(/\[SALDO\]/g,d.sal!=null?('$'+fmt(d.sal)):'[SALDO]')
+    // Si un dato no existe, el comodín se deja TAL CUAL en vez de poner "null" o
+    // vaciarlo: así el auxiliar ve qué falta y lo escribe a mano antes de enviar.
+    const _pon=(re,val,tag)=>{s=s.replace(re,_ok(val)||tag)}
+    const _pri=String(d.nombre||'').trim().split(/\s+/)[0]||''
+    _pon(/\[NOMBRE\]/g,d.nombre,'[NOMBRE]')
+    _pon(/\[PRIMER_NOMBRE\]/g,_pri,'[PRIMER_NOMBRE]')
+    _pon(/\[PRODUCTO\]/g,d.prod,'[PRODUCTO]')
+    _pon(/\[CANTIDAD\]/g,d.cant,'[CANTIDAD]')
+    _pon(/\[CIUDAD\]/g,d.ciudad,'[CIUDAD]')
+    _pon(/\[DEPARTAMENTO\]/g,d.depto,'[DEPARTAMENTO]')
+    _pon(/\[DIRECCION\]|\[DIRECCIÓN\]/g,d.direccion,'[DIRECCION]')
+    _pon(/\[TRANSPORTADORA\]|\[CARRIER\]/g,d.transp,'[TRANSPORTADORA]')
+    _pon(/\[GUIA\]|\[GUÍA\]/g,d.guia,'[GUIA]')
+    _pon(/\[TELÉFONO\]|\[TELEFONO\]/g,d.telCorto,'[TELEFONO]')
+    s=s.replace(/\[TOTAL\]/g,d.tot!=null?('$'+fmt(d.tot)):'[TOTAL]')
+     .replace(/\[SALDO\]/g,d.sal!=null?('$'+fmt(d.sal)):'[SALDO]')
   }catch(_){}
   return s
 }

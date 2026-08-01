@@ -5309,6 +5309,12 @@ async function pageAdminProductos(c){
     // columnas faltantes de abajo la quita solo y avisa con el SQL pendiente.
     const _durlEl=document.getElementById('purl-'+id)
     if(_durlEl)updateData.dropi_url=(_durlEl.value||'').trim()||null
+    // 📄 (31jul26) Descripción del producto → sale sola como Paso 3 en el protocolo del
+    // chat. Igual que las de arriba: solo si el campo está en pantalla, para no pisarla
+    // con vacío desde otra vista. Si la columna `descripcion` todavía no existe en la
+    // tabla, el fallback de columnas faltantes de abajo la quita y avisa con el SQL.
+    const _pdescEl=document.getElementById('pdesc-'+id)
+    if(_pdescEl)updateData.descripcion=(_pdescEl.value||'').trim()||null
 
     // Intentar guardar incluyendo todos los campos nuevos; si una columna no existe, ir quitándola
     const fullPayload={...updateData,aliases,aliases_visibles,tipo_producto,almacenamiento}
@@ -6552,6 +6558,11 @@ async function renderProdBody(id,maestrosList){
           <input type="text" id="purl-${id}" value="${(prod.dropi_url||'').replace(/"/g,'&quot;')}" placeholder="https://app.dropi.co/..." autocapitalize="off" style="flex:1;font-family:monospace;font-size:11px">
           <button type="button" class="btn-sm" onclick="(()=>{const v=(document.getElementById('purl-${id}')?.value||'').trim();if(!v){alert('Pega primero la URL de Dropi de este producto');return}window.open(/^https?:\\/\\//i.test(v)?v:('https://'+v),'_blank','noopener')})()" title="Abrir la URL de Dropi de este producto en otra pestaña" style="background:rgba(59,130,246,.12);border:1px solid var(--blue,#3b82f6);color:var(--blue,#3b82f6);font-size:11px;padding:4px 10px;white-space:nowrap">🔗 Abrir</button>
         </div></div>
+    </div>
+    <div class="fld" style="margin-top:10px">
+      <label>📄 Descripción del producto <span style="color:var(--muted);font-size:10px">(la que el auxiliar le manda al cliente — sale sola como <b>Paso 3</b> en el protocolo del chat)</span></label>
+      <textarea id="pdesc-${id}" rows="4" placeholder="Pega aquí la descripción de este producto: qué es, para qué sirve, cómo se toma…&#10;&#10;Cuando el auxiliar abra el 📋 de un chat, NEXO mira qué producto pidió ESE cliente y le deja este texto listo para copiar de un clic." style="font-size:12px;line-height:1.5">${(prod.descripcion||'').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</textarea>
+      <div style="font-size:10px;color:var(--muted);margin-top:3px">Se identifica solo por el pedido del cliente: no hay que elegir nada en el chat. Si lo dejas vacío, el chat simplemente no muestra el Paso 3.</div>
     </div>
     <div style="font-size:10px;color:var(--muted);margin-top:6px;display:flex;gap:14px;flex-wrap:wrap">
       <span>📅 Creado: ${prod.created_at?new Date(prod.created_at).toLocaleString('es-CO'):'—'}</span>
@@ -44334,7 +44345,7 @@ window._wchProtoPedido=async function(convId,tel){
   let m=null
   try{
     const corto=_wchTelCorto(tel)
-    const{data}=await sb.from('mapeos').select('nombre_cliente,producto,producto_id,cantidad,ciudad,transportadora,telefono,fecha,precio_dropi').like('telefono','%'+corto).order('id',{ascending:false}).limit(1)
+    const{data}=await sb.from('mapeos').select('nombre_cliente,producto,producto_id,cantidad,ciudad,transportadora,telefono,fecha,precio_dropi,producto_id_dropi').like('telefono','%'+corto).order('id',{ascending:false}).limit(1)
     m=data&&data[0]||null
   }catch(_){}
   const conv=((window._wchState||{}).convs||[]).find(x=>x.id===convId)
@@ -44345,7 +44356,26 @@ window._wchProtoPedido=async function(convId,tel){
   let tot=null,sal=null
   try{if(m&&typeof _cancTotal==='function')tot=_cancTotal(m)}catch(_){}
   try{if(m&&typeof _cancSaldo==='function')sal=_cancSaldo(m)}catch(_){}
-  return{m,nombre,prod,cant,transp,ciudad:(m&&m.ciudad)||'[CIUDAD]',telCorto:_wchTelCorto(tel)||'[TELÉFONO]',tot,sal}
+  // 📄 (31jul26) PASO 3: la descripción del producto QUE PIDIÓ ESTE CLIENTE. Se busca en
+  // el catálogo por el mismo camino que usa el resto de la app, del dato más confiable al
+  // menos: 1) producto_id del mapeo · 2) ID de Dropi del reporte (verdad de máquina) ·
+  // 3) nombre/alias del pedido. Si el producto no tiene descripción escrita en Productos,
+  // esto devuelve vacío y el chat sencillamente no muestra el Paso 3.
+  let prodDesc='',prodNom=''
+  try{
+    // `productos` es un let del módulo: dentro de este IIFE se ve por closure, NO por
+    // window (ahí no está). El fallback a window queda por si algún día se expone.
+    const cat=Array.isArray(productos)?productos:(Array.isArray(window.productos)?window.productos:[])
+    let p=null
+    if(m&&m.producto_id)p=cat.find(x=>String(x.id)===String(m.producto_id))||null
+    if(!p&&m&&m.producto_id_dropi&&typeof resolveProdByDropiId==='function'){try{p=resolveProdByDropiId(String(m.producto_id_dropi).trim())||null}catch(_){}}
+    if(!p&&m&&m.producto&&typeof resolveProdName==='function'){
+      const r=resolveProdName(m.producto)
+      if(r&&r.id)p=cat.find(x=>String(x.id)===String(r.id))||null
+    }
+    if(p){prodDesc=String(p.descripcion==null?'':p.descripcion).trim();prodNom=p.alias_visible||p.nombre||''}
+  }catch(_){}
+  return{m,nombre,prod,cant,transp,ciudad:(m&&m.ciudad)||'[CIUDAD]',telCorto:_wchTelCorto(tel)||'[TELÉFONO]',tot,sal,prodDesc,prodNom}
 }
 // [DÍA], [MAÑANA / TARDE] y [DIRECCIÓN COMPLETA] se dejan tal cual: eso es lo
 // que el cliente acuerda y lo escribe el auxiliar al pegar en Dropi.
@@ -44374,12 +44404,21 @@ window._wchProtoPills=async function(convId,tel,idx,soloP2,via){
   const d=await window._wchProtoPedido(convId,tel)
   const p1=String(proto.msg||'').trim()?window._wchProtoRellenar(proto.msg,d):''
   const p2=String(proto.resp||'').trim()?window._wchProtoRellenar(proto.resp,d):''
-  window._wchProtoTxt[convId]={p1,p2,titulo:proto.titulo||('Tipo '+idx)}
+  // 📄 (31jul26) PASO 3: la descripción del producto que pidió ESTE cliente, tal como
+  // quedó escrita en Productos. Sale sola: el auxiliar no elige nada. Se rellenan los
+  // comodines igual que en los otros pasos, por si la descripción usa [NOMBRE] o similares.
+  const p3=String(d.prodDesc||'').trim()?window._wchProtoRellenar(d.prodDesc,d):''
+  window._wchProtoTxt[convId]={p1,p2,p3,titulo:proto.titulo||('Tipo '+idx)}
   const prev=(t)=>{const s=String(t||'').replace(/\s+/g,' ').trim();return s.length>58?(s.slice(0,58)+'…'):s}
   const pill=(paso,txt,rot,bg)=>`<button onclick="_wchProtoPillCopiar('${convId}','${paso}')" title="${_wchEsc(txt)}" style="display:inline-flex;align-items:center;gap:6px;max-width:100%;background:${bg};border:1.5px solid #fff;color:#fff;border-radius:999px;padding:6px 13px;font-size:10.5px;font-weight:800;cursor:pointer;line-height:1.2;box-shadow:0 2px 7px rgba(0,0,0,.32)">📋 ${rot}<span style="font-weight:500;opacity:.88;max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_wchEsc(prev(txt))}</span></button>`
   const pills=[]
   if(!soloP2&&p1)pills.push(pill('p1',p1,'Paso 1 · Cliente','#16a34a'))
   if(p2)pills.push(pill('p2',p2,'Paso 2 · Transportadora','#4f46e5'))
+  // El nombre va recortado: un producto de nombre largo reventaría la píldora compacta.
+  // El nombre completo y el texto entero se ven en el tooltip.
+  const _pnom=String(d.prodNom||'').trim()
+  const _pnomCorto=_pnom?(_pnom.length>20?(_pnom.slice(0,20)+'…'):_pnom):'Producto'
+  if(!soloP2&&p3)pills.push(pill('p3',p3,'Paso 3 · '+_wchEsc(_pnomCorto),'#b45309'))
   if(!pills.length){
     p.innerHTML='<div style="font-size:11px;color:var(--muted);background:var(--card);border:1px dashed var(--border);border-radius:8px;padding:7px 9px">Esta novedad no tiene textos configurados (Textos → Novedades). <button class="btn-sm btn-outline" style="font-size:10px" onclick="_wchProtoLista(\'' + convId + '\',\'' + tel + '\')">Elegir otro tipo</button></div>'
     return
@@ -44398,10 +44437,10 @@ window._wchProtoPills=async function(convId,tel,idx,soloP2,via){
 }
 window._wchProtoPillCopiar=async function(convId,paso){
   const c=(window._wchProtoTxt||{})[convId];if(!c)return
-  const txt=paso==='p1'?c.p1:c.p2
+  const txt=paso==='p1'?c.p1:(paso==='p3'?c.p3:c.p2)
   const out=document.getElementById('wch-protomsg-'+convId)
   if(!txt)return
-  const rot=paso==='p1'?'Paso 1 (mensaje al cliente)':'Paso 2 (respuesta a la transportadora)'
+  const rot=paso==='p1'?'Paso 1 (mensaje al cliente)':(paso==='p3'?'Paso 3 (descripción del producto)':'Paso 2 (respuesta a la transportadora)')
   try{
     await navigator.clipboard.writeText(txt)
     if(out)out.innerHTML='<span style="color:#22c55e">✅ '+rot+' copiado. Pégalo con Ctrl+V.</span>'

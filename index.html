@@ -31632,58 +31632,143 @@ window.massBudTodasInput=(which,raw)=>{
     window.massBudInput(it.meta_id,which,raw)
   }
 }
+// ════════════════════════════════════════════════════════════════════════════
+// 💵 ESCALA DEL DINERO — RAÍZ del error "elegí 50.000 y quedó 5.000.000" (3ago26)
+// ─────────────────────────────────────────────────────────────────────────────
+// CAUSA REAL (no es un parche, es el origen): cada tarjeta ADIVINABA por su
+// cuenta si el número crudo de Meta se divide entre 1 o entre 100, comparándolo
+// con el presupuesto local. Cuando NO tenía con qué comparar (local en 0:
+// campañas apagadas, recién clonadas, conjuntos sin dato en la copia) se iba por
+// el DEFAULT 100. Eso pinta un "Actual" 100 veces más chico; al aplicar, la Edge
+// Function deduce la escala con ese mismo current_human (raw_actual/current_human)
+// y termina mandándole a Meta un monto 100 veces más grande. 50.000 → 5.000.000.
+// ARREGLO DE RAÍZ: una cuenta publicitaria tiene UNA sola moneda → UNA sola
+// escala. Se resuelve UNA vez por corrida, con TODAS las tarjetas que sí tienen
+// ancla (voto por mayoría), y esa misma escala se le aplica a todas. Sin anclas
+// se usa la convención que ya rige en TODO NEXO (modalPresupuesto, meta_campanas,
+// el portafolio y _nexoBudgetOverride guardan el crudo de Meta TAL CUAL): escala 1.
+// NUNCA MÁS un default a 100 por tarjeta.
+window._massBudEscalaCuenta=(pares)=>{
+  let v1=0,v100=0
+  for(const p of (pares||[])){
+    const raw=Number(p.raw)||0,loc=Number(p.local)||0
+    if(raw<=0||loc<=0)continue
+    const rel=raw/loc
+    if(Math.abs(rel-1)<=0.2)v1++          // crudo ≈ local        → escala 1
+    else if(Math.abs(rel-100)<=20)v100++  // crudo ≈ local × 100  → escala 100
+  }
+  if(!v1&&!v100)return{off:1,anclas:0,votos1:0,votos100:0,seguro:false,motivo:'sin anclas — se usa la convención de NEXO (crudo = pesos)'}
+  const off=(v100>v1)?100:1
+  return{off,anclas:v1+v100,votos1:v1,votos100:v100,seguro:!(v1>0&&v100>0),motivo:(v1>0&&v100>0)?'anclas contradictorias':''}
+}
 window.massContinue=async()=>{
   const st=window._massState;if(!st||!st.selected.size)return
   const selCamps=st.items.filter(it=>st.selected.has(it.meta_id))
   if(st.action!=='presupuesto'){window._massRenderConfirmEstado(selCamps);return}
   openModal(`<div class="modal-title">⏳ Preparando...</div><div style="font-size:13px;color:var(--muted);padding:10px 0">Verificando con Meta si cada campaña es CBO o ABO (con su presupuesto vivo).</div>`)
-  // ── 🛡️ RAÍZ (22jul26 · ley del owner): la clasificación CBO/ABO tampoco se decide con la copia
-  // local — se le PREGUNTA A META antes de armar la lista. Presupuesto vivo en la campaña → es CBO
-  // (aunque la copia dijera ABO); sin presupuesto → ABO de verdad → se traen sus conjuntos. Lo que
-  // Meta responde REPARA la copia (esCBO + budget en memoria, portafolio y meta_campanas en BD),
-  // así queda corregida para siempre. Tolerante: si Meta no responde, se usa la clasificación
-  // local de siempre y la verificación posterior atrapa lo que falte.
+  // ── 🛡️ RAÍZ (3ago26 · reemplaza la versión "tolerante" del 22jul26) ───────────────────────────
+  // La clasificación CBO/ABO la decide META y SOLO META. Antes, si Meta no respondía (lote caído,
+  // un ID malo que tumbaba los otros 49, token vencido) se caía calladito a la clasificación LOCAL
+  // — y esa copia es justamente la que venía mal: CBO marcadas como ABO. Ahora:
+  //   · Los lotes que fallan se REINTENTAN uno por uno (un ID malo ya no arrastra a los demás).
+  //   · Lo que Meta NO confirmó NO se adivina: queda fuera de la lista y se avisa en pantalla.
+  //   · Las que Meta dice ABO se muestran aparte (si solo lanzas CBO, ahí está la señal).
+  //   · Los conjuntos de una ABO se traen de META (no de la copia en BD, que puede estar vieja);
+  //     la BD queda solo como respaldo si Meta no responde.
+  // Además: la ESCALA del dinero se resuelve UNA sola vez para toda la corrida (ver
+  // _massBudEscalaCuenta) en lugar de que cada tarjeta adivine y se vaya al default 100.
+  const _resp={},_sinMeta=[],_esc={off:1,anclas:0,votos1:0,votos100:0,seguro:false,motivo:'no se consultó a Meta'}
+  let _tkOK=false
   try{
     const _tk=await getConfig('meta_access_token')
     if(_tk){
+      _tkOK=true
+      const _pedir=async(ids)=>{ // devuelve el objeto de Meta o null si el lote entero falló
+        try{
+          const r=await fetch(`${META_BASE}/?ids=${ids.join(',')}&fields=daily_budget,lifetime_budget&access_token=${_tk}`)
+          if(!r.ok)return null
+          const j=await r.json()
+          if(!j||j.error)return null
+          return j
+        }catch(_){return null}
+      }
+      const _pendientes=[]
       for(let i=0;i<selCamps.length;i+=50){
         const batch=selCamps.slice(i,i+50)
-        try{
-          const r=await fetch(`${META_BASE}/?ids=${batch.map(c=>c.meta_id).join(',')}&fields=daily_budget,lifetime_budget&access_token=${_tk}`)
-          if(!r.ok)continue
-          const j=await r.json()
-          for(const c of batch){
-            const o=j&&j[c.meta_id];if(!o)continue // sin respuesta de ESTA → clasificación local
-            const rawD=parseInt(o.daily_budget)||0,rawL=parseInt(o.lifetime_budget)||0,raw=rawD||rawL
-            const eraCBO=!!c.esCBO
-            if(raw>0){
-              let off=100
-              if(c.budget>0){const rel=raw/c.budget;off=Math.abs(rel-1)<Math.abs(rel-100)?1:100}
-              c.esCBO=true;c.budget=Math.round(raw/off)
-            }else c.esCBO=false // Meta respondió SIN presupuesto → ABO de verdad
-            if(c.esCBO!==eraCBO){
-              console.warn(`[mass CBO/ABO] ${c.meta_id} estaba mal clasificada (${eraCBO?'CBO':'ABO'}→${c.esCBO?'CBO':'ABO'}) — reparada con el dato vivo de Meta`)
-              try{ // reparar la copia: BD + portafolio en memoria — la próxima vez ya nace bien
-                if(raw>0)await sb.from('meta_campanas').update(rawD>0?{daily_budget:rawD}:{lifetime_budget:rawL}).eq('meta_id',String(c.meta_id))
-                const _ba=(window._metaPort&&window._metaPort.campsActivasByAcc)||{}
-                for(const _a in _ba){for(const _c of (_ba[_a]||[])){if(String(_c.meta_id)===String(c.meta_id)){if(rawD>0)_c.daily_budget=raw;else if(rawL>0)_c.lifetime_budget=raw}}}
-                if(raw>0){window._nexoBudgetOverride=window._nexoBudgetOverride||{};window._nexoBudgetOverride[String(c.meta_id)]=c.budget}
-              }catch(_){}
-            }
-          }
-        }catch(_){}
+        const j=await _pedir(batch.map(c=>c.meta_id))
+        if(!j){for(const c of batch)_pendientes.push(c);continue} // lote caído → uno por uno
+        for(const c of batch){const o=j[c.meta_id];if(o&&!o.error)_resp[String(c.meta_id)]=o;else _pendientes.push(c)}
+      }
+      for(const c of _pendientes){ // reintento individual: un ID malo ya no tumba a los buenos
+        const j=await _pedir([c.meta_id])
+        const o=j&&j[c.meta_id]
+        if(o&&!o.error)_resp[String(c.meta_id)]=o
       }
     }
   }catch(_){}
+  // 1) Escala ÚNICA de la cuenta, con todas las anclas disponibles (crudo de Meta vs local)
+  const _anclas=[]
+  for(const c of selCamps){
+    const o=_resp[String(c.meta_id)];if(!o)continue
+    const raw=(parseInt(o.daily_budget)||0)||(parseInt(o.lifetime_budget)||0)
+    if(raw>0)_anclas.push({raw,local:Number(c.budget)||0})
+  }
+  if(_tkOK)Object.assign(_esc,window._massBudEscalaCuenta(_anclas))
+  st.escala=_esc
+  // 2) Aplicar lo que Meta dijo — y solo eso
+  const _aboDetect=[]
+  for(const c of selCamps){
+    const o=_resp[String(c.meta_id)]
+    if(!o){c._sinMeta=true;_sinMeta.push(c);continue}
+    c._sinMeta=false
+    const rawD=parseInt(o.daily_budget)||0,rawL=parseInt(o.lifetime_budget)||0,raw=rawD||rawL
+    const eraCBO=!!c.esCBO
+    if(raw>0){c.esCBO=true;c.budget=Math.round(raw/_esc.off)}
+    else{c.esCBO=false;_aboDetect.push(c)} // Meta respondió SIN presupuesto de campaña → ABO real
+    if(c.esCBO!==eraCBO){
+      console.warn(`[mass CBO/ABO] ${c.meta_id} estaba mal clasificada (${eraCBO?'CBO':'ABO'}→${c.esCBO?'CBO':'ABO'}) — reparada con el dato vivo de Meta`)
+      try{ // reparar la copia: BD + portafolio en memoria — la próxima vez ya nace bien
+        if(raw>0)await sb.from('meta_campanas').update(rawD>0?{daily_budget:rawD}:{lifetime_budget:rawL}).eq('meta_id',String(c.meta_id))
+        const _ba=(window._metaPort&&window._metaPort.campsActivasByAcc)||{}
+        for(const _a in _ba){for(const _c of (_ba[_a]||[])){if(String(_c.meta_id)===String(c.meta_id)){if(rawD>0)_c.daily_budget=raw;else if(rawL>0)_c.lifetime_budget=raw}}}
+        if(raw>0){window._nexoBudgetOverride=window._nexoBudgetOverride||{};window._nexoBudgetOverride[String(c.meta_id)]=c.budget}
+      }catch(_){}
+    }
+  }
+  st.sinMeta=_sinMeta.map(c=>({meta_id:c.meta_id,nombre:c.nombre}))
+  st.aboDetect=_aboDetect.map(c=>({meta_id:c.meta_id,nombre:c.nombre}))
   const budItems=[]
-  for(const c of selCamps){if(c.esCBO)budItems.push({meta_id:c.meta_id,nivel:'campaign',nombre:c.nombre,budget:c.budget,tipoBudget:'CBO'})}
-  const aboCamps=selCamps.filter(c=>!c.esCBO)
+  for(const c of selCamps){if(c.esCBO&&!c._sinMeta)budItems.push({meta_id:c.meta_id,nivel:'campaign',nombre:c.nombre,budget:c.budget,tipoBudget:'CBO'})}
+  const aboCamps=selCamps.filter(c=>!c.esCBO&&!c._sinMeta)
   if(aboCamps.length){
+    const nomPadre={};for(const c of aboCamps)nomPadre[c.meta_id]=c.nombre
+    const _yaAdset=new Set()
+    // 2a) Conjuntos DESDE META (fuente viva) — con la MISMA escala única de la cuenta
+    if(_tkOK){
+      try{
+        const _tk2=await getConfig('meta_access_token')
+        for(const c of aboCamps){
+          try{
+            const rows=await metaGet('/'+c.meta_id+'/adsets',_tk2,{fields:'name,daily_budget,lifetime_budget',limit:'200'})
+            for(const a of (rows||[])){
+              const raw=(parseInt(a.daily_budget)||0)||(parseInt(a.lifetime_budget)||0)
+              if(raw<=0)continue
+              _yaAdset.add(String(a.id))
+              budItems.push({meta_id:a.id,nivel:'adset',nombre:a.name||a.id,budget:Math.round(raw/_esc.off),tipoBudget:'ABO',parentNombre:nomPadre[c.meta_id]||'',parentMetaId:c.meta_id})
+            }
+          }catch(e){console.warn('[mass] adsets Meta '+c.meta_id+':',e.message)}
+        }
+      }catch(_){}
+    }
+    // 2b) Respaldo BD solo para los conjuntos que Meta no alcanzó a entregar
     try{
-      const ids=aboCamps.map(c=>c.meta_id),nomPadre={}
-      for(const c of aboCamps)nomPadre[c.meta_id]=c.nombre
+      const ids=aboCamps.map(c=>c.meta_id)
       const{data:adsets}=await sb.from('meta_campanas').select('meta_id,parent_id,nombre,daily_budget').in('parent_id',ids).eq('nivel','adset')
-      for(const a of (adsets||[])){const _ovA=(window._nexoBudgetOverride||{})[String(a.meta_id)];const b=(_ovA>0?_ovA:(a.daily_budget||0));if(b>0)budItems.push({meta_id:a.meta_id,nivel:'adset',nombre:a.nombre||a.meta_id,budget:b,tipoBudget:'ABO',parentNombre:nomPadre[a.parent_id]||'',parentMetaId:a.parent_id})}
+      for(const a of (adsets||[])){
+        if(_yaAdset.has(String(a.meta_id)))continue
+        const _ovA=(window._nexoBudgetOverride||{})[String(a.meta_id)];const b=(_ovA>0?_ovA:(a.daily_budget||0))
+        if(b>0)budItems.push({meta_id:a.meta_id,nivel:'adset',nombre:a.nombre||a.meta_id,budget:b,tipoBudget:'ABO',parentNombre:nomPadre[a.parent_id]||'',parentMetaId:a.parent_id})
+      }
     }catch(e){console.warn('[mass] adsets ABO:',e.message)}
   }
   if(!budItems.length){
@@ -31752,12 +31837,12 @@ window._massRenderBudget=(sel)=>{
   const SEMBAR={fuego:['🟣 DOBLAR','var(--purple)'],escalar:['🟢 ESCALAR','var(--green)'],precaucion:['🟡 CUIDADO','var(--amber)'],stop:['🔴 APAGAR','var(--red)'],prender_ya:['🛑 PRENDER YA','var(--red)'],esperar:['⏳ ESPERAR','var(--muted)'],sin_ventas:['⏳ ESPERAR','var(--muted)'],'':['▫️ SIN SEMÁFORO','var(--muted)']}
   const _semDe=it=>semByMeta[it.meta_id]||semByMeta[it.parentMetaId]||''
   const _gid=s=>String(s).replace(/[^a-zA-Z0-9_-]/g,'')
-  const barGrupo=(gid,sem,n)=>{
+  const barGrupo=(gid,sem,n,sub)=>{
     const[lbl,col]=SEMBAR[sem]||SEMBAR['']
     const btns=[[20,'green','+20%'],[30,'green','+30%'],[40,'green','+40%'],[50,'green','+50%'],[70,'green','+70%'],[100,'purple','×2'],[200,'purple','×3'],[-20,'red','-20%'],[-30,'red','-30%'],[-40,'red','-40%'],[-50,'red','-50%'],[-70,'red','-70%']]
       .map(([p,c,t])=>`<button class="btn-sm btn-outline" onclick="massBudGrupo('${gid}',${p})" title="Pone ${t} a las ${n} tarjeta(s) visibles de ${lbl}" style="padding:5px 10px;font-size:12px;border-color:var(--${c});color:var(--${c})">${t}</button>`).join('')
-    return`<div style="border:2px solid ${col};border-radius:8px;padding:8px 10px;margin:10px 0 8px">
-      <div style="font-size:12px;color:${col};font-weight:800;margin-bottom:6px">⚡ Aplicar a las <span class="massbud-grpn" data-grp="${gid}">${n}</span> de ${lbl}:</div>
+    return`<div class="massbud-bar" data-grp="${gid}" style="border:2px solid ${col};border-radius:8px;padding:8px 10px;margin:0 0 8px">
+      <div style="font-size:12px;color:${col};font-weight:800;margin-bottom:6px">⚡ Aplicar a las <span class="massbud-grpn" data-grp="${gid}">${n}</span> de ${lbl}${sub?` <span style="color:var(--muted);font-weight:600">· 🧩 ${sub}</span>`:''}:</div>
       <div style="display:flex;gap:5px;flex-wrap:wrap">${btns}</div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:7px">
         <input id="massbud-g-${gid}-subir" type="number" inputmode="numeric" placeholder="+ subir $" oninput="massBudGrupoInput('${gid}','subir',this.value)" style="width:110px;padding:7px 9px;font-size:13px;background:var(--card);border:1px solid var(--green);border-radius:6px;color:var(--text)">
@@ -31770,30 +31855,52 @@ window._massRenderBudget=(sel)=>{
     const g={};for(const it of arr){const s=_semDe(it);(g[s]=g[s]||[]).push(it)}
     return Object.entries(g).sort((a,b)=>_wSemG(a[0])-_wSemG(b[0]))
   }
-  let listaHtml=''
+  // ── ⚡ (3ago26 · pedido del owner) TODAS las barras de semáforo van ARRIBA, juntas, fuera de la
+  // lista que scrollea: se sube/baja presupuesto de cualquier semáforo sin bajar a buscarlo.
+  // Las tarjetas siguen abajo, agrupadas igual que siempre. Cada barra se sigue amarrando a su
+  // grupo por data-grp, así massBudGrupo/massBudGrupoInput funcionan sin cambiar una línea.
+  let listaHtml='',barrasHtml=''
   const cbo=sel.filter(it=>it.tipoBudget==='CBO')
   for(const[sem,items]of _agrupa(cbo)){
     const gid=_gid('cbo-'+(sem||'na'))
-    listaHtml+=`<div class="massbud-grpwrap">${barGrupo(gid,sem,items.length)}${items.map(it=>card(it,gid)).join('')}</div>`
+    barrasHtml+=barGrupo(gid,sem,items.length)
+    listaHtml+=`<div class="massbud-grpwrap" data-grp="${gid}">${items.map(it=>card(it,gid)).join('')}</div>`
   }
   const aboPorCamp={}
   for(const it of sel.filter(x=>x.tipoBudget==='ABO')){const k=String(it.parentMetaId||'?');(aboPorCamp[k]=aboPorCamp[k]||[]).push(it)}
   for(const[pid,items]of Object.entries(aboPorCamp)){
     let inner=''
+    const _nomPad=items[0].parentNombre||pid
     for(const[sem,grp]of _agrupa(items)){
       const gid=_gid('abo-'+pid+'-'+(sem||'na'))
-      inner+=`<div class="massbud-grpwrap">${barGrupo(gid,sem,grp.length)}${grp.map(it=>card(it,gid)).join('')}</div>`
+      barrasHtml+=barGrupo(gid,sem,grp.length,_nomPad)
+      inner+=`<div class="massbud-grpwrap" data-grp="${gid}">${grp.map(it=>card(it,gid)).join('')}</div>`
     }
     listaHtml+=`<div class="massbud-abosec" style="border:2px dashed var(--accent);border-radius:10px;padding:8px 10px;margin:14px 0 8px">
-      <div style="font-size:12px;font-weight:800;color:var(--accent);letter-spacing:.03em">🧩 CAMPAÑA ABO — ${items[0].parentNombre||pid} <span style="font-weight:400;color:var(--muted)">(sus conjuntos, cada uno con su presupuesto)</span></div>
+      <div style="font-size:12px;font-weight:800;color:var(--accent);letter-spacing:.03em">🧩 CAMPAÑA ABO — ${_nomPad} <span style="font-weight:400;color:var(--muted)">(sus conjuntos, cada uno con su presupuesto)</span></div>
       ${inner}</div>`
   }
+  const barrasTop=barrasHtml?`<div id="massbud-barras-top" style="max-height:34vh;overflow-y:auto;border:1px solid var(--border);border-radius:10px;padding:9px 10px;margin-bottom:9px;background:rgba(255,255,255,.02)">
+      <div style="font-size:11px;font-weight:800;color:var(--accent);letter-spacing:.04em;margin-bottom:7px">⚡ ACCIONES POR SEMÁFORO — todas aquí arriba, sin bajar</div>
+      ${barrasHtml}</div>`:''
+  // ── 🧭 (3ago26) AVISO DE CLASIFICACIÓN: lo que Meta NO confirmó queda FUERA (no se adivina) y
+  // lo que Meta reporta como ABO se lista aparte — si solo lanzas CBO, ahí salta la inconsistencia.
+  const _sinM=(st.sinMeta||[]),_aboD=(st.aboDetect||[])
+  const _nom=a=>a.map(x=>_dmEsc(x.nombre||x.meta_id)).slice(0,6).join(' · ')+(a.length>6?` …y ${a.length-6} más`:'')
+  const _avisoClasif=(_sinM.length||_aboD.length)?`<div style="border:2px solid ${_sinM.length?'var(--red)':'var(--amber)'};border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12px">
+      ${_sinM.length?`<div style="color:var(--red);font-weight:800">🚫 ${_sinM.length} campaña(s) quedaron FUERA — Meta no confirmó si son CBO o ABO</div>
+      <div style="color:var(--muted);margin:2px 0 5px">No se adivina su tipo: ciérralo, recarga y vuelve a intentar, o cámbialas una por una. → ${_nom(_sinM)}</div>`:''}
+      ${_aboD.length?`<div style="color:var(--amber);font-weight:800">🧩 ${_aboD.length} campaña(s) Meta las reporta como ABO (presupuesto en los conjuntos, no en la campaña)</div>
+      <div style="color:var(--muted);margin-top:2px">Si tú solo lanzas CBO, revísalas en el administrador de anuncios — abajo aparecen sus conjuntos. → ${_nom(_aboD)}</div>`:''}
+    </div>`:''
   openModal(`
     <div class="modal-title">💰 Presupuesto a ${sel.length} en lote</div>
     <div style="font-size:13px;color:var(--muted);margin-bottom:8px">Cada semáforo lleva su propia barra (misma escala, distinta decisión). Cada tarjeta sigue siendo independiente.</div>
+    ${_avisoClasif}
     <div id="massbud-verifbar"><div style="border:1px solid var(--amber);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12px;color:var(--amber)">⏳ Verificando los presupuestos REALES con Meta (los mismos que ves en el administrador de anuncios)… El botón de aplicar se habilita al terminar.</div></div>
+    ${barrasTop}
     <input id="massbud-search" type="text" placeholder="🔎 Buscar por ID o nombre..." oninput="massBudBuscar()" autocomplete="off" style="width:100%;padding:8px 10px;margin-bottom:8px;background:var(--card);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:12px;outline:none">
-    <div id="massbud-list" style="max-height:52vh;overflow-y:auto;margin-bottom:10px">${listaHtml}<div id="massbud-noresult" style="display:none;color:var(--muted);font-size:12px;padding:10px">Ninguna campaña coincide con esa búsqueda.</div></div>
+    <div id="massbud-list" style="max-height:38vh;overflow-y:auto;margin-bottom:10px">${listaHtml}<div id="massbud-noresult" style="display:none;color:var(--muted);font-size:12px;padding:10px">Ninguna campaña coincide con esa búsqueda.</div></div>
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button class="btn-sm btn-outline" onclick="_massRenderSelect()">⬅️ Atrás</button>
       <button class="btn-sm btn-blue" id="massbud-apply" onclick="massApplyAll()" disabled style="opacity:.55">⏳ Verificando presupuestos…</button>
@@ -31835,7 +31942,16 @@ window.massBudBuscar=()=>{
     const vis=[...w.querySelectorAll('.massbud-item')].filter(c=>c.style.display!=='none').length
     w.style.display=vis>0?'block':'none'
     const n=w.querySelector('.massbud-grpn');if(n)n.textContent=vis
+    // ⚡ (3ago26) la barra de este grupo ahora vive ARRIBA: se le actualiza el conteo y se
+    // esconde si el buscador dejó su grupo sin tarjetas (mismo comportamiento de antes).
+    const gid=w.dataset.grp||''
+    if(gid){
+      const bar=document.querySelector('#massbud-barras-top .massbud-bar[data-grp="'+gid+'"]')
+      if(bar){bar.style.display=vis>0?'block':'none';const bn=bar.querySelector('.massbud-grpn');if(bn)bn.textContent=vis}
+    }
   })
+  const _topBox=document.getElementById('massbud-barras-top')
+  if(_topBox){const _bv=[..._topBox.querySelectorAll('.massbud-bar')].filter(b=>b.style.display!=='none').length;_topBox.style.display=_bv>0?'block':'none'}
   document.querySelectorAll('#massbud-list .massbud-abosec').forEach(s=>{
     const vis=[...s.querySelectorAll('.massbud-item')].filter(c=>c.style.display!=='none').length
     s.style.display=vis>0?'block':'none'
@@ -31892,6 +32008,51 @@ window.massApplyAll=()=>{
   const sel=st.action==='presupuesto'?sel0.filter(it=>it.verificado===true&&!it.excluida):sel0
   if(!sel.length)return
   const accionTxt=st.action==='activar'?'ACTIVAR':(st.action==='pausar'?'PAUSAR':'cambiar el PRESUPUESTO de')
+  // ── 🛡️ (3ago26) FRENO ANTES DE ESCRIBIR: en presupuesto ya no se confirma a ciegas.
+  // Se muestra tarjeta por tarjeta el ACTUAL → NUEVO real que se va a mandar, y si algún salto
+  // es absurdo (≥5× arriba o ≤1/5 abajo — ni ×2 ni ×3 llegan ahí) se marca en rojo y el botón
+  // de aplicar se bloquea hasta que TÚ lo destrabes a propósito. Así un 50.000 → 5.000.000 se
+  // ve ANTES de tocar Meta, no después.
+  if(st.action==='presupuesto'){
+    let raros=0,conCambio=0
+    const filas=sel.map(it=>{
+      const pi=st.perItem[it.meta_id]||{}
+      if(!pi.mode)return `<div style="display:flex;gap:8px;align-items:center;padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px;opacity:.5">
+        <span style="flex:1;min-width:0;white-space:normal;word-break:break-word">${it.nivel==='campaign'?'🎯':'📦'} ${_dmEsc(it.nombre||it.meta_id)}</span>
+        <span style="color:var(--muted);white-space:nowrap">⏭️ sin cambio</span></div>`
+      conCambio++
+      const act=Number(it.budget)||0
+      const nue=(pi.mode==='pct')?Math.round(act*(1+(Number(pi.val)||0)/100)):(Number(pi.nuevo)||0)
+      const f=(act>0&&nue>0)?(nue/act):1
+      const raro=(act>0&&nue>0)&&(f>=5||f<=0.2)
+      if(raro)raros++
+      const intencion=(pi.mode==='pct')?((pi.val>0?'+':'')+pi.val+'%'):(pi.mode==='exacto'?('= $'+fmt(pi.val||0)):(pi.mode==='subir'?('+ $'+fmt(pi.val||0)):('- $'+fmt(pi.val||0))))
+      return `<div style="display:flex;gap:8px;align-items:center;padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px;${raro?'background:rgba(248,113,113,.10)':''}">
+        <span style="flex:1;min-width:0;white-space:normal;word-break:break-word;color:var(--text)">${raro?'🚨 ':''}${it.nivel==='campaign'?'🎯':'📦'} ${_dmEsc(it.nombre||it.meta_id)} <span style="color:var(--muted);font-size:10px">(${intencion})</span></span>
+        <span style="white-space:nowrap">$${fmt(act)} → <strong style="color:${raro?'var(--red)':(nue>act?'var(--green)':(nue<act?'var(--amber)':'var(--muted)'))}">$${fmt(nue)}</strong>${raro?` <span style="color:var(--red);font-weight:800">×${(f>=1?f:1/f).toFixed(f>=1?1:2)}${f<1?'↓':''}</span>`:''}</span>
+      </div>`
+    }).join('')
+    const esc=st.escala||{}
+    const notaEsc=`<div style="font-size:10.5px;color:var(--muted);margin-bottom:6px">💵 Escala del dinero de esta corrida: <strong style="color:var(--text)">÷${esc.off||1}</strong> · ${esc.anclas||0} ancla(s)${esc.seguro===false?` <span style="color:var(--amber);font-weight:700">⚠️ ${_dmEsc(esc.motivo||'sin confirmar')}</span>`:' ✅'}</div>`
+    const aviso=raros?`<div style="border:2px solid var(--red);border-radius:8px;padding:8px 10px;margin:8px 0;font-size:12px">
+        <div style="color:var(--red);font-weight:800">🚨 ${raros} salto(s) fuera de lo normal (5 veces o más)</div>
+        <div style="color:var(--muted);margin-top:3px">Ni ×2 ni ×3 llegan ahí. Revisa las filas marcadas en rojo antes de aplicar.</div>
+        <label style="display:flex;gap:7px;align-items:center;margin-top:7px;cursor:pointer;color:var(--text)">
+          <input type="checkbox" id="massconf-ok" onchange="const b=document.getElementById('massconf-go');if(b){b.disabled=!this.checked;b.style.opacity=this.checked?'1':'.45'}">
+          <span>Los revisé y sí los quiero aplicar así</span></label>
+      </div>`:''
+    openModal(`
+      <div class="modal-title">⚠️ Confirmar presupuestos</div>
+      <div style="font-size:12.5px;color:var(--muted);margin:6px 0 4px">Esto es EXACTAMENTE lo que se le va a mandar a Meta (${conCambio} con cambio de ${sel.length}).</div>
+      ${notaEsc}${aviso}
+      <div style="max-height:44vh;overflow-y:auto;border:1px solid var(--border);border-radius:8px;margin-bottom:10px">${filas}</div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn-sm btn-outline" onclick="massContinue()">⬅️ Atrás</button>
+        <button class="btn-sm btn-blue" id="massconf-go" onclick="_massRun()" ${raros?'disabled style="opacity:.45"':''}>✅ Sí, aplicar (${conCambio})</button>
+      </div>
+    `)
+    return
+  }
   openModal(`
     <div class="modal-title">⚠️ Confirmar</div>
     <div style="font-size:13px;color:var(--text);margin:12px 0;line-height:1.5">Vas a <strong>${accionTxt}</strong> <strong>${sel.length}</strong> ${sel.length===1?'elemento':'elementos'} en Meta, uno por uno.<br>¿Seguro?</div>
@@ -31938,6 +32099,7 @@ window._massRun=async()=>{
     if(st.action==='presupuesto'){
       const pi=st.perItem[it.meta_id];const nuevo=pi?pi.nuevo:it.budget
       if(!pi||!pi.mode){setIc('⏭️','Sin cambio');continue}
+      const _antesDeAplicar=Number(it.budget)||0 // 📌 guardado ANTES de escribir — lo usa la auditoría
       // ── 🛡️ RAÍZ (22jul26 · ley del owner: "el presupuesto tiene UN solo dueño y es Meta") ──
       // ESCALAR (%, ×2, ×3) ya NO manda un monto calculado con el número local: manda la INTENCIÓN
       // (mode:'pct') y la Edge Function la aplica sobre el presupuesto VIVO que lee de Meta en ese
@@ -31955,8 +32117,13 @@ window._massRun=async()=>{
         // "igual al actual" con monto exacto NO es un error: Meta ya está en ese valor. Sin ❌.
         if(r&&!r.ok&&String(r.error||'').toLowerCase().includes('igual al actual')){setIc('⏭️','Ya estaba en ese valor en Meta');continue}
       }
-      const _aplicado=(r&&r.ok&&Number(r.human_new)>0)?Number(r.human_new):nuevo // la VERDAD de Meta
-      if(r.ok)window._logCambioMeta(it.meta_id,it.nivel,acc,'presupuesto',(r&&Number(r.human_current)>0)?Number(r.human_current):it.budget,_aplicado)
+      // 🛡️ RAÍZ (3ago26): _metaWrite devuelve {ok,data} — la respuesta de Meta viene DENTRO de
+      // r.data. Se estaba leyendo r.human_new (siempre undefined), así que la "verdad de Meta"
+      // NUNCA se leía: la pantalla confirmaba el número calculado en local aunque Meta hubiera
+      // guardado otro. Por eso el 5.000.000 se mostró como "confirmado". Ahora sí se lee.
+      const _d=(r&&r.ok&&r.data)?r.data:{}
+      const _aplicado=(Number(_d.human_new)>0)?Number(_d.human_new):nuevo // la VERDAD de Meta
+      if(r.ok)window._logCambioMeta(it.meta_id,it.nivel,acc,'presupuesto',(Number(_d.human_current)>0)?Number(_d.human_current):it.budget,_aplicado)
       // NUEVO (20jul26 · presupuesto acumulativo): tras aplicar con ÉXITO, el nuevo pasa a ser
       // el ACTUAL en memoria (sin recargar): así el próximo "subir" parte del valor ya subido.
       // 🛡️ (22jul26): el valor que se guarda es el que META RESPONDIÓ (human_new) — el mismo
@@ -31972,8 +32139,10 @@ window._massRun=async()=>{
           const _ba=(window._metaPort&&window._metaPort.campsActivasByAcc)||{}
           for(const _a in _ba){for(const _c of (_ba[_a]||[])){if(String(_c.meta_id)===String(it.meta_id)){if(_c.lifetime_budget&&!_c.daily_budget)_c.lifetime_budget=_aplicado;else _c.daily_budget=_aplicado}}}
         }catch(_){}
-        if(r.campo&&Number(r.raw_new)>0){try{await sb.from('meta_campanas').update({[r.campo]:Number(r.raw_new)}).eq('meta_id',String(it.meta_id))}catch(_){}}
-        if(row&&Number(r.human_new)>0){const _pvEl=document.getElementById('massbud-pv-'+it.meta_id);if(_pvEl)_pvEl.innerHTML=`Nuevo: <strong style="color:var(--green)">$${fmt(_aplicado)}</strong> <span style="font-size:9px;color:var(--muted)">(confirmado por Meta)</span>`}
+        if(_d.campo&&Number(_d.raw_new)>0){try{await sb.from('meta_campanas').update({[_d.campo]:Number(_d.raw_new)}).eq('meta_id',String(it.meta_id))}catch(_){}}
+        if(row&&Number(_d.human_new)>0){const _pvEl=document.getElementById('massbud-pv-'+it.meta_id);if(_pvEl)_pvEl.innerHTML=`Nuevo: <strong style="color:var(--green)">$${fmt(_aplicado)}</strong> <span style="font-size:9px;color:var(--muted)">(confirmado por Meta)</span>`}
+        // 📌 lo que se PIDIÓ vs lo que Meta guardó — lo compara la auditoría final (_massBudAuditar)
+        it._pedido=nuevo;it._modo=pi.mode;it._pct=(pi.mode==='pct'?pi.val:null);it._antes=_antesDeAplicar
       }
     }else{
       const status=st.action==='activar'?'ACTIVE':'PAUSED'
@@ -31999,6 +32168,77 @@ window._massRun=async()=>{
       foot.innerHTML=`<span style="font-size:12px;float:left;color:var(--muted)">✅ ${okN} · ❌ ${errN} · cambios ya aplicados en Meta (se ven al recargar manual)</span><button class="btn-sm btn-blue" onclick="closeModal();window._massState=null">Listo</button>`
     }
   }
+  // 🚨 (3ago26) Auditoría final: se le vuelve a preguntar a Meta y se avisa si algo no cuadró
+  if(st.action==='presupuesto')await window._massBudAuditar(sel)
+}
+// ════════════════════════════════════════════════════════════════════════════
+// 🚨 AUDITORÍA DESPUÉS DE APLICAR (3ago26) — "si no salió bien, que me avise"
+// ─────────────────────────────────────────────────────────────────────────────
+// Terminada la corrida se le VUELVE A PREGUNTAR a Meta cuánto quedó de verdad en
+// cada nodo y se compara contra lo que TÚ pediste. Si no coincide, sale un panel
+// rojo con el detalle (pediste X · quedó Y · factor) y además un alert que no se
+// puede pasar por alto. Nada queda mudo: un 50.000 que terminó en 5.000.000 se ve.
+window._massBudAuditar=async(sel)=>{
+  try{
+    const st=window._massState;if(!st)return
+    const foot=document.getElementById('massrun-foot');if(!foot)return
+    const off=((st.escala&&st.escala.off)||1)
+    const aplicadas=(sel||[]).filter(it=>it&&it._modo)
+    if(!aplicadas.length)return
+    foot.insertAdjacentHTML('afterbegin','<div id="massaudit-box" style="border:1px solid var(--amber);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12px;color:var(--amber);text-align:left">🔍 Auditando con Meta lo que quedó realmente…</div>')
+    let token=null;try{token=await getConfig('meta_access_token')}catch(_){}
+    const real={}
+    if(token){
+      for(let i=0;i<aplicadas.length;i+=50){
+        const lote=aplicadas.slice(i,i+50)
+        try{
+          const r=await fetch(`${META_BASE}/?ids=${lote.map(x=>x.meta_id).join(',')}&fields=daily_budget,lifetime_budget&access_token=${token}`)
+          const j=r.ok?await r.json():null
+          if(!j||j.error)continue
+          for(const it of lote){
+            const o=j[it.meta_id];if(!o||o.error)continue
+            const raw=(parseInt(o.daily_budget)||0)||(parseInt(o.lifetime_budget)||0)
+            if(raw>0)real[String(it.meta_id)]=Math.round(raw/off)
+          }
+        }catch(_){}
+      }
+    }
+    const malas=[],sinDato=[]
+    for(const it of aplicadas){
+      const quedo=real[String(it.meta_id)]
+      if(!(quedo>0)){sinDato.push(it);continue}
+      // Lo que DEBÍA quedar: en % se calcula sobre el valor previo; en monto, el monto pedido
+      const esperado=(it._modo==='pct')?Math.round((Number(it._antes)||0)*(1+(Number(it._pct)||0)/100)):(Number(it._pedido)||0)
+      if(!(esperado>0))continue
+      const tol=Math.max(esperado*0.05,2) // Meta redondea y puede subir a su mínimo: 5% de holgura
+      if(Math.abs(quedo-esperado)<=tol)continue
+      const factor=quedo/esperado
+      malas.push({it,esperado,quedo,factor,grave:(factor>=5||factor<=0.2)})
+    }
+    const box=document.getElementById('massaudit-box');if(!box)return
+    if(!malas.length&&!sinDato.length){
+      box.style.borderColor='var(--green)';box.style.color='var(--green)'
+      box.innerHTML=`✅ Auditado con Meta: los ${aplicadas.length} presupuesto(s) quedaron EXACTAMENTE como los pediste.`
+      return
+    }
+    const graves=malas.filter(m=>m.grave).length
+    const filas=malas.map(m=>`<div style="padding:5px 0;border-top:1px solid var(--border)">
+      <div style="color:var(--text);font-weight:600;white-space:normal;word-break:break-word">${m.grave?'🚨':'⚠️'} ${_dmEsc(m.it.nombre||m.it.meta_id)}</div>
+      <div style="color:var(--muted);font-size:11px">ID ${_dmEsc(m.it.meta_id)} · pediste <strong style="color:var(--text)">$${fmt(m.esperado)}</strong> · en Meta quedó <strong style="color:var(--red)">$${fmt(m.quedo)}</strong> · factor <strong style="color:${m.grave?'var(--red)':'var(--amber)'}">×${(m.factor>=1?m.factor:1/m.factor).toFixed(m.factor>=1?1:2)}${m.factor<1?' (a la baja)':''}</strong></div>
+    </div>`).join('')
+    const filasSD=sinDato.length?`<div style="padding:5px 0;border-top:1px solid var(--border);color:var(--amber);font-size:11px">❔ ${sinDato.length} sin confirmar — Meta no devolvió el presupuesto al auditar: ${sinDato.slice(0,6).map(x=>_dmEsc(x.meta_id)).join(', ')}${sinDato.length>6?'…':''}. Revísalas a mano en el administrador de anuncios.</div>`:''
+    box.style.borderColor=graves?'var(--red)':'var(--amber)'
+    box.style.color='var(--text)'
+    box.innerHTML=`<div style="font-weight:800;color:${graves?'var(--red)':'var(--amber)'};margin-bottom:4px">${graves?'🚨':'⚠️'} AUDITORÍA: ${malas.length} presupuesto(s) NO quedaron como los pediste${sinDato.length?` · ${sinDato.length} sin confirmar`:''}</div>
+      <div style="color:var(--muted);font-size:11px;margin-bottom:2px">Comparado contra Meta después de aplicar. Corrígelos antes de seguir.</div>
+      ${filas}${filasSD}`
+    let msg='🚨 REVISIÓN DE PRESUPUESTO\n\n'+malas.length+' presupuesto(s) NO quedaron como los pediste:\n\n'
+    for(const m of malas.slice(0,8))msg+=`• ${m.it.nombre||m.it.meta_id}\n   pediste $${fmt(m.esperado)} → quedó $${fmt(m.quedo)}\n`
+    if(malas.length>8)msg+=`…y ${malas.length-8} más (ver el panel rojo).\n`
+    if(sinDato.length)msg+=`\n❔ ${sinDato.length} sin confirmar (Meta no respondió al auditar).\n`
+    msg+='\nEl detalle completo quedó en la ventana.'
+    if(malas.length||sinDato.length)alert(msg)
+  }catch(e){console.warn('[massBudAuditar]',e&&e.message)}
 }
 // NUEVO (fallidas visibles): re-corre la pasada masiva SOLO con las que fallaron.
 // Presupuesto: st.perItem sigue intacto, así que los montos escritos se conservan.
@@ -40966,6 +41206,7 @@ window._massBudVerificar=async(soloFallidas)=>{
   }
   window._massVerifUI()
   let token=null
+  const _crudo={} // meta_id → número CRUDO de Meta (sin dividir) — la escala se decide después
   try{token=await getConfig('meta_access_token')}catch(_){}
   if(token){
     for(let i=0;i<pend.length;i+=50){
@@ -40977,15 +41218,25 @@ window._massBudVerificar=async(soloFallidas)=>{
         for(const it of batch){
           const o=j&&j[it.meta_id]
           const raw=o?(parseInt(o.daily_budget)||parseInt(o.lifetime_budget)||0):0
-          if(raw>0){
-            // Derivar la escala igual que la Edge Function: crudo vs el valor conocido → ÷1 o ÷100
-            let off=100
-            if(it.budget>0){const rel=raw/it.budget;off=Math.abs(rel-1)<Math.abs(rel-100)?1:100}
-            it.budget=Math.round(raw/off)
-            it.verificado=true
-          }else it.verificado=false
+          if(raw>0)_crudo[String(it.meta_id)]=raw
+          else it.verificado=false
         }
       }catch(_){for(const it of batch)it.verificado=false}
+    }
+    // 💵 RAÍZ (3ago26): la escala NO se adivina por tarjeta (antes: default ÷100 cuando no había
+    // con qué comparar → "Actual" 100 veces más chico → la Edge Function mandaba ×100 a Meta).
+    // Una cuenta = una moneda = UNA escala: la de la corrida (st.escala) o, si no hay, la que
+    // salga por mayoría de todas las anclas juntas. Ver _massBudEscalaCuenta.
+    const _anc=[]
+    for(const it of pend){const raw=_crudo[String(it.meta_id)];if(raw>0&&Number(it.budget)>0)_anc.push({raw,local:Number(it.budget)})}
+    const _escNueva=window._massBudEscalaCuenta(_anc)
+    const _escPrev=st.escala
+    const _esc=(_escPrev&&_escPrev.anclas>0&&_escPrev.seguro)?_escPrev:((_escNueva.anclas>0)?_escNueva:(_escPrev||_escNueva))
+    st.escala=_esc
+    for(const it of pend){
+      const raw=_crudo[String(it.meta_id)]
+      if(raw>0){it.budget=Math.round(raw/(_esc.off||1));it.verificado=true}
+      else if(it.verificado===undefined)it.verificado=false
     }
   }else{for(const it of pend)it.verificado=false}
   // Pintar el resultado en cada tarjeta (el MISMO número del administrador de anuncios)
@@ -41192,10 +41443,11 @@ window.presupVerifYAbrir=async(metaId,nombre,accountId,btn)=>{
     const rawD=parseInt(j.daily_budget)||0,rawL=parseInt(j.lifetime_budget)||0,raw=rawD||rawL
     if(raw>0){
       // CBO real mal clasificada → reparar la copia y abrir el modal con el vivo
-      let off=100
+      // 💵 (3ago26) MISMA regla de escala que el modal masivo — una sola fuente de verdad
+      // (_massBudEscalaCuenta), sin default a 100: sin ancla confiable, el crudo de Meta ES el
+      // peso (convención de todo NEXO: modalPresupuesto, meta_campanas y el portafolio).
       const _ov=(window._nexoBudgetOverride||{})[String(metaId)]
-      if(_ov>0){const rel=raw/_ov;off=Math.abs(rel-1)<Math.abs(rel-100)?1:100}
-      else off=1 // sin referencia local: el modal de una campaña usa el crudo tal cual (comportamiento de siempre)
+      const off=window._massBudEscalaCuenta([{raw,local:_ov}]).off
       const disp=Math.round(raw/off)
       try{
         await sb.from('meta_campanas').update(rawD>0?{daily_budget:rawD}:{lifetime_budget:rawL}).eq('meta_id',String(metaId))

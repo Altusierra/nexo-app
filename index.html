@@ -31512,6 +31512,112 @@ window.massStart=async(accountId,action,listaOverride)=>{
   })
   window._massState={action,accountId,items,selected:new Set(),perItem:{},filtroUrg:'all',budItems:null}
   window._massRenderSelect()
+  // NUEVO (4ago26): el monto que se ve al MARCAR se confirma EN VIVO con Meta (ver _massVerifBudgetsVivo).
+  // Va sin await para que el modal abra instantáneo; las celdas se repintan solas cuando Meta contesta.
+  if(action==='presupuesto'){try{window._massVerifBudgetsVivo()}catch(_){}}
+}
+// ════════════════════════════════════════════════════════════════════════════
+// 💰 PASO 1 EN VIVO (4ago26) — el presupuesto que se ve AL MARCAR ya no es la copia local
+// ─────────────────────────────────────────────────────────────────────────────
+// RAÍZ: la lista del paso 1 pintaba c.daily_budget||c.lifetime_budget, o sea la COPIA
+// (meta_campanas / campsActivasByAcc / override de la sesión). Si esa copia está vieja
+// —presupuesto cambiado por fuera de NEXO, campaña clonada, CBO mal marcada como ABO—
+// el owner decide a cuáles subirles plata MIRANDO UN NÚMERO QUE NO ES EL REAL.
+// El paso 2 ya le pregunta a Meta; ahora el paso 1 hace EXACTAMENTE lo mismo:
+//   · lotes de 50 + REINTENTO uno-por-uno (un ID malo ya no tumba a los otros 49)
+//   · UNA sola escala para toda la corrida (_massBudEscalaCuenta) — jamás un default por tarjeta
+//   · lo que Meta NO confirme NO se adivina: queda "⚠️ sin confirmar" con el local en gris
+//   · repinta EN SITIO (no re-renderiza el modal → no pierde buscador, scroll ni lo ya marcado)
+//   · si el número cambió, se ve el viejo tachado → el nuevo (nada se corrige a escondidas)
+// ════════════════════════════════════════════════════════════════════════════
+window._massBudCellHTML=(it)=>{
+  const v=(it&&it._budVerif)||''
+  if(v==='pend')return `<span style="color:var(--amber)" title="Preguntándole a Meta el presupuesto vivo de esta campaña">⏳ verificando…</span>`
+  if(v==='err')return `<span style="color:var(--amber)" title="Meta no respondió por esta campaña — el monto es la copia local, SIN confirmar">⚠️ sin confirmar</span> <span style="color:var(--muted)">$${fmt(it.budget)}</span>`
+  if(v==='abo')return `<span style="color:var(--muted)" title="Meta confirma que esta campaña NO tiene presupuesto propio: vive en sus conjuntos. Al continuar se abren.">📦 ABO · presupuesto en sus conjuntos</span>`
+  if(v==='ok'){
+    const _ant=(it._budLocal!=null&&Number(it._budLocal)!==Number(it.budget))?`<s style="color:var(--muted)" title="Lo que decía la copia local (estaba viejo)">$${fmt(it._budLocal)}</s> → `:''
+    return `${_ant}<span style="color:var(--accent)">$${fmt(it.budget)}</span> <span style="font-size:11px;color:var(--green)" title="Monto vivo confirmado con Meta">CBO ✓</span>`
+  }
+  return `<span style="color:var(--accent)">$${fmt(it.budget)}</span> <span style="font-size:11px;color:var(--muted)">${it.esCBO?'CBO':'ABO'}</span>`
+}
+window._massPintarBudCelda=(it)=>{
+  try{const el=document.getElementById('massel-bud-'+it.meta_id);if(el)el.innerHTML=window._massBudCellHTML(it)}catch(_){}
+}
+window._massVerifBudgetsVivo=async()=>{
+  const st=window._massState
+  if(!st||st.action!=='presupuesto'||!Array.isArray(st.items)||!st.items.length)return
+  const run=(st._budRun=(st._budRun||0)+1)
+  // se calla sola si: cerró el modal, arrancó otra corrida, o ya pasó al paso 2 (st.budItems)
+  const vivo=()=>(window._massState===st&&st._budRun===run&&!st.budItems)
+  const _res=(html)=>{if(!vivo())return;st._budResumen=html;const d=document.getElementById('mass-budverif');if(d)d.innerHTML=html}
+  let tk=null
+  try{tk=await getConfig('meta_access_token')}catch(_){}
+  if(!vivo())return
+  if(!tk){_res('<span style="color:var(--amber)">⚠️ Sin token de Meta configurado — los montos de abajo son la copia local, SIN confirmar.</span>');return}
+  _res('<span style="color:var(--amber)">⏳ Confirmando con Meta el presupuesto vivo de '+st.items.length+' campañas…</span>')
+  for(const it of st.items){if(it._budLocal==null)it._budLocal=Number(it.budget)||0;it._budVerif='pend';window._massPintarBudCelda(it)}
+  const _pedir=async(ids)=>{ // devuelve el objeto de Meta o null si el lote entero falló
+    try{
+      const r=await fetch(`${META_BASE}/?ids=${ids.join(',')}&fields=daily_budget,lifetime_budget&access_token=${tk}`)
+      if(!r.ok)return null
+      const j=await r.json()
+      if(!j||j.error)return null
+      return j
+    }catch(_){return null}
+  }
+  const resp={},pend=[]
+  for(let i=0;i<st.items.length;i+=50){
+    if(!vivo())return
+    const lote=st.items.slice(i,i+50)
+    const j=await _pedir(lote.map(c=>c.meta_id))
+    if(!j){for(const c of lote)pend.push(c);continue} // lote caído → uno por uno
+    for(const c of lote){const o=j[String(c.meta_id)];if(o&&!o.error)resp[String(c.meta_id)]=o;else pend.push(c)}
+  }
+  for(const c of pend){
+    if(!vivo())return
+    const j=await _pedir([c.meta_id])
+    const o=j&&j[String(c.meta_id)]
+    if(o&&!o.error)resp[String(c.meta_id)]=o
+  }
+  if(!vivo())return
+  // 1) Escala ÚNICA de la corrida (misma ley que el paso 2): una cuenta = una moneda = una escala
+  const anclas=[]
+  for(const c of st.items){
+    const o=resp[String(c.meta_id)];if(!o)continue
+    const raw=(parseInt(o.daily_budget)||0)||(parseInt(o.lifetime_budget)||0)
+    if(raw>0)anclas.push({raw,local:Number(c._budLocal)||0})
+  }
+  const esc=window._massBudEscalaCuenta(anclas)
+  st.escalaPaso1=esc
+  // 2) Aplicar lo que Meta dijo — y SOLO eso
+  let nOK=0,nABO=0,nErr=0,nCorr=0
+  for(const c of st.items){
+    const o=resp[String(c.meta_id)]
+    if(!o){c._budVerif='err';nErr++;window._massPintarBudCelda(c);continue}
+    const rawD=parseInt(o.daily_budget)||0,rawL=parseInt(o.lifetime_budget)||0,raw=rawD||rawL
+    if(raw>0){
+      const val=Math.round(raw/esc.off)
+      if(val!==(Number(c._budLocal)||0))nCorr++
+      c.budget=val;c.esCBO=true;c._budVerif='ok';nOK++
+      try{ // curar la copia en memoria (misma cura que ya usa presupVerifYAbrir) — sin escribir BD aquí
+        window._nexoBudgetOverride=window._nexoBudgetOverride||{};window._nexoBudgetOverride[String(c.meta_id)]=val
+        if(esc.off===1){ // campsActivasByAcc guarda el CRUDO de Meta; solo se toca si crudo===pesos
+          const _ba=(window._metaPort&&window._metaPort.campsActivasByAcc)||{}
+          for(const _a in _ba){for(const _c of (_ba[_a]||[])){if(String(_c.meta_id)===String(c.meta_id)){if(rawD>0)_c.daily_budget=rawD;else _c.lifetime_budget=rawL}}}
+        }
+      }catch(_){}
+    }else{c.esCBO=false;c._budVerif='abo';nABO++} // Meta respondió SIN presupuesto de campaña → ABO real
+    window._massPintarBudCelda(c)
+  }
+  const _p=[]
+  _p.push('<span style="color:var(--green)">✅ '+nOK+' con presupuesto vivo de Meta</span>')
+  if(nCorr)_p.push('<span style="color:var(--accent)">✏️ '+nCorr+' venían mal en la copia local y ya quedaron con el real</span>')
+  if(nABO)_p.push('<span style="color:var(--muted)">📦 '+nABO+' ABO (su presupuesto vive en los conjuntos)</span>')
+  if(nErr)_p.push('<span style="color:var(--amber)">⚠️ '+nErr+' sin respuesta de Meta — quedan con el monto local SIN confirmar</span>')
+  if(esc.anclas&&!esc.seguro)_p.push('<span style="color:var(--amber)">⚠️ escala del dinero con anclas contradictorias — revisa los montos antes de aplicar</span>')
+  _res(_p.join(' · '))
+  if(nCorr||nErr){try{logAction('mass_presup_paso1_verif',{ok:nOK,corregidas:nCorr,abo:nABO,sin_meta:nErr,escala:esc.off,anclas:esc.anclas}).catch(()=>{})}catch(_){}}
 }
 window._massMatchable=(it)=>{
   const st=window._massState;if(!st)return true
@@ -31542,7 +31648,9 @@ window._massRenderSelect=()=>{
     const checked=st.selected.has(it.meta_id)?'checked':''
     const badge=it.semCode?window.nexoBadgeMega(it.semCode,'sm',false):''
     const estTxt=it.estado==='ACTIVE'?'<span style="color:var(--green)">🟢 activa</span>':'<span style="color:var(--muted)">⚫ pausada</span>'
-    const budTxt=st.action==='presupuesto'?` · <span style="color:var(--accent)">$${fmt(it.budget)}</span> <span style="font-size:11px;color:var(--muted)">${it.esCBO?'CBO':'ABO'}</span>`:''
+    // 4ago26: la celda del monto se pinta por _massBudCellHTML (mismo HTML de siempre mientras no
+    // haya verificación) y lleva id propio para que Meta la repinte EN SITIO, sin re-render del modal.
+    const budTxt=st.action==='presupuesto'?` · <span id="massel-bud-${it.meta_id}">${window._massBudCellHTML(it)}</span>`:''
     const _srch=(String(it.meta_id)+' '+_normProd(it.nombre||''))
     return `<label class="mass-item" data-mid="${it.meta_id}" data-search="${_srch}" style="display:flex;align-items:center;gap:9px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:5px;${ok?'':'opacity:.4'}">
       <input type="checkbox" ${checked} ${ok?'':'disabled'} onchange="massToggle('${it.meta_id}')" style="width:18px;height:18px;flex-shrink:0">
@@ -31556,6 +31664,7 @@ window._massRenderSelect=()=>{
   openModal(`
     <div class="modal-title" style="color:${cfg.color}">${cfg.t}</div>
     <div style="font-size:12px;color:var(--muted);margin-bottom:6px">${cfg.hint}</div>
+    ${st.action==='presupuesto'?`<div id="mass-budverif" style="font-size:11.5px;line-height:1.5;margin-bottom:7px">${st._budResumen||''}</div>`:''}
     <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">${filtroBtns}</div>
     <input id="mass-search" type="text" placeholder="🔎 Buscar por ID o nombre..." oninput="massBuscar()" autocomplete="off" style="width:100%;padding:8px 10px;margin-bottom:8px;background:var(--card);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:12px;outline:none">
     <div style="display:flex;gap:6px;margin-bottom:8px">

@@ -19827,19 +19827,46 @@ async function waEncolarNovedadesAuto(items,loteFecha){
 window._waChipData={estados:{},numeros:[]}
 async function _waChipCargar(){
   try{
-    const[{data:tpls},{data:nums}]=await Promise.all([
-      sb.from('wa_plantillas').select('nombre,estado,waba_id,cuerpo_meta,footer,boton,variables'),
-      sb.from('wa_numeros').select('id,etiqueta,display,waba_id,phone_number_id,seccion,secciones').eq('modo','api').eq('estado','activo') // (26jul26) sección para filtrar chips coherentes
-    ])
-    const est={},cont={}
+    // (11ago26) 🏷️ CATEGORÍA DE META (Utilidad / Marketing / Autenticación).
+    // Se pide en un intento aparte porque la columna `categoria` puede NO existir
+    // todavía en wa_plantillas: si no está, Supabase devuelve error y el select
+    // entero se cae — y con él TODOS los chips. Por eso: primero se intenta CON
+    // categoria; si falla, se repite SIN ella y todo sigue funcionando igual.
+    let tpls=null
+    {
+      const r1=await sb.from('wa_plantillas').select('nombre,estado,waba_id,cuerpo_meta,footer,boton,variables,categoria')
+      if(!r1.error)tpls=r1.data
+      else{
+        const r2=await sb.from('wa_plantillas').select('nombre,estado,waba_id,cuerpo_meta,footer,boton,variables')
+        tpls=r2.data
+        window._waSinColCategoria=true // para avisar en el panel de Textos
+      }
+    }
+    const{data:nums}=await sb.from('wa_numeros').select('id,etiqueta,display,waba_id,phone_number_id,seccion,secciones').eq('modo','api').eq('estado','activo') // (26jul26) sección para filtrar chips coherentes
+    const est={},cont={},cat={}
     ;(tpls||[]).forEach(t=>{
       (est[t.nombre]=est[t.nombre]||{})[t.waba_id]=t.estado
+      if(t.categoria&&!cat[t.nombre])cat[t.nombre]=String(t.categoria).toUpperCase()
       // Lo que Meta tiene REALMENTE guardado, para detectar textos desfasados
       if(!cont[t.nombre]&&t.cuerpo_meta)cont[t.nombre]={cuerpo:t.cuerpo_meta,footer:t.footer||null,boton:t.boton||null,vars:t.variables||null}
     })
-    window._waChipData={estados:est,contenido:cont,numeros:(nums||[]).filter(n=>n.phone_number_id&&n.waba_id)}
+    window._waChipData={estados:est,contenido:cont,categorias:cat,numeros:(nums||[]).filter(n=>n.phone_number_id&&n.waba_id)}
     await _waTplNombresCargar(true) // ✏️ sobrenombres al día antes de pintar las cards
-  }catch(_){window._waChipData={estados:{},numeros:[]}}
+  }catch(_){window._waChipData={estados:{},categorias:{},numeros:[]}}
+}
+// (11ago26) 🏷️ Chip de categoría: al lado del estado, para ver de un vistazo si
+// Meta la cobra como Utilidad (barata) o Marketing (cara). Si no hay dato, no pinta nada.
+function _waCatChip(nombre){
+  const c=((window._waChipData||{}).categorias||{})[nombre]
+  if(!c)return ''
+  const M={
+    UTILITY:['🔧 Utilidad','var(--green)','Servicio: habla de un pedido que YA existe. Es la categoría barata y la correcta para tu operación.'],
+    MARKETING:['📣 Marketing','var(--amber)','Meta la cobra como promocional — cuesta MÁS por mensaje. Si no querías esto, revisa el texto o la Edge Function wa-send.'],
+    AUTHENTICATION:['🔐 Autenticación','var(--red)','⚠️ Meta la leyó como código de verificación. Casi seguro es el combo "documento + indicar un número al asesor". Quítalo.'],
+    SERVICE:['🔧 Utilidad','var(--green)','Servicio: habla de un pedido que YA existe.']
+  }
+  const d=M[c]||['🏷️ '+c,'var(--muted)','Categoría reportada por Meta.']
+  return ` · <span title="${_waEsc(d[2])}" style="color:${d[1]};font-weight:700;font-size:10.5px;border:1px solid ${d[1]};border-radius:20px;padding:0 7px">${d[0]}</span>`
 }
 window._waTplTextos=window._waTplTextos||{}
 
@@ -20438,10 +20465,10 @@ function _waChipMulti(nombre,texto,secFiltro,footer,boton,destino){
   const wabasVis=new Set(nums.map(n=>n.waba_id))
   const vals=Object.keys(porWaba).filter(w=>!secFiltro||secFiltro==='entrantes'||wabasVis.has(w)).map(w=>porWaba[w])
   const global=vals.includes('APPROVED')?'APPROVED':vals.includes('PENDING')?'PENDING':vals.includes('REJECTED')?'REJECTED':null
-  const chipG=global==='APPROVED'?'<span style="color:var(--green);font-weight:700">🟢 aprobada en Meta</span>'
+  const chipG=(global==='APPROVED'?'<span style="color:var(--green);font-weight:700">🟢 aprobada en Meta</span>'
     :global==='PENDING'?'<span style="color:#3b82f6;font-weight:700">🔵 en revisión de Meta</span>'
     :global==='REJECTED'?'<span style="color:var(--red);font-weight:700">🔴 rechazada por Meta — renómbrala con ✏️ para reintentar</span>'
-    :'<span style="color:#94a3b8;font-weight:700">⚪ sin enviar a aprobación</span>'
+    :'<span style="color:#94a3b8;font-weight:700">⚪ sin enviar a aprobación</span>')+(typeof _waCatChip==='function'?_waCatChip(nombre):'') // (11ago26) 🏷️ + categoría real de Meta
   // circulitos por número: estado de la plantilla en SU portafolio
   const bolas=nums.map(n=>{
     const e=porWaba[n.waba_id]

@@ -11867,11 +11867,17 @@ function armarMensajeConfirmacion(item,idxTpl){
   const cantTxt=item.cantidad?`${item.cantidad} unidad${item.cantidad>1?'es':''}`:'[CANTIDAD]'
   const fechaFmt=item.fecha_envio_programada?new Date(item.fecha_envio_programada+'T00:00:00').toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long'}):'[FECHA_ENVIO]'
   const _telCli=String(item.telefono||'').replace(/\D/g,'')
+  // (11ago26) +[TRANSPORTADORA] y [TOTAL]: sin esto salían LITERALES en el mensaje manual.
+  const _carrTxt=item.carrier||item.transportadora||'la transportadora'
+  const _totC=(typeof _cancTotal==='function')?_cancTotal(item):null
   return _aplicarNombreSaludo(tpl,item.nombre_cliente)
     .replace(/\[PRODUCTO\]/g,prodNom)
     .replace(/\[CANTIDAD\]/g,cantTxt)
     .replace(/\[CIUDAD\]/g,item.ciudad||'[CIUDAD]')
     .replace(/\[FECHA_ENVIO\]/g,fechaFmt)
+    .replace(/\[TRANSPORTADORA\]/g,_carrTxt)
+    .replace(/\[CARRIER\]/g,_carrTxt)
+    .replace(/\[TOTAL\]/g,_totC!=null&&_totC>0?('$'+fmt(_totC)):'el total del pedido')
     +(_telCli?`\n\n📞 ${_telCli}`:'')
 }
 
@@ -11906,10 +11912,16 @@ function armarMensajePsf(m,idxTpl){
   const prodNom=(typeof resolveProdName==='function'?(resolveProdName(m.producto)||{}).nombre:null)||m.producto||'[PRODUCTO]'
   const cantTxt=m.cantidad?`${m.cantidad} unidad${m.cantidad>1?'es':''}`:'[CANTIDAD]'
   const _telCli=String(m.telefono||'').replace(/\D/g,'')
+  // (11ago26) +[TRANSPORTADORA] y [TOTAL]: sin esto salían LITERALES en el mensaje manual.
+  const _carrP=m.carrier||m.transportadora||'la transportadora'
+  const _totP=(typeof _cancTotal==='function')?_cancTotal(m):null
   return _aplicarNombreSaludo(tpl,m.nombre_cliente)
     .replace(/\[PRODUCTO\]/g,prodNom)
     .replace(/\[CANTIDAD\]/g,cantTxt)
     .replace(/\[CIUDAD\]/g,m.ciudad||'[CIUDAD]')
+    .replace(/\[TRANSPORTADORA\]/g,_carrP)
+    .replace(/\[CARRIER\]/g,_carrP)
+    .replace(/\[TOTAL\]/g,_totP!=null&&_totP>0?('$'+fmt(_totP)):'el total del pedido')
     +(_telCli?`\n\n📞 ${_telCli}`:'')
 }
 
@@ -12039,7 +12051,7 @@ async function cargarPendientesConfirmacion(){
     let mapeos=[]
     for(let i=0;i<mapeoIds.length;i+=100){
       const batch=mapeoIds.slice(i,i+100)
-      const{data}=await sb.from('mapeos').select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha').in('id',batch)
+      const{data}=await sb.from('mapeos').select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,transportadora,precio_dropi,producto_id,abono').in('id',batch) // (11ago26) +transportadora (la columna se llama ASÍ, no 'carrier') +precio_dropi/producto_id/abono para [TOTAL]
       if(data)mapeos=mapeos.concat(data)
     }
     const mapById={}
@@ -12074,9 +12086,10 @@ async function cargarPendientesConfirmacion(){
         producto:m.producto,
         cantidad:m.cantidad,
         ciudad:m.ciudad,
-        carrier:m.carrier,
+        carrier:m.transportadora||m.carrier||'', // (11ago26) 🐛 BUG: leía m.carrier, pero en mapeos la columna se llama 'transportadora' → siempre salía "sin carrier"
         fecha_compra:m.fecha,
         fecha_envio_programada:p.fecha_envio_programada,
+        precio_dropi:m.precio_dropi,producto_id:m.producto_id,abono:m.abono, // (11ago26) para [TOTAL]
         nota:p.motivo,
         dias_falta:diasFalta,
         envios_total:todosEnvios.length,
@@ -12221,13 +12234,13 @@ async function cargarPendientesSinFecha(){
     // Limitamos a últimos 90 días para no traer historia infinita
     const hace90=_isoDate(new Date(Date.now()-90*24*60*60*1000))
     const{data:pendA,error:e1}=await _sbFetchAll((_f,_t)=>sb.from('mapeos')
-      .select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,fecha_dropi,estado_inicial,estado_final,created_at')
+      .select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,fecha_dropi,estado_inicial,estado_final,created_at,transportadora,precio_dropi,producto_id,abono')
       .in('estado_final',['PENDIENTE CONFIRMACION'])
       .gte('fecha',hace90)
       .order('fecha',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
     if(e1)throw e1
     const{data:pendB,error:e2}=await _sbFetchAll((_f,_t)=>sb.from('mapeos')
-      .select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,fecha_dropi,estado_inicial,estado_final,created_at')
+      .select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,fecha_dropi,estado_inicial,estado_final,created_at,transportadora,precio_dropi,producto_id,abono')
       .eq('estado_inicial','PENDIENTE CONFIRMACION')
       .is('estado_final',null)
       .gte('fecha',hace90)
@@ -14552,6 +14565,14 @@ function _waValorReal(tag,m){
   const prodNom=(typeof resolveProdName==='function'?(resolveProdName(m.producto)||{}).nombre:null)||m.producto||'su pedido'
   const _tot=(typeof _cancTotal==='function')?_cancTotal(m):null
   const _sal=(typeof _cancSaldo==='function')?_cancSaldo(m):null
+  // (11ago26) 🐛 ARREGLO [FECHA_ENVIO]: antes NO existía en este switch y caía en
+  // el default '—', así que al cliente le llegaba "Despacho programado: —".
+  // Mismo formato que el envío manual (armarMensajeConfirmacion): "lunes, 13 de agosto".
+  const _fRaw=m.fecha_envio_programada||m.fecha_envio||null
+  let _fTxt=null
+  if(_fRaw){
+    try{_fTxt=new Date(String(_fRaw).slice(0,10)+'T00:00:00').toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long'})}catch(_){_fTxt=null}
+  }
   switch(tag){
     case 'NOMBRE':return m.nombre||'cliente'
     case 'PRODUCTO':return prodNom
@@ -14562,6 +14583,8 @@ function _waValorReal(tag,m){
     case 'GUIA':return m.guia||'tu guía'
     case 'TOTAL':return _tot!=null?('$'+fmt(_tot)):'el total'
     case 'SALDO':return _sal!=null?('$'+fmt(_sal)):'el saldo'
+    case 'FECHA_ENVIO':
+    case 'FECHA':return _fTxt||'la fecha programada'
     default:return '—'
   }
 }
@@ -17979,8 +18002,8 @@ const _TXT_EJEMPLOS={
 const _TXT_TODAS=['[NOMBRE]','[PRODUCTO]','[CANTIDAD]','[CIUDAD]','[FECHA_ENVIO]','[TRANSPORTADORA]','[CARRIER]','[GUIA]','[TOTAL]','[SALDO]','[TELÉFONO]','[DIRECCIÓN COMPLETA]']
 // Set REAL por sección (verificado en armarMensaje*). Solo se valida lo que llega al CLIENTE.
 const _TXT_VALIDAS={
-  confirmacion:['[NOMBRE]','[PRODUCTO]','[CANTIDAD]','[CIUDAD]','[FECHA_ENVIO]'],
-  psf:['[NOMBRE]','[PRODUCTO]','[CANTIDAD]','[CIUDAD]'],
+  confirmacion:['[NOMBRE]','[PRODUCTO]','[CANTIDAD]','[CIUDAD]','[FECHA_ENVIO]','[TRANSPORTADORA]','[TOTAL]'], // (11ago26) +TRANSPORTADORA (columna real de mapeos) +TOTAL: más datos reales = más confianza
+  psf:['[NOMBRE]','[PRODUCTO]','[CANTIDAD]','[CIUDAD]','[TRANSPORTADORA]','[TOTAL]'], // (11ago26) +TRANSPORTADORA +TOTAL. NO lleva [FECHA_ENVIO]: estos pedidos aún no tienen fecha.
   cancelados:['[NOMBRE]','[PRODUCTO]','[CANTIDAD]','[CIUDAD]','[TRANSPORTADORA]','[TOTAL]','[SALDO]'],
   reclame:['[NOMBRE]','[PRODUCTO]','[CANTIDAD]','[CIUDAD]','[TRANSPORTADORA]','[CARRIER]','[GUIA]','[TOTAL]'],
   'novedades-msg':['[NOMBRE]','[PRODUCTO]','[CARRIER]','[TRANSPORTADORA]','[CANTIDAD]','[CIUDAD]','[GUIA]','[TOTAL]','[SALDO]'],
@@ -19164,7 +19187,11 @@ window.waCopiar=(txt,btn)=>{
 // textos — ya no se mezclan. 'reservado' (legado) sigue leyendo las dos, así lo
 // viejo no se queda sin plantillas mientras exista.
 const _WA_TPL_MAP={novedades:['novedades'],reclame:['reclame'],confirmacion:['confirmacion'],psf:['psf'],reservado:['confirmacion','psf'],cancelados:['cancelados'],entrantes:['entrantes']} // +entrantes (27jul26)
-const _WA_TPL_EJ={NOMBRE:'María',PRODUCTO:'Colágeno Premium',CANTIDAD:'2 unidades',GUIA:'014117806991',CIUDAD:'Bogotá',TRANSPORTADORA:'ENVIA',CARRIER:'ENVIA',TOTAL:'$120.000',FECHA:'28 de julio',FECHA_ENVIO:'28 de julio',DIRECCION:'Cra 10 #20-30'}
+// (11ago26) ⚠️ El revisor de Meta LEE estos ejemplos. 'Colágeno Premium' era un
+// suplemento y el manual advierte que puede activar la política de productos
+// restringidos. Se cambió por uno neutro (Audífonos inalámbricos ya fue APROBADO).
+// Las fechas ahora traen el mismo formato que sale de verdad ("jueves, 13 de agosto").
+const _WA_TPL_EJ={NOMBRE:'María',PRODUCTO:'Audifonos inalambricos',CANTIDAD:'2 unidades',GUIA:'240012345',CIUDAD:'Bogotá',TRANSPORTADORA:'ENVIA',CARRIER:'ENVIA',TOTAL:'$120.000',FECHA:'jueves, 13 de agosto',FECHA_ENVIO:'jueves, 13 de agosto',DIRECCION:'Cra 10 #20-30'}
 const _waTplSlug=(s)=>String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'')
 
 // Fuente de textos por sección: novedades vive en novedades_protocolos (campo msg);
@@ -19582,7 +19609,10 @@ function _waNormItem(m){
     nombre:m.nombre||m.nombre_cliente||'',
     producto:m.producto||'',cantidad:m.cantidad,
     ciudad:m.ciudad||'',carrier:m.carrier||m.transportadora||'',
-    guia:m.guia||'',precio_dropi:m.precio_dropi,abono:m.abono
+    guia:m.guia||'',precio_dropi:m.precio_dropi,abono:m.abono,producto_id:m.producto_id, // (11ago26) +producto_id: _cancTotal lo usa para sacar el precio del catálogo si no hay precio_dropi
+    // (11ago26) 🐛 ARREGLO: la fecha de envío programada NO se estaba arrastrando,
+    // así que [FECHA_ENVIO] llegaba al cliente como "—" en los envíos por API.
+    fecha_envio_programada:m.fecha_envio_programada||m.fecha_envio||m.fechaEnvio||null
   }
 }
 // Encolador para reclame/cancelados/reservado: usa la plantilla APROBADA de la

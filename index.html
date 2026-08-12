@@ -11838,20 +11838,28 @@ function _confDiasFalta(fechaEnvio){
   return Math.round((f-hoy)/(24*60*60*1000))
 }
 
+// (12ago26) 📅 FLUJO DE 3 MENSAJES — acordado y cerrado:
+//   · 2 días antes  → UN solo mensaje (idx 0)
+//   · 1 día antes   → DOS mensajes (idx 2 en la mañana, idx 3 al mediodía)
+//   · Día del envío → NINGUNO. El pedido sale hoy: solo ✅ Confirmar / ❌ Cancelar a mano.
+//   · Vencido       → NINGUNO. Se trabaja desde las píldoras ⏰/📨 Vencidos del Centro.
+// Devuelve puede:false cuando NO toca mandar nada, y motivo explica por qué.
+// ANTES pedía idx 1 el día 2-antes (2do mensaje) — esa plantilla NUNCA existió, así
+// que caía al fallback CONF_MSGS[0] y REPETÍA el mensaje de la mañana. Y los días
+// 0 y vencidos reusaban idx 3 ("sigue programado"), que ya no aplica.
 function getNivelMensajeConfirmacion(diasFalta,enviosHoy){
   if(diasFalta===2){
-    if(enviosHoy===0)return{idxTpl:0,etiqueta:'1er mensaje (2 días antes)',nivel:1}
-    return{idxTpl:1,etiqueta:'2do mensaje (2 días antes)',nivel:2}
+    if(enviosHoy===0)return{idxTpl:0,etiqueta:'1er mensaje (2 días antes)',nivel:1,puede:true}
+    return{idxTpl:0,etiqueta:'1er mensaje (2 días antes)',nivel:1,puede:false,motivo:'A 2 días va UN solo mensaje — ya salió hoy. El siguiente es mañana.'}
   }
   if(diasFalta===1){
-    if(enviosHoy===0)return{idxTpl:2,etiqueta:'1er mensaje (1 día antes)',nivel:1}
-    return{idxTpl:3,etiqueta:'2do mensaje (1 día antes)',nivel:2}
+    if(enviosHoy===0)return{idxTpl:2,etiqueta:'1er mensaje (1 día antes)',nivel:1,puede:true}
+    if(enviosHoy===1)return{idxTpl:3,etiqueta:'2do mensaje (1 día antes)',nivel:2,puede:true}
+    return{idxTpl:3,etiqueta:'2do mensaje (1 día antes)',nivel:2,puede:false,motivo:'Ya salieron los 2 mensajes de hoy.'}
   }
-  if(diasFalta<=0){
-    if(enviosHoy===0)return{idxTpl:3,etiqueta:'Día del envío — confirmar urgente',nivel:1}
-    return{idxTpl:3,etiqueta:'Día del envío — 2do mensaje',nivel:2}
-  }
-  return{idxTpl:0,etiqueta:'Recordatorio',nivel:1}
+  if(diasFalta===0)return{idxTpl:3,etiqueta:'Día del envío',nivel:2,puede:false,motivo:'HOY sale el pedido: ya no se mandan plantillas. Confirma o cancela a mano.'}
+  if(diasFalta<0)return{idxTpl:3,etiqueta:'Vencido',nivel:2,puede:false,motivo:'La fecha ya pasó. Trabájalo desde ⏰/📨 Vencidos en el Centro de Chats, o reprográmalo.'}
+  return{idxTpl:0,etiqueta:'1er mensaje (2 días antes)',nivel:1,puede:false,motivo:`Faltan ${diasFalta} días. El ciclo arranca 2 días antes del envío.`}
 }
 
 // Reemplaza [NOMBRE]: con nombre del cliente lo usa tal cual; sin nombre deja un
@@ -12104,7 +12112,14 @@ async function cargarPendientesConfirmacion(){
     else if(filtro==='vencidos')filtrados=enriched.filter(i=>i.dias_falta!=null&&i.dias_falta<0)
     filtrados.sort((a,b)=>(a.dias_falta-b.dias_falta)||(a.envios_hoy-b.envios_hoy))
     window._confCache={items:filtrados,fechaActiva:hoyStr}
-    try{waEncolarSeccionAuto('confirmacion',filtrados)}catch(_){} // (11ago26) ✂️ SPLIT: PASO 1 = pedidos que YA tienen fecha → sección 📅 confirmacion
+    // (12ago26) 📅 Tercer cerrojo del flujo de 3 mensajes. El 🤖 automático encolaba
+    // TODO lo que estuviera en pantalla — incluidos los del día del envío y los
+    // vencidos, que ya no deben recibir plantilla. Se filtra por la MISMA función
+    // que manda en la tarjeta y en el envío manual: una sola fuente de verdad.
+    const _paraEncolar=filtrados.filter(i=>{
+      try{return getNivelMensajeConfirmacion(i.dias_falta,i.envios_hoy).puede!==false}catch(_){return false}
+    })
+    try{waEncolarSeccionAuto('confirmacion',_paraEncolar)}catch(_){} // (11ago26) ✂️ SPLIT: PASO 1 = pedidos que YA tienen fecha → sección 📅 confirmacion
     renderPendientesConfirmacion(filtrados,filtro)
   }catch(e){
     el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
@@ -12161,7 +12176,11 @@ function renderPendientesConfirmacion(items,filtro){
 
     const fechaEnvioFmt=item.fecha_envio_programada?new Date(item.fecha_envio_programada+'T00:00:00').toLocaleDateString('es-CO',{weekday:'short',day:'numeric',month:'short'}):'—'
 
-    const btnEnviar=yaCompletoHoy
+    // (12ago26) 📅 El botón obedece al flujo de 3 mensajes. Si NO toca mandar,
+    // se explica por qué en vez de dejar un botón que dispararía de más.
+    const btnEnviar=(nivelInfo.puede===false)
+      ?`<div style="font-size:11px;color:var(--muted);border:1px dashed var(--border);border-radius:8px;padding:6px 9px;line-height:1.45;max-width:330px">🔒 ${nivelInfo.motivo||'Hoy no toca mandar mensaje.'}</div>`
+      :yaCompletoHoy
       ?`<button class="btn-sm btn-outline" disabled style="opacity:.5;cursor:not-allowed">✅ Cupo de hoy completo</button>`
       :`<button class="btn-sm btn-primary" onclick="enviarMensajeConfirmacion(${item.prog_id})">📨 Enviar ${nivelInfo.etiqueta}</button>`+(waBtnDespacho('confirmacion','renderPendientesConfirmacion')?`<button class="btn-sm" onclick='waDespacharItem("confirmacion",((window._confCache&&window._confCache.items)||[]).find(i=>i.prog_id===${item.prog_id}))' style="background:linear-gradient(90deg,#7c5cff,#5b8def);color:#fff;border:none;padding:7px 12px;font-weight:600;margin-left:6px">▶️ API</button>`:'')
 
@@ -12782,6 +12801,10 @@ window.enviarMensajeConfirmacion=async(progId)=>{
   if(!item){alert('No se encontró el pedido');return}
   if(item.envios_hoy>=_cuotaDiaria('confirmacion',2)){alert('Ya enviaste los '+_cuotaDiaria('confirmacion',2)+' mensajes de hoy para este pedido.');return}
   const nivelInfo=getNivelMensajeConfirmacion(item.dias_falta,item.envios_hoy)
+  // (12ago26) 📅 Segundo cerrojo del flujo de 3 mensajes. La tarjeta ya oculta el
+  // botón, pero esta función también se llama desde el Modo envío rápido y desde el
+  // encolador, así que el freno tiene que estar TAMBIÉN aquí.
+  if(nivelInfo.puede===false){alert('🔒 '+(nivelInfo.motivo||'Hoy no toca mandar mensaje para este pedido.'));return}
   const mensaje=armarMensajeConfirmacion(item,nivelInfo.idxTpl)
   const telLimpio=String(item.telefono||'').replace(/\D/g,'')
   if(telLimpio.length<7){alert('Teléfono inválido');return}
@@ -41912,6 +41935,13 @@ const WCH_RIELES_DEF={
   // agrupan (o cuentan aparte). Por eso no aparecen como destino de una regla.
   nodisp:{n:'Avisar admin',e:'⚠️',c:'#ef4444',grupo:true},
   porprog:{n:'Por programar',e:'🗓️',c:'#f59e0b',grupo:true},
+  // (12ago26) ⏰📨 VENCIDOS: la fecha de envío ya pasó y el pedido sigue en
+  // 'programado' — o sea NO lo confirmaron ni lo cancelaron. Van SEPARADAS porque
+  // la acción que toca es distinta: a los que nunca se contactaron hay que
+  // escribirles; a los que ya recibieron sus plantillas y no contestaron, hay que
+  // decidir si se insiste o se cierra.
+  venc_sin:{n:'Vencidos sin contactar',e:'⏰',c:'#ef4444',grupo:true},
+  venc_con:{n:'Vencidos contactados',e:'📨',c:'#f97316',grupo:true},
   g_llamar:{n:'Llamar',e:'📞',c:'#ef4444',grupo:true},
   g_camino:{n:'En camino',e:'📨',c:'#38bdf8',grupo:true}
 }
@@ -41964,6 +41994,12 @@ const WCH_RIELES_FICHA={
   porprog:{entra:'Solo en ⏳ Pend. Conf.: pedidos pendientes que todavía NO tienen fecha programada.',
     sale:'En cuanto se les asigna fecha salen de aquí solos.',
     afecta:'Va antes que todo lo demás porque sin fecha no hay plantilla que disparar. La calcula el sistema: nadie la pone a mano y por eso el contador nunca miente.'},
+  venc_sin:{entra:'Solo en 📅 Con fecha: la fecha de envío YA PASÓ, el pedido sigue programado (nadie lo confirmó ni lo canceló) y NUNCA se le mandó una plantilla.',
+    sale:'En cuanto lo confirmes, lo canceles o le pongas fecha nueva, sale solo.',
+    afecta:'Son los que se escaparon: se les pasó el envío sin que nadie les escribiera. Debería vivir en CERO — si sube, el flujo de 2 días antes no está corriendo.'},
+  venc_con:{entra:'Solo en 📅 Con fecha: la fecha de envío YA PASÓ, el pedido sigue programado y SÍ recibió una o más plantillas, pero el cliente nunca resolvió.',
+    sale:'En cuanto lo confirmes, lo canceles o le pongas fecha nueva, sale solo.',
+    afecta:'Aquí el trabajo ya se hizo y el cliente no respondió. Crúzala con ✅ Entregada y 🆕 Respondió: si llegó y no contestó, es candidato a recuperar; si nunca llegó, el problema es el número.'},
   g_llamar:{entra:'Cajón que agrupa lo que necesita una LLAMADA en vez de un mensaje.',
     sale:'Al resolverse el caso por su vía normal.',
     afecta:'Es un grupo de la franja, no un estado calculado: sirve para ordenar el trabajo del auxiliar.'},
@@ -44404,6 +44440,15 @@ function _wchChipsOrden(){
   const _nd=_g('nodisp','Avisar admin','⚠️','#ef4444')
   rieles.unshift({tipo:'nodisp',clave:'nodisp',n:_nd.n,e:_nd.e,c:_nd.c})
   if(st.sec==='reservado'||st.sec==='confirmacion'||st.sec==='psf'){const _pp=_g('porprog','Por programar','🗓️','#f59e0b');rieles.unshift({tipo:'porprog',clave:'porprog',n:_pp.n,e:_pp.e,c:_pp.c})} // (11ago26) ✂️ SPLIT
+  // (12ago26) ⏰📨 VENCIDOS — solo en 📅 Con fecha (ahí viven los pedidos con fecha
+  // programada). Van justo después de 🗓️ Por programar porque son la MISMA historia
+  // contada al revés: sin fecha vs. con fecha que ya se pasó.
+  if(st.sec==='reservado'||st.sec==='confirmacion'){
+    const _vc=_g('venc_con','Vencidos contactados','📨','#f97316')
+    rieles.unshift({tipo:'venc_con',clave:'venc_con',n:_vc.n,e:_vc.e,c:_vc.c})
+    const _vs=_g('venc_sin','Vencidos sin contactar','⏰','#ef4444')
+    rieles.unshift({tipo:'venc_sin',clave:'venc_sin',n:_vs.n,e:_vs.e,c:_vs.c})
+  }
   const manuales=_wchEtqsDe(st.sec).map(x=>({tipo:'manual',id:x.id,n:x.n,e:x.e,c:x.c,cierre:x.cierre,ambito:x.ambito}))
   let lista=[...rieles,...manuales]
   // (28jul26) 🧲 ORDEN GUARDADO por sección (config 'cc_pill_orden', lo arma el admin
@@ -44638,9 +44683,141 @@ window._wchNoDispReintentar=async function(id,btn){
     _wchNoDispCargar()
   }catch(e){alert('❌ No se pudo reintentar: '+(e.message||e));if(btn)btn.disabled=false}
 }
+// ── ⏰📨 VENCIDOS (12ago26) — la fecha de envío YA PASÓ y nadie resolvió ──────
+// Un pedido llega aquí cuando su programación sigue en estado='programado' (o sea
+// NO lo confirmaron ni lo cancelaron: esos dos cambian el estado y salen solos) y
+// su fecha_envio_programada es ANTERIOR a hoy.
+// Se parten en dos porque la acción que toca es distinta:
+//   ⏰ venc_sin → CERO plantillas enviadas: se escapó, nadie le escribió.
+//   📨 venc_con → 1+ plantillas enviadas: le escribimos y no contestó.
+// La ventana de 24h de WhatsApp decide qué se le puede mandar: abierta = texto o
+// cualquier plantilla; cerrada = SOLO plantillas aprobadas por Meta.
+window._wchVencState=null
+async function _wchVencToggle(key){
+  const el=document.getElementById('wch-lista');if(!el)return
+  const box=document.getElementById('wch-venc')
+  if(box&&window._wchVencState&&window._wchVencState.key===key){box.remove();window._wchVencState=null;_wchListaRender();return}
+  if(box)box.remove()
+  window._wchVencState={key,items:[],cargando:false}
+  const nuevo=document.createElement('div')
+  nuevo.id='wch-venc'
+  nuevo.innerHTML='<div class="loading" style="font-size:12px">⏰ Buscando pedidos con la fecha de envío vencida…</div>'
+  el.prepend(nuevo)
+  await _wchVencCargar()
+}
+async function _wchVencCargar(){
+  const st=window._wchVencState;if(!st||st.cargando)return
+  st.cargando=true
+  try{
+    const hoy=(typeof today==='function')?today():new Date().toISOString().slice(0,10)
+    // 1) Programaciones VIVAS con fecha ya pasada. estado='programado' garantiza que
+    //    no fueron confirmadas ni canceladas.
+    const{data:progs,error}=await sb.from('programaciones_envio')
+      .select('mapeo_id,fecha_envio_programada,created_at')
+      .eq('estado','programado').lt('fecha_envio_programada',hoy)
+      .order('fecha_envio_programada',{ascending:true}).limit(600)
+    if(error)throw error
+    const lista=progs||[]
+    const ids=[...new Set(lista.map(p=>p.mapeo_id).filter(Boolean))]
+    if(!ids.length){st.items=[];st.sin=0;st.con=0;_wchVencPintar();return}
+    // 2) Datos del pedido
+    const info={}
+    for(let i=0;i<ids.length;i+=100){
+      const b=ids.slice(i,i+100)
+      try{const{data}=await sb.from('mapeos').select('id,telefono,nombre_cliente,producto,cantidad,ciudad,transportadora').in('id',b);for(const m of(data||[]))info[m.id]=m}catch(_){}
+    }
+    // 3) ¿Cuántas plantillas recibió cada uno? (esto es lo que parte las dos píldoras)
+    const envios={}
+    for(let i=0;i<ids.length;i+=100){
+      const b=ids.slice(i,i+100)
+      try{const{data}=await sb.from('confirmacion_envios').select('mapeo_id').in('mapeo_id',b);for(const e of(data||[]))envios[e.mapeo_id]=(envios[e.mapeo_id]||0)+1}catch(_){}
+    }
+    // 4) Ventana de 24h por teléfono: decide qué se le puede enviar
+    const tels=[...new Set(ids.map(id=>(info[id]||{}).telefono).filter(Boolean).map(t=>String(t).replace(/\D/g,'')))]
+    const vent={}
+    for(let i=0;i<tels.length;i+=150){
+      const b=tels.slice(i,i+150)
+      try{
+        const{data}=await sb.from('conversaciones').select('telefono,ventana_24h_hasta').in('telefono',b.map(t=>t.startsWith('57')?t:'57'+t)).limit(500)
+        for(const c of(data||[])){
+          const t=String(c.telefono||'').replace(/\D/g,'').replace(/^57/,'')
+          const ms=c.ventana_24h_hasta?new Date(c.ventana_24h_hasta).getTime():0
+          vent[t]=(isFinite(ms)&&ms>Date.now())?ms:0
+        }
+      }catch(_){}
+    }
+    const todos=lista.map(p=>{
+      const m=info[p.mapeo_id]||{}
+      const tel=String(m.telefono||'').replace(/\D/g,'').replace(/^57/,'')
+      return{...m,mapeo_id:p.mapeo_id,fecha:p.fecha_envio_programada,
+        msgs:envios[p.mapeo_id]||0,
+        dias:Math.max(0,Math.floor((new Date(hoy+'T00:00:00')-new Date(String(p.fecha_envio_programada).slice(0,10)+'T00:00:00'))/864e5)),
+        ventana:vent[tel]||0}
+    })
+    st.sin=todos.filter(x=>x.msgs===0).length
+    st.con=todos.filter(x=>x.msgs>0).length
+    st.items=todos.filter(x=>st.key==='venc_sin'?x.msgs===0:x.msgs>0)
+    _wchVencPintar()
+  }catch(e){const b=document.getElementById('wch-venc');if(b)b.innerHTML='<div class="alert alert-red" style="font-size:12px">❌ '+_wchEsc(e.message||String(e))+'</div>'}
+  finally{st.cargando=false}
+}
+function _wchVencPintar(){
+  const st=window._wchVencState,box=document.getElementById('wch-venc')
+  if(!st||!box)return
+  document.querySelectorAll('[data-wchn="venc_sin"]').forEach(c=>{c.textContent=st.sin||0})
+  document.querySelectorAll('[data-wchn="venc_con"]').forEach(c=>{c.textContent=st.con||0})
+  const esSin=st.key==='venc_sin'
+  const col=esSin?'#ef4444':'#f97316'
+  if(!st.items.length){
+    box.innerHTML=`<div style="background:rgba(34,197,94,.10);border:1px solid var(--green);border-radius:10px;padding:12px;font-size:12.5px;color:var(--green);text-align:center;margin-bottom:8px">🎉 CERO pedidos ${esSin?'vencidos sin contactar':'vencidos contactados'} — nada pendiente por aquí.</div>`
+    return
+  }
+  box.innerHTML=`<div style="background:${esSin?'rgba(239,68,68,.10)':'rgba(249,115,22,.10)'};border:1px solid ${col};border-radius:10px;padding:9px 11px;margin-bottom:8px">
+    <div style="font-size:12px;font-weight:800;color:${col}">${esSin?'⏰':'📨'} ${st.items.length} pedido(s) con la fecha de envío YA VENCIDA — ni confirmados ni cancelados.</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:3px;line-height:1.5">${esSin
+      ? 'A estos <strong>nunca</strong> se les mandó una plantilla: se les pasó el envío sin que nadie les escribiera. Esta cola debería vivir en CERO.'
+      : 'A estos <strong>sí</strong> se les escribió y no resolvieron. Decide: reprograma con fecha nueva, o ciérralo.'}</div>
+  </div>`+st.items.slice(0,80).map(m=>{
+    const tel=String(m.telefono||'').replace(/\D/g,'').replace(/^57/,'')
+    const abierta=m.ventana>Date.now()
+    const hrs=abierta?Math.max(1,Math.round((m.ventana-Date.now())/36e5)):0
+    const fTxt=m.fecha?new Date(String(m.fecha).slice(0,10)+'T00:00:00').toLocaleDateString('es-CO',{weekday:'short',day:'numeric',month:'short'}):'—'
+    return `<div style="background:var(--card2);border:1px solid var(--border);border-left:3px solid ${col};border-radius:10px;padding:9px 11px;margin-bottom:6px">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+        <div style="font-size:12.5px">
+          <strong style="font-size:13px">${_wchEsc(tel||'—')}</strong>
+          <span style="color:var(--muted)"> · ${_wchEsc(m.nombre_cliente||'—')} · ${_wchEsc(m.producto||'—')}${m.cantidad?' ('+m.cantidad+'u)':''}</span>
+        </div>
+        <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">
+          <span style="font-size:10px;border:1px solid ${col};color:${col};border-radius:20px;padding:1px 7px;font-weight:700">📅 era ${_wchEsc(fTxt)} · hace ${m.dias} día${m.dias===1?'':'s'}</span>
+          <span style="font-size:10px;border:1px solid var(--border);color:var(--muted);border-radius:20px;padding:1px 7px">📨 ${m.msgs} mensaje${m.msgs===1?'':'s'}</span>
+        </div>
+      </div>
+      <div style="font-size:10.5px;margin-top:5px;color:${abierta?'var(--green)':'var(--muted)'};line-height:1.5">
+        ${abierta
+          ? `🟢 <strong>Ventana abierta ~${hrs}h</strong> — te escribió hace poco: puedes mandarle CUALQUIER texto o plantilla, esté aprobada o no.`
+          : `🔒 <strong>Ventana cerrada</strong> — no te ha escrito en 24h: SOLO le puede llegar una plantilla 🟢 aprobada por Meta.`}
+      </div>
+      <div style="display:flex;gap:5px;margin-top:7px;flex-wrap:wrap">
+        <button class="btn-sm" style="background:var(--green);color:#fff;border:none;font-size:11px;padding:5px 10px;font-weight:700" onclick="_wchVencIr('${_wchEsc(tel)}')">💬 Abrir chat</button>
+        <button class="btn-sm btn-outline" style="font-size:11px;padding:5px 10px" data-gtel="${_wchEsc(tel)}" data-gsec="confirmacion" data-gnom="${_wchEsc(m.nombre_cliente||'')}" onclick="_wchTplModal(this)">📨 Plantillas${abierta?'':' 🟢'}</button>
+      </div>
+    </div>`
+  }).join('')+(st.items.length>80?`<div style="text-align:center;font-size:11px;color:var(--muted);padding:6px">Mostrando 80 de ${st.items.length}. Resuelve estos y recarga.</div>`:'')
+}
+window._wchVencIr=function(tel){
+  // Reutiliza el buscador global del Centro: escribe el número y deja que la
+  // búsqueda normal abra el chat en la sección que corresponda.
+  try{
+    const b=document.getElementById('wch-busca')
+    if(b)b.value=tel
+    if(typeof _wchBuscaCambio==='function')_wchBuscaCambio(tel)
+  }catch(_){}
+}
 window._wchChipClick=function(key){
   const st=window._wchState
   if(key==='porprog'){_wchPorProgToggle();return} // (28jul26) 🗓️ panel propio — no filtra la lista de chats
+  if(key==='venc_sin'||key==='venc_con'){_wchVencToggle(key);return} // (12ago26) ⏰📨 panel propio — no filtra la lista de chats
   if(key==='nodisp'){_wchNoDispToggle();return} // (28jul26) ⚠️ panel propio — no filtra la lista de chats
   st.filtroEtq=key // (30jul26) clic en la MISMA etiqueta ya no te saca: te quedas ahí
   const el=document.getElementById('wch-franja');const sl=el?el.scrollLeft:0

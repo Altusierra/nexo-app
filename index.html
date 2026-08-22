@@ -39300,7 +39300,9 @@ function hbVent1Show(listos){
   // ══ H1-bis (15jul26): si quedó un modal abierto (doble clic en Generar), se reemplaza — nunca dos apilados ══
   document.getElementById('hb-v1-modal')?.remove()
   const rows=[]
-  listos.forEach(f=>{f.rows.forEach(r=>{rows.push({r,dir:String(r.sc.direccion==null?'':r.sc.direccion),tel:r.tel,prod:f.producto?.nombre||''})})})
+  // 🟡✍️ (22ago26): `of` viaja PEGADO a cada fila porque _hbV1 NO carga el archivo `f`, y la
+  // ventana 📅 necesita saber si la fila vino de un Excel __oferta para ponerle su prefijo.
+  listos.forEach(f=>{f.rows.forEach(r=>{rows.push({r,dir:String(r.sc.direccion==null?'':r.sc.direccion),tel:r.tel,prod:f.producto?.nombre||'',of:!!f.oferta})})})
   window._hbV1=rows
   window._hbEnvListos=listos // 📅 (23jul26): la ventana de ENVÍOS usa la misma lista — Volver/Siguiente sin perder progreso
   const ov=document.createElement('div')
@@ -41767,11 +41769,27 @@ window.presupVerifYAbrir=async(metaId,nombre,accountId,btn)=>{
 // (En el Excel del masivo el emoji del semáforo lo antepone la columna direccion_emoji
 //  → allí se ve "📦✅🔴🛒2 de agosto- ...". En hoja base y Asignador va sin ese emoji.)
 const HB_ENVIO_PREFIJO='🔴🛒'
+// ════════════════════════════════════════════════════════════════════════════
+// 🟡✍️ (22ago26 · pedido del owner): PREFIJO de los pedidos que vienen de un Excel __oferta.
+// Se detecta con `f.oferta`, que ya lo resuelve hbValidarNombre() exigiendo "oferta" como
+// ÚLTIMA parte del nombre (38__Neocell_A6_A2__2026-07-05__1__oferta). Eso NO se tocó.
+// Va SIEMPRE, haya o no fecha de envío, y SIEMPRE después del 🔴🛒 cuando los dos aplican:
+//    envío + oferta → "🔴🛒🟡✍️despues del 30 de agosto- Calle 19 #12-22"
+//    solo oferta    → "🟡✍️Calle 19 #12-22"
+//    solo envío     → "🔴🛒despues del 30 de agosto- Calle 19 #12-22"  (igual que antes)
+//    ninguno        → "Calle 19 #12-22"                                 (igual que antes)
+// Misma fuente ÚNICA que el envío: vista previa y fusión real leen esta constante.
+// (En el Excel del masivo el semáforo de direccion_emoji se antepone → "📦✅🔴🛒🟡✍️...".)
+// ════════════════════════════════════════════════════════════════════════════
+const HB_OFERTA_PREFIJO='🟡✍️'
 // Arma la dirección fusionada de un envío: prefijo + "llegar" TAL CUAL + "- " + dirección.
 // Si NO hay fecha en "llegar", devuelve la dirección intacta (igual que antes del 28jul26).
-function hbEnvioFusion(llegar,dir){
+// 🟡✍️ (22ago26): 3er parámetro OPCIONAL `esOferta`. Si NO se pasa (llamadas viejas de 2
+// argumentos), OF queda '' y el resultado es BYTE A BYTE el mismo de antes — nada se rompe.
+function hbEnvioFusion(llegar,dir,esOferta){
   const L=String(llegar==null?'':llegar).trim()
-  return(L?HB_ENVIO_PREFIJO+L+'- ':'')+String(dir==null?'':dir)
+  const OF=esOferta?HB_OFERTA_PREFIJO:'' // 🟡✍️ entra haya o no fecha en "llegar"
+  return(L?HB_ENVIO_PREFIJO+OF+L+'- ':OF)+String(dir==null?'':dir)
 }
 // Señal sobre el texto de "llegar": 'envio' (fecha/día concreto) · 'normal' · 'ambigua'
 function hbEnvioSenal(llegar){
@@ -41823,7 +41841,12 @@ function hbVentEnvFila(x,i){
   // 🔴🛒 (28jul26): la vista previa usa hbEnvioFusion → es EXACTAMENTE lo que se va a guardar.
   // Si ya hubo un intento anterior, se parte de la dirección ORIGINAL (nunca de la ya fusionada).
   const _dirBase=(x.r._dirOriginalEnvio!=null?x.r._dirOriginalEnvio:x.dir)
-  const fusion=on?`<br><span style="color:var(--amber);font-size:11.5px">🟡 Quedará: <b>${hbEsc(hbEnvioFusion(llegar,_dirBase))}</b></span>`:''
+  // 🟡✍️ (22ago26): la vista previa TAMBIÉN sale para las filas de OFERTA que no están marcadas
+  // como envío, para que el auxiliar vea exactamente lo que se va a guardar. Si no está marcada,
+  // se pasa llegar='' → NO aparece el 🔴🛒, solo el 🟡✍️. Misma función que la fusión real:
+  // vista previa y guardado no se pueden desincronizar nunca.
+  const _of=!!x.of
+  const fusion=(on||_of)?`<br><span style="color:var(--amber);font-size:11.5px">🟡 Quedará: <b>${hbEsc(hbEnvioFusion(on?llegar:'',_dirBase,_of))}</b></span>`:''
   return`<div id="hb-venv-row-${i}" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px;border:1px solid ${bord};border-left:4px solid ${bord};border-radius:8px;margin-top:6px;background:${bg};font-size:12.5px">
     <div style="width:34px;height:34px;flex-shrink:0;border-radius:50%;border:2px solid ${bord};background:rgba(255,255,255,.06);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:800">${i+1}</div>
     <div style="flex:1;min-width:230px;line-height:1.5">${tag}📅 llegar: <b>${hbEsc(llegar)||'<i>(vacío)</i>'}</b><br><span style="color:var(--muted)">📍 ${hbEsc(x.dir)||'(sin dirección)'} · 📞 ${hbEsc(x.tel)||'—'} ${hbTelBtn(x.tel)} · ${hbEsc(x.prod)}</span>${fusion}</div>
@@ -41846,14 +41869,21 @@ window.hbVentEnvCancel=()=>{document.getElementById('hb-venv-modal')?.remove();w
 window.hbVentEnvContinuar=()=>{
   if(!confirm('¿Seguro? Vas a GENERAR la hoja definitiva.'))return
   // Aplicar la fusión IDEMPOTENTE fila a fila (marcada → "llegar"- dirección · desmarcada → restaurar)
-  let nEnv=0
+  // 🟡✍️ (22ago26): ahora TAMBIÉN entran las filas de OFERTA aunque NO estén marcadas como envío.
+  // El ancla r._dirOriginalEnvio pasa a significar "dirección original antes de CUALQUIER prefijo"
+  // (se conserva el nombre A PROPÓSITO: renombrarlo obligaría a tocar código que ya funciona).
+  // Sigue siendo IDEMPOTENTE: siempre se reconstruye desde el original, así que generar N veces
+  // —o correr PRUEBA y luego el real— NO duplica ningún emoji.
+  let nEnv=0,nOf=0
   for(const x of (window._hbV1||[])){
     const r=x.r
-    if(r._envioMarcado){
+    const _of=!!x.of // 🟡✍️ la fila vino de un Excel __oferta
+    if(r._envioMarcado||_of){
       if(r._dirOriginalEnvio==null)r._dirOriginalEnvio=String(r.sc.direccion==null?'':r.sc.direccion) // el original, UNA sola vez
-      const llegar=String(r.sc.llegar==null?'':r.sc.llegar).trim()
-      r.sc.direccion=hbEnvioFusion(llegar,r._dirOriginalEnvio) // 🔴🛒 + TAL CUAL + "- " + dirección (regla del owner · 28jul26)
-      nEnv++
+      const llegar=r._envioMarcado?String(r.sc.llegar==null?'':r.sc.llegar).trim():'' // NO marcada como envío → sin 🔴🛒 y sin fecha
+      r.sc.direccion=hbEnvioFusion(llegar,r._dirOriginalEnvio,_of) // 🔴🛒 + 🟡✍️ + TAL CUAL + "- " + dirección
+      if(r._envioMarcado)nEnv++ // el conteo de envíos queda EXACTAMENTE igual que antes
+      if(_of)nOf++
     }else if(r._dirOriginalEnvio!=null){
       r.sc.direccion=r._dirOriginalEnvio // desmarcada tras un intento anterior (o PRUEBA): restaurar
       delete r._dirOriginalEnvio
@@ -41861,7 +41891,7 @@ window.hbVentEnvContinuar=()=>{
   }
   document.getElementById('hb-venv-modal')?.remove()
   const st=window._hb;if(st)st._convManual=[] // igual que el flujo de siempre (sin Ventana 2)
-  logAction('hb_envios_marcados',{envios:nEnv,total:(window._hbV1||[]).length,prueba:window._hbPrueba===true}).catch(()=>{})
+  logAction('hb_envios_marcados',{envios:nEnv,ofertas:nOf,total:(window._hbV1||[]).length,prueba:window._hbPrueba===true}).catch(()=>{})
   _hbGenerarFinal()
 }
 // ── 🔒 GUARDIA DE SALIDA (23jul26): con archivos cargados SIN generar, salir pregunta ──

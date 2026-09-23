@@ -17298,6 +17298,52 @@ window._emparejarDropi=(ordenes,mapeos)=>{
   }
   const _n=s=>String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()
   const res=new Map()
+  // ══ (23sep26) 🎯 REGLA DEL OWNER: "NÚMERO DE ORDEN DISTINTO = PEDIDO DISTINTO" ══
+  // Antes, cuando el nombre del producto no cuadraba, se emparejaba SOLO por teléfono y se tomaba el
+  // pedido MÁS VIEJO → la orden nueva de un cliente que volvió a comprar se pegaba a su venta vieja
+  // (99 casos desde mayo). Ahora:
+  //  · Un mapeo que YA tiene OTRO número de orden NUNCA recibe una orden distinta (solo PASE 0: resubida).
+  //  · La orden nueva busca un mapeo LIBRE (sin orden y sin cruce), el más reciente primero.
+  //  · El producto se reconoce por el ID de producto de Dropi contra el CATÁLOGO (como el Asignador).
+  //  · Mapeos viejos cruzados SIN número de orden (antes existía la columna) → último recurso.
+  const _oDia=o=>{const p=String(o.fecha_dropi||'').split(/[-/]/);if(p.length!==3)return'';return p[0].length===4?`${p[0]}-${p[1]}-${p[2]}`:`${p[2]}-${p[1]}-${p[0]}`} // DD-MM-YYYY → YYYY-MM-DD
+  const _mDia=m=>String(m.fecha_dropi||'').slice(0,10)
+  const _mOid=m=>String(m.dropi_order_id||'').trim()
+  const _libre=m=>!_mOid(m)&&!m.fecha_dropi            // nunca cruzado: candidato normal
+  const _viejoSinId=m=>!_mOid(m)&&!!m.fecha_dropi      // cruzado antes de que existiera dropi_order_id: último recurso
+  const _catId=did=>{ // ID de producto de Dropi → producto del catálogo (mismo método del Asignador)
+    if(!did)return null
+    try{
+      const p=(productos||[]).find(pp=>String(pp.dropi_id||'').trim()===did);if(p)return p.id
+      const tj=(typeof nxIdTambienGet==='function')?nxIdTambienGet(did):null;return tj?tj.p:null
+    }catch(_){return null}
+  }
+  // ¿El producto de la orden CONTRADICE el del mapeo? (los dos conocidos y distintos) → es OTRO pedido
+  const _contradice=(o,m)=>{
+    const cid=_catId(String(o.producto_id_dropi||'').trim())
+    if(cid==null||m.producto_id==null||m.producto_id==='')return false
+    return String(m.producto_id)!==String(cid)
+  }
+  const _esCancO=o=>/CANCEL|RECHAZ|ANULAD/i.test(String(o.estatus||''))
+  // Resubida del mismo día: orden DISTINTA, pero MISMO teléfono + MISMO día + MISMO producto (+cantidad)
+  // → es el mismo pedido que se canceló por error y se volvió a subir. Se queda con la orden viva/nueva.
+  const _resubida=(o,m)=>{
+    const oid=String(o.id_dropi||'').trim(),mid=_mOid(m)
+    if(!oid||!mid||mid===oid)return false
+    const d=_oDia(o);if(!d||d!==_mDia(m))return false
+    const did=String(o.producto_id_dropi||'').trim(),mdid=String(m.producto_id_dropi||'').trim()
+    if(did&&mdid){if(did!==mdid)return false}
+    else if(_contradice(o,m))return false
+    return !o.cantidad||!m.cantidad||(m.cantidad||0)===(o.cantidad||0)
+  }
+  // PASE 0 (23sep26): resubida del mismo día (una orden cancelada NO le quita el pedido a la viva)
+  ordenes.forEach((o,idx)=>{
+    const oid=String(o.id_dropi||'').trim()
+    if(!oid||byDropiId[oid]||_esCancO(o))return
+    const t=String(o.telefono||'').replace(/\D/g,'')
+    const m=(byTel[t]||[]).find(x=>!usados.has(x.id)&&_resubida(o,x))
+    if(m){res.set(idx,m);usados.add(m.id)}
+  })
   // PASE 1: ID de orden de Dropi exacto
   ordenes.forEach((o,idx)=>{
     const oid=String(o.id_dropi||'').trim()
@@ -17312,20 +17358,36 @@ window._emparejarDropi=(ordenes,mapeos)=>{
   // PASE 3: teléfono + producto POR ID ÚNICO. Prioridad: 1) PRODUCTO ID de Dropi (id↔id, se auto-puebla en mapeos al importar) → 2) producto_id canónico del mapeo (cadena ad_id→producto) → 3) nombre crudo (respaldo). + cantidad
   const _rid=s=>{const r=(typeof resolveProdName==='function')?resolveProdName(s):null;return (r&&r.id)?('id:'+r.id):('nm:'+_n((r&&r.nombre)||s))}
   const _mid=m=>(m.producto_id!=null&&m.producto_id!=='')?('id:'+m.producto_id):_rid(m.producto)
+  // (23sep26) Candidatos por niveles: [LIBRES (más reciente primero), VIEJOS SIN ID (más reciente primero)].
+  // Un mapeo atado a OTRA orden queda FUERA (regla del owner).
+  const _fechaM=m=>String(m.fecha||'')
+  const _niveles=t=>{
+    const todos=(byTel[t]||[]).filter(m=>!usados.has(m.id))
+    const orden=(a,b)=>_fechaM(b).localeCompare(_fechaM(a))
+    return[todos.filter(_libre).sort(orden),todos.filter(_viejoSinId).sort(orden)]
+  }
+  // Emparejar por PRODUCTO dentro de un nivel: 1) ID de producto de Dropi → catálogo (nuevo) → 2) la cadena original
+  const _porProducto=(o,cand)=>{
+    if(!cand.length)return null
+    const did=String(o.producto_id_dropi||'').trim(),keyO=_rid(o.producto||o.producto_dropi),prodO=_n(o.producto||o.producto_dropi),qO=(o.cantidad||0)
+    const cid=_catId(did)
+    return (cid!=null&&cand.find(m=>String(m.producto_id)===String(cid)&&(m.cantidad||0)===qO))||(cid!=null&&cand.find(m=>String(m.producto_id)===String(cid)))
+      ||(did&&cand.find(m=>String(m.producto_id_dropi||'').trim()===did&&(m.cantidad||0)===qO))||(did&&cand.find(m=>String(m.producto_id_dropi||'').trim()===did))
+      ||cand.find(m=>_mid(m)===keyO&&(m.cantidad||0)===qO)||cand.find(m=>_mid(m)===keyO)||cand.find(m=>_n(m.producto)===prodO&&(m.cantidad||0)===qO)||cand.find(m=>_n(m.producto)===prodO)||null
+  }
   ordenes.forEach((o,idx)=>{
     if(res.has(idx))return
     const t=String(o.telefono||'').replace(/\D/g,'')
-    const cand=(byTel[t]||[]).filter(m=>!usados.has(m.id))
-    if(!cand.length)return
-    const did=String(o.producto_id_dropi||'').trim(),keyO=_rid(o.producto||o.producto_dropi),prodO=_n(o.producto||o.producto_dropi),qO=(o.cantidad||0)
-    const match=(did&&cand.find(m=>String(m.producto_id_dropi||'').trim()===did&&(m.cantidad||0)===qO))||(did&&cand.find(m=>String(m.producto_id_dropi||'').trim()===did))||cand.find(m=>_mid(m)===keyO&&(m.cantidad||0)===qO)||cand.find(m=>_mid(m)===keyO)||cand.find(m=>_n(m.producto)===prodO&&(m.cantidad||0)===qO)||cand.find(m=>_n(m.producto)===prodO)
+    const[libres,viejos]=_niveles(t)
+    const match=_porProducto(o,libres)||_porProducto(o,viejos)
     if(match){res.set(idx,match);usados.add(match.id)}
   })
-  // PASE 4: teléfono (consumo 1 a 1)
+  // PASE 4: teléfono (consumo 1 a 1) — solo LIBRES y luego VIEJOS SIN ID, y nunca si el producto se contradice
   ordenes.forEach((o,idx)=>{
     if(res.has(idx))return
     const t=String(o.telefono||'').replace(/\D/g,'')
-    const cand=(byTel[t]||[]).find(m=>!usados.has(m.id))
+    const[libres,viejos]=_niveles(t)
+    const cand=libres.find(m=>!_contradice(o,m))||viejos.find(m=>!_contradice(o,m))
     if(cand){res.set(idx,cand);usados.add(cand.id)}
   })
   return res
@@ -17403,6 +17465,24 @@ window.procesarDropi=async()=>{
       _vistos.add(_dk)
       _dedupOrdenes.push(o)
     }
+    // (23sep26) 🎯 RESUBIDA DEL MISMO DÍA: mismo teléfono + mismo día + mismo producto (+cantidad) con números de
+    // orden DISTINTOS = el mismo pedido que se canceló por error y se volvió a subir. Se conserva UNA sola:
+    // la VIVA sobre la cancelada; si empatan, la más reciente. La orden muerta sale de la lista para que la
+    // Validación 1 no bloquee el guardado por "orden sin cruce". (_dedupOrdenes ya viene de más reciente a más vieja.)
+    try{
+      const _esCancR=o=>/CANCEL|RECHAZ|ANULAD/i.test(String(o.estatus||''))
+      const _kRes=o=>{const t=String(o.telefono||'').replace(/\D/g,'');const d=String(o.fecha_dropi||'').trim();const pr=String(o.producto_id_dropi||'').trim()||String(o.producto||'').toLowerCase().trim();return(t.length>=10&&d&&pr)?`${t}|${d}|${pr}|${o.cantidad||0}`:null}
+      const _porRes={},_quedan=[]
+      for(const o of _dedupOrdenes){
+        const k=_kRes(o)
+        if(!k){_quedan.push(o);continue}
+        const e=_porRes[k]
+        if(!e){_porRes[k]=o;_quedan.push(o);continue}
+        if(_esCancR(e)&&!_esCancR(o)){_quedan[_quedan.indexOf(e)]=o;_porRes[k]=o} // la viva reemplaza a la cancelada
+        // si no: la que ya está (más reciente, o viva) se queda y esta se descarta
+      }
+      if(_quedan.length!==_dedupOrdenes.length){_dedupOrdenes.length=0;_dedupOrdenes.push(..._quedan)}
+    }catch(_eR){console.warn('[cruce] dedup resubida:',_eR?.message||_eR)}
     const _eliminadasDup=ordenes.length-_dedupOrdenes.length
     window._dropiDedupInfo={total:ordenes.length,unicas:_dedupOrdenes.length,eliminadas:_eliminadasDup}
     ordenes.length=0

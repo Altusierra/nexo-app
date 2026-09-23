@@ -11018,9 +11018,10 @@ window.enviarMensajeXlsxPend=async(idx)=>{
   const telLimpio=String(m.telefono||'').replace(/\D/g,'')
   if(telLimpio.length<7){alert('Teléfono inválido');return}
   const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  if(!nxFrenoHuecos(mensaje,telConPrefijo))return // (23sep26) 🛑 sin datos del pedido NO sale
   if(!waThrottleCheck('xlsxpend'))return
   navigator.clipboard.writeText(mensaje).catch(()=>{}) // copia para pegar con Ctrl+V (emojis salen bien al pegar)
-  window.open(`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`,'_blank','noopener')
+  window.open(nxWaUrl(telConPrefijo,mensaje),'_blank','noopener') // (23sep26) emojis intactos
   waThrottleRegistrar('xlsxpend')
   // Registro POR TELÉFONO en mensajes_enviados (el contador que sobrevive entre días/equipos)
   try{
@@ -11820,6 +11821,33 @@ window.waConfirmarDesbloqueo=(sec)=>{
 // Mantener los contadores visibles siempre al día (barato: solo actualiza spans visibles)
 setInterval(()=>{try{waThrottleRefreshPills()}catch(_){}},1500)
 
+// ══════════════════════════════════════════════════════════════════════
+// (23sep26) 🛑 FRENO DE HUECOS + 🔗 LINK DE WHATSAPP — una sola fuente de verdad
+// para TODOS los envíos (manual, modo rápido y 🤖 automático).
+// ══════════════════════════════════════════════════════════════════════
+// Datos del pedido que NUNCA pueden faltar en un mensaje. Si el texto final
+// todavía trae la etiqueta sin llenar (o "Sin producto"), el mensaje NO sale.
+const _NX_HUECOS=[['[PRODUCTO]','producto'],['[CANTIDAD]','cantidad'],['[CIUDAD]','ciudad'],['[FECHA_ENVIO]','fecha de envío']]
+function nxHuecosMensaje(texto){
+  const t=String(texto||''),f=[]
+  for(const[tag,nom]of _NX_HUECOS)if(t.includes(tag)||(nom==='producto'&&t.includes('Sin producto')))f.push(nom)
+  return f
+}
+// Envío manual: si hay huecos avisa claro, deja rastro y devuelve false (el que llama hace return).
+function nxFrenoHuecos(texto,tel){
+  const f=nxHuecosMensaje(texto)
+  if(!f.length)return true
+  try{logAction('msg_bloqueado_huecos',{telefono:tel||null,faltan:f}).catch(()=>{})}catch(_){}
+  alert('⛔ NO se envió este mensaje.\n\nA este pedido le falta: '+f.join(', ').toUpperCase()+'.\n\nEl mensaje iba a salir incompleto al cliente. Recarga la sección y, si sigue faltando, revisa ese pedido antes de enviarlo.')
+  return false
+}
+// wa.me pasa por un servidor de Meta que cambia TODOS los emojis por ◆ (probado con curl).
+// api.whatsapp.com/send los conserva. Si Meta cambia algo, se arregla SOLO aquí.
+function nxWaUrl(tel,msg){
+  const t=String(tel||'').replace(/\D/g,'')
+  return 'https://api.whatsapp.com/send?phone='+t+(msg?'&text='+encodeURIComponent(msg):'')
+}
+
 const CONF_MSGS=[
   // NIVEL 1 — Día 2 antes, 1er mensaje (cordial / informativo)
   `Hola [NOMBRE] ✨\n\nTe escribimos para avisarte que tu pedido de *[PRODUCTO]* ([CANTIDAD]) está apartado y listo.\n\n📦 Despacho programado: *[FECHA_ENVIO]* a [CIUDAD]\n💵 Pago contra entrega — recibes y pagas al transportador\n\n¿Confirmas que sigues interesado? Así alistamos todo para enviártelo 🙏`,
@@ -12059,7 +12087,12 @@ async function cargarPendientesConfirmacion(){
     let mapeos=[]
     for(let i=0;i<mapeoIds.length;i+=100){
       const batch=mapeoIds.slice(i,i+100)
-      const{data}=await sb.from('mapeos').select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,transportadora,precio_dropi,producto_id,abono').in('id',batch) // (11ago26) +transportadora (la columna se llama ASÍ, no 'carrier') +precio_dropi/producto_id/abono para [TOTAL]
+      const{data,error:_eMap}=await sb.from('mapeos').select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,transportadora,precio_dropi,producto_id').in('id',batch) // (11ago26) +transportadora (la columna se llama ASÍ, no 'carrier') +precio_dropi/producto_id para [TOTAL]
+      // (23sep26) 🐛 CAUSA RAÍZ "mensajes sin datos": se pedía 'abono', columna que NO existe en mapeos →
+      // Supabase rechazaba la consulta ENTERA, el error se ignoraba y todos los pedidos quedaban sin
+      // producto/cantidad/ciudad/transportadora. Se quitó 'abono' (_cancTotal no lo usa) y el error ya
+      // NO se traga: se muestra en rojo en vez de pintar tarjetas vacías.
+      if(_eMap)throw _eMap
       if(data)mapeos=mapeos.concat(data)
     }
     const mapById={}
@@ -12253,13 +12286,13 @@ async function cargarPendientesSinFecha(){
     // Limitamos a últimos 90 días para no traer historia infinita
     const hace90=_isoDate(new Date(Date.now()-90*24*60*60*1000))
     const{data:pendA,error:e1}=await _sbFetchAll((_f,_t)=>sb.from('mapeos')
-      .select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,fecha_dropi,estado_inicial,estado_final,created_at,transportadora,precio_dropi,producto_id,abono')
+      .select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,fecha_dropi,estado_inicial,estado_final,created_at,transportadora,precio_dropi,producto_id') // (23sep26) −abono: no existe en mapeos
       .in('estado_final',['PENDIENTE CONFIRMACION'])
       .gte('fecha',hace90)
       .order('fecha',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
     if(e1)throw e1
     const{data:pendB,error:e2}=await _sbFetchAll((_f,_t)=>sb.from('mapeos')
-      .select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,fecha_dropi,estado_inicial,estado_final,created_at,transportadora,precio_dropi,producto_id,abono')
+      .select('id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,fecha_dropi,estado_inicial,estado_final,created_at,transportadora,precio_dropi,producto_id') // (23sep26) −abono: no existe en mapeos
       .eq('estado_inicial','PENDIENTE CONFIRMACION')
       .is('estado_final',null)
       .gte('fecha',hace90)
@@ -12587,9 +12620,10 @@ window.enviarMensajeCanc=async(mapeoId)=>{
   const telLimpio=String(m.telefono||'').replace(/\D/g,'')
   if(telLimpio.length<7){alert('Teléfono inválido');return}
   const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  if(!nxFrenoHuecos(mensaje,telConPrefijo))return // (23sep26) 🛑 sin datos del pedido NO sale
   if(!waThrottleCheck('canc'))return
   navigator.clipboard.writeText(mensaje).catch(()=>{}) // copia para pegar con Ctrl+V (emojis salen bien al pegar)
-  window.open(`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`,'_blank','noopener')
+  window.open(nxWaUrl(telConPrefijo,mensaje),'_blank','noopener') // (23sep26) emojis intactos
   waThrottleRegistrar('canc')
   try{
     const{error:evErr}=await sb.from('mapeo_eventos').insert({
@@ -12755,9 +12789,10 @@ window.enviarMensajePsf=async(mapeoId)=>{
   const telLimpio=String(m.telefono||'').replace(/\D/g,'')
   if(telLimpio.length<7){alert('Teléfono inválido');return}
   const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  if(!nxFrenoHuecos(mensaje,telConPrefijo))return // (23sep26) 🛑 sin datos del pedido NO sale
   if(!waThrottleCheck('psf'))return
   navigator.clipboard.writeText(mensaje).catch(()=>{}) // copia para pegar con Ctrl+V (emojis salen bien al pegar)
-  const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`
+  const url=nxWaUrl(telConPrefijo,mensaje) // (23sep26) emojis intactos
   window.open(url,'_blank','noopener')
   waThrottleRegistrar('psf')
   try{
@@ -12809,9 +12844,10 @@ window.enviarMensajeConfirmacion=async(progId)=>{
   const telLimpio=String(item.telefono||'').replace(/\D/g,'')
   if(telLimpio.length<7){alert('Teléfono inválido');return}
   const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  if(!nxFrenoHuecos(mensaje,telConPrefijo))return // (23sep26) 🛑 sin datos del pedido NO sale
   if(!waThrottleCheck('conf'))return
   navigator.clipboard.writeText(mensaje).catch(()=>{}) // copia para pegar con Ctrl+V (emojis salen bien al pegar)
-  const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`
+  const url=nxWaUrl(telConPrefijo,mensaje) // (23sep26) emojis intactos
   window.open(url,'_blank','noopener')
   waThrottleRegistrar('conf')
   try{
@@ -14686,9 +14722,10 @@ window._colaAbrirWa=async()=>{
   const armado=_colaArmarMensaje(m)
   const telLimpio=String(m.tel||'').replace(/\D/g,'')
   const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  if(!nxFrenoHuecos(armado.msg,telConPrefijo))return // (23sep26) 🛑 sin datos del pedido NO sale
   if(!waThrottleCheck('novedades'))return
   navigator.clipboard.writeText(armado.msg).catch(()=>{}) // copia para pegar con Ctrl+V (emojis salen bien al pegar)
-  const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(armado.msg)}`
+  const url=nxWaUrl(telConPrefijo,armado.msg) // (23sep26) emojis intactos
   window.open(url,'_blank','noopener')
   waThrottleRegistrar('novedades')
   // El contador SIEMPRE sube al abrir WhatsApp (no depende de que la BD acepte el insert)
@@ -15427,9 +15464,10 @@ window.enviarReclameUno=async(tel,guia)=>{
   const mensaje=armarMensajeReclame(m,nivel)
   const telLimpio=String(m.tel||'').replace(/\D/g,'')
   const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  if(!nxFrenoHuecos(mensaje,telConPrefijo))return // (23sep26) 🛑 sin datos del pedido NO sale
   if(!waThrottleCheck('reclame'))return
   navigator.clipboard.writeText(mensaje).catch(()=>{}) // copia para pegar con Ctrl+V (emojis salen bien al pegar)
-  const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`
+  const url=nxWaUrl(telConPrefijo,mensaje) // (23sep26) emojis intactos
   window.open(url,'_blank','noopener')
   waThrottleRegistrar('reclame')
   try{
@@ -15678,9 +15716,10 @@ window._recColaAbrirWa=async()=>{
   const mensaje=armarMensajeReclame(m,nivel)
   const telLimpio=String(m.tel||'').replace(/\D/g,'')
   const telConPrefijo=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+  if(!nxFrenoHuecos(mensaje,telConPrefijo))return // (23sep26) 🛑 sin datos del pedido NO sale
   if(!waThrottleCheck('reclame'))return
   navigator.clipboard.writeText(mensaje).catch(()=>{}) // copia para pegar con Ctrl+V (emojis salen bien al pegar)
-  const url=`https://wa.me/${telConPrefijo}?text=${encodeURIComponent(mensaje)}`
+  const url=nxWaUrl(telConPrefijo,mensaje) // (23sep26) emojis intactos
   window.open(url,'_blank','noopener')
   waThrottleRegistrar('reclame')
   // Auto-registrar envío (no bloquea apertura si falla)
@@ -19668,7 +19707,7 @@ async function waEncolarSeccionAuto(seccion,itemsRaw){
     // (28jul26 · F3) Chats CERRADOS VIGENTES (Resuelta en el chat, sin respuesta posterior) → no se les dispara
     let _cerr=null
     try{_cerr=await _waTelsCerradosVigentes((itemsRaw||[]).map(r=>{const d=String(r.tel||r.telefono||'').replace(/\D/g,'');return d?(d.startsWith('57')?d:('57'+d)):''}))}catch(_){}
-    let encolados=0,i=0,_sinMapeo=0 // 🔎 (29jul26) los saltos dejan de ser invisibles
+    let encolados=0,i=0,_sinMapeo=0,_sinDatos=0 // 🔎 (29jul26) los saltos dejan de ser invisibles · (23sep26) +_sinDatos
     const _saltados=[] // (28jul26) 🟢 rastro de saltos: clientes cerrados/resueltos que NO se encolan — quedan como fila cancelada con motivo, para que "¿por qué a este no le salió?" siempre tenga respuesta
     for(const raw of (itemsRaw||[])){
       if(raw.resol?.accion==='resuelta'||raw.resuelta||raw.confirmado)continue
@@ -19680,6 +19719,7 @@ async function waEncolarSeccionAuto(seccion,itemsRaw){
       if(window._waEncoladoHoy.set.has(clave))continue
       const vars=Array.isArray(tpl.variables)?tpl.variables:[]
       const parametros=vars.map(tag=>_waValorReal(tag,m))
+      if(nxHuecosMensaje(parametros.join(' | ')).length){_sinDatos++;continue} // (23sep26) 🛑 sin datos del pedido NO se encola (queda para la próxima pasada)
       const telFull=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
       if(_cerr&&_cerr.has(telFull)){_saltados.push({tel:telFull,nombre:m.nombre||null,plantilla:tpl.nombre,mapeo:m.id||null});continue} // (F3) cerrado vigente en el chat → no disparar (queda rastro)
       if(m.id==null){_sinMapeo++;continue} // 🛡️ (Mejora #8) sin pedido no se encola: mapeo_id null esquiva el índice único y multiplica copias
@@ -19701,6 +19741,11 @@ async function waEncolarSeccionAuto(seccion,itemsRaw){
     if(encolados===0&&_sinMapeo>0){
       waToast('⚠️ 0 encolados en '+seccion+': '+_sinMapeo+' pedido(s) sin mapeo_id. Vuelve a subir el Excel para reconstruir el vínculo.','aviso')
       logAction('wa_encolado_bloqueado',{seccion,sin_mapeo:_sinMapeo}).catch(()=>{})
+    }
+    // (23sep26) 🛑 FRENO DE HUECOS en el 🤖: los que iban a salir con "Sin producto" no se encolan y se DICE.
+    if(_sinDatos>0){
+      waToast('🛑 '+_sinDatos+' pedido(s) de '+seccion+' NO se encolaron: les falta el producto. Recarga la sección; si sigue, revisa esos pedidos.','aviso')
+      logAction('wa_encolado_sin_datos',{seccion,sin_datos:_sinDatos}).catch(()=>{})
     }
   }catch(e){console.error('[encolador '+seccion+']',e)}
   finally{_waSoltarCandado(seccion)}
@@ -44933,7 +44978,7 @@ function _wchListaRender(){
 
 // 📱 wa.me / 📞 llamar — abre y estampa el sello 📲 (queda superado por cualquier mensaje posterior)
 window._wchWaMe=async function(convId,tel,conTexto){
-  let url='https://wa.me/'+tel
+  let url=nxWaUrl(tel) // (23sep26) emojis intactos (antes wa.me)
   if(conTexto){
     try{
       const st=window._wchState
@@ -44941,7 +44986,7 @@ window._wchWaMe=async function(convId,tel,conTexto){
       const{data:tx}=secsTxt.length?await sb.from('app_mensajes').select('texto').in('seccion',secsTxt).neq('activo',false).order('seccion').order('idx').limit(1):{data:[]}
       const conv=st.convs.find(c=>c.id===convId)
       let msg=(tx&&tx[0]&&tx[0].texto)||''
-      if(msg){msg=msg.replace(/\[NOMBRE\]/g,(conv&&conv.nombre)||'').trim();navigator.clipboard.writeText(msg).catch(()=>{});url+='?text='+encodeURIComponent(msg)}
+      if(msg){msg=msg.replace(/\[NOMBRE\]/g,(conv&&conv.nombre)||'').trim();navigator.clipboard.writeText(msg).catch(()=>{});url=nxWaUrl(tel,msg)}
     }catch(_){}
   }
   window.open(url,'_blank','noopener')

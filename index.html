@@ -23708,9 +23708,26 @@ async function _renderResumenProductos(desde,hasta,hoy){
     // Antes solo se traía en vivo el de campaña → la campaña marcaba el gasto fresco (ej: $93.040)
     // pero su ID se quedaba con el último sync de BD (ej: $25.315). Mismo patrón y mismo fallback.
     const _gastoLiveAdByAdId={}
-    for(const cuenta of (cuentasAll||[])){
+    // (23sep26) ⏱️ CARGA EN VIVO CON TOPE: antes se preguntaba a Meta cuenta por cuenta (46), sin tiempo
+    // máximo, y con esperas de 30s/60s por límite → la pantalla quedaba en "Cargando…" minutos. Ahora:
+    //  · 5 "trabajadores" en paralelo toman cuentas de una fila (una cuenta colgada ocupa solo a uno).
+    //  · Máx 8s por cuenta y tope TOTAL de 20s: la que no alcance usa el dato GUARDADO (el respaldo de siempre).
+    //  · Cuenta que Meta niega por permiso (#200) → no se le vuelve a preguntar en esta sesión.
+    const _LIVE_MAX_MS=20000,_LIVE_CTA_MS=8000,_LIVE_LOTE=5,_tLive0=Date.now()
+    window._nxMetaSinPermiso=window._nxMetaSinPermiso||{}
+    let _nVivo=0,_nBD=0
+    const _conTope=(prom)=>{
+      const resta=Math.min(_LIVE_CTA_MS,_LIVE_MAX_MS-(Date.now()-_tLive0))
+      if(resta<=0){prom.catch(()=>{});return Promise.reject(new Error('tope de 20s en vivo alcanzado'))}
+      prom.catch(()=>{}) // si llega tarde y falla, que no ensucie la consola
+      let _tm
+      return Promise.race([prom,new Promise((_,rej)=>{_tm=setTimeout(()=>rej(new Error('Meta tardó demasiado en esta cuenta')),resta)})]).finally(()=>clearTimeout(_tm))
+    }
+    const _vivoCuenta=async(cuenta)=>{
       try{
-        const ins=await metaGet(`/act_${cuenta.account_id}/insights`,token,{fields:'campaign_id,campaign_name,spend',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
+        if(window._nxMetaSinPermiso[String(cuenta.account_id)])throw new Error('(#200) sin permiso (recordado en esta sesión)')
+        const ins=await _conTope(metaGet(`/act_${cuenta.account_id}/insights`,token,{fields:'campaign_id,campaign_name,spend',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'}))
+        _nVivo++
         for(const i of (ins||[])){
           if(!i.campaign_id)continue
           gastoByCampId[String(i.campaign_id)]=(gastoByCampId[String(i.campaign_id)]||0)+(parseFloat(i.spend)||0)
@@ -23732,6 +23749,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
           }
         }catch(eAd){console.warn(`[resumen producto] gasto ad en vivo falló cuenta ${cuenta.account_id} (sus IDs usan BD):`,eAd.message)}
       }catch(e){
+        _nBD++
+        if(/#200|permission/i.test(String(e&&e.message||'')))window._nxMetaSinPermiso[String(cuenta.account_id)]=true // (23sep26) no insistir
         console.warn(`[resumen producto] Meta API fallo cuenta ${cuenta.account_id}, fallback BD:`,e.message)
         const{data:insBD}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').eq('account_id',cuenta.account_id).gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
         for(const i of (insBD||[])){
@@ -23740,6 +23759,10 @@ async function _renderResumenProductos(desde,hasta,hoy){
         }
       }
     }
+    const _ctas=(cuentasAll||[]);let _pos=0
+    const _trabajador=async()=>{while(_pos<_ctas.length){const _c=_ctas[_pos++];await _vivoCuenta(_c)}}
+    await Promise.all(Array.from({length:Math.min(_LIVE_LOTE,_ctas.length)},_trabajador))
+    console.log(`[resumen producto] ⏱️ gasto listo en ${((Date.now()-_tLive0)/1000).toFixed(1)}s · ${_nVivo} cuenta(s) en vivo · ${_nBD} con dato guardado`)
     try{window._nexoLiveGastoByAdId=_gastoLiveAdByAdId}catch(_){}
   }catch(e){
     console.warn('[resumen producto] sin token Meta, fallback BD completa:',e.message)

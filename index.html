@@ -1073,7 +1073,9 @@ window.nxCopia=(function(){
     return _c
   }
   function guardar(c){try{localStorage.setItem(c.k,JSON.stringify({fecha:c.fecha,vals:c.vals}))}catch(_){}}
-  function esta(v,t){const k=clave(v,t||'cliente');return !!(k&&leer().vals[k])}
+  const _perm=new Set() // 📒 (24sep26): tareas con constancia PERMANENTE en la bitácora → verde aunque sea otro día
+  function esta(v,t){const k=clave(v,t||'cliente');return !!(k&&(leer().vals[k]||_perm.has(k)))}
+  function agregarPermanentes(vals,t){for(const v of(vals||[])){const k=clave(v,t||'cliente');if(k)_perm.add(k)}pintar()}
   function cuando(v,t){const k=clave(v,t||'cliente');return k?(leer().vals[k]||null):null}
   function clase(v,t){return esta(v,t)?'nxc-verde':(t==='cliente'?'nxc-rojo':'nxc-gris')}
   function pintarEl(el){
@@ -1103,7 +1105,7 @@ window.nxCopia=(function(){
     const e=x=>String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
     return`<button type="button" class="btn-sm ${clase(v,t)}" data-nxcopia="${e(v)}" data-nxtipo="${t}" onclick="nxCopia.copiarYa(this.getAttribute('data-nxcopia'))" title="${e(o.title||'Copiar')}" style="padding:1px 7px;font-size:11px">${o.label||'📋'}</button>`
   }
-  return{normVal,esta,cuando,clase,pintar,marcar,copiarYa,btn}
+  return{normVal,esta,cuando,clase,pintar,marcar,copiarYa,btn,agregarPermanentes}
 })()
 ;(function nxcInit(){
   // Colores (UNA sola fuente). !important para ganarle al estilo propio de cada botón.
@@ -1113,6 +1115,7 @@ window.nxCopia=(function(){
       st.textContent='.nxc-rojo{background:rgba(239,68,68,.16)!important;border:1px solid #ef4444!important;color:#fca5a5!important}'
         +'.nxc-gris{background:rgba(148,163,184,.12)!important;border:1px solid #94a3b8!important;color:var(--text,#e5e7eb)!important}'
         +'.nxc-verde{background:rgba(34,197,94,.22)!important;border:1px solid #22c55e!important;color:#86efac!important}'
+        +'.nxc-amarillo{background:rgba(245,158,11,.20)!important;border:1px solid #f59e0b!important;color:#fcd34d!important}' // 📒 (24sep26): copió, falta el resultado
       ;(document.head||document.documentElement).appendChild(st)
     }
   }catch(_){}
@@ -1139,6 +1142,115 @@ window.nxCopia=(function(){
   if(document.body)arrancar();else document.addEventListener('DOMContentLoaded',arrancar)
 })()
 // ═══ FIN COPIADO CON COLOR ═══
+// ════════════════════════════════════════════════════════════════════════════
+// 📒 BITÁCORA DEL AUXILIAR (24sep26 · Fase 1) — constancia PERMANENTE de cada tarea
+// ─────────────────────────────────────────────────────────────────────────────
+// Tabla Supabase: aux_bitacora. Solo se ESCRIBE y se LEE: nadie puede borrar ni editar.
+// Cada fila = quién · sección · acción · TAREA · cuándo lo hizo (hecho_en) · resultado.
+// La TAREA es la clave del color (pedido + tipo + fecha), NO el teléfono: un pedido nuevo
+// siempre nace 🔴 aunque el cliente sea el mismo. Colores:
+//   🔴 sin tocar · 🟡 copió, falta decir qué pasó · 🟢 con resultado
+// NUNCA se pierde un registro: primero se guarda en una cola del navegador y se sube a
+// Supabase; si falla (o la tabla aún no existe), se reintenta solo cada 30 s hasta que entra.
+// Cada registro guarda también quién estaba logueado de verdad y, si el admin usaba
+// "Viendo como", a quién estaba viendo (así las pruebas del admin no se mezclan).
+// Uso: nxBit.registrar({seccion,accion,tarea,telefono,fecha_ref,resultado,detalle})
+//      nxBit.cargar(tareas,{alAvanzar,vivo}) → {mapa:{tarea:[filas]},error}
+//      nxBit.estadoDe(filas) → {estado:'rojo'|'amarillo'|'verde',copia,resultado}
+// ════════════════════════════════════════════════════════════════════════════
+window.nxBit=(function(){
+  const COLA='nx_bitacora_cola_v1'
+  let _faltaTabla=false,_vaciando=false
+  const leerCola=()=>{try{const a=JSON.parse(localStorage.getItem(COLA)||'[]');return Array.isArray(a)?a:[]}catch(_){return[]}}
+  const guardarCola=a=>{try{localStorage.setItem(COLA,JSON.stringify(a.slice(-3000)))}catch(_){}}
+  const uidReal=()=>{try{return(me&&me.id)?String(me.id):null}catch(_){return null}}
+  function quien(){
+    try{
+      const r=me||{},c=(typeof currentMe==='function'?currentMe():null)||r
+      return{usuario_nombre:r.nombre||r.username||null,viendo_como:(c&&r&&c.id&&r.id&&String(c.id)!==String(r.id))?(c.nombre||c.username||null):null}
+    }catch(_){return{usuario_nombre:null,viendo_como:null}}
+  }
+  const esISO=s=>/^\d{4}-\d{2}-\d{2}$/.test(String(s||''))
+  function registrar(o){
+    o=o||{}
+    const fila={seccion:String(o.seccion||''),accion:String(o.accion||''),tarea:String(o.tarea||''),
+      telefono:o.telefono!=null&&o.telefono!==''?String(o.telefono):null,
+      fecha_ref:esISO(o.fecha_ref)?String(o.fecha_ref):null,
+      resultado:o.resultado!=null&&o.resultado!==''?String(o.resultado):null,
+      detalle:o.detalle||null,hecho_en:new Date().toISOString(),...quien()}
+    if(!fila.seccion||!fila.accion||!fila.tarea)return null
+    const cola=leerCola()
+    cola.push({...fila,_lid:Date.now()+'-'+Math.random().toString(36).slice(2,9),_uid:uidReal()})
+    guardarCola(cola)
+    vaciar()
+    return fila
+  }
+  // Sube la cola en lotes de 50. Solo sube lo de QUIEN está logueado (nunca a nombre de otro).
+  async function vaciar(){
+    if(_vaciando)return
+    _vaciando=true
+    try{
+      for(let vuelta=0;vuelta<40;vuelta++){
+        const yo=uidReal();if(!yo)break
+        const mios=leerCola().filter(x=>x._uid===yo).slice(0,50)
+        if(!mios.length)break
+        let ok=false
+        try{
+          const{error}=await sb.from('aux_bitacora').insert(mios.map(({_lid,_uid,...f})=>f))
+          if(!error){ok=true;_faltaTabla=false}
+          else{if(error.code==='42P01'||/aux_bitacora/i.test(String(error.message||'')))_faltaTabla=true;console.warn('[bitácora] no subió:',error.message)}
+        }catch(e){console.warn('[bitácora] no subió:',e&&e.message)}
+        if(!ok)break
+        const ids=new Set(mios.map(x=>x._lid))
+        guardarCola(leerCola().filter(x=>!ids.has(x._lid)))
+      }
+    }finally{_vaciando=false}
+  }
+  setInterval(()=>{try{if(leerCola().length)vaciar()}catch(_){}},30000)
+  // Lee las constancias de varias tareas. Regla NEXO: reintenta hasta que cargue, con %.
+  async function cargar(tareas,op){
+    op=op||{}
+    const lista=[...new Set((tareas||[]).filter(Boolean).map(String))]
+    const mapa={},vistos=new Set()
+    const add=r=>{const k=[r.tarea,r.accion,r.hecho_en||r.created_at,r.resultado||''].join('¦');if(vistos.has(k))return;vistos.add(k);(mapa[r.tarea]=mapa[r.tarea]||[]).push(r)}
+    const set=new Set(lista)
+    for(const x of leerCola())if(set.has(x.tarea))add({...x,_local:true}) // lo hecho que aún no subió también cuenta
+    const aviso=(pct,intento,err)=>{try{op.alAvanzar&&op.alAvanzar(pct,intento,err)}catch(_){}}
+    const vivo=()=>{try{return op.vivo?op.vivo():true}catch(_){return true}}
+    let error=''
+    const trozos=[];for(let i=0;i<lista.length;i+=80)trozos.push(lista.slice(i,i+80))
+    aviso(0,1,'')
+    for(let t=0;t<trozos.length;t++){
+      let intento=0
+      while(true){
+        if(!vivo())return{mapa,error:'cancelado'}
+        intento++
+        let res
+        try{res=await sb.from('aux_bitacora').select('tarea,accion,resultado,hecho_en,created_at,usuario_nombre,viendo_como,detalle').in('tarea',trozos[t]).order('hecho_en',{ascending:true})}
+        catch(e){res={error:{message:String((e&&e.message)||e),code:''}}}
+        if(res&&!res.error){for(const r of(res.data||[]))add(r);break}
+        const er=(res&&res.error)||{message:'sin respuesta',code:''},em=String(er.message||'')
+        if(er.code==='42P01'||/relation .*aux_bitacora|aux_bitacora.*(not|no) exist/i.test(em)){_faltaTabla=true;error='falta_tabla';break}
+        const transitorio=!er.code||/fetch|network|timeout|tempor|Load failed|50[234]|429/i.test(em)
+        if(!transitorio){error=em||'error de lectura';break}
+        aviso(Math.round(t/trozos.length*100),intento+1,em)
+        await new Promise(r=>setTimeout(r,Math.min(5000,700*intento)))
+      }
+      if(error)break
+      aviso(Math.round((t+1)/trozos.length*100),1,'')
+    }
+    for(const k of Object.keys(mapa))mapa[k].sort((a,b)=>String(a.hecho_en||a.created_at||'').localeCompare(String(b.hecho_en||b.created_at||'')))
+    return{mapa,error}
+  }
+  // 🔴 / 🟡 / 🟢 de una tarea: la PRIMERA copia y el ÚLTIMO resultado (el historial queda completo)
+  function estadoDe(filas){
+    let copia=null,resultado=null
+    for(const x of(filas||[])){if(x.accion==='copiar'&&!copia)copia=x;if(x.accion==='resultado')resultado=x}
+    return{estado:resultado?'verde':(copia?'amarillo':'rojo'),copia,resultado}
+  }
+  return{registrar,cargar,estadoDe,vaciar,pendientes:()=>leerCola().length,faltaTabla:()=>_faltaTabla}
+})()
+// ═══ FIN BITÁCORA DEL AUXILIAR ═══
 const _normProd=s=>(s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()
 // Resuelve un texto crudo (de Dropi/SellerChat) al producto canónico mediante aliases + nombre
 // Devuelve {id, nombre} si encuentra, o {id:null, nombre:raw_original} si no encuentra
@@ -17288,6 +17400,7 @@ async function cargarRegistrosDia(){
       </div>
     </div>`
   cruceUsuariosCargar(_seq,{conf,pend,canc},campo,fecha) // 👤 (24sep26): fila 2 — USUARIOS (no frena la pantalla)
+  cruceTareasPintar(_seq,pend,canc) // 📒 (24sep26): 🔴/🟡/🟢 + resultados + constancia permanente (no frena la pantalla)
 }
 window.cargarRegistrosDia=cargarRegistrosDia
 
@@ -17304,6 +17417,7 @@ window.cruceCopiarLote=async function(btn,tipo){
   btn.innerHTML=`✓ ${lote.length} copiados`
   btn.style.background='var(--green)';btn.style.color='#0F1117'
   setTimeout(()=>{btn.innerHTML=orig;btn.style.background=origBg;btn.style.color='var(--text)'},1800)
+  try{window.cruceLoteRegistrar&&window.cruceLoteRegistrar(btn,'tel',tipo,lote.length)}catch(_){} // 📒 (24sep26): 🟢 permanente
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -17374,6 +17488,7 @@ async function cruceUsuariosCargar(seq,grupos,campo,fecha){
       <div class="card c-red"><div class="card-label">Cancelados</div><div class="card-val">${lotes.canc.length}</div>${btn('canc',lotes.canc.length)}</div>
     </div>
     <div style="font-size:11px;color:var(--muted);line-height:1.5">${tot?'':'Ningún pedido de esta fecha llegó con usuario. · '}ℹ️ Sale de la Hoja Base (ventana 📱 WhatsApp): cuentan las hojas generadas desde el 24/09/2026 con esta versión.</div>`
+  try{cruceLotesPintar(seq)}catch(_){} // 📒 (24sep26): "Copiar todos" de usuarios con su 🟢 permanente
 }
 // Copiar TODOS los usuarios de una categoría — un usuario por fila (igual que los teléfonos)
 window.cruceCopiarUsuarios=async function(btn,tipo){
@@ -17385,8 +17500,164 @@ window.cruceCopiarUsuarios=async function(btn,tipo){
   const orig=btn.innerHTML
   btn.innerHTML=`✓ ${lote.length} copiados`
   setTimeout(()=>{btn.innerHTML=orig},1800)
+  try{window.cruceLoteRegistrar&&window.cruceLoteRegistrar(btn,'usr',tipo,lote.length)}catch(_){} // 📒 (24sep26): 🟢 permanente
 }
 // ═══ FIN USUARIOS EN REGISTROS DEL DÍA ═══
+
+// ════════════════════════════════════════════════════════════════════════════
+// 📒 CRUCE DROPI · TAREAS CON CONSTANCIA (24sep26 · Fase 1 de "rastrear al auxiliar")
+// ─────────────────────────────────────────────────────────────────────────────
+// Cada tarjeta de PENDIENTES y CANCELADOS es una TAREA (tipo + teléfono + fecha Dropi):
+//   🔴 Sin tocar → 🟡 Copió el número (falta decir qué pasó) → 🟢 Dejó un RESULTADO.
+// Los botones de resultado solo aparecen DESPUÉS de copiar (candado). Programar / reprogramar
+// el envío también cuenta como resultado. "📋 Copiar todos" queda 🟢 PERMANENTE para esa fecha.
+// Todo se escribe en la bitácora (nxBit) → constancia para siempre: quién, qué, cuándo y
+// cuántos minutos pasaron entre copiar y decidir. El color lo ve igual el admin en su equipo.
+// Solo pinta ENCIMA de las tarjetas de siempre: no cambia cómo se copian ni cómo se programan.
+// ════════════════════════════════════════════════════════════════════════════
+const CRUCE_RES={
+  pend:[['confirmo','✅ Confirmó'],['no_contesta','📵 No contesta'],['escrito','💬 Le escribí, espera respuesta'],['no_quiere','❌ No lo quiere']],
+  canc:[['recuperado','♻️ Lo recuperé'],['no_contesta','📵 No contesta'],['escrito','💬 Le escribí, espera respuesta'],['no_quiere','❌ No lo quiere']]
+}
+const CRUCE_RES_TXT={confirmo:'✅ Confirmó',recuperado:'♻️ Lo recuperó',no_contesta:'📵 No contesta',escrito:'💬 Le escribió, espera respuesta',no_quiere:'❌ No lo quiere',programo_envio:'📅 Programó el envío',reprogramo_envio:'♻️ Reprogramó el envío'}
+const cruceTarKey=(tipo,tel,fd)=>`cruce|${tipo}|${String(tel==null?'':tel).trim()}|${String(fd==null?'':fd).trim()}`
+const _ctEsc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+const _ctHora=iso=>{try{const d=new Date(iso);const h=d.toLocaleTimeString('es-CO',{hour:'numeric',minute:'2-digit',timeZone:'America/Bogota'});const f=d.toLocaleDateString('en-CA',{timeZone:'America/Bogota'});return f===today()?h:(d.toLocaleDateString('es-CO',{day:'numeric',month:'short',timeZone:'America/Bogota'})+' '+h)}catch(_){return''}}
+const _ctPor=x=>x?`${_ctEsc(x.usuario_nombre||'alguien')}${x.viendo_como?` <span style="opacity:.7">(como ${_ctEsc(x.viendo_como)})</span>`:''}`:''
+window._cruceTar=null
+// Arranca al pintar "Registros del día": primera pasada inmediata + constancias de Supabase
+async function cruceTareasPintar(seq,pend,canc){
+  const cont=document.getElementById('reg-dia-content');if(!cont)return
+  const vivo=()=>seq===window._regDiaSeq&&!!document.getElementById('reg-dia-content')
+  const tipos={}
+  for(const m of(canc||[]))tipos[String(m.telefono||'').replace(/'/g,'')+'|'+String(m.fecha_dropi||'')]='canc'
+  for(const m of(pend||[]))tipos[String(m.telefono||'').replace(/'/g,'')+'|'+String(m.fecha_dropi||'')]='pend'
+  window._cruceTar={seq,tipos,mapa:{},cargado:false,error:''}
+  cruceTareasRepintar() // 1ª pasada: sin esperar a Supabase (lo copiado de antes ya sale 🟡)
+  const keys=[]
+  cont.querySelectorAll('.card[data-tel][data-fd]').forEach(c=>{const t=tipos[c.dataset.tel+'|'+c.dataset.fd];if(t)keys.push(cruceTarKey(t,c.dataset.tel,c.dataset.fd))})
+  const banner=(html)=>{
+    let b=document.getElementById('cruce-tar-estado')
+    if(!b){const grid=cont.querySelector('.form-grid.g2');if(!grid)return;b=document.createElement('div');b.id='cruce-tar-estado';grid.parentNode.insertBefore(b,grid)}
+    b.innerHTML=html
+  }
+  let r={mapa:{},error:''}
+  if(keys.length){
+    r=await nxBit.cargar(keys,{vivo,alAvanzar:(pct,intento,err)=>{if(!vivo())return
+      banner(`<div class="alert" style="margin-bottom:12px;background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:12.5px;line-height:1.6">🟡 <b>Cargando la constancia de las tareas… ${pct}%</b>${intento>1?` · reintento <b>${intento}</b> — sigo intentando hasta que cargue`:''}${err?`<br><span style="font-size:11px;color:var(--muted)">Motivo: ${_ctEsc(err)}</span>`:''}
+        <div style="height:6px;background:rgba(0,0,0,.25);border-radius:6px;margin-top:5px;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--amber);transition:width .3s"></div></div></div>`)}})
+  }
+  if(!vivo()||r.error==='cancelado')return
+  window._cruceTar.mapa=r.mapa||{};window._cruceTar.cargado=true;window._cruceTar.error=r.error||''
+  if(r.error==='falta_tabla')banner(`<div class="alert" style="margin-bottom:12px;background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:12.5px">⚠️ <b>La constancia aún no está activa en Supabase</b> (falta correr el SQL de la tabla <code>aux_bitacora</code>). Todo lo que hagas se guarda en este equipo y se sube SOLO cuando esté lista — no se pierde nada.</div>`)
+  else if(r.error)banner(`<div class="alert alert-red" style="margin-bottom:12px;font-size:12.5px">❌ No pude leer la constancia: ${_ctEsc(r.error)}. Lo que hagas igual queda guardado.</div>`)
+  else banner('')
+  cruceTareasRepintar()
+  cruceLotesPintar(seq)
+}
+// Pinta TODAS las tarjetas de la pantalla según su estado
+function cruceTareasRepintar(){
+  const cont=document.getElementById('reg-dia-content');if(!cont||!window._cruceTar)return
+  cont.querySelectorAll('.card[data-tel][data-fd]').forEach(c=>{try{cruceCardPintar(c)}catch(e){console.warn('[cruce tarea]',e&&e.message)}})
+}
+function cruceCardPintar(card){
+  const T=window._cruceTar;if(!T)return
+  const tel=card.dataset.tel,fd=card.dataset.fd,tipo=T.tipos[tel+'|'+fd];if(!tipo)return
+  if(card.dataset.nxLegacy==null)card.dataset.nxLegacy=(parseFloat(card.style.opacity)<1)?'1':'0' // copiado ANTES de la bitácora (dropi_copiados)
+  const key=cruceTarKey(tipo,tel,fd)
+  let st=nxBit.estadoDe(T.mapa[key]||[])
+  const legacyCop=card.dataset.nxLegacy==='1'
+  const progTxt=tipo==='pend'?((card.querySelector('[id^="cruce-prog-"] span')||{}).textContent||''):''
+  const prog=/Envío:/.test(progTxt)
+  let nota=''
+  if(st.estado==='rojo'&&legacyCop){st={...st,estado:'amarillo'};nota=' <span style="opacity:.7">(copiado antes de la constancia)</span>'}
+  if(st.estado!=='verde'&&prog){st={...st,estado:'verde',progSolo:true}}
+  // tarjeta, círculo y botón de copiar
+  card.style.opacity=st.estado==='verde'?'.6':'1'
+  const num=card.querySelector('.dropi-num')
+  if(num){if(st.estado==='verde'){num.style.background='var(--green)';num.textContent='✓'}else if(st.estado==='amarillo'){num.style.background='#f59e0b'}}
+  const bt=card.querySelector('.dropi-copy-btn')
+  if(bt){bt.classList.remove('nxc-rojo','nxc-amarillo','nxc-verde');bt.classList.add(st.estado==='verde'?'nxc-verde':(st.estado==='amarillo'?'nxc-amarillo':'nxc-rojo'))}
+  // franja de estado (la constancia visible)
+  let fr=card.querySelector('.cruce-tar');if(!fr){fr=document.createElement('div');fr.className='cruce-tar';card.appendChild(fr)}
+  const abierto=card.dataset.nxCambiar==='1'
+  const chips=(CRUCE_RES[tipo]||[]).map(([v,l])=>`<button class="btn-sm" style="font-size:11.5px;padding:4px 10px" onclick="cruceTareaResultado(this,'${v}')">${l}</button>`).join('')
+  let h=''
+  if(st.estado==='rojo'){
+    h=`<div style="color:#fca5a5">🔴 <b>Sin tocar</b> — copia el número para empezar</div>`
+  }else if(st.estado==='amarillo'){
+    h=`<div style="color:#fcd34d">🟡 <b>Copiado</b>${st.copia?` por ${_ctPor(st.copia)} · ${_ctEsc(_ctHora(st.copia.hecho_en||st.copia.created_at))}`:''}${nota} — ahora dime <b>qué pasó</b>:</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${chips}</div>`
+  }else{
+    const R=st.resultado
+    const txt=R?(CRUCE_RES_TXT[R.resultado]||R.resultado):'📅 Envío programado'
+    const seg=R&&R.detalle&&R.detalle.segundos_desde_copiar!=null?R.detalle.segundos_desde_copiar:null
+    const tiempo=seg==null?'':(seg<60?` · ⏱️ ${seg}s después de copiar`:` · ⏱️ ${Math.round(seg/60)} min después de copiar`)
+    const sinCopia=R&&!st.copia&&!legacyCop?' · <span style="color:#fcd34d">⚠️ sin copiar el número</span>':''
+    h=`<div style="color:#86efac">🟢 <b>${_ctEsc(txt)}</b>${R?` · ${_ctPor(R)} · ${_ctEsc(_ctHora(R.hecho_en||R.created_at))}`:' <span style="opacity:.7">(ya estaba programado)</span>'}${tiempo}${sinCopia}
+      ${R&&!abierto?` <button class="btn-sm" style="font-size:10.5px;padding:1px 8px;margin-left:4px" onclick="cruceTareaCambiar(this)">✏️ cambiar</button>`:''}</div>
+      ${abierto?`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${chips}</div>`:''}`
+  }
+  const pend=(T.mapa[key]||[]).some(x=>x._local)
+  fr.innerHTML=`<div style="margin-top:10px;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.6;background:rgba(0,0,0,.18);border:1px solid ${st.estado==='verde'?'#22c55e':(st.estado==='amarillo'?'#f59e0b':'#ef4444')}">${h}${pend?'<div style="font-size:10.5px;color:var(--muted);margin-top:3px">☁️ guardado en este equipo · subiendo a la constancia…</div>':''}</div>`
+}
+// Agrega una fila a la memoria de la pantalla (para que el color cambie AL INSTANTE)
+function cruceTarLocal(key,fila){const T=window._cruceTar;if(!T||!fila)return;(T.mapa[key]=T.mapa[key]||[]).push({...fila,_local:true})}
+// Enganche: después de "📋 Copiar número" (la función de siempre sigue igual)
+window.cruceTareaTrasCopiar=(btn,tel,fd)=>{
+  const T=window._cruceTar,card=btn&&btn.closest&&btn.closest('.card');if(!T||!card)return
+  const tipo=T.tipos[String(tel)+'|'+String(fd||'')]||T.tipos[card.dataset.tel+'|'+card.dataset.fd];if(!tipo)return
+  const key=cruceTarKey(tipo,card.dataset.tel,card.dataset.fd)
+  const f=nxBit.registrar({seccion:'cruce_dropi',accion:'copiar',tarea:key,telefono:card.dataset.tel,fecha_ref:card.dataset.fd,detalle:{tipo}})
+  cruceTarLocal(key,f)
+  cruceCardPintar(card)
+}
+// Botón de resultado (solo aparece después de copiar)
+window.cruceTareaResultado=(el,valor)=>{
+  const T=window._cruceTar,card=el&&el.closest&&el.closest('.card');if(!T||!card)return
+  const tipo=T.tipos[card.dataset.tel+'|'+card.dataset.fd];if(!tipo)return
+  const key=cruceTarKey(tipo,card.dataset.tel,card.dataset.fd)
+  const st=nxBit.estadoDe(T.mapa[key]||[])
+  if(!st.copia&&card.dataset.nxLegacy!=='1'){alert('🔒 Primero copia el número (📋) y habla con el cliente.');return}
+  const tc=st.copia?(st.copia.hecho_en||st.copia.created_at):null
+  const seg=tc?Math.max(0,Math.round((Date.now()-Date.parse(tc))/1000)):null
+  const f=nxBit.registrar({seccion:'cruce_dropi',accion:'resultado',tarea:key,telefono:card.dataset.tel,fecha_ref:card.dataset.fd,resultado:valor,detalle:{tipo,segundos_desde_copiar:seg,cambio:!!st.resultado,anterior:st.resultado?st.resultado.resultado:null}})
+  cruceTarLocal(key,f)
+  card.dataset.nxCambiar='0'
+  cruceCardPintar(card)
+}
+window.cruceTareaCambiar=(el)=>{const card=el&&el.closest&&el.closest('.card');if(!card)return;card.dataset.nxCambiar='1';cruceCardPintar(card)}
+// Enganche: después de programar / reprogramar el envío (la función de siempre sigue igual)
+window.cruceTareaTrasProgramar=(m,fecha,re)=>{
+  const T=window._cruceTar;if(!T||!m)return
+  const tel=String(m.telefono||'').replace(/'/g,''),fd=String(m.fecha_dropi||'')
+  const key=cruceTarKey('pend',tel,fd)
+  const st=nxBit.estadoDe(T.mapa[key]||[])
+  const tc=st.copia?(st.copia.hecho_en||st.copia.created_at):null
+  const seg=tc?Math.max(0,Math.round((Date.now()-Date.parse(tc))/1000)):null
+  const f=nxBit.registrar({seccion:'cruce_dropi',accion:'resultado',tarea:key,telefono:tel,fecha_ref:fd,resultado:re?'reprogramo_envio':'programo_envio',detalle:{tipo:'pend',fecha_envio:fecha,segundos_desde_copiar:seg,mapeo_id:m.id}})
+  cruceTarLocal(key,f)
+  const cont=document.getElementById('reg-dia-content')
+  if(cont)cont.querySelectorAll('.card[data-tel][data-fd]').forEach(c=>{if(c.dataset.tel===tel&&c.dataset.fd===fd)cruceCardPintar(c)})
+}
+// "📋 Copiar todos" (teléfonos y usuarios): 🟢 PERMANENTE para esa fecha y esa cantidad
+async function cruceLotesPintar(seq){
+  const cont=document.getElementById('reg-dia-content');if(!cont)return
+  const btns=[...cont.querySelectorAll('[data-nxcopia^="lote|"]')]
+  const keys=btns.map(b=>b.getAttribute('data-nxcopia')).filter(Boolean)
+  if(!keys.length)return
+  const r=await nxBit.cargar(keys,{vivo:()=>seq===window._regDiaSeq})
+  if(seq!==window._regDiaSeq)return
+  const hechos=keys.filter(k=>(r.mapa[k]||[]).some(x=>x.accion==='copiar_todos'))
+  if(hechos.length&&window.nxCopia&&nxCopia.agregarPermanentes)nxCopia.agregarPermanentes(hechos,'cliente')
+  btns.forEach(b=>{const k=b.getAttribute('data-nxcopia'),x=(r.mapa[k]||[]).find(y=>y.accion==='copiar_todos');if(x)b.title=`✅ Copiado por ${x.usuario_nombre||'alguien'} · ${_ctHora(x.hecho_en||x.created_at)}`})
+}
+window.cruceLoteRegistrar=(btn,fila,tipo,n)=>{
+  const k=btn&&btn.getAttribute&&btn.getAttribute('data-nxcopia');if(!k)return
+  nxBit.registrar({seccion:'cruce_dropi',accion:'copiar_todos',tarea:k,detalle:{fila,tipo,cantidad:n}})
+  if(window.nxCopia&&nxCopia.agregarPermanentes)nxCopia.agregarPermanentes([k],'cliente')
+}
+// ═══ FIN CRUCE DROPI · TAREAS CON CONSTANCIA ═══
 
 // ── MEJORA E (8jul26): programar/reprogramar FECHA DE ENVÍO desde el Cruce Dropi ──────────────
 // MISMO dato de "Confirmar y recuperar": escribe en programaciones_envio con el patrón EXACTO de
@@ -17460,6 +17731,7 @@ window.cruceGuardarFechaEnvio=async(mapeoId)=>{
   const chip=document.getElementById('cruce-prog-'+String(m.id))
   if(chip)chip.innerHTML=`<span style="font-size:12px;color:var(--green)">📅 Envío: <strong>${fecha}</strong> ✓</span>
     <button class="btn-sm" style="font-size:11px;padding:3px 10px" onclick="cruceProgramarEnvio('${String(m.id)}')">♻️ Reprogramar</button>`
+  try{window.cruceTareaTrasProgramar&&window.cruceTareaTrasProgramar(m,fecha,!!progAnterior)}catch(_){} // 📒 (24sep26): programar/reprogramar = resultado 🟢
 }
 
 // ── Copiar teléfono de Cruce Dropi: copia al portapapeles + persiste (telefono+fecha_dropi) ──
@@ -17485,6 +17757,7 @@ window.copiarTelDropi=async function(btn,tel,fechaDropi){
       await sb.from('dropi_copiados').upsert({telefono:tel,fecha_dropi:fechaDropi,usuario_id:uid},{onConflict:'telefono,fecha_dropi'})
     }catch(e){console.warn('[DROPI_COPIADOS] no se pudo guardar:',e?.message||e)}
   }
+  try{window.cruceTareaTrasCopiar&&window.cruceTareaTrasCopiar(btn,tel,fechaDropi)}catch(_){} // 📒 (24sep26): constancia + 🟡
 }
 
 // ── EMPAREJAMIENTO ROBUSTO ORDEN DROPI → MAPEO ──────────────

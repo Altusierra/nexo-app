@@ -503,7 +503,109 @@ import{createClient}from'https://esm.sh/@supabase/supabase-js@2'
 
 const SURL='https://adpfxwnsnltpcgudbkhc.supabase.co'
 const SKEY='sb_publishable_Qq0ZdsQokOiJqAAOoOTSmg_TdLkKDFm'
-const sb=createClient(SURL,SKEY)
+// ════════════════════════════════════════════════════════════════════════════
+// 🚪 PUERTA ÚNICA A SUPABASE (24sep26 · Fase A) — tiempo máximo + reintento + aviso global
+// ─────────────────────────────────────────────────────────────────────────────
+// TODAS las consultas de NEXO a Supabase pasan por aquí (se le entrega a createClient como
+// fetch). Un solo lugar protege Meta Ads, Confirmar, Cruce, Reportes… todo.
+//  · ⏱️ Tiempo máximo por consulta: 25 s (lecturas y escrituras a la base y a la sesión).
+//    Subir/bajar archivos: 4 min · funciones: 2 min (son largas por naturaleza).
+//  · 🔄 Reintento SOLO en lo que es seguro repetir: lecturas (GET) y upserts. Las escrituras
+//    normales NO se repiten (evita pedidos/registros duplicados): fallan claro y rápido.
+//  · 🟡 Detector "Supabase lento": 2 fallas seguidas → aviso amarillo fijo arriba, en toda la
+//    app, con el motivo y cuánto lleva. 2 respuestas buenas seguidas → ✅ "volvió" y se quita.
+//  · Nunca más un "Cargando…" eterno: si de verdad no responde, la sección recibe un error
+//    claro ("Supabase no respondió en 25 s") en vez de esperar para siempre.
+//  · Estado para otras partes de NEXO: nxPuerta.estado() → 'ok' | 'lento' · evento 'nx:red'.
+// ════════════════════════════════════════════════════════════════════════════
+window.nxPuerta=(function(){
+  const realFetch=(typeof window.fetch==='function')?window.fetch.bind(window):null
+  const CFG={rest:{ms:25000,intentos:3},auth:{ms:25000,intentos:2},storage:{ms:240000,intentos:1},functions:{ms:120000,intentos:1},otro:{ms:60000,intentos:1}}
+  const est={estado:'ok',fallas:0,exitos:0,ultimaFalla:'',desde:0,reintentos:0,enVuelo:0}
+  const tipoDe=u=>{u=String(u||'');if(u.includes('/rest/v1/'))return'rest';if(u.includes('/auth/v1/'))return'auth';if(u.includes('/storage/v1/'))return'storage';if(u.includes('/functions/v1/'))return'functions';return'otro'}
+  const urlDe=u=>typeof u==='string'?u:((u&&u.url)||'')
+  // ¿Es seguro repetirla? Lecturas siempre; upsert (merge-duplicates) también; lo demás NO.
+  function repetible(init){
+    const m=String((init&&init.method)||'GET').toUpperCase()
+    if(m==='GET'||m==='HEAD')return true
+    try{const h=init&&init.headers;let p='';if(h){p=(typeof h.get==='function')?(h.get('Prefer')||''):(h.Prefer||h.prefer||'')}if(String(p).includes('merge-duplicates'))return true}catch(_){}
+    return false
+  }
+  const espera=i=>new Promise(r=>setTimeout(r,800*i))
+  // ── aviso global (una sola franja arriba, para toda la app) ──
+  let _timerVolvio=null,_timerLleva=null
+  function banner(){
+    try{
+      let b=document.getElementById('nx-red-banner')
+      if(est.estado==='ok'&&!b)return
+      if(!b){b=document.createElement('div');b.id='nx-red-banner';b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;padding:8px 14px;text-align:center;font-size:13px;font-weight:700;line-height:1.5;box-shadow:0 2px 10px rgba(0,0,0,.35)';(document.body||document.documentElement).appendChild(b)}
+      if(est.estado==='lento'){
+        const seg=Math.max(0,Math.round((Date.now()-est.desde)/1000))
+        b.style.background='#f59e0b';b.style.color='#1a1200'
+        b.innerHTML=`🟡 Supabase va lento — NEXO reintenta sola. Lleva <b>${seg<90?seg+' s':Math.round(seg/60)+' min'}</b> · ${est.fallas} falla${est.fallas===1?'':'s'} seguida${est.fallas===1?'':'s'}${est.ultimaFalla?` · <span style="font-weight:600">motivo: ${String(est.ultimaFalla).replace(/</g,'&lt;').slice(0,90)}</span>`:''} · lo que ya cargó sigue sirviendo`
+      }else{
+        b.style.background='#22c55e';b.style.color='#04210f'
+        b.innerHTML='✅ Supabase respondió otra vez — todo normal'
+      }
+    }catch(_){}
+  }
+  function emitir(){
+    banner()
+    try{window.dispatchEvent(new CustomEvent('nx:red',{detail:{...est}}))}catch(_){}
+    if(est.estado==='lento'&&!_timerLleva)_timerLleva=setInterval(banner,5000)
+    if(est.estado==='ok'&&_timerLleva){clearInterval(_timerLleva);_timerLleva=null}
+  }
+  function falla(tipo,msg){
+    if(tipo==='storage'||tipo==='functions'||tipo==='otro')return // archivos y funciones son largos por naturaleza: no cuentan
+    est.fallas++;est.exitos=0;est.ultimaFalla=msg||''
+    if(est.estado==='ok'&&est.fallas>=2){est.estado='lento';est.desde=Date.now();emitir()}
+    else if(est.estado==='lento')emitir()
+  }
+  function exito(tipo){
+    if(tipo==='storage'||tipo==='functions'||tipo==='otro')return
+    if(est.estado==='lento'){
+      est.exitos++
+      if(est.exitos>=2){est.estado='ok';est.fallas=0;est.ultimaFalla='';emitir();clearTimeout(_timerVolvio);_timerVolvio=setTimeout(()=>{try{document.getElementById('nx-red-banner')?.remove()}catch(_){}},5000)}
+    }else est.fallas=0
+  }
+  async function fetchPuerta(url,init){
+    if(!realFetch)throw new Error('fetch no disponible')
+    init=init||{}
+    const tipo=tipoDe(urlDe(url)),c=CFG[tipo]||CFG.otro
+    const intentos=(tipo==='rest'||tipo==='auth')&&repetible(init)?c.intentos:1
+    let ultimoErr=null
+    for(let i=1;i<=intentos;i++){
+      const ac=new AbortController(),sig=init.signal
+      const onAb=()=>{try{ac.abort()}catch(_){}}
+      if(sig){if(sig.aborted)onAb();else sig.addEventListener('abort',onAb,{once:true})}
+      const t=setTimeout(()=>{try{ac.abort()}catch(_){}},c.ms)
+      est.enVuelo++
+      try{
+        const r=await realFetch(url,{...init,signal:ac.signal})
+        clearTimeout(t);if(sig)sig.removeEventListener('abort',onAb);est.enVuelo--
+        if(r&&r.status>=502&&r.status<=504){ // Supabase caído o saturado
+          falla(tipo,'HTTP '+r.status)
+          if(i<intentos){est.reintentos++;await espera(i);continue}
+          return r
+        }
+        exito(tipo)
+        return r
+      }catch(e){
+        clearTimeout(t);if(sig)sig.removeEventListener('abort',onAb);est.enVuelo--
+        if(sig&&sig.aborted)throw e // la propia app la canceló a propósito: no es falla de red
+        const esTimeout=e&&e.name==='AbortError'
+        ultimoErr=esTimeout?new Error('Supabase no respondió en '+Math.round(c.ms/1000)+' s'+(intentos>1?' (intento '+i+' de '+intentos+')':'')):e
+        falla(tipo,ultimoErr&&ultimoErr.message)
+        if(i<intentos){est.reintentos++;await espera(i);continue}
+        throw ultimoErr
+      }
+    }
+    throw ultimoErr||new Error('Supabase no respondió')
+  }
+  return{fetch:fetchPuerta,estado:()=>est.estado,lento:()=>est.estado==='lento',info:()=>({...est}),CFG}
+})()
+// ═══ FIN PUERTA ÚNICA ═══
+const sb=createClient(SURL,SKEY,{global:{fetch:(window.nxPuerta&&window.nxPuerta.fetch)||undefined}}) // 🚪 (24sep26): todas las consultas pasan por la puerta única (tiempo máximo + reintento + aviso)
 
 // ── ℹ️ Tooltip explicativo: nfo(color,texto) → devuelve el botoncito con su globo ──
 // color: 'g' verde · 'a' ámbar · 'r' rojo · 'b' azul · 'n' gris. Funciona en hover (PC) y tap (móvil).
@@ -11381,6 +11483,8 @@ async function pageAuxReservado(c){
   if(typeof cargarPendientesConfirmacion==='function'){
     setTimeout(()=>cargarPendientesConfirmacion(),50)
   }
+  // 🟡 (Fase C): PRIMERA PÁGINA RÁPIDA de PASO 2 y 3 (los 40 más recientes); la completa sigue atrás
+  if(typeof window.nxPasoRapido==='function'){setTimeout(()=>{nxPasoRapido('psf')},0);setTimeout(()=>{nxPasoRapido('canc')},30)}
   // Cargar lista de pendientes sin fecha al entrar
   if(typeof cargarPendientesSinFecha==='function'){
     setTimeout(()=>cargarPendientesSinFecha(),80)
@@ -12541,6 +12645,7 @@ async function cargarPendientesSinFecha(){
       .gte('fecha',hace90)
       .order('fecha',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
     if(e2)throw e2
+    try{nxCargaPaso('psf',1)}catch(_){} // 🟡 (Fase C)
     // Deduplicar por id
     const byId={}
     for(const m of (pendA||[]))byId[m.id]=m
@@ -12561,6 +12666,7 @@ async function cargarPendientesSinFecha(){
       if(data)progs=progs.concat(data)
     }
     const conProg=new Set(progs.map(p=>p.mapeo_id))
+    try{nxCargaPaso('psf',2)}catch(_){} // 🟡 (Fase C)
     // 2b) ESCUDO 2 (ley del owner): si le dieron "CANCELAR PEDIDO" a mano, NUNCA vuelve a esta
     // lista — aunque el Excel regrese su estado a P.CONF. La decisión vive en mapeo_eventos y el
     // Excel no la toca. Única excepción: si DESPUÉS lo REACTIVARON a mano, sí puede volver.
@@ -12590,6 +12696,7 @@ async function cargarPendientesSinFecha(){
       }
     }catch(_){}
     const sinFecha=pend.filter(m=>!conProg.has(m.id)&&!canceladoManual.has(String(m.id)))
+    try{nxCargaPaso('psf',4)}catch(_){} // 🟡 (Fase C)
     // Orden: más recientes primero
     sinFecha.sort((a,b)=>{
       const fa=a.fecha||a.created_at||''
@@ -12606,6 +12713,7 @@ async function cargarPendientesSinFecha(){
         .in('mapeo_id',batch).order('created_at',{ascending:false}).range(_f,_t))
       if(ed)psfEnvios=psfEnvios.concat(ed)
     }
+    try{nxCargaPaso('psf',5)}catch(_){} // 🟡 (Fase C)
     // Agrupar por mapeo_id: count total, envios_hoy, ultimo envío, último usuario, último nivel
     const hoyStr=today()
     const enviosByMap={}
@@ -12634,8 +12742,10 @@ async function cargarPendientesSinFecha(){
     for(const m of sinFecha)m.psf_esc3=_esc3Marca.has(String(m.id))
     window._psfCache={items:sinFecha,limit:window._psfCache?.limit||20}
     try{waEncolarSeccionAuto('psf',sinFecha)}catch(_){} // (11ago26) ✂️ SPLIT: PASO 2 = pendientes SIN fecha → sección ⏳ psf
+    try{nxCargaListo('psf')}catch(_){} // 🟡 (Fase C): completa lista
     renderPendientesSinFecha()
   }catch(e){
+    if(window.nxCargaFallo&&nxCargaFallo('psf',el,e,cargarPendientesSinFecha))return // 🟡 (Fase C): la lista se queda y se reintenta sola
     el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
   }
 }
@@ -12731,6 +12841,7 @@ async function cargarCancelados(){
       .order('fecha',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
     if(e1)throw e1
     let lista=canc||[]
+    try{nxCargaPaso('canc',1)}catch(_){} // 🟡 (Fase C)
     if(!lista.length){el.innerHTML='<div class="alert alert-blue">No hay pedidos cancelados por el cruce Dropi para recuperar.</div>';window._cancCache={items:[],limit:20};return}
     // 2) Excluir los cancelados MANUALMENTE desde Reservados (evento cancelado + fuente auxiliar_manual).
     //    Los cancelados sin rastro de cancelación manual se consideran del cruce Dropi → se incluyen.
@@ -12749,6 +12860,7 @@ async function cargarCancelados(){
       if(data)evReCanc=evReCanc.concat(data)
     }
     const manualSet=new Set([...evManual.map(e=>e.mapeo_id),...evReCanc.map(e=>e.mapeo_id)])
+    try{nxCargaPaso('canc',3)}catch(_){} // 🟡 (Fase C)
     lista=lista.filter(m=>!manualSet.has(m.id))
     if(!lista.length){el.innerHTML='<div class="alert alert-blue">No hay cancelados del cruce Dropi (los cancelados existentes se cancelaron manualmente).</div>';window._cancCache={items:[],limit:20};return}
     // 3) Contar mensajes de recuperación enviados (mapeo_eventos: canc_mensaje_enviado)
@@ -12759,6 +12871,7 @@ async function cargarCancelados(){
       const{data}=await _sbFetchAll((_f,_t)=>sb.from('mapeo_eventos').select('mapeo_id,created_at').in('mapeo_id',batch).eq('evento','canc_mensaje_enviado').order('created_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
       if(data)evEnv=evEnv.concat(data)
     }
+    try{nxCargaPaso('canc',4)}catch(_){} // 🟡 (Fase C)
     const hoyStr=today()
     const envBy={}
     for(const e of evEnv){
@@ -12777,10 +12890,127 @@ async function cargarCancelados(){
     lista.sort((a,b)=>String(b.fecha||b.created_at||'').localeCompare(String(a.fecha||a.created_at||'')))
     window._cancCache={items:lista,limit:window._cancCache?.limit||20}
     try{waEncolarSeccionAuto('cancelados',lista)}catch(_){}
+    try{nxCargaListo('canc')}catch(_){} // 🟡 (Fase C): completa lista
     renderCancelados()
-  }catch(e){el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`}
+  }catch(e){if(window.nxCargaFallo&&nxCargaFallo('canc',el,e,cargarCancelados))return;el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`} // 🟡 (Fase C): la lista se queda y se reintenta sola
 }
 window.cargarCancelados=cargarCancelados
+// ════════════════════════════════════════════════════════════════════════════
+// 🟡 PASO 2 y PASO 3 · CARGA POR PARTES (24sep26 · Fase C)
+// ─────────────────────────────────────────────────────────────────────────────
+// Antes: cada paso traía 90 días de pedidos + programaciones + eventos + mensajes, TODO antes de
+// mostrar nada; si una consulta se colgaba, la pantalla quedaba en "Cargando…" para siempre.
+// Ahora, con el mismo pipeline y los MISMOS filtros de siempre:
+//  1) PRIMERA PÁGINA RÁPIDA: los 40 pedidos más recientes (con sus contadores de mensajes, para
+//     que el cupo diario siga cuidando) se muestran en 1-2 s. La auxiliar ya puede trabajar.
+//  2) La lista COMPLETA de siempre sigue cargando atrás, con 🟡 % por paso, y al llegar reemplaza
+//     a la primera página (los pedidos ya vistos no se pierden ni se duplican).
+//  3) Si la completa falla, la primera página SE QUEDA y NEXO reintenta sola con el motor de
+//     reintentos de siempre (10 s · 30 s · luego cada 60 s, sin límite) mostrando 🟡 % + cuenta atrás
+//     y la pastilla flotante. Nunca más "Cargando…" eterno ni un error rojo que borre la lista.
+// ════════════════════════════════════════════════════════════════════════════
+window._nxCargaEst=window._nxCargaEst||{}
+const _NX_PASOS={psf:{el:'psf-content',nombre:'pendientes sin fecha (PASO 2)',pasos:5,cache:()=>window._psfCache,render:()=>{try{renderPendientesSinFecha()}catch(_){}}},
+                 canc:{el:'canc-content',nombre:'cancelados (PASO 3)',pasos:4,cache:()=>window._cancCache,render:()=>{try{renderCancelados()}catch(_){}}}}
+const _nxCargaEsc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+// Franja de estado ENCIMA de la lista (hermana del contenedor: sobrevive a cada repintado)
+function nxCargaBanner(clave,html){
+  try{
+    const cfg=_NX_PASOS[clave];if(!cfg)return
+    const el=document.getElementById(cfg.el);if(!el)return
+    let b=document.getElementById('nx-carga-'+clave)
+    if(!html){if(b)b.remove();return}
+    if(!b){b=document.createElement('div');b.id='nx-carga-'+clave;el.parentNode.insertBefore(b,el)}
+    b.innerHTML=html
+  }catch(_){}
+}
+const _nxCargaParcial=clave=>{try{const c=_NX_PASOS[clave].cache();return!!(c&&c.parcial&&c.items&&c.items.length)}catch(_){return false}}
+// % de avance de la carga completa (cada paso del pipeline de siempre lo llama)
+window.nxCargaPaso=function(clave,n){
+  try{
+    const cfg=_NX_PASOS[clave];if(!cfg)return
+    const pct=Math.round(n/cfg.pasos*100)
+    const txt=_nxCargaParcial(clave)?`⏳ Mostrando los <b>${(cfg.cache().items||[]).length} más recientes</b> · cargando la lista completa… <b>${pct}%</b> (paso ${n} de ${cfg.pasos})`:`🟡 Cargando ${cfg.nombre}… <b>${pct}%</b> (paso ${n} de ${cfg.pasos})`
+    nxCargaBanner(clave,`<div class="alert" style="margin-bottom:8px;background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:12.5px;line-height:1.6">${txt}<div style="height:6px;background:rgba(0,0,0,.25);border-radius:6px;margin-top:5px;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--amber);transition:width .3s"></div></div></div>`)
+  }catch(_){}
+}
+// Carga completa lista → se quita la franja (y ya no hay "parcial")
+window.nxCargaListo=function(clave){try{const st=window._nxCargaEst[clave];if(st)delete st.error;nxCargaBanner(clave,'')}catch(_){}}
+// La carga completa falló → la lista que haya se QUEDA y se reintenta sola (motor de siempre)
+window.nxCargaFallo=function(clave,el,e,reintentar){
+  try{
+    const cfg=_NX_PASOS[clave];if(!cfg)return false
+    const st=window._nxCargaEst[clave]=window._nxCargaEst[clave]||{}
+    st.error=String((e&&e.message)||e||'error').slice(0,120)
+    const parcial=_nxCargaParcial(clave)
+    if(!parcial&&el)el.innerHTML='' // sin lista todavía: solo la franja (nada de "Cargando…" eterno)
+    const pinta=(info)=>{
+      const rt=info&&info.rt
+      const cuando=rt?(rt.corriendo?'⏳ intentando ahora…':`próximo intento en <b>${rt.proximoEn} s</b> · intento ${rt.intento}`):'reintentando sola…'
+      nxCargaBanner(clave,`<div class="alert" style="margin-bottom:8px;background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:12.5px;line-height:1.6">🟡 <b>No se pudo cargar ${cfg.nombre} completo</b> — ${cuando}${parcial?' · mientras tanto, abajo siguen los más recientes':''}<br><span style="font-size:11px;color:var(--muted)">Motivo: ${_nxCargaEsc(st.error)}</span> <button class="btn-sm" style="font-size:11px;padding:2px 8px;margin-left:6px" onclick="(window._nxReintentos&&window._nxReintentos['carga-${clave}']&&window._nxReintentos['carga-${clave}'].vivo)?window._nxReintentos['carga-${clave}'].ahora():(${clave==='psf'?'cargarPendientesSinFecha':'cargarCancelados'})()">🔄 Reintentar ahora</button></div>`)
+    }
+    pinta(null)
+    if(!(st.motor&&st.motor.vivo)&&typeof window._nxHastaQueCargue==='function'){
+      st.motor=window._nxHastaQueCargue('carga-'+clave,{titulo:'Carga de '+cfg.nombre,total:1,
+        pendientes:[{nombre:'lista completa',hacer:async()=>{delete st.error;await reintentar();if(st.error)throw new Error(st.error)}}],
+        sigueVivo:()=>!!document.getElementById(cfg.el),
+        alTerminar:async()=>{nxCargaBanner(clave,'')},
+        alCambiar:(info)=>{if(st.error)pinta(info)}})
+    }
+    return true
+  }catch(_){return false}
+}
+// PRIMERA PÁGINA RÁPIDA: los 40 más recientes, con los mismos filtros y contadores del pipeline completo
+window.nxPasoRapido=async function(clave){
+  const cfg=_NX_PASOS[clave];if(!cfg)return
+  const el=document.getElementById(cfg.el);if(!el)return
+  const c0=cfg.cache();if(c0&&c0.items&&c0.items.length&&!c0.parcial)return // la completa ya llegó: no pisarla
+  const N=40
+  try{
+    const hace90=_isoDate(new Date(Date.now()-90*24*60*60*1000))
+    const ids=l=>l.map(m=>m.id)
+    if(clave==='psf'){
+      const sel='id,telefono,nombre_cliente,producto,cantidad,ciudad,fecha,fecha_dropi,estado_inicial,estado_final,created_at,transportadora,precio_dropi,producto_id'
+      const{data:a}=await sb.from('mapeos').select(sel).in('estado_final',['PENDIENTE CONFIRMACION']).gte('fecha',hace90).order('fecha',{ascending:false}).order('id',{ascending:true}).limit(N)
+      const{data:b}=await sb.from('mapeos').select(sel).eq('estado_inicial','PENDIENTE CONFIRMACION').is('estado_final',null).gte('fecha',hace90).order('fecha',{ascending:false}).order('id',{ascending:true}).limit(N)
+      const byId={};for(const m of(a||[]))byId[m.id]=m;for(const m of(b||[]))if(!byId[m.id])byId[m.id]=m
+      let pend=Object.values(byId).sort((x,y)=>String(y.fecha||y.created_at||'').localeCompare(String(x.fecha||x.created_at||''))).slice(0,N)
+      if(!pend.length)return
+      const{data:prg}=await sb.from('programaciones_envio').select('mapeo_id').in('mapeo_id',ids(pend)).eq('estado','programado')
+      const conProg=new Set((prg||[]).map(p=>p.mapeo_id))
+      const{data:ev}=await sb.from('mapeo_eventos').select('mapeo_id,evento,fuente,created_at').in('mapeo_id',ids(pend)).in('evento',['cancelado','re_cancelado','reactivado']).order('created_at',{ascending:true})
+      const dec={};for(const e of(ev||[])){if(e.evento==='reactivado')dec[e.mapeo_id]='ok';else if(e.evento==='re_cancelado'||(e.evento==='cancelado'&&e.fuente==='auxiliar_manual'))dec[e.mapeo_id]='canc'}
+      const cancManual=new Set(Object.keys(dec).filter(k=>dec[k]==='canc'))
+      const sinFecha=pend.filter(m=>!conProg.has(m.id)&&!cancManual.has(String(m.id)))
+      let esc3=new Set();try{const{data:e3}=await sb.from('mapeo_eventos').select('mapeo_id').in('mapeo_id',ids(sinFecha)).in('evento',['esc3_stock_liberado','esc3_reparado']);esc3=new Set((e3||[]).map(e=>String(e.mapeo_id)))}catch(_){}
+      const{data:env}=await sb.from('pendientes_sin_fecha_envios').select('mapeo_id,nivel_mensaje,created_at,usuario_nombre').in('mapeo_id',ids(sinFecha)).order('created_at',{ascending:false})
+      const hoyStr=today(),by={}
+      for(const e of(env||[])){const k=e.mapeo_id;if(!by[k])by[k]={count:0,enviosHoy:0,ultimo:null,ultimoUsuario:null,ultimoNivel:null};by[k].count++;if(String(e.created_at||'').slice(0,10)===hoyStr)by[k].enviosHoy++;if(!by[k].ultimo){by[k].ultimo=e.created_at;by[k].ultimoUsuario=e.usuario_nombre;by[k].ultimoNivel=e.nivel_mensaje}}
+      for(const m of sinFecha){const i=by[m.id]||{count:0,enviosHoy:0,ultimo:null,ultimoUsuario:null,ultimoNivel:null};m.psf_envios=i.count;m.psf_envios_hoy=i.enviosHoy;m.psf_ultimo=i.ultimo;m.psf_ultimo_usuario=i.ultimoUsuario;m.psf_ultimo_nivel=i.ultimoNivel;m.psf_esc3=esc3.has(String(m.id))}
+      const c1=cfg.cache();if(c1&&c1.items&&c1.items.length&&!c1.parcial)return // llegó la completa mientras tanto
+      window._psfCache={items:sinFecha,limit:(c1&&c1.limit)||20,parcial:true}
+    }else{
+      const sel='id,telefono,nombre_cliente,producto,producto_id,cantidad,ciudad,transportadora,precio_dropi,fecha,fecha_dropi,estado_inicial,estado_final,created_at'
+      const{data:canc}=await sb.from('mapeos').select(sel).eq('estado_final','CANCELADO').gte('fecha',hace90).order('fecha',{ascending:false}).order('id',{ascending:true}).limit(N)
+      let lista=canc||[];if(!lista.length)return
+      const{data:evM}=await sb.from('mapeo_eventos').select('mapeo_id').in('mapeo_id',ids(lista)).eq('evento','cancelado').eq('fuente','auxiliar_manual')
+      const{data:evR}=await sb.from('mapeo_eventos').select('mapeo_id').in('mapeo_id',ids(lista)).eq('evento','re_cancelado')
+      const manual=new Set([...(evM||[]).map(e=>e.mapeo_id),...(evR||[]).map(e=>e.mapeo_id)])
+      lista=lista.filter(m=>!manual.has(m.id));if(!lista.length)return
+      const{data:evE}=await sb.from('mapeo_eventos').select('mapeo_id,created_at').in('mapeo_id',ids(lista)).eq('evento','canc_mensaje_enviado').order('created_at',{ascending:false})
+      const hoyStr=today(),by={}
+      for(const e of(evE||[])){const k=e.mapeo_id;if(!by[k])by[k]={count:0,enviosHoy:0,ultimo:null};by[k].count++;if(String(e.created_at||'').slice(0,10)===hoyStr)by[k].enviosHoy++;if(!by[k].ultimo)by[k].ultimo=e.created_at}
+      for(const m of lista){const i=by[m.id]||{count:0,enviosHoy:0,ultimo:null};m.canc_envios=i.count;m.canc_envios_hoy=i.enviosHoy;m.canc_ultimo=i.ultimo}
+      lista.sort((x,y)=>String(y.fecha||y.created_at||'').localeCompare(String(x.fecha||x.created_at||'')))
+      const c1=cfg.cache();if(c1&&c1.items&&c1.items.length&&!c1.parcial)return
+      window._cancCache={items:lista,limit:(c1&&c1.limit)||20,parcial:true}
+    }
+    cfg.render()
+    if(!document.getElementById('nx-carga-'+clave))nxCargaPaso(clave,0)
+  }catch(e){console.warn('[primera página '+clave+']',e&&e.message)} // si falla, la carga completa de siempre sigue su curso
+}
+// ═══ FIN PASO 2 y 3 POR PARTES ═══
+
 
 function renderCancelados(){
   const el=document.getElementById('canc-content')
@@ -30728,10 +30958,136 @@ window._metaCargaError=function(e){
   if(!_el)return
   _el.innerHTML=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:12px 14px;background:var(--red-bg);border:1px solid var(--red);border-radius:8px;font-size:12px;color:var(--red)"><span style="font-size:16px">❌</span><span><strong>No se pudieron cargar los datos del portafolio.</strong> ${String((e&&e.message)||'Error desconocido').replace(/</g,'&lt;')}</span><button onclick="doRefreshPortafolio(this)" style="margin-left:auto;background:transparent;border:1px solid var(--red);border-radius:6px;color:var(--red);font-size:11px;font-weight:700;padding:3px 11px;cursor:pointer" title="Vuelve a cargar todo el portafolio">🔄 Reintentar</button></div>`
 }
+// ════════════════════════════════════════════════════════════════════════════
+// 🟢 META ADS · HOY PRIMERO (24sep26 · Fase B)
+// ─────────────────────────────────────────────────────────────────────────────
+// Antes: al abrir Meta Ads, NEXO cargaba cuentas + 1000 campañas + 46 conteos + 46 llamadas a
+// Meta UNA POR UNA y SIN tope (el encabezado) → recién ahí pintaba… y DESPUÉS volvía a llamar a
+// Meta otras 46 veces para el resumen por producto (lo de HOY). Si algo se colgaba, no veías nada.
+// Ahora: el resumen de HOY (gasto · ventas · CPA por producto — lo que usas para escalar) arranca
+// DE INMEDIATO, en paralelo con la base de datos, con su carga en vivo de siempre (5 en paralelo,
+// tope de 20 s, % de avance, respaldo de BD). Apenas está, se ve. El encabezado de cuentas reusa
+// ese mismo gasto (una sola pasada en vivo) y se pinta después, sin trabar lo de hoy.
+// Si esto falla por lo que sea, devuelve null y corre el flujo de siempre (nada se pierde).
+// ════════════════════════════════════════════════════════════════════════════
+window._nxHoyNodo=null
+window._nxHoyPrimero=async function(el){
+  try{
+    if(typeof _renderResumenProductos!=='function'||!el)return null
+    const hasta=document.getElementById('meta-hasta')?.value||window._metaRangoSel?.hasta||window._metaRangoInicial?.hasta||today()
+    const desde=document.getElementById('meta-desde')?.value||window._metaRangoSel?.desde||window._metaRangoInicial?.desde||hasta
+    const hoyB=new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
+    const _ay=new Date(hoyB+'T12:00:00Z');_ay.setDate(_ay.getDate()-1);const ayerB=_isoDate(_ay)
+    if(hasta<ayerB)return null // rango cerrado (solo días viejos): el flujo de siempre lee la BD
+    const cache=window._nexoLiveGastoByCampId,rng=window._nexoLiveGastoRango
+    if(cache&&rng&&rng.desde===desde&&rng.hasta===hasta)return null // ya hay gasto en vivo de este rango: el flujo de siempre lo reusa
+    window._nxHoyNodo=null
+    el.innerHTML=`<div id="nx-hoy-aviso" class="alert" style="margin-bottom:10px;background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:12.5px;line-height:1.6">🟢 <b>HOY primero</b> — cargando gasto, ventas y CPA de hoy por producto (lo que usas para escalar). Las cuentas y campañas se cargan después, sin trabar esto.</div>
+      <div id="meta-resumen-productos" style="margin-bottom:16px"><div class="loading" style="padding:20px;text-align:center;color:var(--muted);font-size:13px">⏳ Gasto en vivo de Meta… 0%</div></div>
+      <div id="nx-hoy-resto" class="loading" style="padding:14px;text-align:center;color:var(--muted);font-size:12.5px">🟡 Después: cuentas y campañas…</div>`
+    window._metaRangoSel={desde,hasta}
+    const html=await _renderResumenProductos(desde,hasta,today())
+    const cont=document.getElementById('meta-resumen-productos')
+    if(cont&&html!=null){
+      cont.innerHTML=html||''
+      try{window._rpFusionMainInit&&window._rpFusionMainInit()}catch(_fm){console.warn('[fusión principal]',_fm)}
+      window._nxHoyNodo=cont // el mismo nodo (con lo que el usuario ya abrió) se MUEVE a la página completa cuando esté
+      const av=document.getElementById('nx-hoy-aviso');if(av)av.innerHTML='✅ <b>HOY listo</b> — gasto, ventas y CPA de hoy cargados. 🟡 Cargando cuentas y campañas…'
+    }
+    return html==null?null:(html||'')
+  }catch(e){console.warn('[HOY primero] se usa el flujo de siempre:',e&&e.message);return null}
+}
+// ═══ FIN HOY PRIMERO ═══
+// ════════════════════════════════════════════════════════════════════════════
+// ⏳ META ADS · PRECARGA DE PRODUCTOS EN SEGUNDO PLANO (24sep26 · Fase D)
+// ─────────────────────────────────────────────────────────────────────────────
+// Antes: cada producto que abrías arrancaba su desglose desde cero (esperabas el botoncito cada vez).
+// Ahora, cuando el resumen ya está y todo va normal, NEXO adelanta los demás productos calladito,
+// UNO A LA VEZ y con pausa entre cada uno (nunca 46 consultas de golpe). Al abrirlos, ya están.
+// Reglas de seguridad (no es parche):
+//  · Lo que abres MANDA: si tocas un producto, la precarga espera 8 s antes de seguir.
+//  · Si Supabase va lento (puerta única 🟡), la precarga se DETIENE hasta que vuelva.
+//  · Si cambias de rango o de sección, la precarga se cancela sola (nunca trabaja de más).
+//  · Usa EXACTAMENTE el mismo desglose de siempre (_rpFusAuto8): cero código duplicado.
+//  · Aviso discreto abajo: "⏳ Adelantando productos · 3 de 6 · Nad Pro Max".
+// ════════════════════════════════════════════════════════════════════════════
+window._nxPre={seq:0,ultimoClic:0,corriendo:false}
+// Un toque del usuario en un producto → la precarga le da prioridad (espera antes de seguir)
+try{
+  if(typeof window._rpFusGrpToggle==='function'&&!window._rpFusGrpToggle._nxEnvuelto){
+    const _origToggle=window._rpFusGrpToggle
+    window._rpFusGrpToggle=function(){window._nxPre.ultimoClic=Date.now();return _origToggle.apply(this,arguments)}
+    window._rpFusGrpToggle._nxEnvuelto=true
+  }
+}catch(_){}
+const _nxPreEspera=ms=>new Promise(r=>setTimeout(r,ms))
+const _nxPreNombre=slug=>{try{const h=document.getElementById('fusgrp-ch-'+slug);const t=h&&h.parentNode?h.parentNode.textContent.replace(/[▼▸]/g,'').trim():'';return(t||slug).slice(0,28)}catch(_){return slug}}
+window.nxPreCargaProgramar=function(retrasoMs){
+  const seq=++window._nxPre.seq
+  setTimeout(()=>{nxPreCargaCorrer(seq).catch(e=>console.warn('[precarga]',e&&e.message))},retrasoMs==null?6000:retrasoMs)
+}
+window.nxPreCargaCancelar=function(){window._nxPre.seq++;try{window._nxPillCarga&&window._nxPillCarga('precarga','','quitar')}catch(_){}}
+async function nxPreCargaCorrer(seq){
+  const P=window._nxPre
+  if(P.corriendo)return
+  P.corriendo=true
+  try{
+    const vivo=()=>seq===P.seq&&!!document.getElementById('meta-resumen-productos')
+    if(!vivo())return
+    if(typeof window._rpFusAuto8!=='function')return
+    const slugs=[...document.querySelectorAll('[id^="fusgrp-bd-"]')].map(d=>d.id.slice('fusgrp-bd-'.length)).filter(s=>s&&s!=='__sinprod__')
+    const pend=slugs.filter(s=>!(window._rpAuto8Done&&window._rpAuto8Done[s]))
+    if(!pend.length)return
+    const total=slugs.length
+    let hechos=total-pend.length
+    // Primero los datos vivos comunes (estados + entrega), una sola vez, como al primer desglose
+    if(window._nexoCargaVivos&&window._nexoVivosListo!=='ok'){
+      try{window._nxPillCarga&&window._nxPillCarga('precarga','⏳ Adelantando productos · trayendo estados en vivo…','carga')}catch(_){}
+      try{await window._nexoCargaVivos()}catch(_){}
+      if(!vivo())return
+    }
+    for(const slug of pend){
+      // esperar si el usuario está mirando algo o Supabase va lento
+      for(let g=0;g<600;g++){
+        if(!vivo())return
+        const ocupado=(Date.now()-P.ultimoClic)<8000
+        const lento=!!(window.nxPuerta&&window.nxPuerta.lento&&window.nxPuerta.lento())
+        if(!ocupado&&!lento)break
+        try{window._nxPillCarga&&window._nxPillCarga('precarga',`⏸️ Adelantando productos · ${hechos} de ${total} · ${lento?'esperando a Supabase':'esperando a que termines'}…`,'reintento')}catch(_){}
+        await _nxPreEspera(1000)
+      }
+      if(!vivo())return
+      if(window._rpAuto8Done&&window._rpAuto8Done[slug]){hechos++;continue} // el usuario lo abrió mientras tanto
+      try{window._nxPillCarga&&window._nxPillCarga('precarga',`⏳ Adelantando productos · ${hechos+1} de ${total} · ${_nxPreNombre(slug)}`,'carga')}catch(_){}
+      try{
+        window._rpAuto8Done=window._rpAuto8Done||{}
+        if(document.getElementById('cuadf_'+slug+'-wrap')&&window._rpFusionRango){
+          window._rpAuto8Done[slug]=1
+          try{if(window._rpFusion8dias)window._rpFusion8dias(slug,'cuadf_'+slug)}catch(_){} // deja fechas y botón como el flujo de siempre
+          await Promise.race([window._rpFusionRango(slug,'cuadf_'+slug),_nxPreEspera(90000)]) // tope: un producto colgado no frena a los demás
+        }
+      }catch(e){console.warn('[precarga]',slug,e&&e.message)}
+      hechos++
+      await _nxPreEspera(1500) // pausa entre productos: despacio pero constante
+    }
+    try{window._nxPillCarga&&window._nxPillCarga('precarga',`✅ Productos adelantados · ${total} de ${total}`,'ok')}catch(_){}
+  }finally{P.corriendo=false}
+}
+// Arranca sola cuando el resumen por producto ya quedó pintado (con el flujo de siempre o con HOY primero)
+try{
+  if(typeof window._actualizarResumenMetaProductos==='function'&&!window._actualizarResumenMetaProductos._nxEnvuelto){
+    const _origAct=window._actualizarResumenMetaProductos
+    window._actualizarResumenMetaProductos=async function(){window.nxPreCargaCancelar();const r=await _origAct.apply(this,arguments);try{window.nxPreCargaProgramar()}catch(_){}return r}
+    window._actualizarResumenMetaProductos._nxEnvuelto=true
+  }
+}catch(_){}
+// ═══ FIN PRECARGA DE PRODUCTOS ═══
 async function renderMetaPortafolio(el,isAdmin){
   if(!el)return
   // NUEVO AVISO DE CARGA: registro de TODOS los llamados de esta carga (Meta API + BD) para el banner ✅/⚠️
   window._metaCargaInfo={fallas:[],gastoVivo:'',estadosLive:0,entrega:''}
+  const _hoyProm=(typeof window._nxHoyPrimero==='function')?window._nxHoyPrimero(el):null // 🟢 (Fase B): HOY primero, en paralelo con la BD
+  let _resumenPre=null
   const{data:cuentas}=await sb.from('meta_cuentas').select('*').order('nombre')
   const{data:campanas}=await sb.from('meta_campanas').select('*').eq('nivel','campaign').order('nombre')
   const lastSync=await getConfig('meta_sync_last')
@@ -30752,7 +31108,9 @@ async function renderMetaPortafolio(el,isAdmin){
 
   // Count insights per account (con count real, sin límite)
   const insCountByAcc={}
+  try{const _cts=[...(cuentas||[])];for(let _i=0;_i<_cts.length;_i+=8){await Promise.all(_cts.slice(_i,_i+8).map(async c=>{const{count}=await sb.from('meta_insights').select('id',{count:'exact',head:true}).eq('nivel','campaign').eq('account_id',c.account_id);insCountByAcc[c.account_id]=count||0}))}}catch(_){} // 🟢 (Fase B): mismos conteos, de a 8 en paralelo
   for(const c of cuentas){
+    if(insCountByAcc[c.account_id]!=null)continue // 🟢 (Fase B): ya vino en paralelo
     const{count}=await sb.from('meta_insights').select('id',{count:'exact',head:true}).eq('nivel','campaign').eq('account_id',c.account_id)
     insCountByAcc[c.account_id]=count||0
   }
@@ -30797,6 +31155,20 @@ async function renderMetaPortafolio(el,isAdmin){
     }
   }catch(_){}
 
+  // 🟢 (Fase B) HOY PRIMERO: si el resumen de hoy ya cargó el gasto en vivo (con tope y %), el
+  // encabezado lo REUSA y la pasada de siempre (46 llamadas una por una, sin tope) ya no corre.
+  if(_hIncluyeVivos&&_hoyProm){ // se espera SIEMPRE (así el resumen de HOY no se vuelve a cargar al final)
+    try{_resumenPre=await _hoyProm}catch(_){_resumenPre=null}
+    if(!_liveListo)try{
+      const cache=window._nexoLiveGastoByCampId,cacheRng=window._nexoLiveGastoRango
+      if(_resumenPre!=null&&cache&&cacheRng&&cacheRng.desde===_hDesde&&cacheRng.hasta===_hHasta){
+        for(const cid in cache){const v=cache[cid]||0,accId=_accByCampId[cid];if(!accId)continue;gastoRangoByCampId[cid]=v;gastoRangoByAcc[accId]=(gastoRangoByAcc[accId]||0)+v}
+        _liveListo=true
+        window._metaCargaInfo.gastoVivo='api'
+      }
+    }catch(_){}
+    try{const _r=document.getElementById('nx-hoy-resto');if(_r)_r.textContent='🟡 Armando cuentas y campañas…'}catch(_){}
+  }
   // 2) Si no había cache pero el rango incluye hoy/ayer → fetch Meta API ahora
   if(!_liveListo&&_hIncluyeVivos){
     try{
@@ -31287,7 +31659,8 @@ async function renderMetaPortafolio(el,isAdmin){
   if(typeof filterMetaCuentas==='function')filterMetaCuentas()
 
   // Cargar resumen por producto (en su div placeholder)
-  _actualizarResumenMetaProductos()
+  if(_resumenPre!=null){const _c=document.getElementById('meta-resumen-productos');if(_c&&window._nxHoyNodo&&window._nxHoyNodo!==_c){_c.replaceWith(window._nxHoyNodo)}else if(_c){_c.innerHTML=_resumenPre;try{window._rpFusionMainInit&&window._rpFusionMainInit()}catch(_){}}window._nxHoyNodo=null;try{window.nxPreCargaProgramar&&window.nxPreCargaProgramar()}catch(_){}} // 🟢 (Fase B): HOY ya estaba pintado → se mueve tal cual (sin volver a llamar a Meta) · ⏳ (Fase D): arranca la precarga
+  else _actualizarResumenMetaProductos()
 }
 
 // ── Asignar / Cambiar producto de una campaña desde el propio portafolio Meta ──

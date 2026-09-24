@@ -17343,6 +17343,7 @@ async function cargarRegistrosDia(){
         <div style="flex:1;min-width:0">
           <div style="font-size:22px;font-weight:800;font-family:monospace;letter-spacing:.5px;color:var(--text)">${m.telefono}</div>
           <div style="font-size:12px;color:var(--muted);margin-top:2px">${m.nombre_cliente||'—'} · ${m.ciudad||'—'}</div>
+          ${cruceDirHTML(m,tono==='amber'?(progMap[String(m.id)]||null):null,tono==='amber')}
         </div>
       </div>
       <button class="dropi-copy-btn" data-nxregistra="${tel}" onclick="copiarTelDropi(this,'${tel}','${fd}')" style="width:100%;margin-top:10px;padding:11px;border:none;border-radius:8px;background:var(--accent);color:#fff;font-weight:700;font-size:14px;cursor:pointer">📋 Copiar número</button>
@@ -17635,10 +17636,11 @@ window.cruceTareaTrasProgramar=(m,fecha,re)=>{
   const st=nxBit.estadoDe(T.mapa[key]||[])
   const tc=st.copia?(st.copia.hecho_en||st.copia.created_at):null
   const seg=tc?Math.max(0,Math.round((Date.now()-Date.parse(tc))/1000)):null
-  const f=nxBit.registrar({seccion:'cruce_dropi',accion:'resultado',tarea:key,telefono:tel,fecha_ref:fd,resultado:re?'reprogramo_envio':'programo_envio',detalle:{tipo:'pend',fecha_envio:fecha,segundos_desde_copiar:seg,mapeo_id:m.id}})
+  const f=nxBit.registrar({seccion:'cruce_dropi',accion:'resultado',tarea:key,telefono:tel,fecha_ref:fd,resultado:re?'reprogramo_envio':'programo_envio',detalle:{tipo:'pend',fecha_envio:fecha,segundos_desde_copiar:seg,mapeo_id:m.id,fecha_direccion:m._dirFecha||null}})
   cruceTarLocal(key,f)
   const cont=document.getElementById('reg-dia-content')
   if(cont)cont.querySelectorAll('.card[data-tel][data-fd]').forEach(c=>{if(c.dataset.tel===tel&&c.dataset.fd===fd)cruceCardPintar(c)})
+  if(cont)cont.querySelectorAll('.card[data-tel][data-fd]').forEach(c=>{if(c.dataset.tel===tel&&c.dataset.fd===fd){const d=c.querySelector('.cruce-dir');if(d)d.outerHTML=cruceDirHTML(m,fecha,true)}}) // 📍 (24sep26): ✅/⚠️ coincide al instante
 }
 // "📋 Copiar todos" (teléfonos y usuarios): 🟢 PERMANENTE para esa fecha y esa cantidad
 async function cruceLotesPintar(seq){
@@ -17658,6 +17660,107 @@ window.cruceLoteRegistrar=(btn,fila,tipo,n)=>{
   if(window.nxCopia&&nxCopia.agregarPermanentes)nxCopia.agregarPermanentes([k],'cliente')
 }
 // ═══ FIN CRUCE DROPI · TAREAS CON CONSTANCIA ═══
+// ════════════════════════════════════════════════════════════════════════════
+// 📍 DIRECCIÓN + FECHA DE ENVÍO EN EL CRUCE DROPI (24sep26 · pedido del owner)
+// ─────────────────────────────────────────────────────────────────────────────
+// Debajo del teléfono se ve la DIRECCIÓN tal cual la trae el reporte de Dropi (el Cruce ya
+// la guarda en mapeos.direccion). Si el pedido es de ENVÍO PROGRAMADO, la Hoja Base le pegó
+// la fecha delante con el prefijo HB_ENVIO_PREFIJO (🔴🛒) → "🔴🛒2 de octubre- Calle 37…".
+// NEXO lee esa fecha (SOLO la que va entre 🛒 y el primer "- "; nada se adivina del resto):
+//   · un día exacto ("2 de octubre", "5/10", "2026-10-02") → se muestra y se PRE-LLENA el
+//     calendario de "📅 Programar envío" (la auxiliar solo confirma).
+//   · rango o texto no exacto ("15-20 de octubre", "entre jueves 24 y martes 29") → se
+//     muestra resaltada y ella elige el día.
+//   · fecha que ya pasó → aviso "⚠️ esa fecha ya pasó".
+// Candado de coherencia: si programa un día DISTINTO al de la dirección, se le pregunta.
+// La constancia (bitácora) guarda la fecha de la dirección y si coincidió o no.
+// Pedidos sin dirección en el reporte → "📍 sin dirección en el reporte".
+// ════════════════════════════════════════════════════════════════════════════
+const _CRU_MES={enero:1,ene:1,febrero:2,feb:2,marzo:3,mar:3,abril:4,abr:4,mayo:5,may:5,junio:6,jun:6,julio:7,jul:7,agosto:8,ago:8,
+  septiembre:9,setiembre:9,sept:9,sep:9,set:9,octubre:10,oct:10,noviembre:11,nov:11,diciembre:12,dic:12}
+const _cruDirEsc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+const _cruDMY=iso=>{const p=String(iso||'').slice(0,10).split('-');return p.length===3?`${p[2]}/${p[1]}/${p[0]}`:String(iso||'')}
+// Fecha válida → ISO. Sin año escrito: el año actual, o el siguiente si ya pasó hace más de 90 días.
+function _cruFechaValida(y,mo,d,anioEscrito){
+  const hoyISO=today()
+  if(!y)y=parseInt(hoyISO.slice(0,4),10)
+  if(y<100)y+=2000
+  const mk=yy=>{const dt=new Date(Date.UTC(yy,mo-1,d));return(dt.getUTCFullYear()===yy&&dt.getUTCMonth()===mo-1&&dt.getUTCDate()===d)?dt.toISOString().slice(0,10):null}
+  let iso=mk(y);if(!iso)return null
+  if(!anioEscrito){const lim=new Date(Date.parse(hoyISO+'T12:00:00Z')-90*864e5).toISOString().slice(0,10);if(iso<lim)iso=mk(y+1)}
+  return iso
+}
+// Texto de "llegar" → ISO solo si es UN día exacto; si no, null
+function cruceFechaISO(texto){
+  const t=String(texto||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase()
+  let m=t.match(/\b(20\d{2})-(\d{1,2})-(\d{1,2})\b/)
+  if(m)return _cruFechaValida(+m[1],+m[2],+m[3],true)
+  const limpio=t.replace(/\b\d{1,2}:\d{2}\b/g,' ') // horas fuera ("13:00")
+  const meses=[...new Set([...limpio.matchAll(/\b(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sept|sep|set|oct|nov|dic)\b/g)].map(x=>_CRU_MES[x[1]]))]
+  const pares=[...limpio.matchAll(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/g)]
+  if(pares.length===1&&!meses.length){const p=pares[0];return _cruFechaValida(p[3]?+p[3]:0,+p[2],+p[1],!!p[3])}
+  if(pares.length)return null
+  const nums=[...limpio.matchAll(/\b(\d{1,2})\b/g)].map(x=>+x[1]).filter(n=>n>=1&&n<=31)
+  if(meses.length!==1||nums.length!==1)return null // rango, varios días o sin mes → que elija ella
+  return _cruFechaValida(0,meses[0],nums[0],false)
+}
+// Dirección → {texto, iso} de la fecha de envío pegada por la Hoja Base; null si no trae
+function cruceFechaDeDir(dir){
+  const s=String(dir||'')
+  let pref='🔴🛒';try{if(typeof HB_ENVIO_PREFIJO==='string'&&HB_ENVIO_PREFIJO)pref=HB_ENVIO_PREFIJO}catch(_){}
+  let ini=-1
+  const i=s.indexOf(pref);if(i>=0)ini=i+pref.length
+  else{const j=s.indexOf('🛒');if(j>=0)ini=j+'🛒'.length}
+  if(ini<0)return null
+  const resto=s.slice(ini),k=resto.search(/-\s/)
+  if(k<=0)return null
+  const texto=resto.slice(0,k).trim()
+  if(!texto)return null
+  return{texto,iso:cruceFechaISO(texto)}
+}
+// Bloque para la tarjeta: 📍 dirección + 📅 fecha de la dirección (y si coincide con lo programado)
+function cruceDirHTML(m,prog,esPend){
+  const dir=String(m&&m.direccion!=null?m.direccion:'').trim()
+  if(!dir)return`<div class="cruce-dir" style="font-size:11.5px;color:var(--muted);margin-top:3px">📍 sin dirección en el reporte</div>`
+  const F=cruceFechaDeDir(dir)
+  let h=`<div style="font-size:12.5px;color:var(--text);margin-top:4px;line-height:1.45;word-break:break-word">📍 ${_cruDirEsc(dir)}</div>`
+  if(F){
+    const p=prog?String(prog).slice(0,10):''
+    let l=`📅 La dirección dice <b>${_cruDirEsc(F.texto)}</b>`
+    if(F.iso&&F.iso<=today())l+=` · ⚠️ esa fecha ya pasó`
+    else if(F.iso)l+=` → <b>${_cruDMY(F.iso)}</b>`
+    else l+=` · no es un día exacto: elige tú el día`
+    if(p){if(F.iso&&p===F.iso)l+=` · ✅ coincide con lo programado`;else if(F.iso)l+=` · <span style="color:#fca5a5">⚠️ programado ${_cruDMY(p)} (no coincide)</span>`}
+    else if(esPend)l+=` · prográmalo 👇`
+    h+=`<div style="font-size:12px;color:#fcd34d;font-weight:600;margin-top:3px;line-height:1.45">${l}</div>`
+  }
+  return`<div class="cruce-dir">${h}</div>`
+}
+// Al abrir "📅 Programar envío": muestra la dirección y PRE-LLENA el día si es exacto
+window.cruceProgFechaDir=(m)=>{
+  const inp=document.getElementById('cruce-prog-fecha');if(!inp||!m)return
+  const dir=String(m.direccion||'').trim()
+  if(!dir)return
+  const F=cruceFechaDeDir(dir)
+  let nota=''
+  if(F&&F.iso&&F.iso>=String(inp.min||'')){inp.value=F.iso;nota=`📅 La dirección dice <b>${_cruDirEsc(F.texto)}</b> → ya puse <b>${_cruDMY(F.iso)}</b>. Revisa y confirma.`}
+  else if(F&&F.iso)nota=`📅 La dirección dice <b>${_cruDirEsc(F.texto)}</b> · ⚠️ esa fecha ya pasó: acuerda el nuevo día con el cliente.`
+  else if(F)nota=`📅 La dirección dice <b>${_cruDirEsc(F.texto)}</b> · no es un día exacto: elige tú el día.`
+  const fld=inp.closest('.fld');if(!fld)return
+  document.getElementById('cruce-prog-dir')?.remove()
+  fld.insertAdjacentHTML('beforebegin',`<div id="cruce-prog-dir" class="alert" style="margin-top:12px;background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);font-size:12.5px;line-height:1.6;word-break:break-word">📍 ${_cruDirEsc(dir)}${nota?'<br>'+nota:''}</div>`)
+}
+// Candado de coherencia al GUARDAR: día distinto al de la dirección → se pregunta. true = sigue.
+window.cruceProgCoherencia=(m,fecha)=>{
+  if(!m)return true
+  const F=cruceFechaDeDir(m.direccion)
+  m._dirFecha=F?{texto:F.texto,iso:F.iso||null,coincide:F.iso?(F.iso===fecha):null}:null
+  if(F&&F.iso&&F.iso>today()&&F.iso!==fecha){
+    return confirm(`📅 La dirección dice "${F.texto}" (${_cruDMY(F.iso)}), pero elegiste ${_cruDMY(fecha)}.\n\n¿Seguro que es ese día? (por ejemplo, el cliente pidió cambiarlo)`)
+  }
+  return true
+}
+// ═══ FIN DIRECCIÓN + FECHA DE ENVÍO ═══
 
 // ── MEJORA E (8jul26): programar/reprogramar FECHA DE ENVÍO desde el Cruce Dropi ──────────────
 // MISMO dato de "Confirmar y recuperar": escribe en programaciones_envio con el patrón EXACTO de
@@ -17687,6 +17790,7 @@ window.cruceProgramarEnvio=(mapeoId)=>{
   </div>`
   div.onclick=closeModal
   document.body.appendChild(div)
+  try{window.cruceProgFechaDir&&window.cruceProgFechaDir(m)}catch(_){} // 📍 (24sep26): dirección + día pre-llenado desde la dirección
 }
 window.cruceGuardarFechaEnvio=async(mapeoId)=>{
   const m=(window._cruceRegPend||{})[String(mapeoId)];if(!m)return
@@ -17696,6 +17800,7 @@ window.cruceGuardarFechaEnvio=async(mapeoId)=>{
   if(!fecha){if(msgEl)msgEl.innerHTML='<div class="alert alert-red">Selecciona una fecha</div>';return}
   const hoy=new Date();hoy.setHours(0,0,0,0)
   if(new Date(fecha+'T00:00:00')<=hoy){if(msgEl)msgEl.innerHTML='<div class="alert alert-red">La fecha debe ser futura</div>';return}
+  if(window.cruceProgCoherencia&&!window.cruceProgCoherencia(m,fecha))return // 📍 (24sep26): día distinto al de la dirección → se pregunta
   if(msgEl)msgEl.innerHTML='<div class="loading">Guardando...</div>'
   // Detectar programación activa previa (para diferenciar programar vs reprogramar) — patrón de guardarFechaEnvio
   let progAnterior=null

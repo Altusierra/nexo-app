@@ -22910,6 +22910,7 @@ window.runMetaSyncAllAccounts=async(days,btn)=>{
     const{data:cuentas}=await sb.from('meta_cuentas').select('account_id,nombre').order('nombre')
     if(!cuentas?.length){alert('Sin cuentas');return}
     let ok=0,fail=0
+    const _fallidasT=[] // (23sep26) HASTA QUE CARGUE: cuentas que fallaron → se reintentan solas al final
     for(let ci=0;ci<cuentas.length;ci++){
       const cuenta=cuentas[ci]
       const statusEl=document.getElementById('meta-sync-status-'+cuenta.account_id)
@@ -22925,7 +22926,37 @@ window.runMetaSyncAllAccounts=async(days,btn)=>{
         if(statusEl)statusEl.textContent='⚠️'
         console.error(`Sync ${cuenta.nombre}:`,e)
         fail++
+        if(/#200|permission/i.test(String(e&&e.message||''))){if(statusEl)statusEl.innerHTML='<span title="Meta no deja ver esta cuenta (#200). No se reintenta." style="color:var(--muted)">⛔</span>'}
+        else _fallidasT.push(cuenta)
       }
+    }
+    // (23sep26) HASTA QUE CARGUE: las que fallaron (y no son #200) se reintentan SOLAS, sin límite, cada una con su
+    // 🟡 % en su fila; el botón vuelve a quedar libre. Solo se piden las que faltan.
+    if(_fallidasT.length){
+      let _pend=_fallidasT.slice(),_pctPor={}
+      const _pintar=(rt)=>{for(const c of _pend){const el=document.getElementById('meta-sync-status-'+c.account_id);if(!el)continue
+        if(!rt.vivo){if(!rt.listo)el.textContent='⚠️';continue}
+        el.innerHTML=`<span style="font-size:11px;color:var(--amber)" title="Meta no respondió. Se reintenta sin parar hasta que cargue.">🟡 ${_pctPor[c.account_id]||0}% · intento ${rt.intento} · ${rt.corriendo?'⏳':'en '+rt.proximoEn+' s'}</span>`}}
+      window._nxReintentar('sync-todas',{
+        sigueVivo:()=>_pend.some(c=>document.getElementById('meta-sync-status-'+c.account_id)),
+        intentar:async(rt)=>{
+          const _tok=await getConfig('meta_access_token');if(!_tok)return false
+          for(const c of _pend.slice()){
+            const el=document.getElementById('meta-sync-status-'+c.account_id)
+            const _sp=(pct)=>{_pctPor[c.account_id]=pct;if(el)el.innerHTML=pct>=100?'✅':`<span style="font-size:11px;color:var(--amber)">🟡 ${pct}%</span>`}
+            try{
+              await _syncOneAccount(c.account_id,_tok,days,_sp)
+              await sb.from('meta_cuentas').update({synced_at:new Date().toISOString()}).eq('account_id',c.account_id)
+              if(el)el.textContent='✅';_pend=_pend.filter(x=>x!==c)
+            }catch(e2){
+              if(/#200|permission/i.test(String(e2&&e2.message||''))){if(el)el.innerHTML='<span title="Meta no deja ver esta cuenta (#200). No se reintenta." style="color:var(--muted)">⛔</span>';_pend=_pend.filter(x=>x!==c)}
+              else console.warn(`[sync todas] ${c.nombre} sigue sin cargar: ${e2&&e2.message}`)
+            }
+          }
+          return!_pend.length
+        },
+        alCambiar:_pintar
+      })
     }
     await sb.from('config').upsert({clave:'meta_sync_last',valor:new Date().toISOString(),updated_at:new Date().toISOString()},{onConflict:'clave'})
     logAction('meta_sync_all_accounts',{days,ok,fail}).catch(()=>{})
@@ -23051,20 +23082,37 @@ window.runRefrescarDropi=async(btn)=>{
 
 window.runMetaSyncAccount=async(accountId,accountName,days)=>{
   const statusEl=document.getElementById('meta-sync-status-'+accountId)
-  const _showPct=(pct,msg)=>{if(statusEl)statusEl.innerHTML=pct>=100?'✅':`<span style="font-size:11px">${pct}%</span>`}
+  // (23sep26) HASTA QUE CARGUE: se recuerda el último % para mostrarlo en amarillo mientras se reintenta
+  let _ultPct=0,_rein=false
+  const _showPct=(pct,msg)=>{_ultPct=pct;if(statusEl)statusEl.innerHTML=pct>=100?'✅':`<span style="font-size:11px${_rein?';color:var(--amber)':''}">${_rein?'🟡 ':''}${pct}%</span>`}
   if(statusEl)statusEl.innerHTML='<span style="font-size:11px">0%</span>'
-  try{
-    let token=await getConfig('meta_access_token')
-    if(!token){if(statusEl)statusEl.textContent='⚠️';alert('Token no configurado');return}
-    await _syncOneAccount(accountId,token,days,_showPct)
+  // Lo que se hace cuando el sync de la cuenta termina bien (igual que antes)
+  const _alTerminar=async()=>{
     await sb.from('meta_cuentas').update({synced_at:new Date().toISOString()}).eq('account_id',accountId)
     if(statusEl)statusEl.textContent='✅'
     logAction('meta_sync_account',{account_id:accountId,days}).catch(()=>{})
     const accEl=document.getElementById('meta-acc-'+accountId)
     if(accEl&&accEl.style.display!=='none')toggleMetaCuenta(accountId,true)
+  }
+  try{
+    let token=await getConfig('meta_access_token')
+    if(!token){if(statusEl)statusEl.textContent='⚠️';alert('Token no configurado');return}
+    await _syncOneAccount(accountId,token,days,_showPct)
+    await _alTerminar()
   }catch(e){
-    if(statusEl)statusEl.textContent='⚠️'
-    alert(`Error sync ${accountName}: ${e.message}`)
+    // (23sep26) HASTA QUE CARGUE: antes salía ⚠️ y una alerta; ahora queda 🟡 con el % y se reintenta SOLA
+    // esta cuenta (10 s, 30 s, luego cada 60 s, sin límite) hasta que cargue. Como el sync es incremental,
+    // cada reintento retoma desde lo último guardado. Si Meta niega por permiso (#200) se avisa y NO se insiste.
+    console.warn(`[sync cuenta ${accountName}] falló: ${e&&e.message} → se reintenta hasta que cargue`)
+    if(/#200|permission/i.test(String(e&&e.message||''))){if(statusEl)statusEl.innerHTML='<span title="Meta no deja ver esta cuenta con el token actual (#200). No se reintenta." style="color:var(--muted)">⛔</span>';return}
+    _rein=true
+    let _err=String(e&&e.message||'').slice(0,60)
+    window._nxReintentar('sync-cta-'+accountId,{
+      sigueVivo:()=>!!document.getElementById('meta-sync-status-'+accountId),
+      intentar:async()=>{try{const token=await getConfig('meta_access_token');if(!token)throw new Error('Sin token');await _syncOneAccount(accountId,token,days,_showPct);_rein=false;await _alTerminar();return true}catch(e2){_err=String(e2&&e2.message||'').slice(0,60);if(/#200|permission/i.test(_err)){if(statusEl)statusEl.innerHTML='<span title="Meta no deja ver esta cuenta (#200). No se reintenta." style="color:var(--muted)">⛔</span>';return true}return false}},
+      alCambiar:(rt)=>{if(!statusEl)return;if(!rt.vivo){if(!rt.listo)statusEl.textContent='⚠️';return}
+        statusEl.innerHTML=`<span style="font-size:11px;color:var(--amber)" title="Meta no respondió (${_err}). Se reintenta sin parar hasta que cargue.">🟡 ${_ultPct}% · intento ${rt.intento} · ${rt.corriendo?'⏳':'en '+rt.proximoEn+' s'}</span>`}
+    })
   }
 }
 
@@ -23386,6 +23434,9 @@ async function _actualizarEscaladasAbiertas(accountId){
 
 async function _syncOneAccount(accountId,token,days,onProgress){
   const _p=onProgress||(()=>{})
+  // (23sep26) HASTA QUE CARGUE: cada llamada a Meta con tope de 45 s y sin dormir 30/60 s (si algo falla,
+  // el llamador reintenta SOLO esta cuenta hasta que cargue; como el sync es incremental, retoma donde iba)
+  const _nxSyncOpts=()=>({timeoutMs:45000,sinEspera:true})
   const actId='act_'+accountId
   // FIX (incremental TOTAL + TZ Bogota): "hoy" se calcula en zona horaria de Colombia
   // para que coincida con el date_start que devuelve Meta. Ambos modos son
@@ -23428,7 +23479,7 @@ async function _syncOneAccount(accountId,token,days,onProgress){
   }
 
   _p(10,'Campañas...')
-  const camps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,effective_status,objective,daily_budget,lifetime_budget',limit:'500'})
+  const camps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,effective_status,objective,daily_budget,lifetime_budget',limit:'500'},_nxSyncOpts()) // (23sep26) con tope; si Meta no responde, el reintento lo repite
   // Detectar cambios de budget en campañas (CBO) ANTES de hacer upsert
   for(const c of camps){
     const newBudget=c.daily_budget?c.daily_budget:null
@@ -23437,11 +23488,9 @@ async function _syncOneAccount(accountId,token,days,onProgress){
       await _detectarCambioPresupuesto(c.id,'campaign',c.name||prevNombreMap[c.id+'|campaign']||'',accountId,newBudget,prev)
     }
   }
-  for(const c of camps){
-    await sb.from('meta_campanas').upsert({meta_id:c.id,account_id:accountId,nivel:'campaign',nombre:c.name||'',estado:c.effective_status||c.status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
-  }
+  await window._nxUpsertLote('meta_campanas',(camps||[]).map(c=>({meta_id:c.id,account_id:accountId,nivel:'campaign',nombre:c.name||'',estado:c.effective_status||c.status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget:null,synced_at:new Date().toISOString()})),'meta_id,nivel') // (23sep26) en lote (antes fila por fila); misma fila, mismo onConflict
   _p(25,'Ad sets...')
-  const adsets=await metaGet(`/${actId}/adsets`,token,{fields:'id,name,status,effective_status,campaign_id,daily_budget',limit:'500'})
+  const adsets=await metaGet(`/${actId}/adsets`,token,{fields:'id,name,status,effective_status,campaign_id,daily_budget',limit:'500'},_nxSyncOpts()) // (23sep26) con tope; si Meta no responde, el reintento lo repite
   // Detectar cambios de budget en adsets (ABO) ANTES de hacer upsert
   for(const s of adsets){
     const newBudget=s.daily_budget?s.daily_budget:null
@@ -23450,32 +23499,25 @@ async function _syncOneAccount(accountId,token,days,onProgress){
       await _detectarCambioPresupuesto(s.id,'adset',s.name||prevNombreMap[s.id+'|adset']||'',accountId,newBudget,prev)
     }
   }
-  for(const s of adsets){
-    await sb.from('meta_campanas').upsert({meta_id:s.id,account_id:accountId,nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.effective_status||s.status||'',daily_budget:s.daily_budget?s.daily_budget:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
-  }
+  await window._nxUpsertLote('meta_campanas',(adsets||[]).map(s=>({meta_id:s.id,account_id:accountId,nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.effective_status||s.status||'',daily_budget:s.daily_budget?s.daily_budget:null,synced_at:new Date().toISOString()})),'meta_id,nivel') // (23sep26) en lote (antes fila por fila); misma fila, mismo onConflict
   _p(40,'Anuncios...')
-  const ads=await metaGet(`/${actId}/ads`,token,{fields:'id,name,status,effective_status,adset_id',limit:'500'})
-  for(const ad of ads){
-    await sb.from('meta_campanas').upsert({meta_id:ad.id,account_id:accountId,nivel:'ad',parent_id:ad.adset_id||'',nombre:ad.name||'',estado:ad.effective_status||ad.status||'',synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
-  }
+  const ads=await metaGet(`/${actId}/ads`,token,{fields:'id,name,status,effective_status,adset_id',limit:'500'},_nxSyncOpts()) // (23sep26) con tope; si Meta no responde, el reintento lo repite
+  await window._nxUpsertLote('meta_campanas',(ads||[]).map(ad=>({meta_id:ad.id,account_id:accountId,nivel:'ad',parent_id:ad.adset_id||'',nombre:ad.name||'',estado:ad.effective_status||ad.status||'',synced_at:new Date().toISOString()})),'meta_id,nivel') // (23sep26) en lote (antes fila por fila); misma fila, mismo onConflict
   const chunks=metaDateChunks(since,until,90)
   const totalChunks=chunks.length
   for(let ci=0;ci<totalChunks;ci++){
     const ch=chunks[ci]
     const pct=50+Math.round((ci/totalChunks)*50)
     _p(pct,`Métricas ${ci+1}/${totalChunks}...`)
-    const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values',time_range:JSON.stringify(ch),level:'campaign',time_increment:'1',limit:'500'})
-    for(const i of cIns){
-      await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
-    }
-    const sIns=await metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values',time_range:JSON.stringify(ch),level:'adset',time_increment:'1',limit:'500'})
-    for(const i of sIns){
-      await sb.from('meta_insights').upsert({meta_id:i.adset_id,nivel:'adset',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
-    }
-    const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values,quality_ranking,engagement_rate_ranking,conversion_rate_ranking',time_range:JSON.stringify(ch),level:'ad',time_increment:'1',limit:'500'})
-    for(const i of aIns){
-      await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,quality_ranking:i.quality_ranking||null,engagement_rate_ranking:i.engagement_rate_ranking||null,conversion_rate_ranking:i.conversion_rate_ranking||null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
-    }
+    // (23sep26) los 3 niveles se piden A LA VEZ y con tope (antes uno tras otro, sin tope); se guardan en lote
+    const[cIns,sIns,aIns]=await Promise.all([
+      metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values',time_range:JSON.stringify(ch),level:'campaign',time_increment:'1',limit:'500'},_nxSyncOpts()),
+      metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values',time_range:JSON.stringify(ch),level:'adset',time_increment:'1',limit:'500'},_nxSyncOpts()),
+      metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values,quality_ranking,engagement_rate_ranking,conversion_rate_ranking',time_range:JSON.stringify(ch),level:'ad',time_increment:'1',limit:'500'},_nxSyncOpts())
+    ])
+    await window._nxUpsertLote('meta_insights',(cIns||[]).map(i=>({meta_id:i.campaign_id,nivel:'campaign',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,synced_at:new Date().toISOString()})),'meta_id,nivel,fecha') // (23sep26) en lote (antes fila por fila); misma fila, mismo onConflict
+    await window._nxUpsertLote('meta_insights',(sIns||[]).map(i=>({meta_id:i.adset_id,nivel:'adset',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,synced_at:new Date().toISOString()})),'meta_id,nivel,fecha') // (23sep26) en lote (antes fila por fila); misma fila, mismo onConflict
+    await window._nxUpsertLote('meta_insights',(aIns||[]).map(i=>({meta_id:i.ad_id,nivel:'ad',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,quality_ranking:i.quality_ranking||null,engagement_rate_ranking:i.engagement_rate_ranking||null,conversion_rate_ranking:i.conversion_rate_ranking||null,synced_at:new Date().toISOString()})),'meta_id,nivel,fecha') // (23sep26) en lote (antes fila por fila); misma fila, mismo onConflict
   }
   // ── Snapshot horario + actualizar escaladas abiertas ──
   await _capturarSnapshotsHorarios(accountId)
@@ -23492,8 +23534,75 @@ async function _syncOneAccount(accountId,token,days,onProgress){
 //      y guarda los 3 niveles, para que las ventas se atribuyan a su campaña.
 // Progreso EN EL MISMO BOTÓN: ⏳ 3/8 · 37% → ✅ (⚠️ si alguna cuenta falló, sin frenar).
 // offset: 0 = HOY, 1 = AYER (fechas en zona horaria Bogotá, igual que el resto de NEXO).
-window._nexoSyncDiaTodas=async function(offset,btn){
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// (23sep26) CARGADOR "🔄 Hoy · 3/7" · GUARDAR EN LOTE
+// Antes cada campaña / conjunto / anuncio era UNA petición a Supabase (≈240 viajes por cuenta ≈ 50 s).
+// Ahora las filas de cada nivel van en UNA sola petición (lotes de 500) con el MISMO onConflict.
+// Si un lote falla, se guarda fila por fila como antes: nunca se pierde nada.
+// ═══════════════════════════════════════════════════════════════════════════════════════
+window._nxUpsertLote=async function(tabla,filas,onConflict){
+  if(!filas||!filas.length)return{ok:0,fallback:false}
+  // sin repetidos por clave (Postgres rechaza un lote que toque 2 veces la misma fila; la última gana)
+  const _keys=String(onConflict||'').split(',').map(k=>k.trim()),_m=new Map()
+  for(const f of filas)_m.set(_keys.map(k=>String(f[k])).join('|'),f)
+  const _u=[..._m.values()];let ok=0,fallback=false
+  for(let i=0;i<_u.length;i+=500){
+    const lote=_u.slice(i,i+500)
+    const{error}=await sb.from(tabla).upsert(lote,{onConflict})
+    if(!error){ok+=lote.length;continue}
+    fallback=true;console.warn(`[lote ${tabla}] falló (${error&&error.message}) → guardando fila por fila`)
+    for(const f of lote){const{error:e1}=await sb.from(tabla).upsert(f,{onConflict});if(!e1)ok++}
+  }
+  return{ok,fallback}
+}
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// (23sep26) P3 · REFRESCO EN SITIO: repintar SIN moverte de donde estás.
+//  1) Espera a que NO estés interactuando (sin clic/tecla/rueda en los últimos 10 s, sin campo con foco,
+//     sin modal abierto). Máximo 3 min de espera; luego refresca igual.
+//  2) Toma una foto: scroll vertical, scroll horizontal de las tablas, desgloses abiertos y campo con foco.
+//  3) Repinta (fn) y restaura la foto.
+// ═══════════════════════════════════════════════════════════════════════════════════════
+window._nxUltimaActividad=Date.now()
+try{for(const _ev of ['pointerdown','keydown','wheel','touchstart'])document.addEventListener(_ev,()=>{window._nxUltimaActividad=Date.now()},{passive:true,capture:true})}catch(_){}
+window._nxUsuarioOcupado=function(){
+  try{
+    const a=document.activeElement
+    if(a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA'||a.tagName==='SELECT'||a.isContentEditable))return true
+    if(document.getElementById('user-modal'))return true
+  }catch(_){}
+  return(Date.now()-(window._nxUltimaActividad||0))<10000
+}
+window._nxRefrescoEnSitio=async function(rootId,fn,opts){
+  opts=opts||{}
+  let _esperado=0,_aviso=false
+  while(window._nxUsuarioOcupado()&&_esperado<180000){
+    if(!_aviso){_aviso=true;try{opts.onEspera&&opts.onEspera()}catch(_){}}
+    await new Promise(r=>setTimeout(r,5000));_esperado+=5000
+  }
+  const root=document.getElementById(rootId+'-wrap')||document.getElementById(rootId+'-rango')||document.body
+  const sc=document.querySelector('.content')||document.documentElement
+  const foto={y:sc.scrollTop,x:{},abiertos:[],foco:(document.activeElement&&document.activeElement.id)||''}
+  try{
+    root.querySelectorAll('[id$="-sub"]').forEach(e=>{if(e.style.display&&e.style.display!=='none')foto.abiertos.push(e.id.slice(0,-4))})
+    root.querySelectorAll('[style*="overflow-x"]').forEach((e,i)=>{if(e.scrollLeft)foto.x[i]=e.scrollLeft})
+  }catch(_){}
+  try{await fn()}catch(e){console.warn('[refresco en sitio]',e&&e.message)}
+  try{
+    for(const id of foto.abiertos){const sub=document.getElementById(id+'-sub');if(sub&&sub.style.display==='none'&&window._rpToggleCuadre)window._rpToggleCuadre(id)}
+    root.querySelectorAll('[style*="overflow-x"]').forEach((e,i)=>{if(foto.x[i])e.scrollLeft=foto.x[i]})
+    sc.scrollTop=foto.y
+    if(foto.foco){const f=document.getElementById(foto.foco);if(f&&f.focus)f.focus()}
+    if(typeof requestAnimationFrame==='function')requestAnimationFrame(()=>{try{sc.scrollTop=foto.y}catch(_){}})
+  }catch(_){}
+}
+
+// (23sep26) HASTA QUE CARGUE: 3er parámetro opcional `soloCuentas` = lista de cuentas a repetir (las que fallaron).
+// Con él NO se filtran activas ni se hace la pasada de huérfanos (ya se hizo): solo se pide lo que falta.
+// Devuelve {ok, fail, fallidas, terminado}: `terminado` es una promesa que se cumple cuando TODO llegó (100%).
+window._nexoSyncDiaTodas=async function(offset,btn,soloCuentas){
   if(btn&&btn.dataset.busy==='1')return
+  const _solo=(Array.isArray(soloCuentas)&&soloCuentas.length)?soloCuentas:null
+  let _fallidas=[],_terminado=null,_okN=0,_failN=0
   const _orig=btn?btn.innerHTML:''
   const _fin=(html,ms)=>{if(!btn)return;btn.innerHTML=html;setTimeout(()=>{btn.innerHTML=_orig;btn.dataset.busy='';btn.style.opacity=''},ms||4500)}
   try{
@@ -23504,12 +23613,12 @@ window._nexoSyncDiaTodas=async function(offset,btn){
     if(offset>0){const _d=new Date(_hoyBg+'T12:00:00Z');_d.setDate(_d.getDate()-offset);dia=_isoDate(_d)}
     const token=await getConfig('meta_access_token')
     if(!token){_fin('⚠️ Sin token',3500);return}
-    const{data:cuentas}=await sb.from('meta_cuentas').select('account_id,nombre').order('nombre')
+    const{data:cuentas}=_solo?{data:_solo.slice()}:await sb.from('meta_cuentas').select('account_id,nombre').order('nombre') // (23sep26) reintento: solo las que faltan
     if(!cuentas||!cuentas.length){_fin('⚠️ Sin cuentas',3500);return}
     // ── NUEVO (4jul26): SOLO cuentas ACTIVAS — con gasto en los últimos 3 días según la BD ──
     // Las muertas/bloqueadas no gastan → se saltan y el sync vuela (menos llamadas a Meta, menos espera).
     // Blindaje: si la consulta falla o el filtro deja 0, se usan TODAS como antes (el botón nunca queda inútil).
-    try{
+    if(!_solo)try{
       const _d3A=new Date(_hoyBg+'T12:00:00Z');_d3A.setDate(_d3A.getDate()-2)
       const{data:_conG}=await sb.from('meta_insights').select('account_id').eq('nivel','campaign').gte('fecha',_isoDate(_d3A)).lte('fecha',_hoyBg).gt('spend',0)
       const _setAct=new Set();for(const r of (_conG||[]))if(r.account_id)_setAct.add(String(r.account_id))
@@ -23519,38 +23628,50 @@ window._nexoSyncDiaTodas=async function(offset,btn){
         if(_soloAct.length){cuentas.length=0;for(const c of _soloAct)cuentas.push(c);console.log(`[sync-dia] cuentas ACTIVAS: ${cuentas.length}/${_antes} (con gasto en los últimos 3 días)`)}
       }
     }catch(_eAct){console.warn('[sync-dia] filtro de activas falló, se usan TODAS:',_eAct&&_eAct.message)}
-    const totalPasos=cuentas.length+1 // +1 = pasada de huérfanos
+    const totalPasos=cuentas.length+(_solo?0:1) // +1 = pasada de huérfanos (no va en los reintentos)
     let ok=0,fail=0
     const tr=JSON.stringify({since:dia,until:dia})
-    // ── 1) Gasto del día, cuenta por cuenta (si una falla, sigue con la próxima) ──
-    for(let ci=0;ci<cuentas.length;ci++){
-      const cuenta=cuentas[ci]
-      const pct=Math.round((ci/totalPasos)*100)
-      if(btn)btn.innerHTML=`⏳ ${ci+1}/${cuentas.length} · ${pct}%`
+    // ── 1) Gasto del día · (23sep26) CARGADOR: 3 cuentas A LA VEZ, los 3 niveles de cada una A LA VEZ
+    //    (tope 15 s por llamada, sin esperas de 30/60 s) y filas guardadas EN LOTE (1 petición por nivel).
+    //    Antes: una cuenta tras otra, 3 llamadas en fila y UNA petición a Supabase POR FILA (≈50 s por cuenta).
+    //    Si una cuenta falla, sigue con la próxima (igual que antes). Los campos guardados son los MISMOS.
+    const _filaIns=(i,metaId,nivel,cuenta)=>{
+      const f={meta_id:metaId,nivel,account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,synced_at:new Date().toISOString()}
+      if(nivel==='ad'){Object.assign(f,{quality_ranking:i.quality_ranking||null,engagement_rate_ranking:i.engagement_rate_ranking||null,conversion_rate_ranking:i.conversion_rate_ranking||null})}
+      return f
+    }
+    let _hechas=0
+    const _syncCuenta=async(cuenta)=>{
+      if(btn){try{btn.dataset.cuenta=cuenta.nombre||String(cuenta.account_id)}catch(_){}}
       try{
         const actId='act_'+cuenta.account_id
-        const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values',time_range:tr,level:'campaign',time_increment:'1',limit:'500'})
-        for(const i of (cIns||[])){
-          if(!i.campaign_id)continue
-          await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
-        }
-        const sIns=await metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values',time_range:tr,level:'adset',time_increment:'1',limit:'500'})
-        for(const i of (sIns||[])){
-          if(!i.adset_id)continue
-          await sb.from('meta_insights').upsert({meta_id:i.adset_id,nivel:'adset',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
-        }
-        const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values,quality_ranking,engagement_rate_ranking,conversion_rate_ranking',time_range:tr,level:'ad',time_increment:'1',limit:'500'})
-        for(const i of (aIns||[])){
-          if(!i.ad_id)continue
-          await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,quality_ranking:i.quality_ranking||null,engagement_rate_ranking:i.engagement_rate_ranking||null,conversion_rate_ranking:i.conversion_rate_ranking||null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
-        }
+        const _o=()=>({timeoutMs:15000,sinEspera:true})
+        const[cIns,sIns,aIns]=await Promise.all([
+          metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values',time_range:tr,level:'campaign',time_increment:'1',limit:'500'},_o()),
+          metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values',time_range:tr,level:'adset',time_increment:'1',limit:'500'},_o()),
+          metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values,quality_ranking,engagement_rate_ranking,conversion_rate_ranking',time_range:tr,level:'ad',time_increment:'1',limit:'500'},_o())
+        ])
+        const _fc=[],_fs=[],_fa=[]
+        for(const i of (cIns||[])){if(!i.campaign_id)continue;_fc.push(_filaIns(i,i.campaign_id,'campaign',cuenta))}
+        for(const i of (sIns||[])){if(!i.adset_id)continue;_fs.push(_filaIns(i,i.adset_id,'adset',cuenta))}
+        for(const i of (aIns||[])){if(!i.ad_id)continue;_fa.push(_filaIns(i,i.ad_id,'ad',cuenta))}
+        await Promise.all([
+          window._nxUpsertLote('meta_insights',_fc,'meta_id,nivel,fecha'),
+          window._nxUpsertLote('meta_insights',_fs,'meta_id,nivel,fecha'),
+          window._nxUpsertLote('meta_insights',_fa,'meta_id,nivel,fecha')
+        ])
         ok++
-      }catch(eCta){fail++;console.warn('[sync-dia] cuenta',cuenta.nombre||cuenta.account_id,'falló:',eCta&&eCta.message)}
+      }catch(eCta){fail++;_fallidas.push(cuenta);console.warn('[sync-dia] cuenta',cuenta.nombre||cuenta.account_id,'falló:',eCta&&eCta.message)}
+      _hechas++
+      if(btn)btn.innerHTML=`⏳ ${_hechas}/${cuentas.length} · ${Math.round((_hechas/totalPasos)*100)}%`
     }
+    if(btn)btn.innerHTML=`⏳ 0/${cuentas.length} · 0%`
+    let _posC=0;const _trabC=async()=>{while(_posC<cuentas.length){const _c=cuentas[_posC++];await _syncCuenta(_c)}}
+    await Promise.all(Array.from({length:Math.min(3,cuentas.length)},_trabC))
     // ── 2) Pasada de huérfanos del día: ad_ids usados ESE día sin cadena en meta_campanas ──
     if(btn)btn.innerHTML=`⏳ huérfanos · ${Math.round((cuentas.length/totalPasos)*100)}%`
     let _huerResueltos=0,_huerTotal=0
-    try{
+    if(!_solo)try{
       const _idsDia=new Set()
       const{data:_mps}=await sb.from('mapeos').select('ad_id').eq('fecha',dia).not('ad_id','is',null).neq('ad_id','')
       for(const m of (_mps||[])){const _v=String(m.ad_id).trim();if(_v.length>5)_idsDia.add(_v)}
@@ -23610,12 +23731,32 @@ window._nexoSyncDiaTodas=async function(offset,btn){
     }catch(eHu){console.warn('[sync-dia] pasada de huérfanos falló:',eHu&&eHu.message)}
     try{logAction('sync_dia_todas',{dia,cuentas_ok:ok,cuentas_fail:fail,huerfanos:_huerTotal,resueltos:_huerResueltos}).catch(()=>{})}catch(_){}
     // ── Cierre: ✅ si todo bien; ⚠️ con detalle si alguna cuenta falló ──
+    _okN=ok;_failN=fail
     if(fail===0)_fin(_huerResueltos>0?`✅ +${_huerResueltos} IDs`:'✅',4500)
-    else _fin(`⚠️ ${ok} ok · ${fail} fallo${fail>1?'s':''}`,6000)
+    else if(_solo||!btn)_fin(`⚠️ ${ok} ok · ${fail} fallo${fail>1?'s':''}`,6000) // dentro de un reintento: el motor de afuera decide
+    else{
+      // (23sep26) HASTA QUE CARGUE: las cuentas que fallaron se repiten SOLAS (10 s, 30 s, luego cada 60 s, sin límite)
+      // en amarillo y con el % de avance, hasta llegar al 100 %. Solo se piden las que faltan.
+      const _tot=cuentas.length;let _pend=_fallidas.slice()
+      if(btn)try{btn.style.color='var(--amber)'}catch(_){}
+      _terminado=new Promise(_res=>{
+        window._nxReintentar('sync-dia-'+dia,{
+          sigueVivo:()=>true,
+          intentar:async()=>{const _btnF={dataset:{},style:{},set innerHTML(v){},get innerHTML(){return''}};const r=await window._nexoSyncDiaTodas(offset,_btnF,_pend);_pend=(r&&r.fallidas)||[];return!_pend.length},
+          alCambiar:(rt)=>{
+            const _pct=Math.round((_tot-_pend.length)/_tot*100)
+            if(btn)try{btn.dataset.cuenta=_pend.map(c=>c.nombre||c.account_id).slice(0,2).join(', ');btn.dataset.estado=rt.vivo?'reintentando':'ok'}catch(_){}
+            if(!rt.vivo){if(btn)try{btn.style.color=''}catch(_){}_fin(rt.listo?'✅ 100%':'⚠️ reintento cancelado',4500);_res();return}
+            if(btn)btn.innerHTML=`🟡 ${_pct}% ${window._nxBarra(_pct)} · reintentando ${_pend.length} · intento ${rt.intento} · ${rt.corriendo?'⏳ Meta…':'en '+rt.proximoEn+' s'}`
+          }
+        })
+      })
+    }
   }catch(e){
     console.warn('[sync-dia] error:',e&&e.message)
     _fin('❌ Error',4500)
   }
+  return{ok:_okN,fail:_failN,fallidas:_fallidas,terminado:_terminado||Promise.resolve()}
 }
 
 // ══ NUEVO (11jul26): AUTO-SYNC DE HOY AL ABRIR UN PRODUCTO ═══════════════════════════════════
@@ -23653,7 +23794,7 @@ window._nexoAutoSyncHoy=async function(slug){
     if(!_viejo&&!_hayNueva)return // todo fresco → cero llamadas a Meta
     // 3) Sincronizar HOY en segundo plano con pill flotante (mismo motor del botón 🔃 HOY)
     window._nexoAutoSyncBusy=1
-    let _pill=null
+    let _pill=null,_seg=null
     try{
       _pill=document.createElement('div')
       _pill.id='nexo-autosync-pill'
@@ -23662,13 +23803,26 @@ window._nexoAutoSyncHoy=async function(slug){
       document.body.appendChild(_pill)
     }catch(_){}
     // Botón "fantasma": recibe el avance (⏳ 3/9 · 33%) del motor y lo pinta en el pill
-    const _fakeBtn={dataset:{},style:{},set innerHTML(v){try{if(_pill)_pill.innerHTML='🔄 Hoy · '+String(v).replace(/⏳\s*/,'')}catch(_){}},get innerHTML(){return''}}
-    try{await window._nexoSyncDiaTodas(0,_fakeBtn)}catch(_){}
+    // (23sep26) CARGADOR: el pill dice qué cuenta va, cuánto lleva (segundero) y tiene ✕ para esconderlo (sigue trabajando atrás)
+    const _t0=Date.now();let _txt='🔄 Actualizando datos de hoy…'
+    const _pintaPill=()=>{try{if(!_pill)return
+      const _rein=_fakeBtn.dataset.estado==='reintentando' // (23sep26) HASTA QUE CARGUE: amarillo mientras reintenta
+      _pill.style.borderColor=_rein?'var(--amber,#f59e0b)':'var(--green,#22c55e)';_pill.style.color=_rein?'var(--amber,#f59e0b)':'var(--green,#22c55e)'
+      _pill.innerHTML=`${_txt}${_fakeBtn.dataset.cuenta?' · '+String(_fakeBtn.dataset.cuenta).slice(0,22):''} · ${Math.round((Date.now()-_t0)/1000)} s <span style="margin-left:8px;cursor:pointer;opacity:.7" title="Esconder (sigue actualizando atrás)" onclick="this.parentNode.style.display='none'">✕</span>`}catch(_){}}
+    const _fakeBtn={dataset:{},style:{},set innerHTML(v){const _v=String(v);_txt=/^(🟡|✅|⚠️|❌)/.test(_v)?_v:'🔄 Hoy · '+_v.replace(/⏳\s*/,'');_pintaPill()},get innerHTML(){return''}}
+    _seg=setInterval(_pintaPill,1000);_pintaPill()
+    let _res=null
+    try{_res=await window._nexoSyncDiaTodas(0,_fakeBtn)}catch(_){}
+    try{if(_res&&_res.terminado)await _res.terminado}catch(_){} // (23sep26) HASTA QUE CARGUE: espera al 100 % antes de refrescar la tabla
+    clearInterval(_seg);_seg=null
     window._nexoAutoSyncLastCheck=Date.now() // la sync recién hecha cuenta como chequeo fresco
     // 4) Refrescar EN VIVO la tabla del producto abierto (sin recargar ni moverte de donde estás)
-    try{if(slug&&document.getElementById('cuadf_'+slug+'-wrap')&&window._rpFusionRango)window._rpFusionRango(slug,'cuadf_'+slug)}catch(_){}
-    try{if(_pill){_pill.innerHTML='✅ Datos de hoy al día';setTimeout(()=>{try{_pill.remove()}catch(_){}},3500)}}catch(_){}
+    // (23sep26) P3: ahora espera a que pares de interactuar y conserva scroll, desgloses abiertos y foco (_nxRefrescoEnSitio)
+    try{if(_pill)_pill.innerHTML=`✅ Datos de hoy al día · ${Math.round((Date.now()-_t0)/1000)} s`}catch(_){}
+    try{if(slug&&document.getElementById('cuadf_'+slug+'-wrap')&&window._rpFusionRango)await window._nxRefrescoEnSitio('cuadf_'+slug,()=>window._rpFusionRango(slug,'cuadf_'+slug),{onEspera:()=>{try{if(_pill)_pill.innerHTML='✅ Datos de hoy listos · la tabla se refresca cuando pares'}catch(_){}}})}catch(_){}
+    try{if(_pill){_pill.innerHTML=`✅ Datos de hoy al día · ${Math.round((Date.now()-_t0)/1000)} s`;setTimeout(()=>{try{_pill.remove()}catch(_){}},3500)}}catch(_){}
   }catch(_e){
+    try{if(_seg)clearInterval(_seg)}catch(_){}
     console.warn('[auto-sync-hoy]',_e&&_e.message)
     try{const p=document.getElementById('nexo-autosync-pill');if(p)p.remove()}catch(_){}
   }finally{window._nexoAutoSyncBusy=0}
@@ -23687,6 +23841,49 @@ window._nexoAutoSyncHoy=async function(slug){
 // Cuando Meta responde, los números de arriba NO se repintan solos (para no moverte de donde
 // estás): la barra avisa y da el botón 🔄 Actualizar.
 // ═══════════════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// (23sep26) MOTOR ÚNICO DE REINTENTOS — regla del dueño: "si un dato no llega, se sigue intentando
+// HASTA QUE CARGUE, en amarillo y con el porcentaje de avance". Lo usan el resumen, el panel de
+// cuenta y el cargador 🔄 Hoy, para que los 3 se comporten igual.
+//   window._nxReintentar(clave,{intentar, sigueVivo, alCambiar})
+//   · intentar(rt)  → true = ya llegó TODO (para) · false = falta algo (sigue). Solo pide lo que falta.
+//   · sigueVivo()   → false = el usuario cerró / cambió de rango → se cancela.
+//   · alCambiar(rt) → se llama en cada cambio (cuenta atrás, intento, fin) para repintar.
+//   · esperas: 10 s, 30 s y luego cada 60 s, SIN límite de intentos.
+//   rt = {intento, proximoEn (segundos), corriendo, vivo, listo}
+// ═══════════════════════════════════════════════════════════════════════════════════════
+window._nxReintentos=window._nxReintentos||{}
+window._nxReintentar=function(clave,cfg){
+  try{const prev=window._nxReintentos[clave];if(prev&&prev.vivo)prev.cancelar()}catch(_){} // el anterior avisa que terminó (para que nadie quede esperándolo)
+  const rt={clave,intento:0,proximoEn:0,corriendo:false,vivo:true,listo:false,timer:null,tick:null}
+  const limpiar=()=>{if(rt.timer)clearTimeout(rt.timer);if(rt.tick)clearInterval(rt.tick);rt.timer=rt.tick=null}
+  const avisar=()=>{try{cfg.alCambiar&&cfg.alCambiar(rt)}catch(_){}}
+  rt.cancelar=(silencio)=>{limpiar();rt.vivo=false;if(window._nxReintentos[clave]===rt)delete window._nxReintentos[clave];if(!silencio)avisar()}
+  const programar=()=>{
+    const ms=[10000,30000][rt.intento]||60000
+    rt.proximoEn=Math.round(ms/1000)
+    rt.tick=setInterval(()=>{rt.proximoEn=Math.max(0,rt.proximoEn-1);avisar()},1000)
+    rt.timer=setTimeout(correr,ms)
+    avisar()
+  }
+  const correr=async()=>{
+    limpiar();if(!rt.vivo)return
+    if(cfg.sigueVivo&&!cfg.sigueVivo()){rt.cancelar();return}
+    rt.corriendo=true;rt.intento++;avisar()
+    let listo=false
+    try{listo=await cfg.intentar(rt)}catch(e){listo=false;console.warn('[reintento '+clave+']',e&&e.message)}
+    rt.corriendo=false
+    if(!rt.vivo)return
+    if(listo){rt.listo=true;rt.cancelar();return}
+    if(cfg.sigueVivo&&!cfg.sigueVivo()){rt.cancelar();return}
+    programar()
+  }
+  rt.ahora=()=>{limpiar();correr()}
+  window._nxReintentos[clave]=rt
+  programar()
+  return rt
+}
+window._nxBarra=(pct)=>{const n=Math.max(0,Math.min(10,Math.round((pct||0)/10)));return'▓'.repeat(n)+'░'.repeat(10-n)}
 window._nxHoraBogota=()=>{try{return new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit',timeZone:'America/Bogota'})}catch(_){return ''}}
 window._nxGastoOrigenHtml=function(){
   const e=window._nxGastoHoyEstado
@@ -23695,33 +23892,42 @@ window._nxGastoOrigenHtml=function(){
   if(e.cerrado)return`<div id="nx-gasto-origen" style="${base}var(--border);color:var(--muted)">🔵 <b>Gasto de la base (cierre nocturno)</b> · rango cerrado ${e.desde} → ${e.hasta}</div>`
   if(e.sinToken)return`<div id="nx-gasto-origen" style="${base}var(--amber);background:var(--amber-bg);color:var(--amber)">🟡 <b>Sin token de Meta</b> · todo el gasto viene del dato guardado</div>`
   const perm=(e.guardadas||[]).filter(g=>g.sinPermiso),caidas=(e.guardadas||[]).filter(g=>!g.sinPermiso)
-  const n=e.total-perm.length,permTxt=perm.length?` · ${perm.length} sin permiso del token`:''
+  const n=e.total-perm.length,permTxt=perm.length?` · <span style="color:var(--muted)">⛔ ${perm.length} sin permiso del token (no se reintenta: Meta no lo deja ver)</span>`:''
   const btn=`<button class="btn-sm btn-outline" style="padding:2px 8px;font-size:10px" onclick="event.stopPropagation();window._actualizarResumenMetaProductos&&window._actualizarResumenMetaProductos()">🔄 Actualizar resumen</button>`
   // OJO: 'recuperado' va ANTES que el 🟢: Meta ya respondió, pero los números pintados siguen siendo del dato guardado
-  if(e.recuperado)return`<div id="nx-gasto-origen" style="${base}var(--green);background:var(--green-bg);color:var(--green)">✅ <b>Meta ya respondió</b> · ${n} de ${n} cuentas en vivo · los números de arriba todavía son del dato guardado ${btn}</div>`
-  if(!caidas.length)return`<div id="nx-gasto-origen" style="${base}var(--green);background:var(--green-bg);color:var(--green)">🟢 <b>Gasto en vivo desde Meta</b> · ${e.vivo} de ${n} cuentas · ${e.hora}${e.incluyeHoy?' · mismo dato que el Administrador de Anuncios':''}${permTxt}</div>`
+  if(e.recuperado)return`<div id="nx-gasto-origen" style="${base}var(--green);background:var(--green-bg);color:var(--green)">✅ <b>100% · Meta ya respondió</b> · ${n} de ${n} cuentas en vivo · los números de arriba todavía son del dato guardado ${btn}</div>`
+  if(!caidas.length)return`<div id="nx-gasto-origen" style="${base}var(--green);background:var(--green-bg);color:var(--green)">🟢 <b>100% en vivo desde Meta</b> · ${e.vivo} de ${n} cuentas · ${e.hora}${e.incluyeHoy?' · mismo dato que el Administrador de Anuncios':''}${permTxt}</div>`
   const nombres=caidas.map(g=>g.nombre).slice(0,6).join(', ')+(caidas.length>6?` y ${caidas.length-6} más`:'')
-  const rein=e.intento>=3?'· ya no se reintenta solo':`· reintentando solo (intento ${e.intento+1}/3)…`
-  return`<div id="nx-gasto-origen" style="${base}var(--amber);background:var(--amber-bg);color:var(--amber)">🟡 <b>Gasto de ${e.incluyeHoy?'hoy':'este rango'}: ${e.vivo} de ${n} cuentas en vivo</b> · ${caidas.length} con dato guardado (Meta no respondió): ${nombres} ${rein}${permTxt} <button class="btn-sm btn-outline" style="padding:2px 8px;font-size:10px" onclick="event.stopPropagation();window._nxGastoHoyReintentar(true)">🔄 Reintentar ahora</button></div>`
+  // (23sep26) HASTA QUE CARGUE: % de avance + cuenta atrás del motor de reintentos (sin límite de intentos)
+  const rt=e.rt||{intento:0,proximoEn:10,corriendo:false},pct=n?Math.round(e.vivo/n*100):0
+  const estado=rt.corriendo?'⏳ pidiendo a Meta…':`próximo intento en ${rt.proximoEn} s`
+  return`<div id="nx-gasto-origen" style="${base}var(--amber);background:var(--amber-bg);color:var(--amber)">🟡 <b>Gasto de ${e.incluyeHoy?'hoy':'este rango'}: ${pct}%</b> <span style="font-family:monospace">${window._nxBarra(pct)}</span> · ${e.vivo} de ${n} cuentas en vivo · <b>reintentando sin parar</b> ${caidas.length}: ${nombres} · intento ${rt.intento} · ${estado}${permTxt} <button class="btn-sm btn-outline" style="padding:2px 8px;font-size:10px;border-color:var(--amber);color:var(--amber)" onclick="event.stopPropagation();window._nxGastoHoyAhora()">🔄 Ahora</button></div>`
 }
 window._nxGastoOrigenPintar=function(){try{const el=document.getElementById('nx-gasto-origen');if(el)el.outerHTML=window._nxGastoOrigenHtml()}catch(_){}}
-// Programa el siguiente reintento automático (10s, 30s, 60s) para las cuentas que NO respondieron.
+// (23sep26) HASTA QUE CARGUE: arranca el motor único para las cuentas que NO respondieron (sin límite).
+window._nxGastoHoyCancelar=function(){try{const r=window._nxReintentos&&window._nxReintentos['gasto-hoy'];if(r&&r.vivo)r.cancelar(true)}catch(_){}}
 window._nxGastoHoyProgramar=function(){
-  const e=window._nxGastoHoyEstado;if(!e||e.cerrado||e.sinToken||e.intento>=3)return
+  const e=window._nxGastoHoyEstado;if(!e||e.cerrado||e.sinToken)return
   if(!(e.guardadas||[]).some(g=>!g.sinPermiso))return
-  if(e._timer)clearTimeout(e._timer)
-  const esperas=[10000,30000,60000]
-  e._timer=setTimeout(()=>{e._timer=null;window._nxGastoHoyReintentar(false)},esperas[e.intento]||60000)
+  window._nxReintentar('gasto-hoy',{
+    sigueVivo:()=>window._nxGastoHoyEstado===e&&!!document.getElementById('nx-gasto-origen'), // si cambió el rango o se fue la barra → para
+    intentar:async()=>{await window._nxGastoHoyReintentar();return!(e.guardadas||[]).some(g=>!g.sinPermiso)},
+    alCambiar:(rt)=>{e.rt=rt;e.intento=rt.intento;window._nxGastoOrigenPintar()}
+  })
 }
-// Reintenta AHORA solo las cuentas caídas (no todo el resumen). manual=true → botón del usuario.
-window._nxGastoHoyReintentar=async function(manual){
+// Botón 🔄 Ahora: reintenta ya mismo (y si no había motor, lo arranca)
+window._nxGastoHoyAhora=function(){
+  const r=window._nxReintentos&&window._nxReintentos['gasto-hoy']
+  if(r&&r.vivo)r.ahora()
+  else window._nxGastoHoyReintentar().then(()=>{window._nxGastoOrigenPintar();window._nxGastoHoyProgramar()})
+}
+// UN intento: pide a Meta SOLO las cuentas caídas (no todo el resumen). El motor único decide cuándo repetir.
+window._nxGastoHoyReintentar=async function(){
   const e=window._nxGastoHoyEstado;if(!e||e.cerrado||e.sinToken)return
   const caidas=(e.guardadas||[]).filter(g=>!g.sinPermiso);if(!caidas.length)return
-  if(e._timer){clearTimeout(e._timer);e._timer=null}
   if(e._corriendo)return
   e._corriendo=true
   try{
-    e.intento++
     const token=await getConfig('meta_access_token');if(!token)return
     const timeRange=JSON.stringify({since:e.desde,until:e.hasta})
     await Promise.all(caidas.map(async g=>{
@@ -23737,7 +23943,7 @@ window._nxGastoHoyReintentar=async function(manual){
     e.guardadas=(e.guardadas||[]).filter(g=>!g.recuperada)
     const quedan=e.guardadas.filter(g=>!g.sinPermiso)
     if(!quedan.length){if(_huboRecuperada){e.recuperado=true;console.log('[resumen producto] ✅ reintento: todas las cuentas ya respondieron en vivo')}e.hora=window._nxHoraBogota()}
-    else{console.warn(`[resumen producto] 🟡 reintento ${e.intento}/3: siguen sin responder ${quedan.length} cuenta(s)`);if(!manual)window._nxGastoHoyProgramar()}
+    else console.warn(`[resumen producto] 🟡 reintento: siguen sin responder ${quedan.length} cuenta(s), se sigue intentando`)
     window._nxGastoOrigenPintar()
   }finally{e._corriendo=false}
 }
@@ -23770,7 +23976,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
   try{window._nexoLiveGastoByAdId=null}catch(_){}
   if(!incluyeVivos){
     // Rango solo histórico cerrado → BD directo (Meta no agrega nada nuevo)
-    try{if(window._nxGastoHoyEstado&&window._nxGastoHoyEstado._timer)clearTimeout(window._nxGastoHoyEstado._timer)}catch(_){}
+    window._nxGastoHoyCancelar() // (23sep26) rango nuevo → el reintento anterior se apaga
     window._nxGastoHoyEstado={cerrado:true,desde,hasta,hora:window._nxHoraBogota()} // (23sep26) P2: origen visible
     const{data:insByCamp}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
     for(const i of (insByCamp||[])){
@@ -23800,6 +24006,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
     window._nxMetaSinPermiso=window._nxMetaSinPermiso||{}
     let _nVivo=0,_nBD=0
     const _nxCaidas=[] // (23sep26) P2: cuentas que NO respondieron (para marcarlas 🟡 y reintentar)
+    // (23sep26) avance 0→100% mientras carga (escribe en el "Cargando resumen…" que puso el llamador)
+    const _nxProgreso=()=>{try{const _l=document.querySelector('#meta-resumen-productos .loading');if(_l){const _h=_nVivo+_nBD,_t=(cuentasAll||[]).length||1,_p=Math.round(_h/_t*100);_l.textContent=`⏳ Gasto en vivo de Meta: ${_h} de ${_t} cuentas · ${_p}% ${window._nxBarra(_p)}`}}catch(_){}}
     const _conTope=(prom)=>{
       const resta=Math.min(_LIVE_CTA_MS,_LIVE_MAX_MS-(Date.now()-_tLive0))
       if(resta<=0){prom.catch(()=>{});return Promise.reject(new Error('tope de 20s en vivo alcanzado'))}
@@ -23811,7 +24019,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
       try{
         if(window._nxMetaSinPermiso[String(cuenta.account_id)])throw new Error('(#200) sin permiso (recordado en esta sesión)')
         const ins=await _conTope(metaGet(`/act_${cuenta.account_id}/insights`,token,{fields:'campaign_id,campaign_name,spend',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'},{timeoutMs:_LIVE_CTA_MS,sinEspera:true})) // (23sep26) P1: corta la red de verdad y no duerme 30s
-        _nVivo++
+        _nVivo++;_nxProgreso()
         for(const i of (ins||[])){
           if(!i.campaign_id)continue
           gastoByCampId[String(i.campaign_id)]=(gastoByCampId[String(i.campaign_id)]||0)+(parseFloat(i.spend)||0)
@@ -23833,7 +24041,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
           }
         }catch(eAd){console.warn(`[resumen producto] gasto ad en vivo falló cuenta ${cuenta.account_id} (sus IDs usan BD):`,eAd.message)}
       }catch(e){
-        _nBD++
+        _nBD++;_nxProgreso()
         if(/#200|permission/i.test(String(e&&e.message||'')))window._nxMetaSinPermiso[String(cuenta.account_id)]=true // (23sep26) no insistir
         console.warn(`[resumen producto] Meta API fallo cuenta ${cuenta.account_id}, fallback BD:`,e.message)
         const{data:insBD}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').eq('account_id',cuenta.account_id).gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
@@ -23852,12 +24060,12 @@ async function _renderResumenProductos(desde,hasta,hoy){
     console.log(`[resumen producto] ⏱️ gasto listo en ${((Date.now()-_tLive0)/1000).toFixed(1)}s · ${_nVivo} cuenta(s) en vivo · ${_nBD} con dato guardado`)
     try{window._nexoLiveGastoByAdId=_gastoLiveAdByAdId}catch(_){}
     // (23sep26) P2: dejar el origen visible y, si alguna cuenta no respondió, reintentar sola (10s/30s/60s)
-    try{if(window._nxGastoHoyEstado&&window._nxGastoHoyEstado._timer)clearTimeout(window._nxGastoHoyEstado._timer)}catch(_){}
+    window._nxGastoHoyCancelar() // (23sep26) rango nuevo → el reintento anterior se apaga
     window._nxGastoHoyEstado={desde,hasta,incluyeHoy:hasta>=todayBogota,total:_ctas.length,vivo:_nVivo,guardado:_nBD,guardadas:_nxCaidas,hora:window._nxHoraBogota(),intento:0}
     try{window._nxGastoHoyProgramar()}catch(_){}
   }catch(e){
     console.warn('[resumen producto] sin token Meta, fallback BD completa:',e.message)
-    try{if(window._nxGastoHoyEstado&&window._nxGastoHoyEstado._timer)clearTimeout(window._nxGastoHoyEstado._timer)}catch(_){}
+    window._nxGastoHoyCancelar() // (23sep26) rango nuevo → el reintento anterior se apaga
     window._nxGastoHoyEstado={sinToken:true,desde,hasta,hora:window._nxHoraBogota()} // (23sep26) P2: origen visible
     const{data:insByCamp}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
     for(const i of (insByCamp||[])){
@@ -32847,15 +33055,32 @@ window._nxFotoPanel=(accEl)=>{
 window._nxOrigenPanel=(accountId,html)=>{try{const accEl=document.getElementById('meta-acc-'+accountId);if(!accEl)return;const el=accEl.querySelector('.nx-origen');if(el)el.innerHTML=html}catch(_){}}
 // Hora del último dato guardado de la cuenta (meta_insights.synced_at) para el aviso 🟡
 window._nxUltimoSync=async(accountId)=>{try{const{data}=await sb.from('meta_insights').select('synced_at').eq('account_id',accountId).not('synced_at','is',null).order('synced_at',{ascending:false}).limit(1);const d=data&&data[0]&&data[0].synced_at;return d?new Date(d).toLocaleString('es-CO',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'America/Bogota'}):'sin fecha'}catch(_){return 'sin fecha'}}
-// Reintento en segundo plano de la pasada EN VIVO (10 s, 30 s, 60 s) mientras el panel siga abierto
+// (23sep26) HASTA QUE CARGUE · el panel se divide en 4 BLOQUES: rango (2 llamadas), ayer (3), antier (3),
+// trasantier (3) = 11. Lo que YA llegó se guarda en memoria (st.cache) y NO se vuelve a pedir; el motor único
+// (_nxReintentar) repite la pasada en vivo SOLO por lo que falta, sin límite, mientras el panel siga abierto.
+window._nxPesoBloque={rango:2,ayer:3,antier:3,trasantier:3}
+window._nxMetaVivoCancelar=(accountId)=>{try{const r=window._nxReintentos&&window._nxReintentos['cuenta-'+accountId];if(r&&r.vivo)r.cancelar(true)}catch(_){}}
 window._nxMetaVivoProgramar=(accountId)=>{
-  const st=window._nxMetaVivoEstado(accountId);if(st.timer){clearTimeout(st.timer);st.timer=null}
-  const esperas=[10000,30000,60000],ms=esperas[st.intento-1],gen=st.gen // intento = fallos seguidos (1→10s, 2→30s, 3→60s, 4→parar)
-  if(!ms)return
-  st.timer=setTimeout(()=>{st.timer=null;const accEl=document.getElementById('meta-acc-'+accountId);if(!accEl||accEl.style.display==='none'||st.gen!==gen)return;window.toggleMetaCuenta(accountId,true,'vivo')},ms)
+  const st=window._nxMetaVivoEstado(accountId),gen=st.gen
+  const ya=window._nxReintentos&&window._nxReintentos['cuenta-'+accountId];if(ya&&ya.vivo)return // el motor ya está en eso
+  window._nxReintentar('cuenta-'+accountId,{
+    sigueVivo:()=>{const el=document.getElementById('meta-acc-'+accountId);return!!el&&el.style.display!=='none'&&st.gen===gen},
+    intentar:async()=>{await window.toggleMetaCuenta(accountId,true,'vivo');return!(st.faltan&&st.faltan.length)},
+    alCambiar:(rt)=>{st.rt=rt;if(!rt.corriendo)window._nxOrigenPanel(accountId,window._nxOrigenLinea(accountId))}
+  })
 }
-// Botón 🔄: volver a pedir a Meta ya mismo
-window._nxMetaVivoAhora=(accountId)=>{const st=window._nxMetaVivoEstado(accountId);if(st.timer){clearTimeout(st.timer);st.timer=null}st.intento=0;window._nxOrigenPanel(accountId,'⏳ Pidiendo a Meta el dato en vivo…');window.toggleMetaCuenta(accountId,true,'vivo')}
+// Línea de origen del panel: 🟢 100% · o 🟡 con % por bloque, qué llegó, qué se reintenta y la cuenta atrás
+window._nxOrigenLinea=(accountId)=>{
+  const st=window._nxMetaVivoEstado(accountId),b=st.bloques||{},falta=st.faltan||[],ok=Object.keys(b).filter(k=>b[k]==='vivo')
+  const btn=`<span style="cursor:pointer;margin-left:6px" title="Volver a pedir a Meta ahora" onclick="event.stopPropagation();window._nxMetaVivoAhora('${accountId}')">🔄 Ahora</span>`
+  if(!falta.length)return`<span style="color:var(--green)">🟢 <b>100% en vivo desde Meta</b> · ${st.rango||''} · ${st.hora||window._nxHoraBogota()} · rango, ayer, antier y trasantier ${btn}</span>`
+  const pesoOk=ok.reduce((a,k)=>a+(window._nxPesoBloque[k]||0),0),pct=Math.round(pesoOk/11*100)
+  const rt=st.rt||{intento:0,proximoEn:10,corriendo:false}
+  const estado=rt.corriendo?'⏳ pidiendo a Meta…':`próximo intento en ${rt.proximoEn} s`
+  return`<span style="color:var(--amber)">🟡 <b>${pct}% en vivo</b> <span style="font-family:monospace">${window._nxBarra(pct)}</span> · llegó: ${ok.length?ok.join(', '):'nada'} · <b>reintentando sin parar</b>: ${falta.join(', ')} (mientras tanto dato guardado${st.sync?' · sync '+st.sync:''}) · intento ${rt.intento} · ${estado}${st.err?' · Meta dijo: '+st.err:''} ${btn}</span>`
+}
+// Botón 🔄 Ahora: vuelve a pedir TODO a Meta ya mismo (borra la memoria de bloques)
+window._nxMetaVivoAhora=(accountId)=>{const st=window._nxMetaVivoEstado(accountId);window._nxMetaVivoCancelar(accountId);st.cache={};window._nxOrigenPanel(accountId,'⏳ Pidiendo a Meta el dato en vivo…');window.toggleMetaCuenta(accountId,true,'vivo')}
 
 window.toggleMetaCuenta=async(accountId,forceReload,_modo)=>{
   const accEl=document.getElementById('meta-acc-'+accountId)
@@ -32864,12 +33089,20 @@ window.toggleMetaCuenta=async(accountId,forceReload,_modo)=>{
   // (23sep26) P1: pasada 'vivo' (segunda, en segundo plano) vs pasada base (abrir/cerrar/forceReload)
   const _vivo=(_modo==='vivo')
   const _st=window._nxMetaVivoEstado(accountId)
-  if(!_vivo){_st.gen++;if(_st.timer){clearTimeout(_st.timer);_st.timer=null}_st.intento=0} // cualquier acción nueva cancela la pasada en vivo anterior
+  if(!_vivo){_st.gen++;if(_st.timer){clearTimeout(_st.timer);_st.timer=null}_st.intento=0;window._nxMetaVivoCancelar(accountId);_st.cache={}} // cualquier acción nueva cancela la pasada en vivo anterior (y su reintento)
   const _gen=_st.gen
   let _tokenOk=false
   const _nxDl={t0:Date.now(),max:20000,cta:8000} // tope: 8 s por llamada, 20 s en total
   const _nxOpts=()=>{const resta=_nxDl.max-(Date.now()-_nxDl.t0);if(resta<=0)throw new Error('tope de 20s en vivo alcanzado');return{timeoutMs:Math.min(_nxDl.cta,resta),sinEspera:true}}
   const _nxCancelado=()=>(_vivo&&(_st.gen!==_gen||accEl.style.display==='none'))
+  // (23sep26) HASTA QUE CARGUE: memoria de lo que YA llegó (no se repide en los reintentos) + avance 0→100%
+  _st.cache=_st.cache||{};_st.bloques={};_st.faltan=[];_st.err=''
+  const _nxProg={hecho:0,total:11}
+  const _nxMG=(bloque,path,tok,params)=>{
+    const k=bloque+'|'+String(params.time_range||'')+'|'+String(params.level||'')+'|'+String(params.fields||'')
+    if(_st.cache[k]){_nxProg.total=Math.max(1,_nxProg.total-1);return Promise.resolve(_st.cache[k])}
+    return metaGet(path,tok,params,_nxOpts()).then(r=>{_st.cache[k]=r;_nxProg.hecho++;if(_vivo)window._nxOrigenPanel(accountId,`⏳ Meta en vivo · ${_nxProg.hecho} de ${_nxProg.total} llamadas · ${Math.round(_nxProg.hecho/_nxProg.total*100)}% ${window._nxBarra(_nxProg.hecho/_nxProg.total*100)}`);return r})
+  }
   // Mejora 1: al recargar (forceReload), recordar la posición y los desgloses abiertos
   // para volver EXACTAMENTE al mismo lugar (no perder tiempo bajando y reabriendo).
   let _uiSnap=null
@@ -32905,11 +33138,11 @@ window.toggleMetaCuenta=async(accountId,forceReload,_modo)=>{
     _tokenOk=true
     if(!_vivo)throw new Error('pasada base: primero lo de Supabase; Meta en vivo va en segundo plano') // (23sep26) P1
 
-    const rawCamps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,effective_status,objective,daily_budget,lifetime_budget',limit:'500'},_nxOpts()) // (23sep26) P1: con tope
+    const rawCamps=await _nxMG('rango',`/${actId}/campaigns`,token,{fields:'id,name,status,effective_status,objective,daily_budget,lifetime_budget',limit:'500'}) // (23sep26) P1: con tope · bloque rango
     camps=rawCamps.map(c=>({meta_id:c.id,nombre:c.name||'',estado:c.status||c.effective_status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget:null}))
 
     const timeRange=JSON.stringify({since:desde,until:hasta})
-    const rawIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'},_nxOpts()) // (23sep26) P1: con tope
+    const rawIns=await _nxMG('rango',`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'}) // (23sep26) P1: con tope · bloque rango
     for(const i of rawIns){
       const cid=i.campaign_id
       if(!agg[cid])agg[cid]={spend:0,imp:0,clicks:0,reach:0,uout:0,conv:0,ctrs:[],cpms:[],freqs:[]}
@@ -32936,11 +33169,10 @@ window.toggleMetaCuenta=async(accountId,forceReload,_modo)=>{
   // (23sep26) P1: la pasada EN VIVO no logró el dato de Meta → no se repinta nada: se marca 🟡 y se reintenta sola
   if(_vivo&&source!=='meta'){
     if(_nxCancelado())return
-    _st.intento++
-    const _sync=await window._nxUltimoSync(accountId)
-    const _esp=[10,30,60][_st.intento-1]
-    const _rein=_esp?`reintento solo en ${_esp}s (${_st.intento}/3)`:'ya no se reintenta solo (3/3)'
-    window._nxOrigenPanel(accountId,`🟡 <b>Dato guardado</b> · sync ${_sync} · Meta no respondió (${_metaErrTxt}) · ${_rein} <span style="cursor:pointer" title="Volver a pedir a Meta" onclick="event.stopPropagation();window._nxMetaVivoAhora('${accountId}')">🔄 Reintentar ahora</span>`)
+    // (23sep26) HASTA QUE CARGUE: el rango no llegó → los 4 bloques quedan pendientes y el motor sigue sin límite
+    _st.bloques={rango:'base',ayer:'base',antier:'base',trasantier:'base'};_st.faltan=['rango','ayer','antier','trasantier'];_st.err=_metaErrTxt
+    _st.sync=await window._nxUltimoSync(accountId)
+    window._nxOrigenPanel(accountId,window._nxOrigenLinea(accountId))
     window._nxMetaVivoProgramar(accountId)
     return
   }
@@ -33299,7 +33531,7 @@ window.toggleMetaCuenta=async(accountId,forceReload,_modo)=>{
         const _trAyer=JSON.stringify({since:_prevDesde,until:_prevHasta})
         const _accAyer={}
         // (23sep26) P1: los 3 niveles se piden A LA VEZ y con tope (antes uno tras otro, sin tope). La suma es la misma.
-        const _rowsAyer=await Promise.all([['campaign','campaign_id'],['adset','adset_id'],['ad','ad_id']].map(_lv=>metaGet(`/${actId}/insights`,_tok,{fields:`${_lv[1]},spend,actions`,time_range:_trAyer,level:_lv[0],time_increment:'1',limit:'500'},_nxOpts()).then(_r=>[_lv,_r])))
+        const _rowsAyer=await Promise.all([['campaign','campaign_id'],['adset','adset_id'],['ad','ad_id']].map(_lv=>_nxMG('ayer',`/${actId}/insights`,_tok,{fields:`${_lv[1]},spend,actions`,time_range:_trAyer,level:_lv[0],time_increment:'1',limit:'500'}).then(_r=>[_lv,_r])))
         for(const[_lv,_rows]of _rowsAyer){
           for(const i of (_rows||[])){
             const mid=i[_lv[1]];if(!mid)continue
@@ -33331,7 +33563,7 @@ window.toggleMetaCuenta=async(accountId,forceReload,_modo)=>{
 
   // ── Meta de ANTIER / TRASANTIER (Gasto + Conv + CPA Meta) · MISMO criterio que AYER ──
   // En vivo desde Meta API si hay token; fallback a meta_insights de BD por fecha.
-  const _calcMetaDiaPrevio=async(pDesde,pHasta)=>{
+  const _calcMetaDiaPrevio=async(pDesde,pHasta,_bq)=>{ // (23sep26) _bq = nombre del bloque (antier / trasantier)
     const gasto={},conv={},cpaMeta={}
     let enVivo=false
     if(source==='meta'){
@@ -33342,7 +33574,7 @@ window.toggleMetaCuenta=async(accountId,forceReload,_modo)=>{
           const _tr=JSON.stringify({since:pDesde,until:pHasta})
           const _acc={}
           // (23sep26) P1: los 3 niveles a la vez y con tope (misma suma)
-          const _rowsPrev=await Promise.all([['campaign','campaign_id'],['adset','adset_id'],['ad','ad_id']].map(_lv=>metaGet(`/${actId}/insights`,_tok,{fields:`${_lv[1]},spend,actions`,time_range:_tr,level:_lv[0],time_increment:'1',limit:'500'},_nxOpts()).then(_r=>[_lv,_r])))
+          const _rowsPrev=await Promise.all([['campaign','campaign_id'],['adset','adset_id'],['ad','ad_id']].map(_lv=>_nxMG(_bq||'previo',`/${actId}/insights`,_tok,{fields:`${_lv[1]},spend,actions`,time_range:_tr,level:_lv[0],time_increment:'1',limit:'500'}).then(_r=>[_lv,_r])))
           for(const[_lv,_rows]of _rowsPrev){
             for(const i of (_rows||[])){
               const mid=i[_lv[1]];if(!mid)continue
@@ -33370,8 +33602,10 @@ window.toggleMetaCuenta=async(accountId,forceReload,_modo)=>{
     }
     return{gasto,conv,cpaMeta,enVivo} // (23sep26) P2: enVivo se muestra en la línea de origen
   }
-  const _metaAntier=await _calcMetaDiaPrevio(_prev2Desde,_prev2Hasta)
-  const _metaTrasantier=await _calcMetaDiaPrevio(_prev3Desde,_prev3Hasta)
+  const _metaAntier=await _calcMetaDiaPrevio(_prev2Desde,_prev2Hasta,'antier')
+  const _metaTrasantier=await _calcMetaDiaPrevio(_prev3Desde,_prev3Hasta,'trasantier')
+  // (23sep26) HASTA QUE CARGUE: qué bloque llegó en vivo y cuál quedó con dato guardado (solo en la pasada en vivo)
+  if(_vivo){_st.bloques={rango:'vivo',ayer:_ayerEnVivo?'vivo':'base',antier:_metaAntier.enVivo?'vivo':'base',trasantier:_metaTrasantier.enVivo?'vivo':'base'};_st.faltan=Object.keys(_st.bloques).filter(k=>_st.bloques[k]!=='vivo');_st.rango=desde+' → '+hasta;_st.hora=window._nxHoraBogota();if(_st.faltan.length)_st.sync=await window._nxUltimoSync(accountId)}
   const gastoAntierByMeta=_metaAntier.gasto,convAntierByMeta=_metaAntier.conv,cpaMetaAntierByMeta=_metaAntier.cpaMeta
   const gastoTrasantierByMeta=_metaTrasantier.gasto,convTrasantierByMeta=_metaTrasantier.conv,cpaMetaTrasantierByMeta=_metaTrasantier.cpaMeta
   // ── Mejora 1: cambios de HOY (presupuesto/estado) hechos desde NEXO ──
@@ -33458,7 +33692,7 @@ window.toggleMetaCuenta=async(accountId,forceReload,_modo)=>{
   // Meta viene en camino; en la pasada en vivo, qué llegó en vivo 🟢 y qué quedó de la base 🔵.
   const _oPrev=(v)=>v?'🟢 en vivo':'🔵 base'
   const sourceHtml=source==='meta'
-    ?`<div class="nx-origen" style="font-size:11px;color:var(--green);margin-bottom:8px">🟢 <b>En vivo desde Meta</b> · ${desde} → ${hasta} · ${window._nxHoraBogota()} · ayer: ${_oPrev(_ayerEnVivo)} · antier: ${_oPrev(_metaAntier.enVivo)} · trasantier: ${_oPrev(_metaTrasantier.enVivo)} <span style="cursor:pointer" title="Volver a pedir a Meta" onclick="event.stopPropagation();window._nxMetaVivoAhora('${accountId}')">🔄</span></div>`
+    ?`<div class="nx-origen" style="font-size:11px;color:var(--green);margin-bottom:8px">${window._nxOrigenLinea(accountId)}</div>` // (23sep26) 🟢 100% o 🟡 con % y reintento sin parar
     :`<div class="nx-origen" style="font-size:11px;color:var(--blue);margin-bottom:8px">🔵 <b>Datos de la base</b> · ${desde} → ${hasta} · ${_tokenOk?'⏳ pidiendo a Meta el dato en vivo…':'🟡 sin token de Meta: todo es dato guardado'}</div>`
 
   const renderCamp=(camp)=>{
@@ -33875,7 +34109,9 @@ window.toggleMetaCuenta=async(accountId,forceReload,_modo)=>{
 
   // (23sep26) P1: tras la pasada BASE, la pasada EN VIVO arranca sola en segundo plano (sin bloquear la pantalla)
   if(!_vivo&&_tokenOk)setTimeout(()=>{if(_st.gen===_gen&&accEl.style.display!=='none')window.toggleMetaCuenta(accountId,true,'vivo')},0)
-  if(_vivo){_st.intento=0;try{console.log(`[cuenta ${accountId}] ⏱️ en vivo listo en ${((Date.now()-_nxDl.t0)/1000).toFixed(1)}s`)}catch(_){}}
+  if(_vivo){_st.intento=0;try{console.log(`[cuenta ${accountId}] ⏱️ en vivo ${_st.faltan.length?'PARCIAL (faltan: '+_st.faltan.join(', ')+')':'100%'} en ${((Date.now()-_nxDl.t0)/1000).toFixed(1)}s`)}catch(_){}
+    if(_st.faltan.length)window._nxMetaVivoProgramar(accountId) // (23sep26) HASTA QUE CARGUE: sigue por lo que falta
+  }
 }
 
 window.filterCampsInAccount=(accountId,filter,btn)=>{

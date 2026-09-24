@@ -4710,24 +4710,36 @@ window.syncGastoResumen=async(btn)=>{
     if(!cuentas||!cuentas.length){alert('No hay cuentas de Meta');if(btn){btn.disabled=false;btn.textContent=orig}return}
     const chunks=metaDateChunks(desde,hasta,90)
     let filas=0,fail=0
+    const _nxFallR=[] // (23sep26) tramos que Meta no entregó → se reintentan solos hasta que carguen
     for(let ci=0;ci<cuentas.length;ci++){
       const cuenta=cuentas[ci]
       if(btn)btn.textContent=`⏳ ${ci+1}/${cuentas.length} cuentas...`
-      try{
-        for(const ch of chunks){
-          const ins=await metaGet(`/act_${cuenta.account_id}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values',time_range:JSON.stringify(ch),level:'campaign',time_increment:'1',limit:'500'})
+      {const _p=Math.round(ci/cuentas.length*100);window._nxPillCarga('sync-resumen',`⏳ Gasto del resumen · ${ci+1} de ${cuentas.length} cuentas · ${_p}% <span style="font-family:monospace">${window._nxBarra(_p)}</span>`,'carga')} // (23sep26) avance 0→100%
+      // (23sep26) HASTA QUE CARGUE: cada tramo (cuenta × 90 días) es una UNIDAD. Antes, si un tramo fallaba se
+      // perdía el resto de la cuenta (fail++). Ahora se intentan todos y los que fallen se repiten solos (solo esos).
+      let _nxFalloCta=false
+      for(const ch of chunks){
+        const _nxTramo=async()=>{
+          const ins=await metaGet(`/act_${cuenta.account_id}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks,action_values',time_range:JSON.stringify(ch),level:'campaign',time_increment:'1',limit:'500'},{timeoutMs:60000,sinEspera:true}) // (23sep26) con tope; si falla, el reintento lo repite
+          const _nxL1=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
           for(const i of (ins||[])){
             if(!i.campaign_id)continue
-            await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+            _nxL1.push({meta_id:i.campaign_id,nivel:'campaign',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),landing_page_views:metaLandingViews(i.actions),action_values_json:i.action_values?JSON.stringify(i.action_values):null,synced_at:new Date().toISOString()})
             filas++
           }
+          await window._nxUpsertLote('meta_insights',_nxL1,'meta_id,nivel,fecha')
         }
-      }catch(e){console.warn('[syncGastoResumen] cuenta '+cuenta.account_id,e.message);fail++}
+        try{await _nxTramo()}catch(e){console.warn('[syncGastoResumen] cuenta '+cuenta.account_id,e.message);if(!_nxFalloCta){_nxFalloCta=true;fail++}if(!window._nxEsSinPermiso(e))_nxFallR.push({nombre:(cuenta.nombre||cuenta.account_id)+' '+ch.since,hacer:_nxTramo});else break}
+      }
     }
     logAction('resumen_sync_gasto',{desde,hasta,filas,fail}).catch(()=>{})
     if(btn)btn.textContent='✅ '+filas+' filas. Recargando...'
+    // (23sep26) HASTA QUE CARGUE: 100% → aviso verde; si faltan tramos → 🟡 y se repiten solos; al llegar TODO se recarga el resumen
+    if(!_nxFallR.length)window._nxPillCarga('sync-resumen','✅ Gasto del resumen · 100%','ok')
+    else window._nxHastaQueCargue('sync-resumen',{titulo:'Gasto del resumen',total:cuentas.length*chunks.length,pendientes:_nxFallR,alTerminar:async()=>{await cargarResumenSemanal()}})
     await cargarResumenSemanal()
   }catch(e){
+    window._nxPillCarga('sync-resumen','','quitar') // (23sep26) no dejar el aviso colgado
     alert('Error sincronizando gasto: '+(e.message||e))
     if(btn){btn.disabled=false;btn.textContent=orig}
   }
@@ -10832,7 +10844,7 @@ window.saveReporteV2=async(fecha)=>{
         let _msOk=false
         try{_msOk=await window._miniSyncInsightsDiaParaAds(adIdsUnicos,_fxRep||today())}catch(_){}
         if(!_msOk){const _mw=document.getElementById('rep-msg');if(_mw)_mw.innerHTML+='<div class="alert alert-amber" style="margin-top:8px;font-size:12px">⚠️ El gasto en vivo no se pudo guardar (permisos o Meta no respondió). El semáforo quedó con el gasto del último sync. Avísale a Leidy o corre el 🧪 Probar gasto en vivo en Meta Ads → Credenciales.</div>'}
-        _calcularYGuardarSemaforos(adIdsUnicos,'reporte_dia',_fxRep).catch(()=>{})
+        _calcularYGuardarSemaforos(adIdsUnicos,'reporte_dia',_fxRep,{origen:_msOk?'vivo':'base'}).catch(()=>{}) // (23sep26) 🟡 si Meta no respondió → se corrige solo
       },0)
     }
   }catch(_){}
@@ -17937,7 +17949,7 @@ window.actualizarEstadosDropi=async()=>{
         let _msOk=false
         try{_msOk=await window._miniSyncInsightsDiaParaAds(adIdsAfectados,_fechaCruce||today())}catch(_){}
         if(!_msOk){const _mw=document.getElementById('dropi-upd-msg');if(_mw)_mw.innerHTML+='<span style="color:var(--amber);font-size:12px;margin-left:8px">⚠️ El gasto en vivo no se pudo guardar (permisos o Meta no respondió). El semáforo ★Dropi quedó con el gasto del último sync.</span>'}
-        _calcularYGuardarSemaforos(adIdsAfectados,'cruce_dropi',_fechaCruce).catch(()=>{})
+        _calcularYGuardarSemaforos(adIdsAfectados,'cruce_dropi',_fechaCruce,{origen:_msOk?'vivo':'base'}).catch(()=>{}) // (23sep26) 🟡 si Meta no respondió → se corrige solo
       },0)
     }
   }catch(_){}
@@ -22637,10 +22649,12 @@ window.runMetaSync=async(days)=>{
     // solo se desbloquean con el botón 🔓 (confirmación manual, como pediste).
     const _blkSetS1=new Set()
     try{const{data:_blkS1}=await sb.from('meta_cuentas').select('account_id').eq('estado','BLOCKED');for(const b of (_blkS1||[]))_blkSetS1.add(String(b.account_id))}catch(_){}
+    const _nxL2=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
     for(const a of accounts){
       const accId=a.account_id||a.id.replace('act_','')
-      await sb.from('meta_cuentas').upsert({account_id:accId,nombre:a.name||'',moneda:a.currency||'COP',timezone:a.timezone_name||'',estado:_blkSetS1.has(String(accId))?'BLOCKED':(a.account_status===1?'ACTIVE':'INACTIVE'),synced_at:new Date().toISOString()},{onConflict:'account_id'})
+      _nxL2.push({account_id:accId,nombre:a.name||'',moneda:a.currency||'COP',timezone:a.timezone_name||'',estado:_blkSetS1.has(String(accId))?'BLOCKED':(a.account_status===1?'ACTIVE':'INACTIVE'),synced_at:new Date().toISOString()})
     }
+    await window._nxUpsertLote('meta_cuentas',_nxL2,'account_id')
 
     const until=today()
     const sd=new Date()
@@ -22648,56 +22662,90 @@ window.runMetaSync=async(days)=>{
     const since=_isoDate(sd)
     let tCamp=0,tIns=0
 
-    for(const a of accounts){
+    // (23sep26) HASTA QUE CARGUE: la cuenta se sincroniza en una función para poder REPETIRLA si Meta falla.
+    // El cuerpo es el MISMO de antes; solo cambió el envoltorio. Cada llamada a Meta tiene tope de 60 s.
+    const _nxFallFull=[]
+    const _nxCuentaFull=async(a)=>{
       const accId=a.account_id||a.id.replace('act_',''),actId=a.id
-      try{
+      {
 
       log(`📊 ${a.name}: campañas...`)
-      const camps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,effective_status,objective,daily_budget,lifetime_budget',limit:'500'})
+      const camps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,effective_status,objective,daily_budget,lifetime_budget',limit:'500'},{timeoutMs:60000,sinEspera:true})
+      const _nxL3=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
       for(const c of camps){
-        await sb.from('meta_campanas').upsert({meta_id:c.id,account_id:accId,nivel:'campaign',nombre:c.name||'',estado:c.effective_status||c.status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+        _nxL3.push({meta_id:c.id,account_id:accId,nivel:'campaign',nombre:c.name||'',estado:c.effective_status||c.status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget:null,synced_at:new Date().toISOString()})
         tCamp++
       }
+      await window._nxUpsertLote('meta_campanas',_nxL3,'meta_id,nivel')
 
       log(`📊 ${a.name}: conjuntos...`)
-      const adsets=await metaGet(`/${actId}/adsets`,token,{fields:'id,name,status,effective_status,campaign_id,daily_budget',limit:'500'})
+      const adsets=await metaGet(`/${actId}/adsets`,token,{fields:'id,name,status,effective_status,campaign_id,daily_budget',limit:'500'},{timeoutMs:60000,sinEspera:true})
+      const _nxL4=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
       for(const s of adsets){
-        await sb.from('meta_campanas').upsert({meta_id:s.id,account_id:accId,nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.effective_status||s.status||'',daily_budget:s.daily_budget?s.daily_budget:null,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+        _nxL4.push({meta_id:s.id,account_id:accId,nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.effective_status||s.status||'',daily_budget:s.daily_budget?s.daily_budget:null,synced_at:new Date().toISOString()})
       }
+      await window._nxUpsertLote('meta_campanas',_nxL4,'meta_id,nivel')
 
       log(`📊 ${a.name}: anuncios...`)
-      const ads=await metaGet(`/${actId}/ads`,token,{fields:'id,name,status,effective_status,adset_id',limit:'500'})
+      const ads=await metaGet(`/${actId}/ads`,token,{fields:'id,name,status,effective_status,adset_id',limit:'500'},{timeoutMs:60000,sinEspera:true})
+      const _nxL5=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
       for(const ad of ads){
-        await sb.from('meta_campanas').upsert({meta_id:ad.id,account_id:accId,nivel:'ad',parent_id:ad.adset_id||'',nombre:ad.name||'',estado:ad.effective_status||ad.status||'',synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+        _nxL5.push({meta_id:ad.id,account_id:accId,nivel:'ad',parent_id:ad.adset_id||'',nombre:ad.name||'',estado:ad.effective_status||ad.status||'',synced_at:new Date().toISOString()})
       }
+      await window._nxUpsertLote('meta_campanas',_nxL5,'meta_id,nivel')
 
       const chunks=metaDateChunks(since,until,90)
       for(const ch of chunks){
         log(`📈 ${a.name}: métricas campañas (${ch.since} → ${ch.until})...`)
-        const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:JSON.stringify(ch),level:'campaign',time_increment:'1',limit:'500'})
+        const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:JSON.stringify(ch),level:'campaign',time_increment:'1',limit:'500'},{timeoutMs:60000,sinEspera:true})
+        const _nxL6=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
         for(const i of cIns){
-          await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:accId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+          _nxL6.push({meta_id:i.campaign_id,nivel:'campaign',account_id:accId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()})
           tIns++
         }
+        await window._nxUpsertLote('meta_insights',_nxL6,'meta_id,nivel,fecha')
 
         log(`📈 ${a.name}: métricas anuncios (${ch.since} → ${ch.until})...`)
-        const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:JSON.stringify(ch),level:'ad',time_increment:'1',limit:'500'})
+        const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:JSON.stringify(ch),level:'ad',time_increment:'1',limit:'500'},{timeoutMs:60000,sinEspera:true})
+        const _nxL7=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
         for(const i of aIns){
-          await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:accId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+          _nxL7.push({meta_id:i.ad_id,nivel:'ad',account_id:accId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()})
           tIns++
         }
+        await window._nxUpsertLote('meta_insights',_nxL7,'meta_id,nivel,fecha')
       }
 
       log(`✅ ${a.name}: listo`)
+      }
+    }
+    for(let _nxK=0;_nxK<accounts.length;_nxK++){
+      const a=accounts[_nxK]
+      {const _p=Math.round(_nxK/accounts.length*100);window._nxPillCarga('sync-full',`⏳ Sync completo · ${_nxK+1} de ${accounts.length} cuentas · ${_p}% <span style="font-family:monospace">${window._nxBarra(_p)}</span>`,'carga')}
+      const _c0=[tCamp,tIns] // si la cuenta falla a mitad, sus contadores se descuentan (se cuentan al cargar de verdad)
+      try{await _nxCuentaFull(a)
       }catch(accErr){
+        [tCamp,tIns]=_c0
         log(`<span style="color:var(--amber)">⚠️ ${a.name}: error — ${accErr.message}. Continuando...</span>`)
+        if(window._nxEsSinPermiso(accErr))log(`<span style="color:var(--muted)">⛔ ${a.name}: Meta no deja verla con este token (no se reintenta)</span>`)
+        else _nxFallFull.push({nombre:a.name||a.account_id,hacer:async()=>{const _c1=[tCamp,tIns];try{await _nxCuentaFull(a)}catch(e){[tCamp,tIns]=_c1;throw e}}})
       }
     }
 
     await sb.from('config').upsert({clave:'meta_sync_last',valor:new Date().toISOString(),updated_at:new Date().toISOString()},{onConflict:'clave'})
     log(`<br><strong style="color:var(--green)">✅ Sync completo: ${accounts.length} cuentas · ${tCamp} campañas · ${tIns} métricas</strong>`)
     logAction('meta_sync',{days,cuentas:accounts.length,campanas:tCamp,insights:tIns}).catch(()=>{})
+    // (23sep26) HASTA QUE CARGUE: 100% → verde; si faltan cuentas → 🟡 y se repiten solas hasta cargar
+    if(!_nxFallFull.length)window._nxPillCarga('sync-full','✅ Sync completo · 100%','ok')
+    else{
+      log(`<span style="color:var(--amber)">🟡 ${_nxFallFull.length} cuenta(s) sin respuesta de Meta: se reintentan solas hasta que carguen (mira el aviso abajo a la derecha)</span>`)
+      window._nxHastaQueCargue('sync-full',{titulo:'Sync completo',total:accounts.length,pendientes:_nxFallFull,alTerminar:async()=>{
+        await sb.from('config').upsert({clave:'meta_sync_last',valor:new Date().toISOString(),updated_at:new Date().toISOString()},{onConflict:'clave'})
+        try{if(document.getElementById('sync-progress'))log(`<strong style="color:var(--green)">✅ Reintento: todas las cuentas cargaron · ${tCamp} campañas · ${tIns} métricas</strong>`)}catch(_){}
+        logAction('meta_sync_reintento_ok',{days,cuentas:accounts.length,campanas:tCamp,insights:tIns}).catch(()=>{})
+      }})
+    }
   }catch(e){
+    window._nxPillCarga('sync-full','','quitar') // (23sep26) no dejar el aviso colgado
     log(`<strong style="color:var(--red)">❌ Error: ${e.message}</strong>`)
   }
 }
@@ -22895,18 +22943,24 @@ window.runMetaSyncAllAccounts=async(days,btn)=>{
     // ── NUEVO: refrescar nombres (y descubrir cuentas nuevas) desde Meta antes de sincronizar el gasto.
     //    Mismo patrón canónico que runMetaSync: upsert por account_id con el nombre fresco de /me/adaccounts.
     //    Robusto: si Meta falla aquí, NO abortamos — seguimos con lo que ya hay en BD.
-    try{
-      if(btn)btn.textContent='⏳ Actualizando cuentas...'
-      const _accsFresh=await metaGet('/me/adaccounts',token,{fields:'account_id,name,currency,timezone_name,account_status'})
+    // (23sep26) HASTA QUE CARGUE: el refresco de nombres va en una función; si Meta falla, se sigue igual que antes
+    // con lo que hay en BD, y ADEMÁS se repite solo (🟡) hasta que cargue. Tope de 30 s.
+    const _nxNombres=async(_enReintento)=>{
+      if(btn&&!_enReintento)btn.textContent='⏳ Actualizando cuentas...'
+      const _accsFresh=await metaGet('/me/adaccounts',token,{fields:'account_id,name,currency,timezone_name,account_status'},{timeoutMs:30000,sinEspera:true})
       // MEJORA 3 (3jul26): las cuentas marcadas BLOCKED conservan su estado en el sync —
       // solo se desbloquean con el botón 🔓 (confirmación manual, como pediste).
       const _blkSetS2=new Set()
       try{const{data:_blkS2}=await sb.from('meta_cuentas').select('account_id').eq('estado','BLOCKED');for(const b of (_blkS2||[]))_blkSetS2.add(String(b.account_id))}catch(_){}
+      const _nxL8=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
       for(const a of (_accsFresh||[])){
         const _aid=a.account_id||a.id.replace('act_','')
-        await sb.from('meta_cuentas').upsert({account_id:_aid,nombre:a.name||'',moneda:a.currency||'COP',timezone:a.timezone_name||'',estado:_blkSetS2.has(String(_aid))?'BLOCKED':(a.account_status===1?'ACTIVE':'INACTIVE'),synced_at:new Date().toISOString()},{onConflict:'account_id'})
+        _nxL8.push({account_id:_aid,nombre:a.name||'',moneda:a.currency||'COP',timezone:a.timezone_name||'',estado:_blkSetS2.has(String(_aid))?'BLOCKED':(a.account_status===1?'ACTIVE':'INACTIVE'),synced_at:new Date().toISOString()})
       }
-    }catch(eNom){console.warn('[sync todas] no se pudieron refrescar nombres:',eNom&&eNom.message)}
+      await window._nxUpsertLote('meta_cuentas',_nxL8,'account_id')
+    }
+    try{await _nxNombres()}catch(eNom){console.warn('[sync todas] no se pudieron refrescar nombres:',eNom&&eNom.message)
+      if(!window._nxEsSinPermiso(eNom))window._nxHastaQueCargue('sync-nombres',{titulo:'Nombres de cuentas',total:1,pendientes:[{nombre:'cuentas de Meta',hacer:()=>_nxNombres(true)}]})}
     const{data:cuentas}=await sb.from('meta_cuentas').select('account_id,nombre').order('nombre')
     if(!cuentas?.length){alert('Sin cuentas');return}
     let ok=0,fail=0
@@ -23003,37 +23057,46 @@ window.runRefrescarDropi=async(btn)=>{
     // Stats
     let cuentasConActividad=0,puntosCreados=0,diasOmitidos=0,erroresMeta=0
     const totalDiasPosibles=cuentas.length*fechas.length // para reporte
+    const _nxFallDropi=[] // (23sep26) cuentas cuyo mini-sync Meta no entregó → se reintentan solas hasta que carguen
     btn.textContent=`⏳ 0/${cuentas.length}...`
     for(let ci=0;ci<cuentas.length;ci++){
       const cuenta=cuentas[ci]
       btn.textContent=`⏳ ${ci+1}/${cuentas.length} ${cuenta.nombre||cuenta.account_id}...`
+      {const _p=Math.round(ci/cuentas.length*100);window._nxPillCarga('refrescar-dropi',`⏳ Refrescar Dropi · ${ci+1} de ${cuentas.length} cuentas · ${_p}% <span style="font-family:monospace">${window._nxBarra(_p)}</span>`,'carga')} // (23sep26) avance 0→100%
       // 1) Check BD: ¿tuvo gasto en los últimos 3 días?
       const{data:gastoCheck}=await sb.from('meta_insights').select('spend').eq('account_id',cuenta.account_id).eq('nivel','campaign').gte('fecha',desdeR).lte('fecha',hastaR).gt('spend',0).limit(1)
       if(!gastoCheck||!gastoCheck.length){console.log('[REFRESH-DROPI] skip cuenta sin gasto:',cuenta.nombre||cuenta.account_id);continue}
       cuentasConActividad++
+      // (23sep26) HASTA QUE CARGUE: pasos 2 y 3 en una función para poder REPETIRLOS si Meta falla (cuerpo igual)
+      const _nxPaso23=async()=>{
       // 2) Mini-sync Meta API de los 3 días (campaign + adset + ad) → BD fresca
       try{
         const actId='act_'+cuenta.account_id
         const timeRange=JSON.stringify({since:desdeR,until:hastaR})
-        const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
+        const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'},{timeoutMs:30000,sinEspera:true})
+        const _nxL9=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
         for(const i of (cIns||[])){
           if(!i.campaign_id)continue
-          await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+          _nxL9.push({meta_id:i.campaign_id,nivel:'campaign',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()})
         }
-        const sIns=await metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'adset',time_increment:'1',limit:'500'})
+        await window._nxUpsertLote('meta_insights',_nxL9,'meta_id,nivel,fecha')
+        const sIns=await metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'adset',time_increment:'1',limit:'500'},{timeoutMs:30000,sinEspera:true})
+        const _nxL10=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
         for(const i of (sIns||[])){
           if(!i.adset_id)continue
-          await sb.from('meta_insights').upsert({meta_id:i.adset_id,nivel:'adset',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+          _nxL10.push({meta_id:i.adset_id,nivel:'adset',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()})
         }
-        const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'ad',time_increment:'1',limit:'500'})
+        await window._nxUpsertLote('meta_insights',_nxL10,'meta_id,nivel,fecha')
+        const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'ad',time_increment:'1',limit:'500'},{timeoutMs:30000,sinEspera:true})
+        const _nxL11=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
         for(const i of (aIns||[])){
           if(!i.ad_id)continue
-          await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+          _nxL11.push({meta_id:i.ad_id,nivel:'ad',account_id:cuenta.account_id,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()})
         }
+        await window._nxUpsertLote('meta_insights',_nxL11,'meta_id,nivel,fecha')
       }catch(syncErr){
         console.warn('[REFRESH-DROPI] mini-sync falló en cuenta',cuenta.nombre||cuenta.account_id,':',syncErr.message)
-        erroresMeta++
-        continue // saltar a la siguiente cuenta
+        throw syncErr // (23sep26) antes: erroresMeta++ y continue → ahora lo cuenta el llamador y se reintenta
       }
       // 3) Por cada día, procesar los ad_ids cruzados que AÚN NO tengan su punto cruce_dropi
       for(const f of fechas){
@@ -23060,6 +23123,8 @@ window.runRefrescarDropi=async(btn)=>{
           console.warn('[REFRESH-DROPI] cálculo falló para',cuenta.account_id,f,':',calcErr.message)
         }
       }
+      }
+      try{await _nxPaso23()}catch(_eP){erroresMeta++;if(!window._nxEsSinPermiso(_eP))_nxFallDropi.push({nombre:cuenta.nombre||cuenta.account_id,hacer:_nxPaso23})}
     }
     // Reporte final
     btn.textContent='✅ Procesado completo'
@@ -23069,11 +23134,18 @@ window.runRefrescarDropi=async(btn)=>{
    Creados: ${puntosCreados} puntos
    Ya existían: ${diasOmitidos} días (omitidos)
    Errores Meta: ${erroresMeta}`)
-    alert(`✅ Procesado completo\n\nCuentas procesadas: ${cuentasConActividad} de ${cuentas.length} (con actividad)\nCreados: ${puntosCreados} puntos\nYa existían: ${diasOmitidos} días (omitidos)\nErrores Meta: ${erroresMeta}`)
+    alert(`✅ Procesado completo${_nxFallDropi.length?`\n\n🟡 ${_nxFallDropi.length} cuenta(s) sin respuesta de Meta: se reintentan SOLAS hasta que carguen (aviso abajo a la derecha)`:''}\n\nCuentas procesadas: ${cuentasConActividad} de ${cuentas.length} (con actividad)\nCreados: ${puntosCreados} puntos\nYa existían: ${diasOmitidos} días (omitidos)\nErrores Meta: ${erroresMeta}`)
     logAction('refrescar_dropi',{cuentasConActividad,puntosCreados,diasOmitidos,erroresMeta}).catch(()=>{})
+    // (23sep26) HASTA QUE CARGUE: 100% → verde; si Meta no entregó alguna cuenta → 🟡 y se repite sola hasta cargar
+    if(!_nxFallDropi.length)window._nxPillCarga('refrescar-dropi',`✅ Refrescar Dropi · 100% · ${puntosCreados} puntos`,'ok')
+    else{const _p0=puntosCreados;window._nxHastaQueCargue('refrescar-dropi',{titulo:'Refrescar Dropi',total:cuentasConActividad||1,pendientes:_nxFallDropi,alTerminar:async()=>{
+      console.log(`[REFRESH-DROPI] ✅ reintento completo · +${puntosCreados-_p0} puntos`)
+      logAction('refrescar_dropi_reintento_ok',{puntosNuevos:puntosCreados-_p0}).catch(()=>{})
+    }})}
     setTimeout(()=>{btn.textContent=origText;btn.title=btn.getAttribute('data-title-orig')||btn.title;btn.disabled=false},4000)
   }catch(e){
     console.error('[REFRESH-DROPI] error fatal:',e)
+    window._nxPillCarga('refrescar-dropi','','quitar') // (23sep26) no dejar el aviso colgado
     btn.textContent='❌ Error'
     setTimeout(()=>{btn.textContent=origText;btn.disabled=false},3000)
     alert('Error: '+e.message)
@@ -23671,7 +23743,10 @@ window._nexoSyncDiaTodas=async function(offset,btn,soloCuentas){
     // ── 2) Pasada de huérfanos del día: ad_ids usados ESE día sin cadena en meta_campanas ──
     if(btn)btn.innerHTML=`⏳ huérfanos · ${Math.round((cuentas.length/totalPasos)*100)}%`
     let _huerResueltos=0,_huerTotal=0
-    if(!_solo)try{
+    // (23sep26) HASTA QUE CARGUE: la pasada va en una función para poder REPETIRLA. Antes una caída de red se
+    // tomaba como "ID muerto" y ese anuncio quedaba sin cadena en silencio; ahora eso marca _nxHuerRed y se reintenta.
+    const _nxHuerPasada=async()=>{
+      let _nxHuerRed=''
       const _idsDia=new Set()
       const{data:_mps}=await sb.from('mapeos').select('ad_id').eq('fecha',dia).not('ad_id','is',null).neq('ad_id','')
       for(const m of (_mps||[])){const _v=String(m.ad_id).trim();if(_v.length>5)_idsDia.add(_v)}
@@ -23705,7 +23780,8 @@ window._nexoSyncDiaTodas=async function(offset,btn,soloCuentas){
                   const r1=await fetch(`${META_BASE}/${id}?fields=${encodeURIComponent(fields)}&access_token=${token}`)
                   const j1=await r1.json()
                   if(!j1.error)out[id]=j1
-                }catch(_e1){/* ID muerto, skip */}
+                  else if(!window._nxMetaIdMuerto(j1.error))_nxHuerRed=j1.error.message||'Meta pidió esperar' // (23sep26) no es ID muerto → reintentar
+                }catch(_e1){_nxHuerRed=(_e1&&_e1.message)||'red caída' /* (23sep26) antes "ID muerto, skip": una caída de red NO es un ID muerto */}
               }
             }
           }
@@ -23717,18 +23793,27 @@ window._nexoSyncDiaTodas=async function(offset,btn,soloCuentas){
         const _adsetsObj=_adsetIds.size?await _fetchIds([..._adsetIds],'name,status,effective_status,campaign_id,account_id'):{}
         const _campsObj=_campIds.size?await _fetchIds([..._campIds],'name,status,effective_status,objective,account_id'):{}
         // Upsert 3 niveles (mismos campos/onConflict de _syncOneAccount)
+        const _nxL12=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
         for(const[cid,c]of Object.entries(_campsObj)){
-          await sb.from('meta_campanas').upsert({meta_id:cid,account_id:(c.account_id||'').replace('act_',''),nivel:'campaign',nombre:c.name||'',estado:c.effective_status||c.status||'',objetivo:c.objective||'',synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+          _nxL12.push({meta_id:cid,account_id:(c.account_id||'').replace('act_',''),nivel:'campaign',nombre:c.name||'',estado:c.effective_status||c.status||'',objetivo:c.objective||'',synced_at:new Date().toISOString()})
         }
+        await window._nxUpsertLote('meta_campanas',_nxL12,'meta_id,nivel')
+        const _nxL13=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
         for(const[sid,s]of Object.entries(_adsetsObj)){
-          await sb.from('meta_campanas').upsert({meta_id:sid,account_id:(s.account_id||'').replace('act_',''),nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.effective_status||s.status||'',synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+          _nxL13.push({meta_id:sid,account_id:(s.account_id||'').replace('act_',''),nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.effective_status||s.status||'',synced_at:new Date().toISOString()})
         }
+        await window._nxUpsertLote('meta_campanas',_nxL13,'meta_id,nivel')
+        const _nxL14=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
         for(const[aid,a]of Object.entries(_adsObj)){
-          await sb.from('meta_campanas').upsert({meta_id:aid,account_id:(a.account_id||'').replace('act_',''),nivel:'ad',parent_id:a.adset_id||'',nombre:a.name||'',estado:a.effective_status||a.status||'',synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+          _nxL14.push({meta_id:aid,account_id:(a.account_id||'').replace('act_',''),nivel:'ad',parent_id:a.adset_id||'',nombre:a.name||'',estado:a.effective_status||a.status||'',synced_at:new Date().toISOString()})
           _huerResueltos++
         }
+        await window._nxUpsertLote('meta_campanas',_nxL14,'meta_id,nivel')
       }
-    }catch(eHu){console.warn('[sync-dia] pasada de huérfanos falló:',eHu&&eHu.message)}
+      if(_nxHuerRed)throw new Error('Meta no respondió para algunos IDs: '+_nxHuerRed) // lo resuelto ya quedó guardado; se repite lo que falta
+    }
+    if(!_solo)try{await _nxHuerPasada()}catch(eHu){console.warn('[sync-dia] pasada de huérfanos falló:',eHu&&eHu.message)
+      if(!window._nxEsSinPermiso(eHu))window._nxHastaQueCargue('huerfanos-'+dia,{titulo:'IDs sin cadena del '+dia,total:1,pendientes:[{nombre:'IDs sin campaña',hacer:_nxHuerPasada}]})}
     try{logAction('sync_dia_todas',{dia,cuentas_ok:ok,cuentas_fail:fail,huerfanos:_huerTotal,resueltos:_huerResueltos}).catch(()=>{})}catch(_){}
     // ── Cierre: ✅ si todo bien; ⚠️ con detalle si alguna cuenta falló ──
     _okN=ok;_failN=fail
@@ -23808,7 +23893,7 @@ window._nexoAutoSyncHoy=async function(slug){
     const _pintaPill=()=>{try{if(!_pill)return
       const _rein=_fakeBtn.dataset.estado==='reintentando' // (23sep26) HASTA QUE CARGUE: amarillo mientras reintenta
       _pill.style.borderColor=_rein?'var(--amber,#f59e0b)':'var(--green,#22c55e)';_pill.style.color=_rein?'var(--amber,#f59e0b)':'var(--green,#22c55e)'
-      _pill.innerHTML=`${_txt}${_fakeBtn.dataset.cuenta?' · '+String(_fakeBtn.dataset.cuenta).slice(0,22):''} · ${Math.round((Date.now()-_t0)/1000)} s <span style="margin-left:8px;cursor:pointer;opacity:.7" title="Esconder (sigue actualizando atrás)" onclick="this.parentNode.style.display='none'">✕</span>`}catch(_){}}
+      _pill.innerHTML=`${_txt}${_fakeBtn.dataset.cuenta?' · '+String(_fakeBtn.dataset.cuenta).slice(0,22):''} · ${Math.round((Date.now()-_t0)/1000)} s <span style="margin-left:8px;cursor:pointer;opacity:.7;pointer-events:auto" title="Esconder (sigue actualizando atrás)" onclick="this.parentNode.style.display='none'">✕</span>`}catch(_){}} // (23sep26) pointer-events:auto: sin esto la ✕ no recibía el clic
     const _fakeBtn={dataset:{},style:{},set innerHTML(v){const _v=String(v);_txt=/^(🟡|✅|⚠️|❌)/.test(_v)?_v:'🔄 Hoy · '+_v.replace(/⏳\s*/,'');_pintaPill()},get innerHTML(){return''}}
     _seg=setInterval(_pintaPill,1000);_pintaPill()
     let _res=null
@@ -23816,6 +23901,7 @@ window._nexoAutoSyncHoy=async function(slug){
     try{if(_res&&_res.terminado)await _res.terminado}catch(_){} // (23sep26) HASTA QUE CARGUE: espera al 100 % antes de refrescar la tabla
     clearInterval(_seg);_seg=null
     window._nexoAutoSyncLastCheck=Date.now() // la sync recién hecha cuenta como chequeo fresco
+    try{window._nxSemBarridoBase()}catch(_){} // (23sep26) aprovechar para corregir semáforos 🟡 pendientes
     // 4) Refrescar EN VIVO la tabla del producto abierto (sin recargar ni moverte de donde estás)
     // (23sep26) P3: ahora espera a que pares de interactuar y conserva scroll, desgloses abiertos y foco (_nxRefrescoEnSitio)
     try{if(_pill)_pill.innerHTML=`✅ Datos de hoy al día · ${Math.round((Date.now()-_t0)/1000)} s`}catch(_){}
@@ -23884,6 +23970,78 @@ window._nxReintentar=function(clave,cfg){
   return rt
 }
 window._nxBarra=(pct)=>{const n=Math.max(0,Math.min(10,Math.round((pct||0)/10)));return'▓'.repeat(n)+'░'.repeat(10-n)}
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// (23sep26) HASTA QUE CARGUE · piezas comunes para TODAS las cargas de Meta
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// ¿Meta negó por permiso? (#200 / permission) → insistir no sirve: se avisa ⛔ y no se reintenta
+window._nxEsSinPermiso=(e)=>/#200|permission/i.test(String((e&&e.message)||e||''))
+// Aviso flotante común (abajo a la derecha, encima del 🔄 Hoy). estado: 'carga' (azul) · 'reintento' (amarillo)
+// · 'ok' (verde, se va solo a los 5 s) · 'quitar'. La ✕ lo esconde (el trabajo sigue atrás).
+window._nxPillCarga=function(id,html,estado){
+  try{
+    let box=document.getElementById('nx-pills-carga')
+    if(!box){box=document.createElement('div');box.id='nx-pills-carga';box.style.cssText='position:fixed;bottom:64px;right:18px;z-index:99998;display:flex;flex-direction:column;gap:6px;align-items:flex-end;pointer-events:none';document.body.appendChild(box)}
+    let p=document.getElementById('nx-pc-'+id)
+    if(estado==='quitar'){if(p)p.remove();return}
+    if(!p){p=document.createElement('div');p.id='nx-pc-'+id;box.appendChild(p)}
+    const col=estado==='ok'?'var(--green,#22c55e)':estado==='reintento'?'var(--amber,#f59e0b)':'var(--accent,#60a5fa)'
+    p.style.cssText=`pointer-events:auto;background:var(--card2,#1e1e2e);border:1px solid ${col};color:${col};font-size:12px;font-weight:700;padding:7px 12px;border-radius:999px;box-shadow:0 4px 18px rgba(0,0,0,.45);max-width:min(620px,92vw);display:${p.dataset.oculto?'none':'block'}`
+    p.innerHTML=html+` <span style="margin-left:6px;cursor:pointer;opacity:.7" title="Esconder (sigue trabajando atrás)" onclick="this.parentNode.dataset.oculto='1';this.parentNode.style.display='none'">✕</span>`
+    clearTimeout(p._t);if(estado==='ok')p._t=setTimeout(()=>{try{p.remove()}catch(_){}},5000)
+  }catch(_){}
+}
+// Motor por UNIDADES: repite SOLO las que fallaron (sin límite, 10 s · 30 s · luego cada 60 s) hasta que
+// TODAS carguen, mostrando 🟡 % + cuenta atrás en el aviso. cfg: {titulo, total, pendientes:[{nombre,hacer}],
+// alTerminar(), sigueVivo(), alCambiar(info)}. Una unidad que falla por permiso (#200) sale como ⛔.
+window._nxHastaQueCargue=function(clave,cfg){
+  let pend=(cfg.pendientes||[]).slice(),err=''
+  const sinPerm=[],total=Math.max(1,cfg.total||pend.length)
+  const pintar=(rt)=>{
+    const pct=Math.round((total-pend.length)/total*100),perm=sinPerm.length?` · <span style="color:var(--muted)">⛔ ${sinPerm.length} sin permiso (no se reintenta)</span>`:''
+    if(cfg.flotante===false){}
+    else if(!rt.vivo){
+      if(rt.listo)window._nxPillCarga(clave,`✅ ${cfg.titulo} · 100%${perm}`,'ok')
+      else window._nxPillCarga(clave,'','quitar')
+    }else{
+      const nombres=pend.map(u=>u.nombre).slice(0,3).join(', ')+(pend.length>3?` y ${pend.length-3} más`:'')
+      window._nxPillCarga(clave,`🟡 ${cfg.titulo} · ${pct}% <span style="font-family:monospace">${window._nxBarra(pct)}</span> · reintentando sin parar ${pend.length}: ${nombres} · intento ${rt.intento} · ${rt.corriendo?'⏳ pidiendo a Meta…':'en '+rt.proximoEn+' s'}${err?' · Meta dijo: '+err.replace(/</g,'&lt;'):''}${perm} <span style="cursor:pointer;text-decoration:underline" onclick="window._nxReintentos['${clave}']&&window._nxReintentos['${clave}'].ahora()">🔄 Ahora</span>`,'reintento')
+    }
+    try{cfg.alCambiar&&cfg.alCambiar({rt,pct,pend,sinPerm,err})}catch(_){}
+  }
+  return window._nxReintentar(clave,{
+    sigueVivo:cfg.sigueVivo,
+    intentar:async()=>{
+      for(const u of pend.slice()){
+        try{await u.hacer();pend=pend.filter(x=>x!==u)}
+        catch(e){if(window._nxEsSinPermiso(e)){sinPerm.push(u);pend=pend.filter(x=>x!==u)}else err=String((e&&e.message)||e||'').slice(0,80)} // el "Meta dijo" es de lo que SÍ se reintenta
+      }
+      if(pend.length)return false
+      try{if(cfg.alTerminar)await cfg.alTerminar()}catch(e){console.warn('[hasta que cargue '+clave+'] al terminar:',e&&e.message)}
+      return true
+    },
+    alCambiar:pintar
+  })
+}
+// ¿El error de Meta dice que el ID está MUERTO (no existe / sin acceso)? Solo eso es definitivo.
+// Todo lo demás (límite de velocidad, token, red caída) es "Meta no respondió" → se reintenta.
+window._nxMetaIdMuerto=(err)=>{const c=+((err&&err.code)||0);return c===100||c===10||(c>=200&&c<300)}
+// Lee IDs de Meta por lote (?ids=) de forma SEGURA: si el lote cae por un ID muerto, pregunta 1 a 1.
+// Devuelve {id: objeto} solo de los que existen. LANZA error si Meta no respondió (así se reintenta),
+// en vez de marcar IDs buenos como malos.
+window._nxMetaIdsLote=async function(ids,fields,token){
+  const r=await _nxFetchTope(`${META_BASE}/?ids=${encodeURIComponent(ids.join(','))}&fields=${encodeURIComponent(fields)}&access_token=${token}`,20000)
+  const j=await r.json().catch(()=>null)
+  if(j&&!j.error)return j
+  if(!j||!window._nxMetaIdMuerto(j.error))throw new Error((j&&j.error&&j.error.message)||('Meta respondió '+r.status))
+  const out={}
+  for(const id of ids){
+    const r1=await _nxFetchTope(`${META_BASE}/${id}?fields=${encodeURIComponent(fields)}&access_token=${token}`,20000)
+    const j1=await r1.json().catch(()=>null)
+    if(j1&&!j1.error){out[id]=j1;continue}
+    if(!j1||!window._nxMetaIdMuerto(j1.error))throw new Error((j1&&j1.error&&j1.error.message)||('Meta respondió '+r1.status))
+  }
+  return out
+}
 window._nxHoraBogota=()=>{try{return new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit',timeZone:'America/Bogota'})}catch(_){return ''}}
 window._nxGastoOrigenHtml=function(){
   const e=window._nxGastoHoyEstado
@@ -26751,8 +26909,10 @@ window._rpFueraResolver=async function(slug,silencioso){
       const faltan=ids.filter(id=>!window._nexoAdCampCache[id])
       for(let i=0;i<faltan.length;i+=50){
         const lote=faltan.slice(i,i+50)
-        const r=await fetch(`${META_BASE}/?ids=${encodeURIComponent(lote.join(','))}&fields=${encodeURIComponent('campaign{id,name},adset{id,name},account_id')}&access_token=${tk}`)
-        const j=await r.json().catch(()=>({}))
+        // (23sep26) HASTA QUE CARGUE: lector SEGURO. Antes, si Meta devolvía error (límite, token, un ID muerto en el
+        // lote) los 50 IDs quedaban marcados como "malos" para siempre. Ahora solo el ID muerto queda sin campaña;
+        // si Meta no respondió, se lanza error y se reintenta solo.
+        const j=await window._nxMetaIdsLote(lote,'campaign{id,name},adset{id,name},account_id',tk)
         for(const id of lote){
           const o=j&&j[id]
           if(o&&o.campaign&&o.campaign.id){
@@ -26766,14 +26926,18 @@ window._rpFueraResolver=async function(slug,silencioso){
       // la próxima carga del rango ya clasifica estos IDs sola — el "fuera" se cura para siempre.
       try{
         const _yaP={}
+        const _nxL15=[],_nxL16=[],_nxL17=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
         for(const id of ids){
           const c=window._nexoAdCampCache[id]
           if(!c||!c.campId||!c.adsetId)continue
           const _acc=c.accId||''
-          if(!_yaP['c_'+c.campId]){_yaP['c_'+c.campId]=1;await sb.from('meta_campanas').upsert({meta_id:c.campId,account_id:_acc,nivel:'campaign',nombre:c.nombre||c.campId,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})}
-          if(!_yaP['s_'+c.adsetId]){_yaP['s_'+c.adsetId]=1;await sb.from('meta_campanas').upsert({meta_id:c.adsetId,account_id:_acc,nivel:'adset',parent_id:c.campId,nombre:c.adsetNombre||c.adsetId,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})}
-          await sb.from('meta_campanas').upsert({meta_id:id,account_id:_acc,nivel:'ad',parent_id:c.adsetId,nombre:id,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+          if(!_yaP['c_'+c.campId]){_yaP['c_'+c.campId]=1;_nxL15.push({meta_id:c.campId,account_id:_acc,nivel:'campaign',nombre:c.nombre||c.campId,synced_at:new Date().toISOString()})}
+          if(!_yaP['s_'+c.adsetId]){_yaP['s_'+c.adsetId]=1;_nxL16.push({meta_id:c.adsetId,account_id:_acc,nivel:'adset',parent_id:c.campId,nombre:c.adsetNombre||c.adsetId,synced_at:new Date().toISOString()})}
+          _nxL17.push({meta_id:id,account_id:_acc,nivel:'ad',parent_id:c.adsetId,nombre:id,synced_at:new Date().toISOString()})
         }
+        await window._nxUpsertLote('meta_campanas',_nxL15,'meta_id,nivel')
+        await window._nxUpsertLote('meta_campanas',_nxL16,'meta_id,nivel')
+        await window._nxUpsertLote('meta_campanas',_nxL17,'meta_id,nivel')
       }catch(eP){console.warn('[fuera persistir] no se pudo guardar la cadena en BD:',eP&&eP.message)}
       // Clasificar para la pill y el flotante
       const _cTP=(window._metaPort&&window._metaPort.campToProd)||{}
@@ -26793,6 +26957,14 @@ window._rpFueraResolver=async function(slug,silencioso){
     }catch(e){
       console.warn('[fuera resolver]',e&&e.message)
       if(pill)pill.innerHTML='⚠️ '+ids.length+' ID'+(ids.length===1?'':'s')+' fuera · Meta no respondió (clic reintenta)'
+      // (23sep26) HASTA QUE CARGUE: se repite solo, en amarillo, con % (IDs ya resueltos) y cuenta atrás, mientras se vea el producto
+      {const _cl='fuera-'+slug,_m=window._nxReintentos&&window._nxReintentos[_cl]
+      if(!(_m&&_m.vivo)&&!window._nxEsSinPermiso(e))window._nxHastaQueCargue(_cl,{titulo:'IDs fuera',total:1,flotante:false,
+        sigueVivo:()=>!!document.getElementById('fuera-pill-'+slug),
+        pendientes:[{nombre:'IDs fuera',hacer:async()=>{await window._rpFueraResolver(slug,true);const _D=window._rpFueraData&&window._rpFueraData[slug];if(_D&&!_D.resuelto)throw new Error('Meta no respondió')}}],
+        alCambiar:({rt,err})=>{const _p=document.getElementById('fuera-pill-'+slug);if(!_p||!rt.vivo)return
+          const _pct=Math.round(ids.filter(id=>window._nexoAdCampCache&&window._nexoAdCampCache[id]).length/Math.max(1,ids.length)*100)
+          _p.innerHTML=`<span style="color:var(--amber)">🟡 ${ids.length} ID${ids.length===1?'':'s'} fuera · ${_pct}% <span style="font-family:monospace">${window._nxBarra(_pct)}</span> · Meta no respondió · reintentando sin parar · intento ${rt.intento} · ${rt.corriendo?'⏳':'en '+rt.proximoEn+' s'}</span>`}})}
       return
     }
   }
@@ -26959,6 +27131,7 @@ window._rpResolverSinSync=async function(cid){
   const idsMap=(window._rpSinSyncData&&window._rpSinSyncData[cid])||{}
   const ids=Object.keys(idsMap)
   if(!ids.length)return
+  try{const _av=res.querySelector('[data-nx-aviso]');if(_av)_av.remove()}catch(_){} // (23sep26) quitar el aviso ⚠️ anterior: antes cada reintento fallido lo anidaba y duplicaba la lista
   const _flatOriginal=res.innerHTML
   res.innerHTML=`<div style="font-size:11.5px;color:var(--muted);padding:6px 8px">⏳ Buscando en Meta a qué campaña pertenece cada ID...</div>`
   try{
@@ -26969,9 +27142,8 @@ window._rpResolverSinSync=async function(cid){
     // Batch: una sola llamada con todos los IDs que falten (hasta 50 por llamada)
     for(let i=0;i<faltan.length;i+=50){
       const lote=faltan.slice(i,i+50)
-      const r=await fetch(`${META_BASE}/?ids=${encodeURIComponent(lote.join(','))}&fields=${encodeURIComponent('campaign{id,name},adset{id,name},account_id')}&access_token=${tk}`)
-      const j=await r.json().catch(()=>({}))
-      if(!r.ok&&j&&j.error)throw new Error(j.error.message||('Error '+r.status))
+      // (23sep26) HASTA QUE CARGUE: lector SEGURO (un ID muerto ya no tumba el lote entero; si Meta no responde → error y reintento)
+      const j=await window._nxMetaIdsLote(lote,'campaign{id,name},adset{id,name},account_id',tk)
       for(const id of lote){
         const o=j&&j[id]
         if(o&&o.campaign&&o.campaign.id){
@@ -27005,20 +27177,24 @@ window._rpResolverSinSync=async function(cid){
     // (ej: RLS sin permisos), avisa en consola y todo lo demás sigue funcionando igual que antes.
     try{
       const _yaP={}
+      const _nxL18=[],_nxL19=[],_nxL20=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
       for(const id of ids){
         const c=window._nexoAdCampCache[id]
         if(!c||!c.campId||!c.adsetId)continue // sin adset no hay cadena completa: se deja como estaba
         const _acc=c.accId||''
         if(!_yaP['c_'+c.campId]){
           _yaP['c_'+c.campId]=1
-          await sb.from('meta_campanas').upsert({meta_id:c.campId,account_id:_acc,nivel:'campaign',nombre:c.nombre||c.campId,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+          _nxL18.push({meta_id:c.campId,account_id:_acc,nivel:'campaign',nombre:c.nombre||c.campId,synced_at:new Date().toISOString()})
         }
         if(!_yaP['s_'+c.adsetId]){
           _yaP['s_'+c.adsetId]=1
-          await sb.from('meta_campanas').upsert({meta_id:c.adsetId,account_id:_acc,nivel:'adset',parent_id:c.campId,nombre:c.adsetNombre||c.adsetId,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+          _nxL19.push({meta_id:c.adsetId,account_id:_acc,nivel:'adset',parent_id:c.campId,nombre:c.adsetNombre||c.adsetId,synced_at:new Date().toISOString()})
         }
-        await sb.from('meta_campanas').upsert({meta_id:id,account_id:_acc,nivel:'ad',parent_id:c.adsetId,nombre:id,synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel'})
+        _nxL20.push({meta_id:id,account_id:_acc,nivel:'ad',parent_id:c.adsetId,nombre:id,synced_at:new Date().toISOString()})
       }
+      await window._nxUpsertLote('meta_campanas',_nxL18,'meta_id,nivel')
+      await window._nxUpsertLote('meta_campanas',_nxL19,'meta_id,nivel')
+      await window._nxUpsertLote('meta_campanas',_nxL20,'meta_id,nivel')
     }catch(eP){console.warn('[sin sync persistir] no se pudo guardar la cadena en BD (volverá a salir al recargar):',eP&&eP.message)}
     window._rpRenderSinSyncGrupos(cid)
     if(sub)sub.dataset.resuelto='1'
@@ -27026,6 +27202,15 @@ window._rpResolverSinSync=async function(cid){
     console.warn('[sin sync resolver] fallo:',e&&e.message)
     // NUEVO (3jul26 · Mejora 2): botón 🔄 Reintentar ahí mismo — antes tocaba cerrar/abrir o recargar.
     res.innerHTML=`<div style="font-size:11px;color:var(--amber);padding:4px 8px 6px">⚠️ No se pudo consultar Meta en vivo (${String(e&&e.message||'error').slice(0,80)}) — mostrando solo los IDs. <button onclick="event.stopPropagation();window._rpReintentarSinSync('${cid}')" style="margin-left:6px;background:rgba(245,158,11,.1);border:1px solid var(--amber);border-radius:5px;color:var(--amber);font-size:10.5px;font-weight:700;padding:1px 9px;cursor:pointer" title="Vuelve a consultar Meta en vivo estos mismos IDs, sin recargar nada">🔄 Reintentar</button></div>`+_flatOriginal
+    // (23sep26) HASTA QUE CARGUE: se marca el aviso (para no anidarlo) y se repite solo, en amarillo, con % y cuenta atrás
+    try{if(res.firstElementChild)res.firstElementChild.dataset.nxAviso='1'}catch(_){}
+    {const _cl='sinsync-'+cid,_m=window._nxReintentos&&window._nxReintentos[_cl]
+    if(!(_m&&_m.vivo)&&!window._nxEsSinPermiso(e))window._nxHastaQueCargue(_cl,{titulo:'IDs sin sincronizar',total:1,flotante:false,
+      sigueVivo:()=>!!document.getElementById(cid+'-res'),
+      pendientes:[{nombre:'IDs sin sincronizar',hacer:async()=>{await window._rpResolverSinSync(cid);if(!(window._rpSinSyncResuelto&&window._rpSinSyncResuelto[cid]))throw new Error('Meta no respondió')}}],
+      alCambiar:({rt,err})=>{const _r=document.getElementById(cid+'-res'),_a=_r&&_r.querySelector('[data-nx-aviso]');if(!_a||!rt.vivo)return
+        const _pct=Math.round(ids.filter(id=>window._nexoAdCampCache&&window._nexoAdCampCache[id]).length/Math.max(1,ids.length)*100)
+        _a.innerHTML=`🟡 Meta no respondió (${String(err||(e&&e.message)||'error').slice(0,60).replace(/</g,'&lt;')}) · ${_pct}% <span style="font-family:monospace">${window._nxBarra(_pct)}</span> · reintentando sin parar · intento ${rt.intento} · ${rt.corriendo?'⏳ pidiendo a Meta…':'en '+rt.proximoEn+' s'} — mientras tanto, solo los IDs. <button onclick="event.stopPropagation();window._nxReintentos['${_cl}']&&window._nxReintentos['${_cl}'].ahora()" style="margin-left:6px;background:rgba(245,158,11,.1);border:1px solid var(--amber);border-radius:5px;color:var(--amber);font-size:10.5px;font-weight:700;padding:1px 9px;cursor:pointer">🔄 Ahora</button>`}})}
   }
 }
 // NUEVO (3jul26 · Mejora 2): reintenta la consulta EN VIVO de un desglose (huérfanos o sin sync)
@@ -28838,7 +29023,7 @@ window._rpFusionRefreshSem=async function(slug,btn){
       try{okSync=await window._miniSyncInsightsDiaParaAds(_adIdsRS,D.f)}catch(_){}
       if(!okSync)_fallasRS.push(D.lab)
       _setB(`⏳ ${i+1}/3 ${D.lab}: guardando semáforo...`)
-      try{await _calcularYGuardarSemaforos(_adIdsRS,'cruce_dropi',D.f)}catch(_eS){if(_fallasRS.indexOf(D.lab)<0)_fallasRS.push(D.lab+' (semáforo)')}
+      try{await _calcularYGuardarSemaforos(_adIdsRS,'cruce_dropi',D.f,{origen:okSync?'vivo':'base'})}catch(_eS){if(_fallasRS.indexOf(D.lab)<0)_fallasRS.push(D.lab+' (semáforo)')}
     }
     if(btn){btn.disabled=false;btn.textContent=_txtOrig}
     if(_fallasRS.length)alert('⚠️ Terminó con avisos en: '+_fallasRS.join(', ')+'. En esos días el gasto en vivo no se pudo traer/verificar desde Meta y el semáforo se guardó con el gasto que había en BD. Revisa con 🧪 Probar gasto en vivo (Meta Ads → Credenciales).')
@@ -32001,14 +32186,14 @@ window._rpFusionSemLoad=async function(ccid){
     let rows=[]
     // NUEVO (12jun26 · captura completa): traer también metricas_extra para el tooltip del desglose completo.
     // Blindaje: si la BD aún no tiene la columna, se reintenta sin ella (las tiras nunca se rompen).
-    let _colsSemF='meta_id,nivel,fecha,hora_calculo,semaforo,semaforo_label,cpa_real,ventas,canceladas,pendientes,gasto,triggered_by,cambio_vs_anterior,semaforo_anterior,ventas_efectivas,cpa_real_efectivas,metricas_extra'
+    let _colsSemF='meta_id,nivel,fecha,hora_calculo,semaforo,semaforo_label,cpa_real,ventas,canceladas,pendientes,gasto,triggered_by,cambio_vs_anterior,semaforo_anterior,ventas_efectivas,cpa_real_efectivas,metricas_extra,gasto_origen' // (23sep26) origen del gasto del punto: 'vivo' · 'base' · 'base_cerrado'
     for(let i=0;i<metas.length;i+=100){
       let{data,error:_eSemF}=await _sbFetchAll((_f,_t)=>sb.from('semaforo_historial')
         .select(_colsSemF)
         .in('meta_id',metas.slice(i,i+100)).gte('fecha',_trasL).lte('fecha',_hoyL)
         .order('hora_calculo',{ascending:true}).order('id',{ascending:true}).range(_f,_t))
-      if(_eSemF&&String(_eSemF.message||'').indexOf('metricas_extra')>=0){
-        _colsSemF=_colsSemF.replace(',metricas_extra','')
+      if(_eSemF&&/metricas_extra|gasto_origen/.test(String(_eSemF.message||''))){ // (23sep26) también si faltara gasto_origen
+        _colsSemF=_colsSemF.replace(',metricas_extra','').replace(',gasto_origen','')
         ;({data}=await _sbFetchAll((_f,_t)=>sb.from('semaforo_historial')
           .select(_colsSemF)
           .in('meta_id',metas.slice(i,i+100)).gte('fecha',_trasL).lte('fecha',_hoyL)
@@ -33488,14 +33673,14 @@ window.toggleMetaCuenta=async(accountId,forceReload,_modo)=>{
     const _semDesde3=_isoDate(new Date(new Date(desde+'T12:00').getTime()-3*86400000))
     // NUEVO (12jun26 · captura completa): traer también metricas_extra para el tooltip del desglose completo.
     // Blindaje: si la BD aún no tiene la columna, se reintenta sin ella (las tiras nunca se rompen).
-    let _colsSemA='meta_id,nivel,fecha,hora_calculo,semaforo,semaforo_label,cpa_real,ventas,pendientes,gasto,triggered_by,cambio_vs_anterior,semaforo_anterior,ventas_efectivas,cpa_real_efectivas,metricas_extra'
+    let _colsSemA='meta_id,nivel,fecha,hora_calculo,semaforo,semaforo_label,cpa_real,ventas,pendientes,gasto,triggered_by,cambio_vs_anterior,semaforo_anterior,ventas_efectivas,cpa_real_efectivas,metricas_extra,gasto_origen' // (23sep26) origen del gasto del punto: 'vivo' · 'base' · 'base_cerrado'
     let{data:semData,error:_eSemA}=await _sbFetchAll((_f,_t)=>sb.from('semaforo_historial')
       .select(_colsSemA)
       .eq('account_id',accountId).gte('fecha',_semDesde3).lte('fecha',hasta)
       .order('hora_calculo',{ascending:true})
       .order('id',{ascending:true}).range(_f,_t))
-    if(_eSemA&&String(_eSemA.message||'').indexOf('metricas_extra')>=0){
-      _colsSemA=_colsSemA.replace(',metricas_extra','')
+    if(_eSemA&&/metricas_extra|gasto_origen/.test(String(_eSemA.message||''))){ // (23sep26) también si faltara gasto_origen
+      _colsSemA=_colsSemA.replace(',metricas_extra','').replace(',gasto_origen','')
       ;({data:semData}=await _sbFetchAll((_f,_t)=>sb.from('semaforo_historial')
         .select(_colsSemA)
         .eq('account_id',accountId).gte('fecha',_semDesde3).lte('fecha',hasta)
@@ -34273,7 +34458,9 @@ async function _insertarEventosCambioPresupuesto(cambios){
 // Devuelve true si sincronizó, false si no pudo (NUNCA lanza error: si falla,
 // el semáforo se calcula igual con el gasto que haya en BD, como siempre).
 // ═══════════════════════════════════════════════════════════════════════
-window._miniSyncInsightsDiaParaAds=async function(adIds,fecha){
+// (23sep26) HASTA QUE CARGUE: 3er parámetro opcional _lanzar (lo usa SOLO el reintento): si Meta falla, lanza el
+// error en vez de devolver false. Los que llaman hoy (2 parámetros) siguen recibiendo true/false igual que antes.
+window._miniSyncInsightsDiaParaAds=async function(adIds,fecha,_lanzar){
   try{
     const adIdsUnicos=[...new Set((adIds||[]).filter(Boolean).map(String))]
     if(!adIdsUnicos.length)return false
@@ -34296,24 +34483,30 @@ window._miniSyncInsightsDiaParaAds=async function(adIds,fecha){
     // 3) Por cada cuenta: insights del día (campaign + adset + ad) → upsert meta_insights
     for(const accountId of cuentas){
       const actId='act_'+accountId
-      const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
+      const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'},{timeoutMs:20000,sinEspera:true})
+      const _nxL21=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
       for(const i of (cIns||[])){
         if(!i.campaign_id)continue
-        await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        _nxL21.push({meta_id:i.campaign_id,nivel:'campaign',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()})
         _verif={meta_id:String(i.campaign_id),nivel:'campaign',fecha:i.date_start||dia}
       }
-      const sIns=await metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'adset',time_increment:'1',limit:'500'})
+      await window._nxUpsertLote('meta_insights',_nxL21,'meta_id,nivel,fecha')
+      const sIns=await metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'adset',time_increment:'1',limit:'500'},{timeoutMs:20000,sinEspera:true})
+      const _nxL22=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
       for(const i of (sIns||[])){
         if(!i.adset_id)continue
-        await sb.from('meta_insights').upsert({meta_id:i.adset_id,nivel:'adset',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        _nxL22.push({meta_id:i.adset_id,nivel:'adset',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()})
         _verif={meta_id:String(i.adset_id),nivel:'adset',fecha:i.date_start||dia}
       }
-      const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'ad',time_increment:'1',limit:'500'})
+      await window._nxUpsertLote('meta_insights',_nxL22,'meta_id,nivel,fecha')
+      const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'ad',time_increment:'1',limit:'500'},{timeoutMs:20000,sinEspera:true})
+      const _nxL23=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
       for(const i of (aIns||[])){
         if(!i.ad_id)continue
-        await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        _nxL23.push({meta_id:i.ad_id,nivel:'ad',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()})
         _verif={meta_id:String(i.ad_id),nivel:'ad',fecha:i.date_start||dia}
       }
+      await window._nxUpsertLote('meta_insights',_nxL23,'meta_id,nivel,fecha')
       console.log(`[mini-sync] ✅ ${dia} · cuenta ${accountId}: ${(cIns?.length||0)} camp, ${(sIns?.length||0)} adset, ${(aIns?.length||0)} ad`)
     }
     // Verificación anti "RLS en silencio": releer la fila testigo y confirmar que la escritura quedó en BD.
@@ -34328,6 +34521,11 @@ window._miniSyncInsightsDiaParaAds=async function(adIds,fecha){
     return true
   }catch(e){
     console.warn('[mini-sync] falló (el semáforo se calcula con el gasto de BD):',e&&e.message)
+    if(_lanzar)throw e // (23sep26) dentro del reintento: que el motor sepa que Meta no respondió
+    // (23sep26) HASTA QUE CARGUE (de raíz): el que llamó sigue de inmediato con el gasto de la base y guarda el
+    // semáforo marcado 🟡 'base'. El CORRECTOR (_nxSemCorregirBase) vuelve a pedir este gasto a Meta en segundo
+    // plano, en amarillo, hasta que cargue, y ACTUALIZA esos mismos puntos a 🟢. Antes aquí solo se recargaba el
+    // gasto y el semáforo quedaba calculado con el dato viejo.
     return false
   }
 }
@@ -34372,7 +34570,80 @@ window.probarGastoVivoMiniSync=async function(){
 // Cada vez que el auxiliar actualiza ventas, recalcula y guarda el
 // semáforo de las campañas/adsets/ads afectados en `semaforo_historial`.
 // ═══════════════════════════════════════════════════════════════════════
-async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// (23sep26) CORRECTOR DE SEMÁFOROS 🟡 — "cada punto sabe de dónde sacó su gasto"
+// Un punto guardado con gasto de la base (Meta no respondió) queda gasto_origen='base' (🟡). El corrector
+// vuelve a pedir el gasto a Meta y ACTUALIZA ese mismo punto → 'vivo' (🟢). Reglas de VERDAD:
+//   · cierre del día (cruce_dropi): se corrige siempre (el gasto del día ya está cerrado → exacto).
+//   · intradía (reporte_dia): solo el ÚLTIMO punto de HOY (su hora pasa a la de la corrección, igual que 🔄).
+//   · intradía de otro día, o un punto viejo que ya tiene otro más nuevo: el gasto "de ese momento" ya no
+//     existe en Meta → corregirlo sería inventar → queda 'base_cerrado' (🟡 con nota) y NO se insiste.
+//   · un 🟢 nunca vuelve a 🟡 (update con candado soloBase).
+// La lista de pendientes vive EN LA BASE (no en la memoria): sobrevive a cerrar/recargar NEXO.
+// ═══════════════════════════════════════════════════════════════════════════════════════
+window._nxSemCerrar=async(ids)=>{for(let i=0;i<ids.length;i+=200)await sb.from('semaforo_historial').update({gasto_origen:'base_cerrado'}).in('id',ids.slice(i,i+200)).eq('gasto_origen','base')}
+// Corrige los 🟡 de UNA fecha. Lanza error si Meta no respondió (así el motor reintenta). Devuelve cuántos quedaron 🟢.
+window._nxSemCorregirFecha=async function(fecha){
+  const hoyB=today()
+  const{data:pts,error}=await _sbFetchAll((_f,_t)=>sb.from('semaforo_historial').select('id,meta_id,nivel,triggered_by,hora_calculo,metricas_extra').eq('fecha',fecha).eq('gasto_origen','base').order('hora_calculo',{ascending:false}).order('id',{ascending:false}).range(_f,_t))
+  if(error)throw new Error(error.message)
+  if(!pts||!pts.length)return 0
+  const grupos={},cerrar=[]
+  for(const p of pts){
+    const trig=p.triggered_by||'manual'
+    const corregible=trig==='cruce_dropi'||fecha===hoyB
+    const g=grupos[trig]=grupos[trig]||{mapa:{},ads:new Set()}
+    if(!corregible||g.mapa[p.meta_id]){cerrar.push(p.id);continue} // ya pasó ese momento / hay uno más nuevo
+    g.mapa[p.meta_id]={id:p.id}
+    const ex=p.metricas_extra;if(ex&&Array.isArray(ex.ads))for(const a of ex.ads)g.ads.add(String(a))
+    if(p.nivel==='ad')g.ads.add(String(p.meta_id))
+  }
+  if(cerrar.length)await window._nxSemCerrar(cerrar)
+  let corregidos=0
+  for(const[trig,g]of Object.entries(grupos)){
+    const ids=Object.values(g.mapa).map(x=>x.id),ads=[...g.ads]
+    if(!ids.length)continue
+    if(!ads.length){await window._nxSemCerrar(ids);continue} // sin anuncios conocidos no se puede recalcular con verdad
+    const ok=await window._miniSyncInsightsDiaParaAds(ads,fecha,true) // LANZA si Meta no respondió → el motor reintenta
+    if(!ok){console.warn('[SEM-base] el gasto no se pudo verificar (no es Meta: permisos/RLS) — se deja 🟡 para el próximo barrido');continue}
+    await _calcularYGuardarSemaforos(ads,trig,fecha,{origen:'vivo',actualizar:g.mapa,soloBase:true})
+    const{count}=await sb.from('semaforo_historial').select('id',{count:'exact',head:true}).in('id',ids).eq('gasto_origen','vivo')
+    corregidos+=count||0
+    await window._nxSemCerrar(ids) // lo que el recálculo no pudo tocar (ese anuncio ya no dio datos) se cierra: no insistir
+  }
+  console.log(`[SEM-base] ✅ ${fecha}: ${corregidos} punto(s) 🟡 → 🟢 · ${cerrar.length} ya no corregibles (base_cerrado)`)
+  return corregidos
+}
+// Asegura UN motor por fecha (amarillo con cuenta atrás, sin límite, hasta que Meta responda)
+window._nxSemCorregirBase=function(fecha){
+  const cl='sem-base-'+fecha,m=window._nxReintentos&&window._nxReintentos[cl]
+  if(m&&m.vivo)return m
+  return window._nxHastaQueCargue(cl,{titulo:'Semáforos 🟡 del '+fecha,total:1,pendientes:[{nombre:'puntos con gasto de la base',hacer:()=>window._nxSemCorregirFecha(fecha)}]})
+}
+// Barrido: busca 🟡 de los últimos 3 días EN LA BASE (sobrevive a cerrar NEXO). Solo admin (tiene el token de Meta).
+// Más viejos que 3 días ya no se corrigen: se cierran. Corre al abrir NEXO y tras cada 🔄 Hoy.
+window._nxSemBarridoBase=async function(){
+  try{
+    if(typeof currentRol!=='function'||currentRol()!=='admin')return
+    const d=new Date(today()+'T12:00:00Z');d.setDate(d.getDate()-3);const desde=_isoDate(d)
+    const{data,error}=await sb.from('semaforo_historial').select('fecha').eq('gasto_origen','base').gte('fecha',desde).limit(1000)
+    if(error)return
+    const fechas=[...new Set((data||[]).map(r=>r.fecha))]
+    for(const f of fechas)window._nxSemCorregirBase(f)
+    await sb.from('semaforo_historial').update({gasto_origen:'base_cerrado'}).eq('gasto_origen','base').lt('fecha',desde)
+    if(fechas.length)console.log('[SEM-base] barrido: 🟡 pendientes en',fechas.join(', '))
+  }catch(e){console.warn('[SEM-base] barrido:',e&&e.message)}
+}
+setTimeout(()=>{try{window._nxSemBarridoBase()}catch(_){}},30000) // al abrir NEXO (espera a que haya sesión)
+
+// (23sep26) 4º parámetro opcional opts (los llamados de siempre, sin él, funcionan IGUAL):
+//   opts.origen    'vivo' (se calculó justo después de traer el gasto en vivo) · 'base' (Meta no respondió:
+//                  gasto de la base → el punto queda 🟡 y el corrector lo arregla solo cuando Meta responda)
+//   opts.actualizar mapa meta_id → {id}: ACTUALIZA esos puntos en vez de crear nuevos. Reemplaza a la
+//                  "pizarra compartida" window._semRefreshBatch (que 2 refrescos a la vez podían pisarse).
+//   opts.soloBase  (solo el corrector) actualiza únicamente puntos que sigan 🟡: un 🟢 nunca vuelve a 🟡.
+async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride,opts){
+  const _o=opts||{}
   try{
     console.log('[SEM] llamada:',{adIds,triggeredBy,fechaOverride})
     if(!adIds||!adIds.length){console.log('[SEM] salida: adIds vacío');return}
@@ -34645,9 +34916,10 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
         // ── Nuevas columnas: V. Efectivas + CPA Efectivo (guardadas en BD) ──
         ventas_efectivas:ventasEfectivas,
         cpa_real_efectivas:cpaRealEfectivas,
+        gasto_origen:_o.origen||null, // (23sep26) 'vivo' · 'base' · null (desconocido: flujos sin mini-sync)
         // NUEVO (12jun26 · captura completa): crudos para derivar TODO el desglose en el tooltip
         // (CPA IDS = gasto÷ids · CPA Meta = gasto÷conv · CLI/CON, CTR, CPC, CPM, Frec salen de imp/reach/uoclk)
-        metricas_extra:{imp:Math.round(impBy[k]||0),reach:Math.round(reachBy[k]||0),uoclk:Math.round(uoclkBy[k]||0),ids:idsAux,conv}
+        metricas_extra:Object.assign({imp:Math.round(impBy[k]||0),reach:Math.round(reachBy[k]||0),uoclk:Math.round(uoclkBy[k]||0),ids:idsAux,conv},_o.origen==='base'?{ads:it.adIds}:{}) // (23sep26) si es 🟡, guarda qué anuncios lo formaron (el corrector los necesita)
       })
     }
 
@@ -34694,8 +34966,11 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
     // UPDATE puntual de MÚLTIPLES registros indicados en window._semRefreshBatch.
     // Es un mapa meta_id → {id (puntoId), ...}. Para cada registro recalculado,
     // si su meta_id está en el mapa, hace UPDATE del punto correspondiente.
-    if(window._semRefreshBatch&&typeof window._semRefreshBatch==='object'){
-      const batch=window._semRefreshBatch
+    const _nxBatch=_o.actualizar||window._semRefreshBatch // (23sep26) primero el parámetro; la pizarra global queda solo por compatibilidad
+    // (23sep26) update con candado: si es el corrector (soloBase), solo toca puntos que sigan 🟡
+    const _nxUpd=(obj,id)=>{let q=sb.from('semaforo_historial').update(obj).eq('id',id);if(_o.soloBase)q=q.eq('gasto_origen','base');return q}
+    if(_nxBatch&&typeof _nxBatch==='object'){
+      const batch=_nxBatch
       let updated=0,skipped=0
       for(const reg of registros){
         const target=batch[reg.meta_id]
@@ -34715,11 +34990,12 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
           hora_calculo:reg.hora_calculo,
           metricas_extra:reg.metricas_extra
         }
-        let{error:uErr}=await sb.from('semaforo_historial').update(_updB).eq('id',target.id)
+        if(_o.origen)_updB.gasto_origen=_o.origen // (23sep26) sin origen (ej. botón 🔄 de un punto) la marca no se toca
+        let{error:uErr}=await _nxUpd(_updB,target.id)
         // Blindaje: si la BD aún no tiene la columna metricas_extra, reintenta SIN ella
         if(uErr&&String(uErr.message||'').indexOf('metricas_extra')>=0){
           delete _updB.metricas_extra
-          ;({error:uErr}=await sb.from('semaforo_historial').update(_updB).eq('id',target.id))
+          ;({error:uErr}=await _nxUpd(_updB,target.id))
         }
         if(uErr){console.warn('[SEM-refresh-batch] update falló para',reg.meta_id,':',uErr.message);skipped++}
         else updated++
@@ -34736,8 +35012,15 @@ async function _calcularYGuardarSemaforos(adIds,triggeredBy,fechaOverride){
       const _sinExtra=registros.map(r=>{const{metricas_extra,..._rest}=r;return _rest})
       ;({error}=await sb.from('semaforo_historial').insert(_sinExtra))
     }
+    // (23sep26) blindaje igual al de metricas_extra: si faltara la columna gasto_origen, guarda sin ella
+    if(error&&String(error.message||'').indexOf('gasto_origen')>=0){
+      const _sinOr=registros.map(r=>{const{gasto_origen,..._r}=r;return _r})
+      ;({error}=await sb.from('semaforo_historial').insert(_sinOr))
+    }
     if(error){console.warn('[SEM] inserción falló:',error.message,error);console.warn('[semaforo_historial] inserción falló:',error.message)}
     else{console.log('[SEM] ✅ insertados',registros.length,'registros')}
+    // (23sep26) guardados con gasto de la base → el corrector los arregla solo cuando Meta responda (🟡 → 🟢)
+    if(!error&&_o.origen==='base')try{window._nxSemCorregirBase(hoy)}catch(_){}
   }catch(e){
     console.warn('[SEM] excepción:',e.message,e)
     console.warn('[semaforo_historial] excepción:',e.message)
@@ -35089,12 +35372,17 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride,compa
           +`\n⚖️ CLI/CON: ${(_uo>0&&_cv>0)?Math.round(_uo/_cv*100)+'%':'—'} · 👆 CTR: ${(_rc>0)?(_uo/_rc*100).toFixed(2)+'%':'—'}`
           +`\n💲 CPC: ${(_uo>0&&_g>0)?'$'+fmt(Math.round(_g/_uo)):'—'} · 📡 CPM: ${(_im>0&&_g>0)?'$'+fmt(Math.round(_g/_im*1000)):'—'} · 🔁 Frec: ${(_rc>0)?(_im/_rc).toFixed(1):'—'}`
       })()
+      // (23sep26) de dónde sacó su gasto este punto (columna gasto_origen)
+      const _nxOrigTip=s.gasto_origen==='vivo'?'\n🟢 Gasto en vivo de Meta'
+        :s.gasto_origen==='base'?'\n🟡 Gasto de la BASE: Meta no respondió al calcular · se corrige solo cuando responda'
+        :s.gasto_origen==='base_cerrado'?'\n🟡 Gasto de la BASE: Meta no respondió y ese momento ya pasó (corregirlo sería inventar)':''
+      const _nxLblBase=(s.gasto_origen==='base'||s.gasto_origen==='base_cerrado')?'<div style="font-size:7px;color:var(--amber);font-weight:800;line-height:1;margin-top:1px;white-space:nowrap">🟡base</div>':''
       // Tooltip enriquecido (multilínea con saltos reales)
       const tooltip=isPresupuesto
         ?`Cambio de presupuesto: $${fmt(s.presupuesto_anterior||0)} → $${fmt(s.presupuesto_nuevo||0)} (${(s.presupuesto_pct_cambio||0)>0?'+':''}${(s.presupuesto_pct_cambio||0).toFixed(0)}%)\nHora: ${hora}`
         :isIds
         ?`🆔 Semáforo con IDs del día (T. Cierre)\n${s.semaforo_label||s.semaforo}\n💸 Gasto del día: $${fmt(s.gasto||0)}\n🆔 Ventas por IDs: ${s.ventas||0}\n🎯 CPA IDs: $${fmt(Math.round(s.cpa_real||0))}\n${fuenteLbl}`
-        :`${s.semaforo_label||s.semaforo}\n🕐 ${hora}\n💸 Gasto: $${fmt(s.gasto||0)}\n📦 Ventas: ${ventasPunto}${detalleDropi}\n🟣 V. Efectivas: ${vEfectPunto.toFixed(2)} (${Math.round(pctConfMeta*100)}%)\n🎯 CPA Real: $${fmt(s.cpa_real||0)}\n🟣 CPA Efectivo: $${fmt(cpaEfectPunto)}${_exTip}\n${fuenteLbl}`
+        :`${s.semaforo_label||s.semaforo}\n🕐 ${hora}\n💸 Gasto: $${fmt(s.gasto||0)}\n📦 Ventas: ${ventasPunto}${detalleDropi}\n🟣 V. Efectivas: ${vEfectPunto.toFixed(2)} (${Math.round(pctConfMeta*100)}%)\n🎯 CPA Real: $${fmt(s.cpa_real||0)}\n🟣 CPA Efectivo: $${fmt(cpaEfectPunto)}${_exTip}${_nxOrigTip}\n${fuenteLbl}`
       const label=isDropi
         ?`<div style="font-size:8px;color:${cFinal.cssVar};font-weight:700;margin-top:3px;line-height:1.1">REAL · Dropi${s._sintetico?' ⚡':''}</div>`
         :isIds
@@ -35110,11 +35398,11 @@ window._renderSemHistorialBlock=function(metaId,nivel,vivoData,diaOverride,compa
           :isIds
           ?`<div style="font-size:7px;color:#fcd34d;font-weight:700;margin-top:2px;line-height:1;white-space:nowrap">🆔IDs</div>`
           :`<div style="font-size:7px;color:${isUltimo?'var(--text)':'var(--subtle)'};margin-top:2px;line-height:1;white-space:nowrap;font-weight:${isUltimo?'600':'400'}">${hora}</div>`
-        return`<div style="display:flex;flex-direction:column;align-items:center;flex:none"><div title="${tooltip}" style="width:${size}px;height:${size}px;border-radius:50%;background:${cFinal.bg};border:2px solid ${cFinal.bd};cursor:help;flex-shrink:0;box-shadow:0 0 0 1px rgba(0,0,0,.2);display:flex;align-items:center;justify-content:center">${innerIcon}</div>${lblC}</div>`
+        return`<div style="display:flex;flex-direction:column;align-items:center;flex:none"><div title="${tooltip}" style="width:${size}px;height:${size}px;border-radius:50%;background:${cFinal.bg};border:2px solid ${cFinal.bd};cursor:help;flex-shrink:0;box-shadow:0 0 0 1px rgba(0,0,0,.2);display:flex;align-items:center;justify-content:center">${innerIcon}</div>${lblC}${_nxLblBase}</div>`
       }
       return`<div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0">
         <div title="${tooltip}" style="width:${size}px;height:${size}px;border-radius:50%;background:${cFinal.bg};border:${borderW}px solid ${cFinal.bd};cursor:help;flex-shrink:0;box-shadow:0 0 0 1px rgba(0,0,0,.2);display:flex;align-items:center;justify-content:center">${innerIcon}</div>
-        ${label}
+        ${label}${_nxLblBase}
       </div>`
     })
     // Insertar conectores entre puntos
@@ -35324,12 +35612,8 @@ window.refrescarUltimoSemaforo=async(metaId,nivel,btnEl)=>{
 
     // 5) Modo "refresh batch" → UPDATE puntual a cada meta_id (campaña + adsets + ads)
     //    con la MISMA hora_calculo nueva. Reusa el mecanismo ya probado del refresh de cuenta.
-    window._semRefreshBatch=ultimoPorMeta
-    try{
-      await _calcularYGuardarSemaforos(adIdsUnicos,'reporte_dia')
-    }finally{
-      window._semRefreshBatch=null
-    }
+    // (23sep26) la lista va como PARÁMETRO (antes pizarra global window._semRefreshBatch: 2 refrescos a la vez se pisaban)
+    await _calcularYGuardarSemaforos(adIdsUnicos,'reporte_dia',undefined,{actualizar:ultimoPorMeta})
     try{window._marcarSemRefrescado(Object.values(ultimoPorMeta).map(o=>o&&o.id))}catch(_){}
     if(btnEl){
       btnEl.innerHTML='✅ Refrescado'
@@ -35356,7 +35640,8 @@ window.refrescarUltimoSemaforo=async(metaId,nivel,btnEl)=>{
 //   - Solo HOY
 //   - Solo reporte_dia (no cruce Dropi ni cambio_presupuesto)
 // ─────────────────────────────────────────────────────────────
-window.refrescarSemaforosCuenta=async(accountId,btnEl)=>{
+// (23sep26) HASTA QUE CARGUE: 3er parámetro _reint (solo lo usa el reintento). Devuelve false si Meta no respondió.
+window.refrescarSemaforosCuenta=async(accountId,btnEl,_reint)=>{
   if(!accountId)return
   const origHtml=btnEl?btnEl.innerHTML:''
   try{
@@ -35420,27 +35705,42 @@ window.refrescarSemaforosCuenta=async(accountId,btnEl)=>{
       const actId='act_'+accountId
       const timeRange=JSON.stringify({since:hoy,until:hoy})
       // Nivel campaign
-      const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
+      const cIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'},{timeoutMs:30000,sinEspera:true})
+      const _nxL24=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
       for(const i of (cIns||[])){
         if(!i.campaign_id)continue
-        await sb.from('meta_insights').upsert({meta_id:i.campaign_id,nivel:'campaign',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        _nxL24.push({meta_id:i.campaign_id,nivel:'campaign',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()})
       }
+      await window._nxUpsertLote('meta_insights',_nxL24,'meta_id,nivel,fecha')
       // Nivel adset
-      const sIns=await metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'adset',time_increment:'1',limit:'500'})
+      const sIns=await metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'adset',time_increment:'1',limit:'500'},{timeoutMs:30000,sinEspera:true})
+      const _nxL25=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
       for(const i of (sIns||[])){
         if(!i.adset_id)continue
-        await sb.from('meta_insights').upsert({meta_id:i.adset_id,nivel:'adset',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        _nxL25.push({meta_id:i.adset_id,nivel:'adset',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()})
       }
+      await window._nxUpsertLote('meta_insights',_nxL25,'meta_id,nivel,fecha')
       // Nivel ad
-      const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'ad',time_increment:'1',limit:'500'})
+      const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'ad',time_increment:'1',limit:'500'},{timeoutMs:30000,sinEspera:true})
+      const _nxL26=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
       for(const i of (aIns||[])){
         if(!i.ad_id)continue
-        await sb.from('meta_insights').upsert({meta_id:i.ad_id,nivel:'ad',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()},{onConflict:'meta_id,nivel,fecha'})
+        _nxL26.push({meta_id:i.ad_id,nivel:'ad',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()})
       }
+      await window._nxUpsertLote('meta_insights',_nxL26,'meta_id,nivel,fecha')
       console.log('[SEM-refresh-cuenta] ✅ mini-sync HOY:',(cIns?.length||0),'camp,',(sIns?.length||0),'adset,',(aIns?.length||0),'ad')
     }catch(syncErr){
       // Sync falló → abortar el refresh, NO guardar snapshot con datos viejos
       console.warn('[SEM-refresh-cuenta] mini-sync falló, abortando refresh:',syncErr.message)
+      // (23sep26) HASTA QUE CARGUE: antes quedaba "⚠️ Sync falló · Reintentar" (a mano). Ahora se repite SOLO, en
+      // amarillo con cuenta atrás, hasta que Meta responda; recién ahí se guarda el snapshot (nunca con datos viejos).
+      if(_reint)return false
+      if(!window._nxEsSinPermiso(syncErr)){
+        window._nxHastaQueCargue('sem-cta-'+accountId,{titulo:'Semáforos de la cuenta',total:1,
+          pendientes:[{nombre:'gasto de hoy',hacer:async()=>{if(await window.refrescarSemaforosCuenta(accountId,btnEl,true)===false)throw new Error('Meta no respondió')}}],
+          alCambiar:({rt})=>{if(!btnEl)return;if(rt.vivo){btnEl.disabled=true;btnEl.innerHTML=`🟡 Reintentando · intento ${rt.intento} · ${rt.corriendo?'⏳':'en '+rt.proximoEn+' s'}`;btnEl.title='Meta no respondió. Se reintenta solo hasta que cargue; el snapshot se guarda solo con datos en vivo.'}else if(!rt.listo){btnEl.innerHTML=origHtml;btnEl.disabled=false}}})
+        return false
+      }
       if(btnEl){
         btnEl.innerHTML='⚠️ Sync falló · Reintentar'
         btnEl.title='No se pudo traer el gasto en vivo desde Meta. NO se guardó el snapshot. Espicha Refrescar de nuevo.'
@@ -35453,12 +35753,8 @@ window.refrescarSemaforosCuenta=async(accountId,btnEl)=>{
 
     // 3) Modo "refresh batch": _calcularYGuardarSemaforos hará UPDATE puntual a CADA
     // meta_id presente en _semRefreshBatch (en vez de INSERT lote)
-    window._semRefreshBatch=ultimoPorMeta // mapa metaId → {id, ...}
-    try{
-      await _calcularYGuardarSemaforos(adIdsUnicos,'reporte_dia')
-    }finally{
-      window._semRefreshBatch=null
-    }
+    // (23sep26) lista como PARÁMETRO (sin pizarra global) y marca 🟢: este cálculo viene de un mini-sync EXITOSO
+    await _calcularYGuardarSemaforos(adIdsUnicos,'reporte_dia',undefined,{actualizar:ultimoPorMeta,origen:'vivo'})
     try{window._marcarSemRefrescado(Object.values(ultimoPorMeta).map(o=>o&&o.id))}catch(_){}
 
     if(btnEl){
@@ -35467,6 +35763,7 @@ window.refrescarSemaforosCuenta=async(accountId,btnEl)=>{
     }
     // Refrescar visualmente la cuenta
     setTimeout(()=>{if(window.toggleMetaCuenta)window.toggleMetaCuenta(accountId,true)},400)
+    return true // (23sep26) para el reintento: cargó
   }catch(e){
     console.warn('[SEM-refresh-cuenta] error:',e.message)
     if(btnEl){btnEl.innerHTML='❌ Error';setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.disabled=false},2200)}

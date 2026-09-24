@@ -22520,7 +22520,19 @@ function metaDateChunks(since,until,chunkDays=90){
 const _metaWait=ms=>new Promise(r=>setTimeout(r,ms))
 let _metaLastCall=0
 
-async function metaGet(path,token,params={}){
+// (23sep26) P1 · fetch con TOPE de tiempo: si Meta no responde en `ms` se corta (AbortController) y
+// se lanza un error claro. Sin `ms` se comporta EXACTAMENTE como fetch(url) de siempre.
+const _nxFetchTope=(url,ms)=>{
+  if(!ms||ms<=0)return fetch(url)
+  const ac=new AbortController();const t=setTimeout(()=>ac.abort(),ms)
+  return fetch(url,{signal:ac.signal}).catch(e=>{throw new Error(e&&e.name==='AbortError'?`Meta tardó más de ${(ms/1000).toFixed(ms<1000?1:0)}s`:(e&&e.message||String(e)))}).finally(()=>clearTimeout(t))
+}
+
+// (23sep26) P1 · opts (opcional, sin opts = igual que antes):
+//   opts.timeoutMs → tope por llamada (usa _nxFetchTope)
+//   opts.sinEspera → modo INTERACTIVO: si Meta pide esperar (rate limit) NO se duerme 30s/60s,
+//                    falla de una y la pantalla usa el dato guardado marcado 🟡 (y reintenta sola).
+async function metaGet(path,token,params={},opts={}){
   let all=[],url=`${META_BASE}${path}?access_token=${token}`
   for(const[k,v]of Object.entries(params))url+=`&${k}=${encodeURIComponent(v)}`
   while(url){
@@ -22531,7 +22543,7 @@ async function metaGet(path,token,params={}){
 
     let retries=0
     while(retries<3){
-      const r=await fetch(url)
+      const r=await _nxFetchTope(url,opts&&opts.timeoutMs) // (23sep26) P1: con tope si se pidió; si no, fetch normal
       if(r.ok){
         const j=await r.json()
         if(j.data)all=all.concat(j.data)
@@ -22540,7 +22552,7 @@ async function metaGet(path,token,params={}){
       }
       const e=await r.json().catch(()=>({}))
       const isRateLimit=r.status===429||r.status>=500||(e.error?.code===4)||(e.error?.code===17)||(e.error?.code===2)||(e.error?.message||'').toLowerCase().match(/limit|unknown|timeout|temporarily/)
-      if(isRateLimit&&retries<2){
+      if(isRateLimit&&retries<2&&!(opts&&opts.sinEspera)){ // (23sep26) P1: en modo interactivo no se espera
         retries++
         const waitSec=30*retries
         const prog=document.getElementById('sync-progress')
@@ -23666,6 +23678,70 @@ window._nexoAutoSyncHoy=async function(slug){
 // Consolida datos por producto desde meta_insights + mapeos + reportes_diarios.
 // Aplica reglas oficiales del semaforo NEXO (45%/70%/100% del break-even).
 // Reutiliza helpers existentes: nexoBadgeMega, nexoOrdenUrgencia, resolveProdName, fmt.
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// (23sep26) P2 · ORIGEN VISIBLE DEL GASTO EN EL RESUMEN + REINTENTO EN SEGUNDO PLANO
+// Regla del dueño: "HOY solo vale en vivo desde Meta. Si algo no es en vivo, se MARCA y se
+// reintenta". Antes, si una cuenta no respondía, el resumen usaba el dato guardado SIN AVISAR.
+// Ahora window._nxGastoHoyEstado guarda qué cuentas llegaron en vivo y cuáles no, la barra
+// #nx-gasto-origen lo muestra, y las que fallaron se reintentan solas (10s, 30s, 60s).
+// Cuando Meta responde, los números de arriba NO se repintan solos (para no moverte de donde
+// estás): la barra avisa y da el botón 🔄 Actualizar.
+// ═══════════════════════════════════════════════════════════════════════════════════════
+window._nxHoraBogota=()=>{try{return new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit',timeZone:'America/Bogota'})}catch(_){return ''}}
+window._nxGastoOrigenHtml=function(){
+  const e=window._nxGastoHoyEstado
+  const base='font-size:11px;padding:6px 10px;border-radius:8px;margin:8px 0;display:flex;gap:8px;flex-wrap:wrap;align-items:center;border:1px solid '
+  if(!e)return`<div id="nx-gasto-origen" style="${base}var(--border);color:var(--muted)">⏳ Consultando el origen del gasto…</div>`
+  if(e.cerrado)return`<div id="nx-gasto-origen" style="${base}var(--border);color:var(--muted)">🔵 <b>Gasto de la base (cierre nocturno)</b> · rango cerrado ${e.desde} → ${e.hasta}</div>`
+  if(e.sinToken)return`<div id="nx-gasto-origen" style="${base}var(--amber);background:var(--amber-bg);color:var(--amber)">🟡 <b>Sin token de Meta</b> · todo el gasto viene del dato guardado</div>`
+  const perm=(e.guardadas||[]).filter(g=>g.sinPermiso),caidas=(e.guardadas||[]).filter(g=>!g.sinPermiso)
+  const n=e.total-perm.length,permTxt=perm.length?` · ${perm.length} sin permiso del token`:''
+  const btn=`<button class="btn-sm btn-outline" style="padding:2px 8px;font-size:10px" onclick="event.stopPropagation();window._actualizarResumenMetaProductos&&window._actualizarResumenMetaProductos()">🔄 Actualizar resumen</button>`
+  // OJO: 'recuperado' va ANTES que el 🟢: Meta ya respondió, pero los números pintados siguen siendo del dato guardado
+  if(e.recuperado)return`<div id="nx-gasto-origen" style="${base}var(--green);background:var(--green-bg);color:var(--green)">✅ <b>Meta ya respondió</b> · ${n} de ${n} cuentas en vivo · los números de arriba todavía son del dato guardado ${btn}</div>`
+  if(!caidas.length)return`<div id="nx-gasto-origen" style="${base}var(--green);background:var(--green-bg);color:var(--green)">🟢 <b>Gasto en vivo desde Meta</b> · ${e.vivo} de ${n} cuentas · ${e.hora}${e.incluyeHoy?' · mismo dato que el Administrador de Anuncios':''}${permTxt}</div>`
+  const nombres=caidas.map(g=>g.nombre).slice(0,6).join(', ')+(caidas.length>6?` y ${caidas.length-6} más`:'')
+  const rein=e.intento>=3?'· ya no se reintenta solo':`· reintentando solo (intento ${e.intento+1}/3)…`
+  return`<div id="nx-gasto-origen" style="${base}var(--amber);background:var(--amber-bg);color:var(--amber)">🟡 <b>Gasto de ${e.incluyeHoy?'hoy':'este rango'}: ${e.vivo} de ${n} cuentas en vivo</b> · ${caidas.length} con dato guardado (Meta no respondió): ${nombres} ${rein}${permTxt} <button class="btn-sm btn-outline" style="padding:2px 8px;font-size:10px" onclick="event.stopPropagation();window._nxGastoHoyReintentar(true)">🔄 Reintentar ahora</button></div>`
+}
+window._nxGastoOrigenPintar=function(){try{const el=document.getElementById('nx-gasto-origen');if(el)el.outerHTML=window._nxGastoOrigenHtml()}catch(_){}}
+// Programa el siguiente reintento automático (10s, 30s, 60s) para las cuentas que NO respondieron.
+window._nxGastoHoyProgramar=function(){
+  const e=window._nxGastoHoyEstado;if(!e||e.cerrado||e.sinToken||e.intento>=3)return
+  if(!(e.guardadas||[]).some(g=>!g.sinPermiso))return
+  if(e._timer)clearTimeout(e._timer)
+  const esperas=[10000,30000,60000]
+  e._timer=setTimeout(()=>{e._timer=null;window._nxGastoHoyReintentar(false)},esperas[e.intento]||60000)
+}
+// Reintenta AHORA solo las cuentas caídas (no todo el resumen). manual=true → botón del usuario.
+window._nxGastoHoyReintentar=async function(manual){
+  const e=window._nxGastoHoyEstado;if(!e||e.cerrado||e.sinToken)return
+  const caidas=(e.guardadas||[]).filter(g=>!g.sinPermiso);if(!caidas.length)return
+  if(e._timer){clearTimeout(e._timer);e._timer=null}
+  if(e._corriendo)return
+  e._corriendo=true
+  try{
+    e.intento++
+    const token=await getConfig('meta_access_token');if(!token)return
+    const timeRange=JSON.stringify({since:e.desde,until:e.hasta})
+    await Promise.all(caidas.map(async g=>{
+      try{
+        const ins=await metaGet(`/act_${g.account_id}/insights`,token,{fields:'campaign_id,campaign_name,spend',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'},{timeoutMs:8000,sinEspera:true})
+        const cache=window._nexoLiveGastoByCampId||(window._nexoLiveGastoByCampId={})
+        for(const id of (g.campBD||[]))cache[id]=0 // limpiar lo que puso el dato guardado de esta cuenta
+        for(const i of (ins||[])){if(!i.campaign_id)continue;cache[String(i.campaign_id)]=(cache[String(i.campaign_id)]||0)+(parseFloat(i.spend)||0)}
+        g.recuperada=true;e.vivo++;e.guardado--
+      }catch(err){g.motivo=String(err&&err.message||'');if(/#200|permission/i.test(g.motivo)){g.sinPermiso=true;(window._nxMetaSinPermiso=window._nxMetaSinPermiso||{})[g.account_id]=true}}
+    }))
+    const _huboRecuperada=caidas.some(g=>g.recuperada)
+    e.guardadas=(e.guardadas||[]).filter(g=>!g.recuperada)
+    const quedan=e.guardadas.filter(g=>!g.sinPermiso)
+    if(!quedan.length){if(_huboRecuperada){e.recuperado=true;console.log('[resumen producto] ✅ reintento: todas las cuentas ya respondieron en vivo')}e.hora=window._nxHoraBogota()}
+    else{console.warn(`[resumen producto] 🟡 reintento ${e.intento}/3: siguen sin responder ${quedan.length} cuenta(s)`);if(!manual)window._nxGastoHoyProgramar()}
+    window._nxGastoOrigenPintar()
+  }finally{e._corriendo=false}
+}
+
 async function _renderResumenProductos(desde,hasta,hoy){
   if(!productos||!productos.length)return''
   // (23sep26) ⏱️ CRONÓMETRO POR ETAPA: solo MIDE (no cambia nada). Al final imprime en consola
@@ -23694,6 +23770,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
   try{window._nexoLiveGastoByAdId=null}catch(_){}
   if(!incluyeVivos){
     // Rango solo histórico cerrado → BD directo (Meta no agrega nada nuevo)
+    try{if(window._nxGastoHoyEstado&&window._nxGastoHoyEstado._timer)clearTimeout(window._nxGastoHoyEstado._timer)}catch(_){}
+    window._nxGastoHoyEstado={cerrado:true,desde,hasta,hora:window._nxHoraBogota()} // (23sep26) P2: origen visible
     const{data:insByCamp}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
     for(const i of (insByCamp||[])){
       if(!i.meta_id)continue
@@ -23721,6 +23799,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
     const _LIVE_MAX_MS=20000,_LIVE_CTA_MS=8000,_LIVE_LOTE=5,_tLive0=Date.now()
     window._nxMetaSinPermiso=window._nxMetaSinPermiso||{}
     let _nVivo=0,_nBD=0
+    const _nxCaidas=[] // (23sep26) P2: cuentas que NO respondieron (para marcarlas 🟡 y reintentar)
     const _conTope=(prom)=>{
       const resta=Math.min(_LIVE_CTA_MS,_LIVE_MAX_MS-(Date.now()-_tLive0))
       if(resta<=0){prom.catch(()=>{});return Promise.reject(new Error('tope de 20s en vivo alcanzado'))}
@@ -23731,7 +23810,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
     const _vivoCuenta=async(cuenta)=>{
       try{
         if(window._nxMetaSinPermiso[String(cuenta.account_id)])throw new Error('(#200) sin permiso (recordado en esta sesión)')
-        const ins=await _conTope(metaGet(`/act_${cuenta.account_id}/insights`,token,{fields:'campaign_id,campaign_name,spend',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'}))
+        const ins=await _conTope(metaGet(`/act_${cuenta.account_id}/insights`,token,{fields:'campaign_id,campaign_name,spend',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'},{timeoutMs:_LIVE_CTA_MS,sinEspera:true})) // (23sep26) P1: corta la red de verdad y no duerme 30s
         _nVivo++
         for(const i of (ins||[])){
           if(!i.campaign_id)continue
@@ -23758,9 +23837,12 @@ async function _renderResumenProductos(desde,hasta,hoy){
         if(/#200|permission/i.test(String(e&&e.message||'')))window._nxMetaSinPermiso[String(cuenta.account_id)]=true // (23sep26) no insistir
         console.warn(`[resumen producto] Meta API fallo cuenta ${cuenta.account_id}, fallback BD:`,e.message)
         const{data:insBD}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').eq('account_id',cuenta.account_id).gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+        const _caida={account_id:String(cuenta.account_id),nombre:cuenta.nombre||String(cuenta.account_id),motivo:String(e&&e.message||''),sinPermiso:/#200|permission/i.test(String(e&&e.message||'')),campBD:[]} // (23sep26) P2
+        _nxCaidas.push(_caida)
         for(const i of (insBD||[])){
           if(!i.meta_id)continue
           gastoByCampId[String(i.meta_id)]=(gastoByCampId[String(i.meta_id)]||0)+(i.spend||0)
+          _caida.campBD.push(String(i.meta_id))
         }
       }
     }
@@ -23769,8 +23851,14 @@ async function _renderResumenProductos(desde,hasta,hoy){
     await Promise.all(Array.from({length:Math.min(_LIVE_LOTE,_ctas.length)},_trabajador))
     console.log(`[resumen producto] ⏱️ gasto listo en ${((Date.now()-_tLive0)/1000).toFixed(1)}s · ${_nVivo} cuenta(s) en vivo · ${_nBD} con dato guardado`)
     try{window._nexoLiveGastoByAdId=_gastoLiveAdByAdId}catch(_){}
+    // (23sep26) P2: dejar el origen visible y, si alguna cuenta no respondió, reintentar sola (10s/30s/60s)
+    try{if(window._nxGastoHoyEstado&&window._nxGastoHoyEstado._timer)clearTimeout(window._nxGastoHoyEstado._timer)}catch(_){}
+    window._nxGastoHoyEstado={desde,hasta,incluyeHoy:hasta>=todayBogota,total:_ctas.length,vivo:_nVivo,guardado:_nBD,guardadas:_nxCaidas,hora:window._nxHoraBogota(),intento:0}
+    try{window._nxGastoHoyProgramar()}catch(_){}
   }catch(e){
     console.warn('[resumen producto] sin token Meta, fallback BD completa:',e.message)
+    try{if(window._nxGastoHoyEstado&&window._nxGastoHoyEstado._timer)clearTimeout(window._nxGastoHoyEstado._timer)}catch(_){}
+    window._nxGastoHoyEstado={sinToken:true,desde,hasta,hora:window._nxHoraBogota()} // (23sep26) P2: origen visible
     const{data:insByCamp}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
     for(const i of (insByCamp||[])){
       if(!i.meta_id)continue
@@ -24293,6 +24381,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
         </div>
         ${_selFechasHtml}
       </div>
+      ${window._nxGastoOrigenHtml()}
     </div>`
   }
 
@@ -24592,6 +24681,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
       </div>
       ${_selFechasHtml}
     </div>
+
+    ${window._nxGastoOrigenHtml()}
 
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:14px 0">
       <span style="font-size:11px;color:var(--muted);letter-spacing:.3px;margin-right:4px">Estado del portafolio:</span>
@@ -32732,10 +32823,53 @@ window._nxObserveCampBars=()=>{
     document.querySelectorAll('.nx-camp-sentinel').forEach(s=>window._nxCampObs.observe(s))
   }catch(_){}
 }
-window.toggleMetaCuenta=async(accountId,forceReload)=>{
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// (23sep26) P1 · PANEL DE CUENTA EN 2 PASADAS
+// Antes: al abrir una cuenta se hacían 11+ llamadas a Meta una tras otra (sin tope y con esperas
+// de 30/60 s si Meta pedía calma) → "Cargando campañas desde Meta…" durante minutos. Ahora:
+//   PASADA 1 (base): pinta AL INSTANTE lo que hay en Supabase, marcado 🔵 (< 2 s).
+//   PASADA 2 (vivo): en segundo plano pide a Meta con TOPE (8 s por llamada, 20 s en total) y
+//     repinta con los números en vivo 🟢 conservando scroll, desgloses abiertos, filtro y sub-pestaña.
+//   Si Meta no responde: la línea de origen queda 🟡 "Guardado · sync HH:MM", se reintenta sola
+//   (10 s, 30 s, 60 s) y hay botón 🔄. NUNCA se usa el dato guardado en silencio.
+// toggleMetaCuenta(accountId, forceReload, _modo): _modo==='vivo' es la pasada 2 (solo la llama
+// esta misma lógica); cualquier otra llamada (abrir, cerrar, forceReload) es la pasada 1.
+window._nxMetaVivo=window._nxMetaVivo||{} // accountId → {gen, intento, timer}
+window._nxMetaVivoEstado=(accountId)=>(window._nxMetaVivo[accountId]=window._nxMetaVivo[accountId]||{gen:0,intento:0,timer:null})
+// Foto del panel para volver EXACTAMENTE al mismo sitio tras repintar (scroll, desgloses, filtro, sub-pestaña)
+window._nxFotoPanel=(accEl)=>{
+  const abiertos=[...accEl.querySelectorAll('[id^="desglose-"]')].filter(e=>e.style.display==='block').map(e=>e.id)
+  const fb=accEl.querySelector('.cf-btn.btn-primary'),m=fb&&(fb.getAttribute('onclick')||'').match(/'(all|active|inactive)'/)
+  const csb=accEl.querySelector('.cs-btn.btn-primary')
+  return{y:(document.querySelector('.content')||document.documentElement).scrollTop,abiertos,filtro:m?m[1]:'active',sub:csb?(csb.dataset.sub||'active'):'active'}
+}
+// Cambia SOLO la línea de origen del panel (sin repintar nada más)
+window._nxOrigenPanel=(accountId,html)=>{try{const accEl=document.getElementById('meta-acc-'+accountId);if(!accEl)return;const el=accEl.querySelector('.nx-origen');if(el)el.innerHTML=html}catch(_){}}
+// Hora del último dato guardado de la cuenta (meta_insights.synced_at) para el aviso 🟡
+window._nxUltimoSync=async(accountId)=>{try{const{data}=await sb.from('meta_insights').select('synced_at').eq('account_id',accountId).not('synced_at','is',null).order('synced_at',{ascending:false}).limit(1);const d=data&&data[0]&&data[0].synced_at;return d?new Date(d).toLocaleString('es-CO',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'America/Bogota'}):'sin fecha'}catch(_){return 'sin fecha'}}
+// Reintento en segundo plano de la pasada EN VIVO (10 s, 30 s, 60 s) mientras el panel siga abierto
+window._nxMetaVivoProgramar=(accountId)=>{
+  const st=window._nxMetaVivoEstado(accountId);if(st.timer){clearTimeout(st.timer);st.timer=null}
+  const esperas=[10000,30000,60000],ms=esperas[st.intento-1],gen=st.gen // intento = fallos seguidos (1→10s, 2→30s, 3→60s, 4→parar)
+  if(!ms)return
+  st.timer=setTimeout(()=>{st.timer=null;const accEl=document.getElementById('meta-acc-'+accountId);if(!accEl||accEl.style.display==='none'||st.gen!==gen)return;window.toggleMetaCuenta(accountId,true,'vivo')},ms)
+}
+// Botón 🔄: volver a pedir a Meta ya mismo
+window._nxMetaVivoAhora=(accountId)=>{const st=window._nxMetaVivoEstado(accountId);if(st.timer){clearTimeout(st.timer);st.timer=null}st.intento=0;window._nxOrigenPanel(accountId,'⏳ Pidiendo a Meta el dato en vivo…');window.toggleMetaCuenta(accountId,true,'vivo')}
+
+window.toggleMetaCuenta=async(accountId,forceReload,_modo)=>{
   const accEl=document.getElementById('meta-acc-'+accountId)
   const chevron=document.getElementById('meta-chevron-'+accountId)
   if(!accEl)return
+  // (23sep26) P1: pasada 'vivo' (segunda, en segundo plano) vs pasada base (abrir/cerrar/forceReload)
+  const _vivo=(_modo==='vivo')
+  const _st=window._nxMetaVivoEstado(accountId)
+  if(!_vivo){_st.gen++;if(_st.timer){clearTimeout(_st.timer);_st.timer=null}_st.intento=0} // cualquier acción nueva cancela la pasada en vivo anterior
+  const _gen=_st.gen
+  let _tokenOk=false
+  const _nxDl={t0:Date.now(),max:20000,cta:8000} // tope: 8 s por llamada, 20 s en total
+  const _nxOpts=()=>{const resta=_nxDl.max-(Date.now()-_nxDl.t0);if(resta<=0)throw new Error('tope de 20s en vivo alcanzado');return{timeoutMs:Math.min(_nxDl.cta,resta),sinEspera:true}}
+  const _nxCancelado=()=>(_vivo&&(_st.gen!==_gen||accEl.style.display==='none'))
   // Mejora 1: al recargar (forceReload), recordar la posición y los desgloses abiertos
   // para volver EXACTAMENTE al mismo lugar (no perder tiempo bajando y reabriendo).
   let _uiSnap=null
@@ -32751,7 +32885,8 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   }
   accEl.style.display='block'
   if(chevron)chevron.textContent='▾'
-  accEl.innerHTML='<div class="loading">Cargando campañas desde Meta...</div>'
+  if(!_vivo)accEl.innerHTML='<div class="loading">Cargando campañas desde Meta...</div>' // (23sep26) P1: en la pasada en vivo NO se borra lo que ya se ve
+  else window._nxOrigenPanel(accountId,'⏳ Pidiendo a Meta el dato en vivo…')
 
   const ctx=window._metaPort
   if(!ctx)return
@@ -32761,17 +32896,20 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   const hoy=today()
   const actId='act_'+accountId
   let camps=[],agg={},source='meta'
+  let _metaErrTxt='' // (23sep26) P1
 
   try{
     let token=document.getElementById('cfg-token')?.value?.trim()||''
     if(!token)token=await getConfig('meta_access_token')
     if(!token)throw new Error('Sin token')
+    _tokenOk=true
+    if(!_vivo)throw new Error('pasada base: primero lo de Supabase; Meta en vivo va en segundo plano') // (23sep26) P1
 
-    const rawCamps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,effective_status,objective,daily_budget,lifetime_budget',limit:'500'})
+    const rawCamps=await metaGet(`/${actId}/campaigns`,token,{fields:'id,name,status,effective_status,objective,daily_budget,lifetime_budget',limit:'500'},_nxOpts()) // (23sep26) P1: con tope
     camps=rawCamps.map(c=>({meta_id:c.id,nombre:c.name||'',estado:c.status||c.effective_status||'',objetivo:c.objective||'',daily_budget:c.daily_budget?c.daily_budget:null,lifetime_budget:c.lifetime_budget?c.lifetime_budget:null}))
 
     const timeRange=JSON.stringify({since:desde,until:hasta})
-    const rawIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'})
+    const rawIns=await metaGet(`/${actId}/insights`,token,{fields:'campaign_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'campaign',time_increment:'1',limit:'500'},_nxOpts()) // (23sep26) P1: con tope
     for(const i of rawIns){
       const cid=i.campaign_id
       if(!agg[cid])agg[cid]={spend:0,imp:0,clicks:0,reach:0,uout:0,conv:0,ctrs:[],cpms:[],freqs:[]}
@@ -32781,6 +32919,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     }
   }catch(e){
     console.warn('Meta API error, fallback Supabase:',e.message)
+    _metaErrTxt=String(e&&e.message||'').slice(0,80) // (23sep26) P1: se muestra en el aviso 🟡
     source='supabase'
     const{data:freshCamps}=await sb.from('meta_campanas').select('*').eq('account_id',accountId).eq('nivel','campaign').order('nombre')
     camps=(freshCamps||[]).map(c=>({meta_id:c.meta_id,nombre:c.nombre||'',estado:c.estado||'',objetivo:c.objetivo||'',daily_budget:c.daily_budget,lifetime_budget:c.lifetime_budget}))
@@ -32794,7 +32933,19 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     }
   }
 
-  if(!camps.length){accEl.innerHTML='<div class="alert alert-blue">Sin campañas</div>';return}
+  // (23sep26) P1: la pasada EN VIVO no logró el dato de Meta → no se repinta nada: se marca 🟡 y se reintenta sola
+  if(_vivo&&source!=='meta'){
+    if(_nxCancelado())return
+    _st.intento++
+    const _sync=await window._nxUltimoSync(accountId)
+    const _esp=[10,30,60][_st.intento-1]
+    const _rein=_esp?`reintento solo en ${_esp}s (${_st.intento}/3)`:'ya no se reintenta solo (3/3)'
+    window._nxOrigenPanel(accountId,`🟡 <b>Dato guardado</b> · sync ${_sync} · Meta no respondió (${_metaErrTxt}) · ${_rein} <span style="cursor:pointer" title="Volver a pedir a Meta" onclick="event.stopPropagation();window._nxMetaVivoAhora('${accountId}')">🔄 Reintentar ahora</span>`)
+    window._nxMetaVivoProgramar(accountId)
+    return
+  }
+  if(_nxCancelado())return
+  if(!camps.length){accEl.innerHTML='<div class="alert alert-blue">Sin campañas</div>';if(!_vivo&&_tokenOk)setTimeout(()=>{if(_st.gen===_gen&&accEl.style.display!=='none')window.toggleMetaCuenta(accountId,true,'vivo')},0);return} // (23sep26) P1: aun sin campañas en la base, se pide a Meta en vivo
 
   // NUEVO: registrar campañas vistas (incluye las EN VIVO de HOY aún no sincronizadas) para el modal de asignación múltiple
   if(!window._liveCampsAll)window._liveCampsAll={}
@@ -32928,7 +33079,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       for(let i=0;i<_huerfanos.length;i+=50){
         const lote=_huerfanos.slice(i,i+50)
         const _url=`${META_BASE}/?ids=${encodeURIComponent(lote.join(','))}&fields=campaign_id&access_token=${_adToken}`
-        const r=await fetch(_url)
+        const r=await _nxFetchTope(_url,_nxOpts().timeoutMs) // (23sep26) P1: con tope
         if(!r.ok){console.warn('[ventas] batch ad_ids nuevos respondió',r.status);break}
         const obj=await r.json()
         if(obj&&typeof obj==='object'){
@@ -33147,8 +33298,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
       if(_tok){
         const _trAyer=JSON.stringify({since:_prevDesde,until:_prevHasta})
         const _accAyer={}
-        for(const _lv of [['campaign','campaign_id'],['adset','adset_id'],['ad','ad_id']]){
-          const _rows=await metaGet(`/${actId}/insights`,_tok,{fields:`${_lv[1]},spend,actions`,time_range:_trAyer,level:_lv[0],time_increment:'1',limit:'500'})
+        // (23sep26) P1: los 3 niveles se piden A LA VEZ y con tope (antes uno tras otro, sin tope). La suma es la misma.
+        const _rowsAyer=await Promise.all([['campaign','campaign_id'],['adset','adset_id'],['ad','ad_id']].map(_lv=>metaGet(`/${actId}/insights`,_tok,{fields:`${_lv[1]},spend,actions`,time_range:_trAyer,level:_lv[0],time_increment:'1',limit:'500'},_nxOpts()).then(_r=>[_lv,_r])))
+        for(const[_lv,_rows]of _rowsAyer){
           for(const i of (_rows||[])){
             const mid=i[_lv[1]];if(!mid)continue
             if(!_accAyer[mid])_accAyer[mid]={spend:0,conv:0}
@@ -33189,8 +33341,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
         if(_tok){
           const _tr=JSON.stringify({since:pDesde,until:pHasta})
           const _acc={}
-          for(const _lv of [['campaign','campaign_id'],['adset','adset_id'],['ad','ad_id']]){
-            const _rows=await metaGet(`/${actId}/insights`,_tok,{fields:`${_lv[1]},spend,actions`,time_range:_tr,level:_lv[0],time_increment:'1',limit:'500'})
+          // (23sep26) P1: los 3 niveles a la vez y con tope (misma suma)
+          const _rowsPrev=await Promise.all([['campaign','campaign_id'],['adset','adset_id'],['ad','ad_id']].map(_lv=>metaGet(`/${actId}/insights`,_tok,{fields:`${_lv[1]},spend,actions`,time_range:_tr,level:_lv[0],time_increment:'1',limit:'500'},_nxOpts()).then(_r=>[_lv,_r])))
+          for(const[_lv,_rows]of _rowsPrev){
             for(const i of (_rows||[])){
               const mid=i[_lv[1]];if(!mid)continue
               if(!_acc[mid])_acc[mid]={spend:0,conv:0}
@@ -33215,7 +33368,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
         for(const mid in _acc){cpaMeta[mid]=_acc[mid].conv>0?_acc[mid].spend/_acc[mid].conv:0;gasto[mid]=_acc[mid].spend;conv[mid]=_acc[mid].conv}
       }catch(_){}
     }
-    return{gasto,conv,cpaMeta}
+    return{gasto,conv,cpaMeta,enVivo} // (23sep26) P2: enVivo se muestra en la línea de origen
   }
   const _metaAntier=await _calcMetaDiaPrevio(_prev2Desde,_prev2Hasta)
   const _metaTrasantier=await _calcMetaDiaPrevio(_prev3Desde,_prev3Hasta)
@@ -33301,9 +33454,12 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   }
   conActividad.sort((a,b)=>(agg[b.meta_id]?.spend||0)-(agg[a.meta_id]?.spend||0))
 
+  // (23sep26) P2: origen visible por bloque (rango · ayer · antier · trasantier). En la pasada base dice que
+  // Meta viene en camino; en la pasada en vivo, qué llegó en vivo 🟢 y qué quedó de la base 🔵.
+  const _oPrev=(v)=>v?'🟢 en vivo':'🔵 base'
   const sourceHtml=source==='meta'
-    ?`<div style="font-size:11px;color:var(--green);margin-bottom:8px">🟢 Datos en vivo de Meta · ${desde} → ${hasta}</div>`
-    :`<div style="font-size:11px;color:var(--amber);margin-bottom:8px">🟡 Datos históricos (Supabase) · ${desde} → ${hasta}</div>`
+    ?`<div class="nx-origen" style="font-size:11px;color:var(--green);margin-bottom:8px">🟢 <b>En vivo desde Meta</b> · ${desde} → ${hasta} · ${window._nxHoraBogota()} · ayer: ${_oPrev(_ayerEnVivo)} · antier: ${_oPrev(_metaAntier.enVivo)} · trasantier: ${_oPrev(_metaTrasantier.enVivo)} <span style="cursor:pointer" title="Volver a pedir a Meta" onclick="event.stopPropagation();window._nxMetaVivoAhora('${accountId}')">🔄</span></div>`
+    :`<div class="nx-origen" style="font-size:11px;color:var(--blue);margin-bottom:8px">🔵 <b>Datos de la base</b> · ${desde} → ${hasta} · ${_tokenOk?'⏳ pidiendo a Meta el dato en vivo…':'🟡 sin token de Meta: todo es dato guardado'}</div>`
 
   const renderCamp=(camp)=>{
     const m=agg[camp.meta_id]||{spend:0,imp:0,clicks:0,conv:0,ctrs:[],cpms:[],freqs:[]}
@@ -33683,6 +33839,7 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
   const _est=_w?.getAttribute('data-estado')||''
   const _estTxt=_est==='ACTIVE'?'<span style="color:var(--green)">ACTIVE</span>':(_est?'<span style="color:var(--muted)">'+_est+'</span>':'')
   const _tira=`<div class="nx-acc-bar" style="position:sticky;top:0;z-index:10;background:var(--card);border:1px solid var(--border);border-left:4px solid var(--hier-cuenta);border-radius:8px;padding:6px 10px;margin-bottom:6px;display:flex;align-items:center;gap:8px;font-size:12px;font-weight:700">🏢 Cuenta ${_nom}${_estTxt?' · '+_estTxt:''}<span style="margin-left:auto;cursor:pointer;font-size:14px;color:var(--muted)" title="Cerrar cuenta" onclick="toggleMetaCuenta('${accountId}')">✕</span></div>`
+  if(_vivo){if(_nxCancelado())return;_uiSnap=window._nxFotoPanel(accEl)} // (23sep26) P1: la foto se toma JUSTO antes de repintar
   accEl.innerHTML=_tira+campHtml
 
   // Aplicar filtros iniciales por defecto: "Con actividad" + sub-tab "Activas"
@@ -33691,6 +33848,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     const _btnActive=accEl.querySelector('.cf-btn.btn-primary')
     filterCampsInAccount(accountId,'active',_btnActive||null)
   }
+  // (23sep26) P1: volver al filtro y la sub-pestaña que el usuario tenía (solo pasada en vivo)
+  if(_vivo&&_uiSnap&&_uiSnap.filtro!=='active'&&typeof filterCampsInAccount==='function'){const _b=[...accEl.querySelectorAll('.cf-btn')].find(x=>(x.getAttribute('onclick')||'').includes("'"+_uiSnap.filtro+"'"));filterCampsInAccount(accountId,_uiSnap.filtro,_b||null)}
+  else if(_vivo&&_uiSnap&&_uiSnap.sub!=='active'&&typeof filterCampSubtab==='function')filterCampSubtab(accountId,_uiSnap.sub,null)
   window._nxObserveCampBars()
 
   // Mejora 1: restaurar lo que estaba abierto y volver a la misma posición de scroll
@@ -33713,6 +33873,9 @@ window.toggleMetaCuenta=async(accountId,forceReload)=>{
     }
   }
 
+  // (23sep26) P1: tras la pasada BASE, la pasada EN VIVO arranca sola en segundo plano (sin bloquear la pantalla)
+  if(!_vivo&&_tokenOk)setTimeout(()=>{if(_st.gen===_gen&&accEl.style.display!=='none')window.toggleMetaCuenta(accountId,true,'vivo')},0)
+  if(_vivo){_st.intento=0;try{console.log(`[cuenta ${accountId}] ⏱️ en vivo listo en ${((Date.now()-_nxDl.t0)/1000).toFixed(1)}s`)}catch(_){}}
 }
 
 window.filterCampsInAccount=(accountId,filter,btn)=>{

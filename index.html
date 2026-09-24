@@ -23668,12 +23668,17 @@ window._nexoAutoSyncHoy=async function(slug){
 // Reutiliza helpers existentes: nexoBadgeMega, nexoOrdenUrgencia, resolveProdName, fmt.
 async function _renderResumenProductos(desde,hasta,hoy){
   if(!productos||!productos.length)return''
+  // (23sep26) ⏱️ CRONÓMETRO POR ETAPA: solo MIDE (no cambia nada). Al final imprime en consola
+  // cuánto tardó cada bloque, para saber exactamente dónde se van los minutos.
+  const _cr={t0:Date.now(),last:Date.now(),et:[]}
+  const _cron=(n)=>{try{const _now=Date.now();_cr.et.push(n+': '+((_now-_cr.last)/1000).toFixed(1)+'s');_cr.last=_now}catch(_){}}
 
   // 1. Traer mapeos del rango (ventas reales por producto)
   const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos')
     .select('cantidad,producto,estado_final,fecha,ad_id,precio_dropi,costo_proveedor_dropi')
     .gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
 
+  _cron('pedidos')
   // 2. Gasto por campaña: decisión inteligente.
   //    - Si el rango incluye HOY o AYER (datos vivos) → Meta API en tiempo real.
   //    - Si el rango es solo días viejos (≥ 2 días atrás) → BD directamente (ya fijo, no llama Meta).
@@ -23780,6 +23785,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
     window._nexoLiveGastoRango={desde,hasta}
   }catch(_){}
 
+  _cron('gasto Meta')
   // 2b. Métricas Meta extra por campaña (clicks/impressions/conversions/CPA Meta) — de BD
   //     Se usa para CTR, CPM, CPA Meta del producto. NO compite con gastoByCampId (sigue siendo el spend canónico).
   const metricsByCampId={}
@@ -23809,6 +23815,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
     }
   }
 
+  _cron('métricas+estados BD')
   // 2d. Período previo (misma duración, justo antes) — solo BD, siempre histórico cerrado.
   //     Sirve para la tira de comparación ("⏪ AYER" o "⏪ N días previos") en cada card.
   let desdePrev='',hastaPrev='',nDiasRango=0
@@ -23861,6 +23868,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
     }
   }
 
+  _cron('período previo')
   // 3. Traer reportes_diarios con ad_ids manuales (auxiliar)
   const{data:reportes}=await sb.from('reportes_diarios')
     .select('ad_ids,producto_id,producto_nombre,fecha,updated_at')
@@ -23960,6 +23968,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
     }
   }
 
+  _cron('reportes+conversaciones')
   // 6.7 ANTIER (prev2) y TRASANTIER (prev3): mapeos + gasto + IDs reportados + conversaciones
   // Consistente con "ayer" de este resumen: gasto desde meta_insights (BD), no Meta API.
   const mapeosAntierByProd={},gastoAntierByCampId={},reportesAntierByProd={},conversacionesAntierByProd={}
@@ -24050,6 +24059,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
   window._precioHistCache=precioHistByProd // ⭐ Regla única de costo: sincronizar cache global (mismos datos, sin doble fetch)
   const _extrasDias={mapeosAntierByProd,gastoAntierByCampId,reportesAntierByProd,conversacionesAntierByProd,mapeosTrasByProd,gastoTrasByCampId,reportesTrasByProd,conversacionesTrasByProd,reportesPrevAdIdsListByProd,reportesAntierAdIdsListByProd,reportesTrasAdIdsListByProd,precioHist:precioHistByProd,fechasDias:_fechasDiasG}
 
+  _cron('antier+trasantier')
   // 6.8 NUEVO: Mapa ad_id → cuenta (para el "cuadre de ventas por origen" y el strip de cuenta).
   //      Sigue la cadena ad → adset → campaña → cuenta usando meta_campanas (igual que
   //      buildAdProductMap, pero llegando hasta la cuenta). ADITIVO: no altera ningún cálculo
@@ -24234,6 +24244,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
     }
   }catch(e){console.warn('[cuadre ventas] no se pudo cargar gasto por ad:',e&&e.message)}
 
+  _cron('cuentas+ads')
   // 7. Calcular metricas por producto
   // esSoloHoy = el rango es exactamente HOY (sin cruce Dropi todavía)
   const esSoloHoy=(desde===hoy&&hasta===hoy)
@@ -24569,6 +24580,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
     </div>`
   }catch(_){}
 
+  _cron('cálculo+armado')
+  try{console.log('[resumen ⏱️] '+_cr.et.join(' | ')+' | TOTAL: '+((Date.now()-_cr.t0)/1000).toFixed(1)+'s')}catch(_){}
   // 13. HTML final
   return`
   <div class="resumen-productos" data-sem-port="${semCodePort}" style="background:${portC.bg};border:1px solid ${portC.border};border-radius:12px;padding:16px 18px;margin-bottom:16px">

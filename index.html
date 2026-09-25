@@ -581,17 +581,35 @@ window.NX_RANGO_DIAS_FABRICA=8
   }
   // Repinta los "N" de los botones que ya están en pantalla
   window._nxRangoPintar=()=>{try{const n=String(window.nxRangoDias());document.querySelectorAll('.nx-rango-n').forEach(e=>{e.textContent=n})}catch(_){}}
-  // Al abrir NEXO: trae de Supabase el número guardado (reintenta mientras la conexión/sesión no esté lista)
-  let _int=0
+  // Al abrir NEXO: trae de Supabase el número guardado.
+  // (25sep26 · B6) DE RAÍZ: antes, si la fila no existía (nunca se ha cambiado el número) o aún no
+  // había sesión, preguntaba 10 veces seguidas (una cada 4 s). Ahora distingue los 3 casos:
+  //  · SIN SESIÓN todavía → no pregunta: espera el aviso de "entró" de Supabase y ahí pregunta (1 vez).
+  //    (sin sesión, el RLS devuelve vacío y eso NO quiere decir "no existe"). getSession() se lee en
+  //    el navegador: no gasta pedidos.
+  //  · CON SESIÓN y la fila NO existe → se pregunta UNA sola vez y se usa el de fábrica / el de este equipo.
+  //  · ERROR de verdad (red, Supabase lento) → reintenta máximo 3 veces (4 s, 8 s, 12 s).
+  let _int=0,_hecho=false,_enCurso=false,_oyendo=false
+  const _esperarSesion=()=>{
+    if(_oyendo)return;_oyendo=true
+    try{sb.auth.onAuthStateChange((ev,ses)=>{if(ses&&!_hecho&&!_enCurso){_int=0;setTimeout(_traer,300)}})}catch(_){} // setTimeout: nunca llamar a Supabase DENTRO del aviso
+  }
   const _traer=async()=>{
+    if(_hecho||_enCurso)return
+    _enCurso=true
     try{
       if(typeof sb==='undefined'||!sb)throw 0 // la conexión aún no existe → reintentar
+      let _ses=true
+      try{if(sb.auth&&typeof sb.auth.getSession==='function'){const{data:_sd}=await sb.auth.getSession();_ses=!!(_sd&&_sd.session)}}catch(_){}
+      if(!_ses){_enCurso=false;_esperarSesion();return} // 🔐 sin sesión: esperar a que entre (0 pedidos mientras tanto)
       const{data,error}=await sb.from('config').select('valor').eq('clave',CLAVE).maybeSingle()
       if(error)throw error
-      if(!data){if(++_int<10)setTimeout(_traer,4000);return} // sin sesión aún, o nunca se ha cambiado
+      _hecho=true // ✅ respondió (exista o no la fila): no se vuelve a preguntar
+      if(!data)return // nunca se ha cambiado → se queda el de fábrica / el de este equipo
       const n=parseInt(data.valor,10)
       if(_ok(n)&&n!==window.nxRangoDias()){try{localStorage.setItem(LS,String(n))}catch(_){};window._nxRangoPintar()}
-    }catch(_){if(++_int<10)setTimeout(_traer,4000)}
+    }catch(_){if(++_int<=3)setTimeout(_traer,4000*_int)} // solo ERROR real: máx. 3 reintentos
+    finally{_enCurso=false}
   }
   setTimeout(_traer,1500)
   // ✏️ Cambiar el número desde la app
@@ -609,6 +627,7 @@ window.NX_RANGO_DIAS_FABRICA=8
     // Lo que está A LA VISTA se recarga ya con el rango nuevo; los productos cerrados se
     // recargan solos (una vez) la próxima vez que los abras.
     try{window._rpAuto8Done={}}catch(_){}
+    try{window.nxAlm&&window.nxAlm.invalidar(null,'perilla de días')}catch(_){} // 🗄️ (25sep26 · B1)
     try{document.querySelectorAll('[id$="-btn8d"]').forEach(b=>{if(b.offsetParent!==null)b.click()})}catch(_){}
     try{if(window._rpRangoGlobalLoad)window._rpRangoGlobalLoad(true)}catch(_){}
     if(!_nube)alert(`✅ Listo: ahora son ${n} días en este equipo.\n\n⚠️ No se pudo guardar en la nube (revisa internet). Dale otra vez al ✏️ para que quede en todos tus equipos.`)
@@ -643,6 +662,28 @@ window.nxPuerta=(function(){
     return false
   }
   const espera=i=>new Promise(r=>setTimeout(r,800*i))
+  // ✂️ (25sep26 · B5) DETECTOR DE CORTE EN SILENCIO — Supabase devuelve máximo 1000 filas por consulta.
+  // Si una lectura SIN límite propio vuelve con 1000 (o 2000, 3000…) filas justas, es casi seguro que
+  // se quedó corta. No cambia NADA de la respuesta (solo lee el encabezado Content-Range): la anota en
+  // nxPuerta.cortes() y avisa UNA vez por tabla en la consola, para arreglarla con _sbFetchAll.
+  est.cortes=[]
+  const _cortesVistos={}
+  function revisarCorte(u,init,r){
+    try{
+      if(!r||!r.ok)return
+      const m=String((init&&init.method)||'GET').toUpperCase();if(m!=='GET')return
+      u=urlDe(u);if(!u.includes('/rest/v1/')||/[?&]limit=/.test(u))return
+      const cr=(r.headers&&r.headers.get&&r.headers.get('content-range'))||''
+      const mm=/^(\d+)-(\d+)\//.exec(cr);if(!mm)return
+      const n=parseInt(mm[2],10)-parseInt(mm[1],10)+1
+      if(n<1000||n%1000!==0)return
+      const tabla=((/\/rest\/v1\/([^?]+)/.exec(u)||[])[1])||'?'
+      const q=u.split('?')[1]||''
+      est.cortes.push({tabla,filas:n,consulta:decodeURIComponent(q).slice(0,300),cuando:new Date().toISOString()})
+      if(est.cortes.length>50)est.cortes.shift()
+      if(!_cortesVistos[tabla]){_cortesVistos[tabla]=1;console.warn('[puerta ✂️] Posible CORTE EN '+n+' FILAS en la tabla "'+tabla+'" (consulta sin límite propio). Los números de esa pantalla pueden estar incompletos. Detalle: nxPuerta.cortes()',q.slice(0,200))}
+    }catch(_){}
+  }
   // ── aviso global (una sola franja arriba, para toda la app) ──
   let _timerVolvio=null,_timerLleva=null
   function banner(){
@@ -700,6 +741,8 @@ window.nxPuerta=(function(){
           return r
         }
         exito(tipo)
+        if(tipo==='rest')revisarCorte(url,init,r) // ✂️ (25sep26 · B5) solo mira el encabezado; la respuesta sale intacta
+        if(tipo==='rest'&&r&&r.ok){const _mE=String(init.method||'GET').toUpperCase();if(_mE!=='GET'&&_mE!=='HEAD'){try{window.dispatchEvent(new CustomEvent('nx:escritura',{detail:{url:urlDe(url),metodo:_mE,cuerpo:(typeof init.body==='string'?init.body:'')}}))}catch(_){}}} // ✍️ (25sep26 · B1) aviso de escritura → el almacén de días cerrados se borra si hace falta
         return r
       }catch(e){
         clearTimeout(t);if(sig)sig.removeEventListener('abort',onAb);est.enVuelo--
@@ -713,7 +756,7 @@ window.nxPuerta=(function(){
     }
     throw ultimoErr||new Error('Supabase no respondió')
   }
-  return{fetch:fetchPuerta,estado:()=>est.estado,lento:()=>est.estado==='lento',info:()=>({...est}),CFG}
+  return{fetch:fetchPuerta,estado:()=>est.estado,lento:()=>est.estado==='lento',info:()=>({...est}),CFG,cortes:()=>(est.cortes||[]).slice()} // (25sep26 · B5) + cortes()
 })()
 // ═══ FIN PUERTA ÚNICA ═══
 const sb=createClient(SURL,SKEY,{global:{fetch:(window.nxPuerta&&window.nxPuerta.fetch)||undefined}}) // 🚪 (24sep26): todas las consultas pasan por la puerta única (tiempo máximo + reintento + aviso)
@@ -2148,7 +2191,20 @@ const NX_SYS_ORIG={
   ccDiasVuelve:{v:7,min:1,max:365,label:'🔁 Días para que un reingreso siga siendo "reciente" (Centro de Chats)',mod:'Centro de Chats',
     explica:'Un cliente que ya estaba CERRADO y vuelve a escribir cae en 🔁 Volvió. Si el cierre fue hace MÁS de estos días, cae en 🕰️ Volvió (viejo) — misma sección, pero abajo en la lista, porque no es urgente. Cada sección respeta la suya: Reclame nunca se mezcla con Novedades.'},
   ccLatidoSeg:{v:12,min:5,max:120,label:'💓 Cada cuántos segundos se refresca la lista (Centro de Chats)',mod:'Centro de Chats',
-    explica:'El refresco es EN EL SITIO: cambia los chips y contadores sin rearmar la lista, así el auxiliar nunca pierde dónde iba. Si el orden cambia, avisa con una barra y reordena solo cuando el auxiliar quiera.'}
+    explica:'El refresco es EN EL SITIO: cambia los chips y contadores sin rearmar la lista, así el auxiliar nunca pierde dónde iba. Si el orden cambia, avisa con una barra y reordena solo cuando el auxiliar quiera.'},
+  // (25sep26 · D1) RITMO INTELIGENTE de cada conversación abierta — antes era fijo cada 3 s, siempre.
+  ccHiloRapidoSeg:{v:3,min:2,max:30,label:'⚡ Refresco RÁPIDO de una conversación abierta, en segundos (Centro de Chats)',mod:'Centro de Chats',
+    explica:'Mientras hay movimiento en esa conversación (llegó o salió un mensaje, cambiaron las palomitas ✓✓, o el auxiliar está usando esa ventana) se revisa así de seguido. Dura 1 minuto después del último movimiento.'},
+  ccHiloLentoSeg:{v:15,min:5,max:120,label:'🐢 Refresco máximo de una conversación QUIETA, en segundos (Centro de Chats)',mod:'Centro de Chats',
+    explica:'Si en esa conversación no pasa nada, NEXO se va espaciando sola (3 → 5 → 8 → 12 → este número) para no gastar pedidos a Supabase. Con la pestaña escondida no pregunta nada; al volver, pinta al instante.'},
+  ccTiempoReal:{v:1,min:0,max:1,label:'📡 Tiempo real en las conversaciones abiertas (1 = prendido · 0 = apagado) (Centro de Chats)',mod:'Centro de Chats',
+    explica:'Prendido: si Supabase avisa que llegó un mensaje, la conversación se pinta YA, sin esperar su turno. Si el tiempo real no está activo en la base, no pasa nada malo: el refresco de arriba sigue solo. Apagado: solo el refresco.'},
+  // (25sep26 · B1) ALMACÉN DE DÍAS CERRADOS de Meta Ads — 0 lo apaga (todo vuelve a bajarse completo como antes)
+  metaAlmacenMin:{v:10,min:0,max:120,label:'🗄️ Minutos que Meta Ads guarda en memoria los días YA CERRADOS (0 = apagado)',mod:'Meta Ads',
+    explica:'Ventas, reportes y gasto de los días que ya pasaron se bajan UNA sola vez y todos los productos, el rango global y la precarga leen de ahí (antes se bajaban una vez por producto). HOY siempre se trae en vivo. Lo guardado se borra solo al pasar estos minutos, al actualizar el resumen, al cambiar el número de días o cuando NEXO guarda algo en esas tablas. 0 = apagado: todo como antes.'},
+  // (25sep26 · C1) VIGÍA DE CARGAS — 0 lo apaga
+  cargaVigia:{v:1,min:0,max:1,label:'👀 Mostrar cuánto lleva cada "Cargando…" de una sola consulta (1 = sí · 0 = no)',mod:'Toda la app',
+    explica:'Las cargas con pasos muestran su % real. Las de UNA sola consulta no tienen pasos que contar (inventar un % sería mentir): a esas se les agrega cuánto llevan (⏳ 7 s) y, si Supabase va lento, lo dicen en amarillo (NEXO reintenta sola). Nunca dicen 100 %: cuando termina, simplemente aparece el contenido.'}
 }
 window._nxSysCfg=window._nxSysCfg||{} // overrides vigentes {clave:número}
 function nxSysVal(k){ // getter único: override válido → original del sistema
@@ -2242,12 +2298,13 @@ window.nxSysOrig=async(k)=>{ // 🔄 volver al original del sistema (borra el ov
 }
 window.nxSysProbar=async()=>{ // FIX (9jul26-b): 🧪 diagnóstico de un clic — guarda, relee y da veredicto
   const el=document.getElementById('nxsys-test-out')
-  if(el)el.innerHTML='<span style="color:var(--blue)">⏳ Probando guardado y lectura en la nube…</span>'
+  if(el)el.innerHTML='<span style="color:var(--blue)">⏳ Paso 1 de 2: guardando en la nube · 0%</span>' // (25sep26 · C1) antes: '⏳ Probando guardado y lectura en la nube…'
   const err=await nxSysSave()
   if(err){
     if(el)el.innerHTML=`<span style="color:var(--red)">❌ La nube NO está guardando: ${err}. Los auxiliares no recibirán cambios hasta resolverlo.</span>`
     return
   }
+  if(el)el.innerHTML='<span style="color:var(--blue)">⏳ Paso 2 de 2: releyendo como otro equipo · 50%</span>' // (25sep26 · C1)
   // relectura completa simulando otro navegador: sin caché local
   const _bak=window._nxSysCfg
   try{localStorage.removeItem('nx_sys_cfg')}catch(_){}
@@ -2977,9 +3034,14 @@ async function _sbFetchAll(qf){
   const _CH=_all.length
   if(_CH<1000)return{data:_all,error:null} // menos que el mínimo techo posible → no hay más
   let _from=_CH,_fin=false
-  for(let _pg=1;_pg<_MAXPAG&&!_fin;_pg+=_PAR){
+  // (25sep26 · B1/B5) PÁGINAS QUE CRECEN: 2 → 4 → 6 a la vez. ANTES pedía SIEMPRE 6 de golpe: una tabla
+  // de 1.500 filas gastaba 7 pedidos (5 volvían vacíos). Ahora gasta 3, con el mismo número de vueltas
+  // hasta ~3.000 filas y las MISMAS filas en el mismo orden. Tablas grandes: igual de rápido (sube a 6).
+  let _pg=1,_ronda=0
+  while(_pg<_MAXPAG&&!_fin){
+    const _par=Math.min(_PAR,2<<_ronda) // 2, 4, 6, 6, 6…
     const _lote=[]
-    for(let _k=0;_k<_PAR&&(_pg+_k)<_MAXPAG;_k++){const _a=_from+_k*_CH;_lote.push(qf(_a,_a+_CH-1))}
+    for(let _k=0;_k<_par&&(_pg+_k)<_MAXPAG;_k++){const _a=_from+_k*_CH;_lote.push(qf(_a,_a+_CH-1))}
     const _rs=await Promise.all(_lote)
     for(const _r of _rs){
       if(_r.error)return{data:_all.length?_all:null,error:_r.error}
@@ -2987,10 +3049,276 @@ async function _sbFetchAll(qf){
       if(_d.length)_all=_all.concat(_d)
       if(_d.length<_CH){_fin=true;break}
     }
-    _from+=_PAR*_CH
+    _from+=_par*_CH;_pg+=_par;_ronda++
   }
   return{data:_all,error:null}
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// 🗄️ ALMACÉN DE DÍAS CERRADOS · META ADS (25sep26 · B1) — "traer UNA sola vez"
+// ─────────────────────────────────────────────────────────────────────────────
+// ANTES: los datos del rango (ventas/mapeos, reportes_diarios, gasto de meta_insights) se bajaban
+// COMPLETOS una vez por cada producto que se abría (+ la precarga de todos + el rango global):
+// con 6-8 productos ≈ 8 veces lo mismo.
+// AHORA: cada tabla del rango se parte en dos:
+//   · 📦 DÍAS CERRADOS (hasta ayer) → se bajan UNA vez y de aquí leen el motor del rango de cada
+//     producto, el rango global, la precarga y el resumen (antier+trasantier). No cambian.
+//   · ⚡ HOY → SIEMPRE en vivo, en cada carga (regla de la dueña). Si dos partes lo piden al mismo
+//     tiempo, comparten la MISMA consulta en vuelo (nunca se sirve un "hoy" viejo).
+// El almacén se BORRA solo:
+//   · al darle 🔄 Actualizar resumen, al cambiar la perilla 🎚️ de días,
+//   · cuando NEXO guarda algo en esas tablas (sync de Meta, cruce Dropi, reportes…) que toque
+//     días cerrados (lo avisa la puerta única con el evento 'nx:escritura'),
+//   · y a los N minutos (valor del sistema metaAlmacenMin, 10 por defecto). 0 = APAGADO → todo
+//     vuelve a bajarse completo como antes (interruptor, no se borra nada).
+// Devuelve {data,error} igual que Supabase (reemplazo directo), con filas COPIADAS (quien las
+// use no puede ensuciar el almacén) y en el MISMO orden que daba la consulta original.
+// Diagnóstico en consola: nxAlm.info()
+// ════════════════════════════════════════════════════════════════════════════
+window.nxAlm=(function(){
+  const DEF={
+    mapeos:{tabla:'mapeos',cols:'id,cantidad,producto,estado_final,fecha,ad_id,telefono,numero_guia',orden:[['id',true]]},
+    reps:{tabla:'reportes_diarios',cols:'id,fecha,conversaciones,conversaciones_aprox,ad_ids,producto_id,producto_nombre,updated_at',orden:[['updated_at',false],['id',true]]},
+    stock:{tabla:'reportes_diarios',cols:'id,fecha,producto_nombre,stock_cierre,updated_at',orden:[['updated_at',false],['id',true]],noNulo:'stock_cierre'},
+    insC:{tabla:'meta_insights',cols:'id,meta_id,fecha,spend,account_id,conversions,impressions,reach,unique_clicks,unique_outbound_clicks',orden:[['id',true]],nivel:'campaign'},
+    insA:{tabla:'meta_insights',cols:'id,meta_id,fecha,spend,conversions,impressions,reach,unique_clicks,unique_outbound_clicks',orden:[['id',true]],nivel:'ad'}
+  }
+  const TABLA_GRUPOS={mapeos:['mapeos'],reportes_diarios:['reps','stock'],meta_insights:['insC','insA'],meta_cuentas:['cuentas']}
+  const R={}        // rango: 'tipo|desde|hasta' → {tipo,desde,hasta,t,prom,filas}
+  const P={}        // por ids: 'tipo|desde|hasta' → {t,porId:Map(id→filas),conocidos:Set,vuelo:Map(id→promesa)}
+  const V={}        // HOY en vuelo (compartido solo mientras la consulta está viva)
+  let CU=null       // cuentas {t,prom,filas}
+  const st={deAlmacen:0,bajadas:0,hoyVivo:0,hoyCompartido:0,invalidaciones:0,ultima:''}
+  const minutos=()=>{try{return nxSysVal('metaAlmacenMin')}catch(_){return 10}}
+  const prendido=()=>minutos()>0
+  const vencido=e=>!e||(Date.now()-e.t)>minutos()*60000
+  const _ayer=f=>{const d=new Date(f+'T12:00:00Z');d.setUTCDate(d.getUTCDate()-1);return d.toISOString().slice(0,10)}
+  const _ok=f=>/^\d{4}-\d{2}-\d{2}$/.test(String(f||''))
+  // Parte el rango: cer = días cerrados (hasta ayer) · viv = hoy (y cualquier día >= hoy)
+  function partir(desde,hasta){
+    const H=today(),AY=_ayer(H)
+    return{cer:desde<=AY?{desde,hasta:hasta<AY?hasta:AY}:null,viv:hasta>=H?{desde:desde>H?desde:H,hasta}:null}
+  }
+  function cmp(orden){
+    return(a,b)=>{
+      for(const[c,asc]of orden){
+        const x=a[c],y=b[c]
+        if(x===y||(x==null&&y==null))continue
+        if(x==null)return asc?1:-1   // igual que Postgres: ASC → vacíos al final · DESC → vacíos al principio
+        if(y==null)return asc?-1:1
+        const r=(typeof x==='number'&&typeof y==='number')?(x-y):(String(x)<String(y)?-1:1)
+        if(r!==0)return asc?r:-r
+      }
+      return 0
+    }
+  }
+  const copiar=filas=>filas.map(r=>({...r}))
+  // Consulta paginada (_sbFetchAll: nunca se corta en 1000) de un tipo, rango y (opcional) lote de ids
+  function consultar(def,rg,ids){
+    return _sbFetchAll((_f,_t)=>{
+      let q=sb.from(def.tabla).select(def.cols)
+      if(def.nivel)q=q.eq('nivel',def.nivel)
+      if(ids)q=q.in('meta_id',ids)
+      q=q.gte('fecha',rg.desde).lte('fecha',rg.hasta)
+      if(def.noNulo)q=q.not(def.noNulo,'is',null)
+      for(const[c,asc]of def.orden)q=q.order(c,{ascending:asc})
+      return q.range(_f,_t)
+    })
+  }
+  // ⚡ HOY en vivo — si ya hay una consulta idéntica EN VUELO se comparte; al terminar se olvida.
+  function vivo(clave,fn){
+    if(V[clave]){st.hoyCompartido++;return V[clave]}
+    st.hoyVivo++
+    const p=V[clave]=Promise.resolve().then(fn).finally(()=>{delete V[clave]})
+    return p
+  }
+  // 📦 Días cerrados de un tipo (toda la tabla en ese rango)
+  function cerrado(tipo,cer){
+    const k=tipo+'|'+cer.desde+'|'+cer.hasta
+    let e=R[k]
+    if(e&&!vencido(e)){st.deAlmacen++;return e.prom}
+    // ¿otro rango ya guardado lo CONTIENE? (ej.: 8 días guardados y se piden 2) → se filtra de ahí
+    for(const kk in R){
+      const x=R[kk]
+      if(x.tipo===tipo&&x.filas&&!vencido(x)&&x.desde<=cer.desde&&x.hasta>=cer.hasta){
+        st.deAlmacen++
+        return Promise.resolve({data:x.filas.filter(r=>r.fecha>=cer.desde&&r.fecha<=cer.hasta),error:null})
+      }
+    }
+    st.bajadas++
+    e=R[k]={tipo,desde:cer.desde,hasta:cer.hasta,t:Date.now(),filas:null,prom:null}
+    e.prom=consultar(DEF[tipo],cer).then(res=>{
+      if(res.error){if(R[k]===e)delete R[k];return res} // un error NUNCA se guarda
+      e.filas=res.data||[];e.t=Date.now()
+      return{data:e.filas,error:null}
+    },err=>{if(R[k]===e)delete R[k];return{data:null,error:err}})
+    return e.prom
+  }
+  // ── API 1 · Toda la tabla en un rango: rango('mapeos'|'reps'|'stock'|'insC', desde, hasta)
+  async function rango(tipo,desde,hasta){
+    const def=DEF[tipo];if(!def)return{data:null,error:new Error('nxAlm: tipo desconocido '+tipo)}
+    if(!prendido()||!_ok(desde)||!_ok(hasta)||desde>hasta)return consultar(def,{desde,hasta}) // 🔌 apagado → como antes
+    const{cer,viv}=partir(desde,hasta)
+    const[rc,rv]=await Promise.all([
+      cer?cerrado(tipo,cer):{data:[],error:null},
+      viv?vivo(tipo+'|'+viv.desde+'|'+viv.hasta,()=>consultar(def,viv)):{data:[],error:null}
+    ])
+    if(rc&&rc.error)return{data:null,error:rc.error}
+    if(rv&&rv.error)return{data:null,error:rv.error}
+    return{data:copiar((rc.data||[]).concat(rv.data||[])).sort(cmp(def.orden)),error:null}
+  }
+  // ── API 2 · Gasto/métricas de ciertos ids: porIds('campaign'|'ad', ids, desde, hasta)
+  //    Los ids ya conocidos salen del almacén; solo se piden los que faltan (lotes de 300, 3 a la vez).
+  async function porIds(nivel,ids,desde,hasta){
+    const tipo=nivel==='ad'?'insA':'insC',def=DEF[tipo]
+    ids=[...new Set((ids||[]).map(String).filter(Boolean))]
+    if(!ids.length)return{data:[],error:null}
+    const _lotes=a=>{const o=[];for(let i=0;i<a.length;i+=300)o.push(a.slice(i,i+300));return o}
+    const _todos=async(rg)=>{ // consulta directa por lotes (3 a la vez)
+      const out=[],ls=_lotes(ids)
+      for(let i=0;i<ls.length;i+=3){
+        const rs=await Promise.all(ls.slice(i,i+3).map(l=>consultar(def,rg,l)))
+        for(const r of rs){if(r.error)return{data:null,error:r.error};for(const f of (r.data||[]))out.push(f)}
+      }
+      return{data:out,error:null}
+    }
+    if(!prendido()||!_ok(desde)||!_ok(hasta)||desde>hasta)return _todos({desde,hasta}) // 🔌 apagado → como antes
+    const{cer,viv}=partir(desde,hasta)
+    const out=[]
+    let err=null
+    const tareas=[]
+    if(cer){
+      tareas.push((async()=>{
+        // a) si el resumen ya bajó TODAS las campañas de un rango que lo contiene → se filtra de ahí
+        if(tipo==='insC'){
+          for(const kk in R){const x=R[kk];if(x.tipo==='insC'&&x.filas&&!vencido(x)&&x.desde<=cer.desde&&x.hasta>=cer.hasta){
+            st.deAlmacen++;const s=new Set(ids)
+            for(const f of x.filas)if(s.has(String(f.meta_id))&&f.fecha>=cer.desde&&f.fecha<=cer.hasta)out.push(f)
+            return
+          }}
+        }
+        // b) almacén por ids
+        const k=tipo+'|'+cer.desde+'|'+cer.hasta
+        let S=P[k];if(S&&vencido(S)){delete P[k];S=null}
+        if(!S)S=P[k]={t:Date.now(),porId:new Map(),conocidos:new Set(),vuelo:new Map()}
+        const faltan=ids.filter(id=>!S.conocidos.has(id)&&!S.vuelo.has(id))
+        if(faltan.length<ids.length)st.deAlmacen++
+        if(faltan.length){
+          st.bajadas++
+          const ls=_lotes(faltan)
+          const pr=(async()=>{
+            for(let i=0;i<ls.length;i+=3){
+              const rs=await Promise.all(ls.slice(i,i+3).map(l=>consultar(def,cer,l).then(r=>({l,r}))))
+              for(const{l,r}of rs){
+                if(r.error)throw r.error
+                for(const f of (r.data||[])){const id=String(f.meta_id);if(!S.porId.has(id))S.porId.set(id,[]);S.porId.get(id).push(f)}
+                for(const id of l)S.conocidos.add(id)
+              }
+            }
+          })()
+          for(const id of faltan)S.vuelo.set(id,pr)
+          try{await pr}catch(e){err=e;for(const id of faltan){S.conocidos.delete(id);S.porId.delete(id)}} // un error NUNCA se guarda
+          finally{for(const id of faltan)if(S.vuelo.get(id)===pr)S.vuelo.delete(id)}
+        }
+        // esperar lo que OTRA parte está bajando de estos mismos ids
+        const ajenos=[...new Set(ids.map(id=>S.vuelo.get(id)).filter(Boolean))]
+        if(ajenos.length){try{await Promise.all(ajenos)}catch(e){err=err||e}}
+        if(err)return
+        for(const id of ids){const fs=S.porId.get(id);if(fs)for(const f of fs)out.push(f)}
+      })())
+    }
+    if(viv){
+      tareas.push((async()=>{
+        const r=await vivo(tipo+'|'+viv.desde+'|'+viv.hasta+'|'+ids.slice().sort().join(','),()=>_todos(viv))
+        if(r.error){err=err||r.error;return}
+        for(const f of (r.data||[]))out.push(f)
+      })())
+    }
+    await Promise.all(tareas)
+    if(err)return{data:null,error:err}
+    return{data:copiar(out).sort(cmp(def.orden)),error:null}
+  }
+  // ── API 3 · Nombres de las cuentas publicitarias (meta_cuentas: cambian casi nunca)
+  async function cuentas(){
+    if(!prendido())return sb.from('meta_cuentas').select('account_id,nombre')
+    if(CU&&!vencido(CU)){st.deAlmacen++;const r=await CU.prom;return r.error?r:{data:copiar(r.data||[]),error:null}}
+    st.bajadas++
+    const e=CU={t:Date.now(),prom:null}
+    e.prom=Promise.resolve(sb.from('meta_cuentas').select('account_id,nombre')).then(r=>{if(r.error&&CU===e)CU=null;return r},err=>{if(CU===e)CU=null;return{data:null,error:err}})
+    const r=await e.prom
+    return r.error?r:{data:copiar(r.data||[]),error:null}
+  }
+  // ── Borrar (todo, o solo ciertos grupos)
+  function invalidar(grupos,motivo){
+    const g=grupos?new Set(grupos):null
+    for(const k in R)if(!g||g.has(R[k].tipo))delete R[k]
+    for(const k in P)if(!g||g.has(k.split('|')[0]))delete P[k]
+    if(!g||g.has('cuentas'))CU=null
+    st.invalidaciones++;st.ultima=(motivo||'manual')+' · '+new Date().toLocaleTimeString('es-CO')
+  }
+  // ✍️ La puerta única avisa cada escritura: si toca DÍAS CERRADOS de estas tablas, se borra lo guardado.
+  //    Si todas las filas escritas son de HOY (ej.: el auto-sync de hoy), los días cerrados siguen sirviendo.
+  try{
+    window.addEventListener('nx:escritura',ev=>{
+      try{
+        const d=(ev&&ev.detail)||{}
+        const m=/\/rest\/v1\/([a-z0-9_]+)/i.exec(d.url||'');if(!m)return
+        const grupos=TABLA_GRUPOS[m[1]];if(!grupos)return
+        if(!Object.keys(R).length&&!Object.keys(P).length&&!CU)return // nada guardado: nada que borrar
+        const H=today()
+        let soloHoy=false
+        const fu=/[?&]fecha=eq\.(\d{4}-\d{2}-\d{2})/.exec(d.url||'')
+        if(fu&&fu[1]>=H)soloHoy=true
+        else if(d.cuerpo&&m[1]!=='meta_cuentas'){
+          try{const b=JSON.parse(d.cuerpo);const a=Array.isArray(b)?b:[b];if(a.length&&a.every(x=>x&&_ok(x.fecha)&&x.fecha>=H))soloHoy=true}catch(_){}
+        }
+        if(!soloHoy)invalidar(grupos,'escritura en '+m[1])
+      }catch(_){}
+    })
+  }catch(_){}
+  function info(){
+    const ent=[]
+    for(const k in R)ent.push({guardado:k,filas:R[k].filas?R[k].filas.length:'bajando…',min:((Date.now()-R[k].t)/60000).toFixed(1)})
+    for(const k in P){let n=0;P[k].porId.forEach(v=>{n+=v.length});ent.push({guardado:k+' (por ids)',filas:n,ids:P[k].conocidos.size,min:((Date.now()-P[k].t)/60000).toFixed(1)})}
+    if(CU)ent.push({guardado:'meta_cuentas',min:((Date.now()-CU.t)/60000).toFixed(1)})
+    try{console.table(ent)}catch(_){}
+    const r={prendido:prendido(),minutos:minutos(),...st}
+    console.log('[almacén 🗄️]',r)
+    return r
+  }
+  return{rango,porIds,cuentas,invalidar,info,partir,activo:prendido}
+})()
+// ═══ FIN ALMACÉN DE DÍAS CERRADOS ═══
+// ════════════════════════════════════════════════════════════════════════════
+// 👀 VIGÍA DE CARGAS (25sep26 · C1) — para los "Cargando…" de UNA sola consulta (toda la app)
+// ─────────────────────────────────────────────────────────────────────────────
+// Las cargas con pasos ya muestran su % REAL. Las de una sola consulta no tienen pasos: inventarles un %
+// sería mentir. Este vigía (1 vez por segundo, solo lo que está a la vista) les agrega al lado:
+//   · "⏳ 7 s" desde los 3 s → se ve que sigue vivo (nunca más un "Cargando…" mudo que parece colgado)
+//   · "🟡 Supabase va lento, NEXO reintenta sola · 32 s" en AMARILLO si la puerta única detecta lentitud
+// No toca las que ya tienen % (ni el texto de nadie: solo agrega su propia etiqueta al final).
+// Se apaga con el valor del sistema cargaVigia = 0.
+// ════════════════════════════════════════════════════════════════════════════
+;(function(){
+  if(window._nxVigiaCargas)return
+  window._nxVigiaCargas=setInterval(()=>{try{
+    if(!(nxSysVal('cargaVigia')>0)){document.querySelectorAll('.nx-vigia').forEach(x=>x.remove());return}
+    const lento=!!(window.nxPuerta&&window.nxPuerta.lento&&window.nxPuerta.lento())
+    document.querySelectorAll('.loading').forEach(el=>{
+      if(!el.isConnected||el.offsetParent===null)return // escondida: no se toca
+      let sp=null;for(const c of el.children){if(c.classList&&c.classList.contains('nx-vigia')){sp=c;break}}
+      const propio=String(el.textContent||'').replace(sp?sp.textContent:'','')
+      if(/\d\s*%/.test(propio)){if(sp)sp.remove();return} // ya tiene % real → manda el suyo
+      if(!el._nxT0)el._nxT0=Date.now()
+      const sg=Math.round((Date.now()-el._nxT0)/1000)
+      if(sg<3)return
+      if(!sp){sp=document.createElement('span');sp.className='nx-vigia';el.appendChild(sp)}
+      sp.style.cssText='margin-left:6px;font-size:.92em;font-weight:600;color:'+(lento?'var(--amber)':'var(--muted)')
+      sp.textContent=lento?` · 🟡 Supabase va lento, NEXO reintenta sola · ${sg} s`:` · ⏳ ${sg} s`
+    })
+  }catch(_){}},1000)
+})()
+// ═══ FIN VIGÍA DE CARGAS ═══
 
 // ══ H3 (15jul26) · TICKET DE SECUENCIA (mismo patrón que _repLoadSeq en cargarReporteData) ══
 // Al TECLEAR una fecha el onchange dispara varias recargas en paralelo; sin ticket, la que
@@ -5128,7 +5456,7 @@ window.syncGastoResumen=async(btn)=>{
   const desde=document.getElementById('rs-desde')?.value||'2024-01-01'
   const hasta=document.getElementById('rs-hasta')?.value||today()
   const orig=btn?btn.textContent:''
-  if(btn){btn.disabled=true;btn.textContent='⏳ Trayendo gasto de Meta...'}
+  if(btn){btn.disabled=true;btn.textContent='⏳ Trayendo gasto de Meta… 0%'} // (25sep26 · C1) + %
   try{
     const token=await getConfig('meta_access_token')
     if(!token){alert('Token de Meta no configurado');if(btn){btn.disabled=false;btn.textContent=orig}return}
@@ -5139,7 +5467,7 @@ window.syncGastoResumen=async(btn)=>{
     const _nxFallR=[] // (23sep26) tramos que Meta no entregó → se reintentan solos hasta que carguen
     for(let ci=0;ci<cuentas.length;ci++){
       const cuenta=cuentas[ci]
-      if(btn)btn.textContent=`⏳ ${ci+1}/${cuentas.length} cuentas...`
+      if(btn)btn.textContent=`⏳ ${ci+1}/${cuentas.length} cuentas · ${window.nxPctPasos(ci,cuentas.length)}%` // (25sep26 · C1) + % (cuentas terminadas ÷ total)
       {const _p=Math.round(ci/cuentas.length*100);window._nxPillCarga('sync-resumen',`⏳ Gasto del resumen · ${ci+1} de ${cuentas.length} cuentas · ${_p}% <span style="font-family:monospace">${window._nxBarra(_p)}</span>`,'carga')} // (23sep26) avance 0→100%
       // (23sep26) HASTA QUE CARGUE: cada tramo (cuenta × 90 días) es una UNIDAD. Antes, si un tramo fallaba se
       // perdía el resto de la cuenta (fail++). Ahora se intentan todos y los que fallen se repiten solos (solo esos).
@@ -6198,6 +6526,7 @@ async function pageAdminProductos(c){
       // 3. Actualizar la BD uno por uno (los IDs no se pueden enviar en bulk con UPDATE simple)
       let actualizados=0,errores=0
       for(const u of aActualizar){
+        if(btn){const _k=actualizados+errores;btn.innerHTML=`⏳ Actualizando ${_k+1} de ${aActualizar.length} · ${window.nxPctPasos(_k,aActualizar.length)}%`} // (25sep26 · C1) % real
         const{error:ue}=await sb.from('reportes_diarios').update({producto_id:u.producto_id}).eq('id',u.id)
         if(ue)errores++;else actualizados++
       }
@@ -24100,6 +24429,7 @@ window._cambiosHoyHTML=(metaId)=>{
 }
 
 window.doRefreshPortafolio=async(btn)=>{
+  try{window.nxReintentoApagar&&window.nxReintentoApagar('portafolio')}catch(_){} // (25sep26 · C1) una carga nueva apaga el reintento viejo
   if(btn){btn.disabled=true;btn.textContent='⏳'}
   try{
     const el=document.getElementById('meta-portafolio')
@@ -24118,7 +24448,7 @@ window.doRefreshPortafolio=async(btn)=>{
 }
 
 window.runMetaSyncAllAccounts=async(days,btn)=>{
-  if(btn){btn.disabled=true;btn.textContent='⏳ Sincronizando...'}
+  if(btn){btn.disabled=true;btn.textContent='⏳ Sincronizando · 0%'} // (25sep26 · C1) + %
   try{
     let token=await getConfig('meta_access_token')
     if(!token){alert('Token no configurado');return}
@@ -24128,7 +24458,7 @@ window.runMetaSyncAllAccounts=async(days,btn)=>{
     // (23sep26) HASTA QUE CARGUE: el refresco de nombres va en una función; si Meta falla, se sigue igual que antes
     // con lo que hay en BD, y ADEMÁS se repite solo (🟡) hasta que cargue. Tope de 30 s.
     const _nxNombres=async(_enReintento)=>{
-      if(btn&&!_enReintento)btn.textContent='⏳ Actualizando cuentas...'
+      if(btn&&!_enReintento)btn.textContent='⏳ Paso previo: nombres de cuentas · 0%' // (25sep26 · C1) + %
       const _accsFresh=await metaGet('/me/adaccounts',token,{fields:'account_id,name,currency,timezone_name,account_status'},{timeoutMs:30000,sinEspera:true})
       // MEJORA 3 (3jul26): las cuentas marcadas BLOCKED conservan su estado en el sync —
       // solo se desbloquean con el botón 🔓 (confirmación manual, como pediste).
@@ -24159,9 +24489,10 @@ window.runMetaSyncAllAccounts=async(days,btn)=>{
     for(let ci=0;ci<cuentas.length;ci++){
       const cuenta=cuentas[ci]
       const statusEl=document.getElementById('meta-sync-status-'+cuenta.account_id)
-      const _showPct=(pct,msg)=>{if(statusEl)statusEl.innerHTML=pct>=100?'✅':`<span style="font-size:11px">${pct}%</span>`}
+      const _btnPct=(sub)=>{if(btn)btn.textContent=`⏳ ${ci+1}/${cuentas.length} cuentas · ${window.nxPctPasos(ci,cuentas.length,sub)}%`} // (25sep26 · C1) % total real
+      const _showPct=(pct,msg)=>{if(statusEl)statusEl.innerHTML=pct>=100?'✅':`<span style="font-size:11px">${pct}%</span>`;_btnPct((pct||0)/100)} // (25sep26 · C1) + avanza el % del botón
       if(statusEl)statusEl.innerHTML='<span style="font-size:11px">0%</span>'
-      if(btn)btn.textContent=`⏳ ${ci+1}/${cuentas.length}...`
+      _btnPct(0) // ANTES: if(btn)btn.textContent=`⏳ ${ci+1}/${cuentas.length}...`
       try{
         await _syncOneAccount(cuenta.account_id,token,days,_showPct)
         await sb.from('meta_cuentas').update({synced_at:new Date().toISOString()}).eq('account_id',cuenta.account_id)
@@ -24249,10 +24580,10 @@ window.runRefrescarDropi=async(btn)=>{
     let cuentasConActividad=0,puntosCreados=0,diasOmitidos=0,erroresMeta=0
     const totalDiasPosibles=cuentas.length*fechas.length // para reporte
     const _nxFallDropi=[] // (23sep26) cuentas cuyo mini-sync Meta no entregó → se reintentan solas hasta que carguen
-    btn.textContent=`⏳ 0/${cuentas.length}...`
+    btn.textContent=`⏳ 0/${cuentas.length} · 0%` // (25sep26 · C1) + %
     for(let ci=0;ci<cuentas.length;ci++){
       const cuenta=cuentas[ci]
-      btn.textContent=`⏳ ${ci+1}/${cuentas.length} ${cuenta.nombre||cuenta.account_id}...`
+      btn.textContent=`⏳ ${ci+1}/${cuentas.length} · ${window.nxPctPasos(ci,cuentas.length)}% · ${cuenta.nombre||cuenta.account_id}` // (25sep26 · C1) + %
       {const _p=Math.round(ci/cuentas.length*100);window._nxPillCarga('refrescar-dropi',`⏳ Refrescar Dropi · ${ci+1} de ${cuentas.length} cuentas · ${_p}% <span style="font-family:monospace">${window._nxBarra(_p)}</span>`,'carga')} // (23sep26) avance 0→100%
       // 1) Check BD: ¿tuvo gasto en los últimos 3 días?
       const{data:gastoCheck}=await sb.from('meta_insights').select('spend').eq('account_id',cuenta.account_id).eq('nivel','campaign').gte('fecha',desdeR).lte('fecha',hastaR).gt('spend',0).limit(1)
@@ -25155,6 +25486,21 @@ window._nxReintentar=function(clave,cfg){
   return rt
 }
 window._nxBarra=(pct)=>{const n=Math.max(0,Math.min(10,Math.round((pct||0)/10)));return'▓'.repeat(n)+'░'.repeat(10-n)}
+// (25sep26 · C1) % REAL de una carga por pasos: hechos ÷ total, con tope 99 → el 100 lo pone SOLO quien termina.
+window.nxPctPasos=(hechos,total,sub)=>Math.max(0,Math.min(99,Math.round(((hechos||0)+Math.max(0,Math.min(sub||0,0.99)))/Math.max(1,total||1)*100)))
+// (25sep26 · C1) REINTENTO AMARILLO PARA BOTONES que cargan datos (regla de la dueña: si no carga, se sigue
+// intentando SOLO hasta que cargue, en amarillo). Usa el motor único _nxReintentar (10 s · 30 s · cada 60 s,
+// sin límite). cfg.rehacer() → true = ya cargó. Se detiene si el botón desaparece (cambiaste de pantalla).
+// Un clic tuyo en el botón vuelve a lanzar la carga de siempre (y esa carga apaga este reintento).
+window.nxReintentoBoton=function(clave,btn,cfg){
+  cfg=cfg||{}
+  return window._nxReintentar(clave,{
+    sigueVivo:()=>!!(btn&&btn.isConnected)&&(!cfg.sigueVivo||cfg.sigueVivo()),
+    intentar:async(rt)=>{try{return !!(await cfg.rehacer(rt))}catch(e){cfg.motivo=String((e&&e.message)||e||'').slice(0,60);return false}},
+    alCambiar:(rt)=>{try{if(!btn||!rt.vivo||rt.corriendo)return;btn.disabled=false;btn.style.pointerEvents='';btn.style.opacity='';btn.title='Clic = reintentar ya';btn.textContent=`🟡 No cargó${cfg.motivo?' ('+cfg.motivo+')':''} · reintento ${rt.intento+1} en ${rt.proximoEn} s`}catch(_){}}
+  })
+}
+window.nxReintentoApagar=function(clave){try{const r=window._nxReintentos&&window._nxReintentos[clave];if(r&&r.vivo)r.cancelar(true)}catch(_){}}
 // ═══════════════════════════════════════════════════════════════════════════════════════
 // (23sep26) HASTA QUE CARGUE · piezas comunes para TODAS las cargas de Meta
 // ═══════════════════════════════════════════════════════════════════════════════════════
@@ -25236,7 +25582,7 @@ window._nxGastoOrigenHtml=function(){
   if(e.sinToken)return`<div id="nx-gasto-origen" style="${base}var(--amber);background:var(--amber-bg);color:var(--amber)">🟡 <b>Sin token de Meta</b> · todo el gasto viene del dato guardado</div>`
   const perm=(e.guardadas||[]).filter(g=>g.sinPermiso),caidas=(e.guardadas||[]).filter(g=>!g.sinPermiso)
   const n=e.total-perm.length,permTxt=perm.length?` · <span style="color:var(--muted)">⛔ ${perm.length} sin permiso del token (no se reintenta: Meta no lo deja ver)</span>`:''
-  const btn=`<button class="btn-sm btn-outline" style="padding:2px 8px;font-size:10px" onclick="event.stopPropagation();window._actualizarResumenMetaProductos&&window._actualizarResumenMetaProductos()">🔄 Actualizar resumen</button>`
+  const btn=`<button class="btn-sm btn-outline" style="padding:2px 8px;font-size:10px" onclick="event.stopPropagation();try{window.nxAlm&&window.nxAlm.invalidar(null,'🔄 Actualizar resumen')}catch(_){};window._actualizarResumenMetaProductos&&window._actualizarResumenMetaProductos()">🔄 Actualizar resumen</button>` // 🗄️ (25sep26 · B1) tu 🔄 manual trae TODO fresco (también los días cerrados)
   // OJO: 'recuperado' va ANTES que el 🟢: Meta ya respondió, pero los números pintados siguen siendo del dato guardado
   if(e.recuperado)return`<div id="nx-gasto-origen" style="${base}var(--green);background:var(--green-bg);color:var(--green)">✅ <b>100% · Meta ya respondió</b> · ${n} de ${n} cuentas en vivo · los números de arriba todavía son del dato guardado ${btn}</div>`
   if(!caidas.length)return`<div id="nx-gasto-origen" style="${base}var(--green);background:var(--green-bg);color:var(--green)">🟢 <b>100% en vivo desde Meta</b> · ${e.vivo} de ${n} cuentas${e.dormidas?` · ${e.dormidas} dormidas sin preguntar`:''} · ${e.hora}${e.incluyeHoy?' · mismo dato que el Administrador de Anuncios':''}${permTxt}</div>`
@@ -25296,7 +25642,21 @@ async function _renderResumenProductos(desde,hasta,hoy){
   // (23sep26) ⏱️ CRONÓMETRO POR ETAPA: solo MIDE (no cambia nada). Al final imprime en consola
   // cuánto tardó cada bloque, para saber exactamente dónde se van los minutos.
   const _cr={t0:Date.now(),last:Date.now(),et:[],p0:(window.nxPuerta&&window.nxPuerta.info)?(window.nxPuerta.info().pedidos||0):0} // (25sep26) Parte 1: p0 = pedidos a Supabase al arrancar
-  const _cron=(n)=>{try{const _now=Date.now();_cr.et.push(n+': '+((_now-_cr.last)/1000).toFixed(1)+'s');_cr.last=_now}catch(_){}}
+  const _cron=(n)=>{try{const _now=Date.now();_cr.et.push(n+': '+((_now-_cr.last)/1000).toFixed(1)+'s');_cr.last=_now;_resAvanza(n)}catch(_){}} // (25sep26 · C1) + avanza el % real
+  // (25sep26 · C1) % REAL DEL RESUMEN — son 8 pasos de verdad (los mismos del cronómetro ⏱️). ANTES el % solo
+  // medía el gasto en vivo: llegaba a 100 % y el resumen seguía cargando 5-7 s más. AHORA: 100 % = terminó.
+  // El paso del gasto avanza por dentro cuenta por cuenta. Si es un REINTENTO, la barra va en amarillo 🟡.
+  const _RES_PASOS=['pedidos','gasto Meta','métricas+estados BD','período previo','reportes+conversaciones','antier+trasantier','cuentas+ads','cálculo+armado']
+  const _RES_TXT={'pedidos':'ventas del rango','gasto Meta':'gasto en vivo de Meta','métricas+estados BD':'métricas y estados','período previo':'período anterior','reportes+conversaciones':'reportes y conversaciones','antier+trasantier':'antier y trasantier','cuentas+ads':'cuentas y anuncios','cálculo+armado':'armando el resumen'}
+  let _resHechos=0,_resSub=0
+  const _resPintar=(det)=>{try{
+    const _l=document.querySelector('#meta-resumen-productos .loading');if(!_l)return
+    const _n=_RES_PASOS.length,_k=Math.min(_resHechos,_n),_rein=_l.dataset&&_l.dataset.rein==='1'
+    const _p=_k>=_n?100:Math.min(99,Math.round((_k+Math.max(0,Math.min(_resSub,0.99)))/_n*100)) // 100 SOLO cuando terminaron los 8
+    _l.textContent=_k>=_n?`✅ Resumen listo · 100% ${window._nxBarra(100)}`:`${_rein?'🟡 Reintentando · ':'⏳ '}Resumen por producto · paso ${_k+1} de ${_n}: ${det||_RES_TXT[_RES_PASOS[_k]]} · ${_p}% ${window._nxBarra(_p)}`
+  }catch(_){}}
+  const _resAvanza=(n)=>{const i=_RES_PASOS.indexOf(n);if(i<0)return;if(i+1>_resHechos){_resHechos=i+1;_resSub=0};_resPintar()}
+  _resPintar()
 
   // 1. Traer mapeos del rango (ventas reales por producto)
   const{data:mapeos}=await _sbFetchAll((_f,_t)=>sb.from('mapeos')
@@ -25350,7 +25710,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
     let _nVivo=0,_nBD=0,_ctasN=(cuentasAll||[]).length // (25sep26) Parte 3: _ctasN = cuentas que sí se preguntan
     const _nxCaidas=[] // (23sep26) P2: cuentas que NO respondieron (para marcarlas 🟡 y reintentar)
     // (23sep26) avance 0→100% mientras carga (escribe en el "Cargando resumen…" que puso el llamador)
-    const _nxProgreso=()=>{try{const _l=document.querySelector('#meta-resumen-productos .loading');if(_l){const _h=_nVivo+_nBD,_t=_ctasN||1,_p=Math.round(_h/_t*100);_l.textContent=`⏳ Gasto en vivo de Meta: ${_h} de ${_t} cuentas · ${_p}% ${window._nxBarra(_p)}`}}catch(_){}}
+    // ANTES: const _nxProgreso=()=>{try{const _l=document.querySelector('#meta-resumen-productos .loading');if(_l){const _h=_nVivo+_nBD,_t=_ctasN||1,_p=Math.round(_h/_t*100);_l.textContent=`⏳ Gasto en vivo de Meta: ${_h} de ${_t} cuentas · ${_p}% ${window._nxBarra(_p)}`}}catch(_){}}
+    const _nxProgreso=()=>{try{const _h=_nVivo+_nBD,_t=_ctasN||1;_resSub=_h/_t;_resPintar(`gasto en vivo de Meta (${_h} de ${_t} cuentas)`)}catch(_){}} // (25sep26 · C1) el gasto es el paso 2 de 8: avanza por dentro
     const _conTope=(prom)=>{
       const resta=Math.min(_LIVE_CTA_MS,_LIVE_MAX_MS-(Date.now()-_tLive0))
       if(resta<=0){prom.catch(()=>{});return Promise.reject(new Error('tope de 20s en vivo alcanzado'))}
@@ -25632,6 +25993,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
   const reportesAntierAdIdsListByProd={},reportesTrasAdIdsListByProd={}
   // PARTE 2: fecha representativa de cada día (fin del rango) para buscar el precio vigente de ese día
   const _fechasDiasG={p:hasta,a:hastaPrev,b:null,c:null}
+  // (25sep26 · B2) el historial de precios no depende de antier/trasantier → se pide YA, en paralelo
+  const _pHist=(()=>{try{const _ids=(productos||[]).map(p=>p.id).filter(Boolean);return _ids.length?Promise.resolve(sb.from('producto_precios_historial').select('producto_id,cantidad,precio,costo,vigente_desde,vigente_hasta').in('producto_id',_ids)).catch(e=>({data:null,error:e})):null}catch(_){return null}})()
   if(desdePrev&&hastaPrev&&nDiasRango>0){
     const _mkRango=(refDesde)=>{
       const d=new Date(refDesde+'T00:00:00')
@@ -25643,15 +26006,19 @@ async function _renderResumenProductos(desde,hasta,hoy){
     const _r3=_mkRango(_r2.desde)   // trasantier
     _fechasDiasG.b=_r2.hasta;_fechasDiasG.c=_r3.hasta
     const _cargarDiaExtra=async(rg,mapeosOut,gastoOut,repsOut,convOut,repsListOut)=>{
-      const{data:mp}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('cantidad,producto,estado_final,fecha,ad_id').gte('fecha',rg.desde).lte('fecha',rg.hasta).order('id',{ascending:true}).range(_f,_t))
+      // (25sep26 · B2) antes: 4 consultas UNA TRAS OTRA por bloque. Ahora las 3 tablas A LA VEZ y del
+      // almacén 🗄️ (antier y trasantier son días CERRADOS). Mismas filas, mismo orden, mismos filtros.
+      // ANTES: const{data:mp}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('cantidad,producto,estado_final,fecha,ad_id').gte('fecha',rg.desde).lte('fecha',rg.hasta).order('id',{ascending:true}).range(_f,_t))
+      const[{data:mp},{data:ins},{data:_repsTodos}]=await Promise.all([window.nxAlm.rango('mapeos',rg.desde,rg.hasta),window.nxAlm.rango('insC',rg.desde,rg.hasta),window.nxAlm.rango('reps',rg.desde,rg.hasta)])
       for(const m of (mp||[])){
         const pn=resolveProdName(m.producto).nombre||(m.producto||'Sin producto')
         if(!mapeosOut[pn])mapeosOut[pn]=[]
         mapeosOut[pn].push(m)
       }
-      const{data:ins}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',rg.desde).lte('fecha',rg.hasta).order('id',{ascending:true}).range(_f,_t))
+      // ANTES: const{data:ins}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('meta_id,spend').eq('nivel','campaign').gte('fecha',rg.desde).lte('fecha',rg.hasta).order('id',{ascending:true}).range(_f,_t))
       for(const i of (ins||[])){if(!i.meta_id)continue;gastoOut[String(i.meta_id)]=(gastoOut[String(i.meta_id)]||0)+(i.spend||0)}
-      const{data:reps}=await _sbFetchAll((_f,_t)=>sb.from('reportes_diarios').select('ad_ids,producto_id,producto_nombre,fecha,updated_at').gte('fecha',rg.desde).lte('fecha',rg.hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
+      // ANTES: const{data:reps}=await _sbFetchAll((_f,_t)=>sb.from('reportes_diarios').select('ad_ids,producto_id,producto_nombre,fecha,updated_at').gte('fecha',rg.desde).lte('fecha',rg.hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
+      const reps=(_repsTodos||[]).filter(r=>r.ad_ids!=null&&r.ad_ids!=='') // mismo filtro (ad_ids no vacío), mismo orden
       const _seen=new Set()
       for(const r of (reps||[])){
         const k=(r.fecha||'')+'|'+(r.producto_id||r.producto_nombre||'')
@@ -25663,7 +26030,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
         repsOut[pn]=(repsOut[pn]||0)+ids.length
         if(repsListOut){if(!repsListOut[pn])repsListOut[pn]=[];for(const id of ids)repsListOut[pn].push(id)}
       }
-      const{data:repsC}=await _sbFetchAll((_f,_t)=>sb.from('reportes_diarios').select('conversaciones,conversaciones_aprox,producto_id,producto_nombre,fecha,updated_at').gte('fecha',rg.desde).lte('fecha',rg.hasta).order('updated_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
+      // ANTES: const{data:repsC}=await _sbFetchAll((_f,_t)=>sb.from('reportes_diarios').select('conversaciones,conversaciones_aprox,producto_id,producto_nombre,fecha,updated_at').gte('fecha',rg.desde).lte('fecha',rg.hasta).order('updated_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
+      const repsC=_repsTodos||[] // las mismas filas de reportes (sin filtro), mismo orden
       const _seenC=new Set()
       for(const r of (repsC||[])){
         const k=(r.fecha||'')+'|'+(r.producto_id||r.producto_nombre||'')
@@ -25674,17 +26042,25 @@ async function _renderResumenProductos(desde,hasta,hoy){
         convOut[pn]=(convOut[pn]||0)+((r.conversaciones||r.conversaciones_aprox)||0)
       }
     }
-    await _cargarDiaExtra(_r2,mapeosAntierByProd,gastoAntierByCampId,reportesAntierByProd,conversacionesAntierByProd,reportesAntierAdIdsListByProd)
-    await _cargarDiaExtra(_r3,mapeosTrasByProd,gastoTrasByCampId,reportesTrasByProd,conversacionesTrasByProd,reportesTrasAdIdsListByProd)
+    // (25sep26 · B2) ANTES: antier y luego trasantier, 4 consultas cada uno, UNA TRAS OTRA (≈2,5 s).
+    // AHORA: trasantier termina justo el día antes de antier → las 3 tablas se piden JUNTAS, una vez,
+    // a la vez (+ stock + historial de precios = 5 en paralelo), y cada bloque sale del almacén 🗄️.
+    const _rangosStk=[['p',desde,hasta],['a',desdePrev,hastaPrev],['b',_r2.desde,_r2.hasta],['c',_r3.desde,_r3.hasta]]
+    const _stkMin=_rangosStk.map(x=>x[1]).filter(Boolean).sort()[0]
+    const _stkMax=_rangosStk.map(x=>x[2]).filter(Boolean).sort().slice(-1)[0]
+    const _pStk=(_stkMin&&_stkMax)?window.nxAlm.rango('stock',_stkMin,_stkMax).catch(e=>({data:null,error:e})):null // HOY del stock sale en vivo
+    try{if(window.nxAlm.activo())await Promise.all(['mapeos','insC','reps'].map(t=>window.nxAlm.rango(t,_r3.desde,_r2.hasta)))}catch(_){} // una sola bajada para los 2 bloques
+    await Promise.all([
+      _cargarDiaExtra(_r2,mapeosAntierByProd,gastoAntierByCampId,reportesAntierByProd,conversacionesAntierByProd,reportesAntierAdIdsListByProd),
+      _cargarDiaExtra(_r3,mapeosTrasByProd,gastoTrasByCampId,reportesTrasByProd,conversacionesTrasByProd,reportesTrasAdIdsListByProd)
+    ]) // cada bloque llena SUS propios objetos: pueden ir a la vez sin pisarse
     // 📦 NUEVO: stock al cierre POR DÍA (lo sube el aux en su reporte). Consulta aparte y
     // tolerante: si la columna stock_cierre aún no existe, no rompe nada (chips muestran —).
     window._stockDiaG={p:{},a:{},b:{},c:{}}
     try{
-      const _rangosStk=[['p',desde,hasta],['a',desdePrev,hastaPrev],['b',_r2.desde,_r2.hasta],['c',_r3.desde,_r3.hasta]]
-      const _stkMin=_rangosStk.map(x=>x[1]).filter(Boolean).sort()[0]
-      const _stkMax=_rangosStk.map(x=>x[2]).filter(Boolean).sort().slice(-1)[0]
       if(_stkMin&&_stkMax){
-        const{data:_stkRows,error:_stkErr}=await _sbFetchAll((_f,_t)=>sb.from('reportes_diarios').select('fecha,producto_nombre,stock_cierre,updated_at').gte('fecha',_stkMin).lte('fecha',_stkMax).not('stock_cierre','is',null).order('updated_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
+        // ANTES: const{data:_stkRows,error:_stkErr}=await _sbFetchAll((_f,_t)=>sb.from('reportes_diarios').select('fecha,producto_nombre,stock_cierre,updated_at').gte('fecha',_stkMin).lte('fecha',_stkMax).not('stock_cierre','is',null).order('updated_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t))
+        const{data:_stkRows,error:_stkErr}=await _pStk // (25sep26 · B2) ya venía en camino (en paralelo); días cerrados del almacén + HOY en vivo
         if(!_stkErr)for(const r of (_stkRows||[])){
           const pnS=resolveProdName(r.producto_nombre||'').nombre||(r.producto_nombre||'')
           if(!pnS)continue
@@ -25700,9 +26076,9 @@ async function _renderResumenProductos(desde,hasta,hoy){
   try{
     const _prodIdsHist=(productos||[]).map(p=>p.id).filter(Boolean)
     if(_prodIdsHist.length){
-      const{data:_histRows}=await sb.from('producto_precios_historial')
+      const{data:_histRows}=await (_pHist||sb.from('producto_precios_historial')
         .select('producto_id,cantidad,precio,costo,vigente_desde,vigente_hasta')
-        .in('producto_id',_prodIdsHist)
+        .in('producto_id',_prodIdsHist)) // (25sep26 · B2) ya venía en camino (en paralelo); si no, la consulta de siempre
       for(const r of (_histRows||[])){
         if(r.producto_id==null||r.cantidad==null)continue
         if(!precioHistByProd[r.producto_id])precioHistByProd[r.producto_id]={}
@@ -25794,7 +26170,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
       // Info de campaña (nombre + cuenta) para las que falten
       const _cgInfo={}
       const[_campsRes,_ctasRes]=await Promise.all([ // (25sep26) Parte 1: campañas (por lotes) + cuentas, todo a la vez
-        Promise.all(_lotes(_campsCG,300).map(l=>sb.from('meta_campanas').select('meta_id,account_id,nombre').eq('nivel','campaign').in('meta_id',l))),
+        Promise.all(_lotes(_campsCG,300).map(l=>_sbFetchAll((_f,_t)=>sb.from('meta_campanas').select('meta_id,account_id,nombre').eq('nivel','campaign').in('meta_id',l).order('meta_id',{ascending:true}).range(_f,_t)))), // (25sep26 · B5) paginado con _sbFetchAll: más de 1000 hijos ya no se cortan en silencio
         sb.from('meta_cuentas').select('account_id,nombre')
       ])
       for(const{data:camps}of _campsRes){
@@ -25805,12 +26181,12 @@ async function _renderResumenProductos(desde,hasta,hoy){
       for(const cc of (_ctasB||[]))_accNomB[String(cc.account_id)]=cc.nombre||String(cc.account_id)
       // campaña → adsets
       const _adsetDeCamp={}
-      for(const{data:adsets}of await Promise.all(_lotes(_campsCG,300).map(l=>sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','adset').in('parent_id',l)))){
+      for(const{data:adsets}of await Promise.all(_lotes(_campsCG,300).map(l=>_sbFetchAll((_f,_t)=>sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','adset').in('parent_id',l).order('meta_id',{ascending:true}).range(_f,_t))))){ // (25sep26 · B5) paginado con _sbFetchAll: más de 1000 hijos ya no se cortan en silencio
         for(const s of (adsets||[])){if(s.parent_id)_adsetDeCamp[String(s.meta_id)]=String(s.parent_id)}
       }
       // adsets → ads
       const _asIds=Object.keys(_adsetDeCamp)
-      for(const{data:adsB}of await Promise.all(_lotes(_asIds,300).map(l=>sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','ad').in('parent_id',l)))){
+      for(const{data:adsB}of await Promise.all(_lotes(_asIds,300).map(l=>_sbFetchAll((_f,_t)=>sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','ad').in('parent_id',l).order('meta_id',{ascending:true}).range(_f,_t))))){ // (25sep26 · B5) paginado con _sbFetchAll: más de 1000 hijos ya no se cortan en silencio
         for(const a of (adsB||[])){
           const aid=String(a.meta_id)
           if(adToCuenta[aid])continue // ya clasificado por ventas/reportes: NO tocar
@@ -28109,13 +28485,16 @@ window._rpFueraResolver=async function(slug,silencioso){
   const ids=Object.keys(D.idsMap||{})
   if(!ids.length){if(!silencioso)window._rpFueraAbrirModal(slug);return}
   if(!D.resuelto){
-    if(pill)pill.innerHTML='⏳ resolviendo IDs fuera...'
+    // ANTES: if(pill)pill.innerHTML='⏳ resolviendo IDs fuera...'
+    const _fPinta=()=>{try{if(!pill)return;const _r=ids.filter(id=>window._nexoAdCampCache&&window._nexoAdCampCache[id]).length,_pc=window.nxPctPasos(_r,ids.length);pill.innerHTML=`⏳ resolviendo ${ids.length} ID${ids.length===1?'':'s'} fuera · ${_r} de ${ids.length} · ${_pc}% <span style="font-family:monospace">${window._nxBarra(_pc)}</span>`}catch(_){}} // (25sep26 · C1) % real
+    _fPinta()
     try{
       const tk=await getConfig('meta_access_token')
       if(!tk)throw new Error('Sin token Meta')
       window._nexoAdCampCache=window._nexoAdCampCache||{}
       const faltan=ids.filter(id=>!window._nexoAdCampCache[id])
       for(let i=0;i<faltan.length;i+=50){
+        if(i)_fPinta() // (25sep26 · C1) avanza lote por lote
         const lote=faltan.slice(i,i+50)
         // (23sep26) HASTA QUE CARGUE: lector SEGURO. Antes, si Meta devolvía error (límite, token, un ID muerto en el
         // lote) los 50 IDs quedaban marcados como "malos" para siempre. Ahora solo el ID muerto queda sin campaña;
@@ -28341,7 +28720,9 @@ window._rpResolverSinSync=async function(cid){
   if(!ids.length)return
   try{const _av=res.querySelector('[data-nx-aviso]');if(_av)_av.remove()}catch(_){} // (23sep26) quitar el aviso ⚠️ anterior: antes cada reintento fallido lo anidaba y duplicaba la lista
   const _flatOriginal=res.innerHTML
-  res.innerHTML=`<div style="font-size:11.5px;color:var(--muted);padding:6px 8px">⏳ Buscando en Meta a qué campaña pertenece cada ID...</div>`
+  // ANTES: res.innerHTML=`<div style="font-size:11.5px;color:var(--muted);padding:6px 8px">⏳ Buscando en Meta a qué campaña pertenece cada ID...</div>`
+  const _sPinta=()=>{try{const _r=ids.filter(id=>window._nexoAdCampCache&&window._nexoAdCampCache[id]).length,_pc=window.nxPctPasos(_r,ids.length);res.innerHTML=`<div style="font-size:11.5px;color:var(--muted);padding:6px 8px">⏳ Buscando en Meta a qué campaña pertenece cada ID · ${_r} de ${ids.length} · ${_pc}% <span style="font-family:monospace">${window._nxBarra(_pc)}</span></div>`}catch(_){}} // (25sep26 · C1) % real
+  _sPinta()
   try{
     const tk=await getConfig('meta_access_token')
     if(!tk)throw new Error('Sin token Meta configurado')
@@ -28349,6 +28730,7 @@ window._rpResolverSinSync=async function(cid){
     const faltan=ids.filter(id=>!window._nexoAdCampCache[id])
     // Batch: una sola llamada con todos los IDs que falten (hasta 50 por llamada)
     for(let i=0;i<faltan.length;i+=50){
+      if(i)_sPinta() // (25sep26 · C1) avanza lote por lote
       const lote=faltan.slice(i,i+50)
       // (23sep26) HASTA QUE CARGUE: lector SEGURO (un ID muerto ya no tumba el lote entero; si Meta no responde → error y reintento)
       const j=await window._nxMetaIdsLote(lote,'campaign{id,name},adset{id,name},account_id',tk)
@@ -29441,7 +29823,8 @@ window._rpLifeOverlayTot=function(cidF){
 //   · Gasto → meta_insights (lo que Meta reportó cada día, ya guardado)
 //   · IDs (total órdenes) y ventas confirmadas Dropi → mapeos (regla _nexoClasifVenta)
 //   · ad_id → campaña vía meta_campanas. Filtrado por el producto de la fusión.
-window._rpFusionLifetime=async function(slug,btn){
+window._rpFusionLifetime=async function(slug,btn,_rein){ // (25sep26 · C1) _rein = lo llama el reintento amarillo
+  if(!_rein)try{window.nxReintentoApagar&&window.nxReintentoApagar('lifetime-'+slug)}catch(_){} // un clic tuyo apaga el reintento viejo
   const ctx=window._rpFusionCtx&&window._rpFusionCtx[slug]
   const cidF='cuadf_'+slug
   const sub=document.getElementById(cidF+'-sub')
@@ -29472,7 +29855,8 @@ window._rpFusionLifetime=async function(slug,btn){
     return
   }
   if(typeof sb==='undefined'||!sb){if(btn)btn.textContent='⚠️ Sin conexión';return}
-  if(btn){btn.disabled=true;btn.textContent='⏳ Cargando histórico…'}
+  if(btn){btn.disabled=true;btn.textContent='⏳ Histórico · paso 1 de 5: gasto de siempre · 0%'} // (25sep26 · C1) antes: '⏳ Cargando histórico…' sin %
+  const _lPaso=(k,txt)=>{try{if(btn)btn.textContent=`⏳ Histórico · paso ${k+1} de 5: ${txt} · ${window.nxPctPasos(k,5)}%`}catch(_){}} // (25sep26 · C1)
   const _fmtL=(x)=>(typeof fmt==='function'?fmt(Math.round(x)):String(Math.round(x)))
   const _abL=(g)=>g>=1e6?('$'+(g/1e6).toFixed(3)+'M'):(g>=1000?('$'+Math.round(g/1000)+'k'):('$'+Math.round(g)))
   const _col=(cpa,be)=>(cpa>0&&typeof window._nexoSemColor==='function'&&be>0)?window._nexoSemColor(cpa,be):'var(--subtle)'
@@ -29488,6 +29872,7 @@ window._rpFusionLifetime=async function(slug,btn){
       const{data:ins}=await _sbFetchAll((_f,_t)=>sb.from('meta_insights').select('spend,meta_id').eq('nivel','campaign').in('meta_id',campIds).order('id',{ascending:true}).range(_f,_t))
       for(const r of (ins||[])){const c=String(r.meta_id);gLife[c]=(gLife[c]||0)+(r.spend||0)}
     }
+    _lPaso(1,'campañas y anuncios') // (25sep26 · C1)
     // 2) Mapa ad→campaña (meta_campanas: ad→adset→campaign) + nombres de campaña
     const adsetToCamp={},adToCamp={},_campNombre={}
     // FIX (29jun26): igual que el modo RANGO — partir de las campañas del producto y BAJAR
@@ -29496,14 +29881,14 @@ window._rpFusionLifetime=async function(slug,btn){
     // atribuir (sus órdenes salían en "—"). Filtrando por parent_id siempre trae sus ads completos.
     for(let _i=0;_i<campIds.length;_i+=300){
       const _lote=campIds.slice(_i,_i+300)
-      const{data:_adsetsL}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','adset').in('parent_id',_lote)
+      const{data:_adsetsL}=await _sbFetchAll((_f,_t)=>sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','adset').in('parent_id',_lote).order('meta_id',{ascending:true}).range(_f,_t)) // (25sep26 · B5) paginado con _sbFetchAll: más de 1000 hijos ya no se cortan en silencio
       for(const s of (_adsetsL||[])){if(s.parent_id)adsetToCamp[String(s.meta_id)]=String(s.parent_id)}
       const{data:_campRowsL}=await sb.from('meta_campanas').select('meta_id,nombre').eq('nivel','campaign').in('meta_id',_lote)
       for(const cp of (_campRowsL||[]))_campNombre[String(cp.meta_id)]=cp.nombre||String(cp.meta_id)
     }
     const _asIdsLife=Object.keys(adsetToCamp)
     for(let _i=0;_i<_asIdsLife.length;_i+=300){
-      const{data:_adsBL}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','ad').in('parent_id',_asIdsLife.slice(_i,_i+300))
+      const{data:_adsBL}=await _sbFetchAll((_f,_t)=>sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','ad').in('parent_id',_asIdsLife.slice(_i,_i+300)).order('meta_id',{ascending:true}).range(_f,_t)) // (25sep26 · B5) paginado con _sbFetchAll: más de 1000 hijos ya no se cortan en silencio
       for(const a of (_adsBL||[])){const _cmp=adsetToCamp[String(a.parent_id)];if(_cmp)adToCamp[String(a.meta_id)]=_cmp}
     }
     // REFUERZO: ad_ids ya conocidos de cada fila (data-fadids) → su campaña, por si meta_campanas
@@ -29514,6 +29899,7 @@ window._rpFusionLifetime=async function(slug,btn){
     })
     // 3) Mapeos del producto → órdenes (IDs) y confirmadas Dropi POR campaña (real) + TOTALES REALES
     //    del producto (_gTotIds/_gTotConf cuentan TODAS las órdenes aunque algún anuncio no se mapee).
+    _lPaso(2,'ventas del producto') // (25sep26 · C1)
     const idsLife={},confLife={}
     let _gTotIds=0,_gTotConf=0,_orgIds=0,_orgConf=0
     const _qmF=()=>{let _q=sb.from('mapeos').select('ad_id,estado_final,es_organico');if(prodId)_q=_q.eq('producto_id',prodId);return _q}
@@ -29532,6 +29918,7 @@ window._rpFusionLifetime=async function(slug,btn){
     //     — descubiertas por sus órdenes de este producto (mapeos) y por la fusión (filas visibles).
     //     Así el total de la barra cuadra con Meta Ads filtrando por el producto (incluye las que
     //     gastaron y vendieron 0). Solo suma el gasto que aún no se contó (no duplica campaign_ids).
+    _lPaso(3,'gasto de campañas extra') // (25sep26 · C1)
     const _domCampIds=[];sub.querySelectorAll('.rp-fus-row[data-fcampid]').forEach(row=>{const c=String(row.dataset.fcampid||'');if(c)_domCampIds.push(c)})
     const _setCamp=new Set(campIds)
     const _extraCamps=[...new Set([...Object.keys(idsLife),..._domCampIds])].filter(c=>c&&!_setCamp.has(c))
@@ -29542,6 +29929,7 @@ window._rpFusionLifetime=async function(slug,btn){
         for(const r of (_insX||[])){const c=String(r.meta_id);gLife[c]=(gLife[c]||0)+(r.spend||0)}
       }
     }
+    _lPaso(4,'pintando') // (25sep26 · C1)
     // Builders del HTML de celda (mismo formato visual que el render normal)
     const _itotH=(ids,g)=>{
       const cI=(ids>0&&g>0)?Math.round(g/ids):0,cE=(ids>0&&g>0)?Math.round(g/(ids*pctConf)):0
@@ -29691,7 +30079,13 @@ window._rpFusionLifetime=async function(slug,btn){
     _bar.innerHTML+='<span onclick="event.stopPropagation();window._rpSyncEstructuraProducto(\''+slug+'\',this)" style="margin-left:8px;display:inline-flex;align-items:center;gap:5px;background:rgba(34,211,238,.10);border:1px solid #22d3ee;border-radius:7px;padding:4px 11px;font-size:11px;font-weight:800;color:#22d3ee;cursor:pointer;flex-shrink:0" title="Trae de Meta la estructura (anuncio→conjunto→campaña) de las campañas VIEJAS de este producto y la guarda, para que sus órdenes se atribuyan y la suma de filas cuadre con el total de arriba. Córrelo UNA vez; después usa 🔄 Sync gasto.">🏗️ Sync estructura</span>'
     sub.parentNode.insertBefore(_bar,sub)
     if(btn){btn.disabled=false;btn.dataset.lifeOn='1';btn.textContent='✅ Lifetime real (clic = apagar)';btn.style.background='rgba(134,239,172,.15)';btn.style.borderColor='var(--green)';btn.style.color='var(--green)'}
-  }catch(e){console.warn('lifetime error',e);if(btn){btn.disabled=false;btn.textContent='⚠️ Error — reintentar'}}
+  }catch(e){console.warn('lifetime error',e);if(btn){btn.disabled=false;btn.textContent='⚠️ Error — reintentar'}
+    // (25sep26 · C1) 🟡 se sigue intentando SOLO hasta que cargue (10 s · 30 s · cada 60 s), mientras veas el producto
+    if(_rein)throw e
+    if(btn&&window.nxReintentoBoton)window.nxReintentoBoton('lifetime-'+slug,btn,{motivo:String((e&&e.message)||'').slice(0,60),
+      sigueVivo:()=>btn.dataset.lifeOn!=='1',
+      rehacer:async()=>{await window._rpFusionLifetime(slug,btn,true);return btn.dataset.lifeOn==='1'}})
+  }
 }
 
 // ★ NUEVO (3jul26) · SYNC INCREMENTAL MANUAL — misma marca de agua (watermark) de los lunes.
@@ -29794,15 +30188,19 @@ window.runSyncIncremental=async function(btn){
 // ════════ SYNC GASTO (botón de la barra lifetime) → Edge Function meta-sync-nocturno ════════
 // Trae de Meta el gasto histórico real de CADA campaña del producto (sin importar la cuenta)
 // y lo guarda en meta_insights. Al terminar, recarga el lifetime para que el total cuadre con Meta.
-window._rpSyncGastoProducto=async function(slug,btn){
+window._rpSyncGastoProducto=async function(slug,btn,_rein){ // (25sep26 · C1) _rein = lo llama el reintento amarillo
+  if(!_rein)try{window.nxReintentoApagar&&window.nxReintentoApagar('syncgasto-'+slug)}catch(_){}
   const ctx=window._rpFusionCtx&&window._rpFusionCtx[slug]
   if(!ctx){if(btn)btn.textContent='⚠️ Abre la fusión primero';return}
   if(typeof sb==='undefined'||!sb){if(btn)btn.textContent='⚠️ Sin conexión';return}
   if(!ctx.prodId){if(btn)btn.textContent='⚠️ Producto sin ID';return}
-  if(btn){btn.dataset._t=btn.textContent;btn.style.pointerEvents='none';btn.style.opacity='.7';btn.textContent='⏳ Trayendo gasto de Meta…'}
+  if(btn){if(!_rein||!btn.dataset._t)btn.dataset._t=btn.textContent;btn.style.pointerEvents='none';btn.style.opacity='.7';btn.textContent='⏳ Trayendo gasto de Meta…'}
+  // (25sep26 · C1) 2 pasos reales: 1) el servidor le pide a Meta (se ven los segundos: no se puede medir por dentro) · 2) recargar el histórico
+  const _t0G=Date.now(),_segG=setInterval(()=>{try{if(btn)btn.textContent=`⏳ Paso 1 de 2: el servidor trae el gasto de Meta · ${Math.round((Date.now()-_t0G)/1000)} s · 0%`}catch(_){}},1000)
   try{
-    const{data,error}=await sb.functions.invoke('meta-sync-nocturno',{body:{modo:'gasto',producto_id:ctx.prodId}})
+    const{data,error}=await sb.functions.invoke('meta-sync-nocturno',{body:{modo:'gasto',producto_id:ctx.prodId}}).finally(()=>clearInterval(_segG))
     if(error)throw error
+    if(btn)btn.textContent='⏳ Paso 2 de 2: recargando el histórico · 50%' // (25sep26 · C1)
     // Recargar el lifetime con el gasto fresco: apagar y volver a prender (re-consulta meta_insights)
     const lifeBtn=document.querySelector('[onclick*="_rpFusionLifetime(\''+slug+'\'"]')
     if(lifeBtn&&lifeBtn.dataset.lifeOn==='1'){
@@ -29810,29 +30208,47 @@ window._rpSyncGastoProducto=async function(slug,btn){
       await window._rpFusionLifetime(slug,lifeBtn)
     }
     if(btn){btn.style.pointerEvents='';btn.style.opacity='';btn.textContent='✅ Gasto sincronizado';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}
-  }catch(e){console.warn('sync gasto error',e);if(btn){btn.style.pointerEvents='';btn.style.opacity='';btn.textContent='⚠️ Error — reintentar';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}}
+  }catch(e){console.warn('sync gasto error',e);clearInterval(_segG)
+    // ANTES: if(btn){...btn.textContent='⚠️ Error — reintentar';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}
+    // (25sep26 · C1) 🟡 reintento SOLO (10 s · 30 s · cada 60 s) mientras veas el producto; clic = ya
+    if(btn){btn.style.pointerEvents='';btn.style.opacity=''}
+    if(_rein)throw e
+    if(btn&&window.nxReintentoBoton)window.nxReintentoBoton('syncgasto-'+slug,btn,{motivo:String((e&&e.message)||'').slice(0,60),rehacer:async()=>{await window._rpSyncGastoProducto(slug,btn,true);return true}})
+    else if(btn){btn.textContent='⚠️ Error — reintentar';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}
+  }
 }
 
 // ════════ SYNC ESTRUCTURA (botón de la barra lifetime) → Edge Function meta-sync-nocturno (modo estructura) ════════
 // Rellena meta_campanas con el árbol ad→adset→campaign de las campañas VIEJAS del producto (las que no
 // corrieron en los días visibles), tomando los ad_id de mapeos que aún no están mapeados. Después de esto,
 // cada orden se atribuye a su campaña → la suma de filas cuadra con el total de arriba. Correr UNA vez.
-window._rpSyncEstructuraProducto=async function(slug,btn){
+window._rpSyncEstructuraProducto=async function(slug,btn,_rein){ // (25sep26 · C1) _rein = lo llama el reintento amarillo
+  if(!_rein)try{window.nxReintentoApagar&&window.nxReintentoApagar('syncestr-'+slug)}catch(_){}
   const ctx=window._rpFusionCtx&&window._rpFusionCtx[slug]
   if(!ctx){if(btn)btn.textContent='⚠️ Abre la fusión primero';return}
   if(typeof sb==='undefined'||!sb){if(btn)btn.textContent='⚠️ Sin conexión';return}
   if(!ctx.prodId){if(btn)btn.textContent='⚠️ Producto sin ID';return}
-  if(btn){btn.dataset._t=btn.textContent;btn.style.pointerEvents='none';btn.style.opacity='.7';btn.textContent='⏳ Trayendo estructura…'}
+  if(btn){if(!_rein||!btn.dataset._t)btn.dataset._t=btn.textContent;btn.style.pointerEvents='none';btn.style.opacity='.7';btn.textContent='⏳ Trayendo estructura…'}
+  // (25sep26 · C1) 2 pasos reales: 1) el servidor le pide a Meta (se ven los segundos) · 2) recargar el histórico
+  const _t0E=Date.now(),_segE=setInterval(()=>{try{if(btn)btn.textContent=`⏳ Paso 1 de 2: el servidor trae la estructura · ${Math.round((Date.now()-_t0E)/1000)} s · 0%`}catch(_){}},1000)
   try{
-    const{data,error}=await sb.functions.invoke('meta-sync-nocturno',{body:{modo:'estructura',producto_id:ctx.prodId}})
+    const{data,error}=await sb.functions.invoke('meta-sync-nocturno',{body:{modo:'estructura',producto_id:ctx.prodId}}).finally(()=>clearInterval(_segE))
     if(error)throw error
+    if(btn)btn.textContent='⏳ Paso 2 de 2: recargando el histórico · 50%' // (25sep26 · C1)
     const _r=(data&&data.estructura)||{}
     const _msg='✅ '+(_r.resueltos!=null?_r.resueltos:0)+' anuncios mapeados'
     // recargar el lifetime para que las campañas viejas ya muestren sus órdenes (apagar y volver a prender)
     const lifeBtn=document.querySelector('[onclick*="_rpFusionLifetime(\''+slug+'\'"]')
     if(lifeBtn&&lifeBtn.dataset.lifeOn==='1'){await window._rpFusionLifetime(slug,lifeBtn);await window._rpFusionLifetime(slug,lifeBtn)}
     if(btn){btn.style.pointerEvents='';btn.style.opacity='';btn.textContent=_msg;setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},4000)}
-  }catch(e){console.warn('sync estructura error',e);if(btn){btn.style.pointerEvents='';btn.style.opacity='';btn.textContent='⚠️ Error — reintentar';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}}
+  }catch(e){console.warn('sync estructura error',e);clearInterval(_segE)
+    // ANTES: if(btn){...btn.textContent='⚠️ Error — reintentar';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}
+    // (25sep26 · C1) 🟡 reintento SOLO (10 s · 30 s · cada 60 s) mientras veas el producto; clic = ya
+    if(btn){btn.style.pointerEvents='';btn.style.opacity=''}
+    if(_rein)throw e
+    if(btn&&window.nxReintentoBoton)window.nxReintentoBoton('syncestr-'+slug,btn,{motivo:String((e&&e.message)||'').slice(0,60),rehacer:async()=>{await window._rpSyncEstructuraProducto(slug,btn,true);return true}})
+    else if(btn){btn.textContent='⚠️ Error — reintentar';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}
+  }
 }
 // desglose, la fila queda fija justo debajo de encabezados + Σ TOTALES (que ya son sticky),
 // así siempre se ve EN QUÉ campaña estás sin subir. Al cerrar el desglose se suelta sola, y
@@ -30092,7 +30508,11 @@ window._rpRangoGlobalLoad=async function(force){
     const _slugsG=Object.keys(_ctxAll)
     if(!_slugsG.length)return // las cards aún no exponen sus campañas; el vigilante reintenta
     cont.dataset.loading='1'
-    cont.innerHTML='<div style="font-size:10.5px;color:var(--purple);padding:2px">⏳ Armando el rango global (últimos '+(window.nxRangoDias?window.nxRangoDias():8)+' días · todos los productos)…</div>'
+    // ANTES: cont.innerHTML='<div style="font-size:10.5px;color:var(--purple);padding:2px">⏳ Armando el rango global (últimos '+(window.nxRangoDias?window.nxRangoDias():8)+' días · todos los productos)…</div>'
+    // (25sep26 · C1) 5 pasos REALES con %. Si viene de un fallo (reintento), va en AMARILLO 🟡.
+    const _gRein=(parseInt(cont.dataset.errores)||0)>0
+    const _gPaso=(k,txt,sub)=>{try{if(!cont.isConnected)return;const _n=5,_p=Math.min(99,Math.round((k+Math.max(0,Math.min(sub||0,0.99)))/_n*100));cont.innerHTML='<div style="font-size:10.5px;color:'+(_gRein?'var(--amber)':'var(--purple)')+';padding:2px">'+(_gRein?'🟡 Reintentando · ':'⏳ ')+'Armando el rango global (últimos '+(window.nxRangoDias?window.nxRangoDias():8)+' días · todos los productos) · paso '+(k+1)+' de '+_n+': '+txt+' · '+_p+'% <span style="font-family:monospace">'+window._nxBarra(_p)+'</span></div>'}catch(_){}}
+    _gPaso(0,'ventas')
     // Rango: últimos 8 días (mismo atajo de las cards) — HOY primero
     const _isoG=(d)=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
     const _dH=new Date(),_dD=new Date();_dD.setDate(_dD.getDate()-((window.nxRangoDias?window.nxRangoDias():8)-1)) // 🎚️ perilla única (antes -7 fijo)
@@ -30108,7 +30528,7 @@ window._rpRangoGlobalLoad=async function(force){
     }
     const _campsG=Object.keys(_campSetG)
     // 1) Ventas confirmadas del rango (filtros canónicos) — global por día y por producto/día
-    const{data:mpG}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('cantidad,producto,estado_final,fecha').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+    const{data:mpG}=await window.nxAlm.rango('mapeos',desde,hasta) // 🗄️ (25sep26 · B1) el mismo almacén que los productos (HOY en vivo)
     const _vDiaG={},_vProdDiaG={}
     for(const m of (mpG||[])){
       if(!m.estado_final||m.estado_final==='CANCELADO'||m.estado_final==='RECHAZADO'||m.estado_final==='GUIA_ANULADA'||m.estado_final==='PENDIENTE CONFIRMACION')continue
@@ -30120,10 +30540,11 @@ window._rpRangoGlobalLoad=async function(force){
       const q=parseInt(m.cantidad)||1
       if(q<=1)D.o1++;else if(q===2)D.o2++;else if(q===3)D.o3++;else D.o4++
     }
+    _gPaso(1,'conversaciones e IDs') // (25sep26 · C1)
     // 2) Conversaciones 💬 e IDs 🆔 por día (último reporte por fecha+producto manda) — TODOS los productos
     const _cvDiaG={},_idsDiaG={},_cvProdDiaG={}
     try{
-      const{data:repsG}=await sb.from('reportes_diarios').select('fecha,conversaciones,conversaciones_aprox,ad_ids,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
+      const{data:repsG}=await window.nxAlm.rango('reps',desde,hasta) // 🗄️ (25sep26 · B1) el mismo almacén que los productos (HOY en vivo)
       const _seenG=new Set()
       for(const r of (repsG||[])){
         const kG=(r.fecha||'')+'|'+(r.producto_id||r.producto_nombre||'')
@@ -30137,12 +30558,14 @@ window._rpRangoGlobalLoad=async function(force){
         for(const idA of (r.ad_ids||'').split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5))_idsDiaG[r.fecha]=(_idsDiaG[r.fecha]||0)+1
       }
     }catch(_){}
+    _gPaso(2,'gasto guardado por día') // (25sep26 · C1)
     // 3) Gasto por día — meta_insights de las campañas CON producto (lotes de 300)
     const _gDiaG={}
     for(let i=0;i<_campsG.length;i+=300){
-      const{data:insG}=await sb.from('meta_insights').select('fecha,spend').eq('nivel','campaign').in('meta_id',_campsG.slice(i,i+300)).gte('fecha',desde).lte('fecha',hasta)
+      const{data:insG}=await window.nxAlm.porIds('campaign',_campsG.slice(i,i+300),desde,hasta) // 🗄️ (25sep26 · B1+B5) almacén + HOY en vivo · paginado (300 campañas × 8 días ya no se corta en 1000)
       for(const r of (insG||[]))_gDiaG[r.fecha]=(_gDiaG[r.fecha]||0)+(r.spend||0)
     }
+    _gPaso(3,'gasto de HOY en vivo') // (25sep26 · C1)
     // 4) Gasto de HOY en VIVO (batch ?ids= — objeto plano, fetch directo). Fallback: BD.
     let _vivoOkG=false
     try{
@@ -30151,6 +30574,7 @@ window._rpRangoGlobalLoad=async function(force){
         let gV=0
         const tr=encodeURIComponent(JSON.stringify({since:_hoyG,until:_hoyG}))
         for(let i=0;i<_campsG.length;i+=50){
+          _gPaso(3,'gasto de HOY en vivo ('+Math.min(i+50,_campsG.length)+' de '+_campsG.length+' campañas)',i/Math.max(1,_campsG.length)) // (25sep26 · C1) avanza lote por lote
           const lote=_campsG.slice(i,i+50)
           const u=`${META_BASE}/?ids=${encodeURIComponent(lote.join(','))}&fields=insights.time_range(${tr}){spend}&access_token=${tk}`
           const rp=await _nxFetchTope(u,20000) // (25sep26) Parte 4: antes fetch(u) sin tope (podía quedarse colgado)
@@ -30161,6 +30585,7 @@ window._rpRangoGlobalLoad=async function(force){
         if(_vivoOkG)_gDiaG[_hoyG]=Math.max(_gDiaG[_hoyG]||0,gV)
       }
     }catch(_eG){console.warn('[rango global] gasto vivo HOY falló, se usa BD:',_eG&&_eG.message)}
+    _gPaso(4,'calculando la ganancia') // (25sep26 · C1)
     // 5) 💰 Ganancia por día = Σ productos (misma fórmula del Dashboard con la economía de cada uno) − gasto global del día
     const _ganDiaG={},_ganOkDiaG={}
     for(const K of Object.keys(_vProdDiaG)){
@@ -30282,12 +30707,12 @@ window._rpFusionRefreshSem=async function(slug,btn){
     const camps=ctx.campIds.map(String)
     const _asSet={},_adIdsRS=[]
     for(let i=0;i<camps.length;i+=300){
-      const{data:asR}=await sb.from('meta_campanas').select('meta_id').eq('nivel','adset').in('parent_id',camps.slice(i,i+300))
+      const{data:asR}=await _sbFetchAll((_f,_t)=>sb.from('meta_campanas').select('meta_id').eq('nivel','adset').in('parent_id',camps.slice(i,i+300)).order('meta_id',{ascending:true}).range(_f,_t)) // (25sep26 · B5) paginado con _sbFetchAll: más de 1000 hijos ya no se cortan en silencio
       for(const s of (asR||[]))_asSet[String(s.meta_id)]=1
     }
     const _asKeysRS=Object.keys(_asSet)
     for(let i=0;i<_asKeysRS.length;i+=300){
-      const{data:adR}=await sb.from('meta_campanas').select('meta_id').eq('nivel','ad').in('parent_id',_asKeysRS.slice(i,i+300))
+      const{data:adR}=await _sbFetchAll((_f,_t)=>sb.from('meta_campanas').select('meta_id').eq('nivel','ad').in('parent_id',_asKeysRS.slice(i,i+300)).order('meta_id',{ascending:true}).range(_f,_t)) // (25sep26 · B5) paginado con _sbFetchAll: más de 1000 hijos ya no se cortan en silencio
       for(const a of (adR||[]))_adIdsRS.push(String(a.meta_id))
     }
     if(!_adIdsRS.length){if(btn){btn.disabled=false;btn.textContent=_txtOrig}alert('No encontré anuncios en las campañas de este producto');return}
@@ -30369,10 +30794,11 @@ window._rpFusionRango=async function(slug,cidF){
     if(!camps.length){_setSt('⚠️ El producto no tiene campañas configuradas','var(--amber)');return}
     // Parte 3 (24sep26): aviso AMARILLO con % de avance (regla fija) — antes era morado fijo sin %
     const _nxPend=()=>{try{const _c=document.getElementById(cidF+'-rango');return !!(_c&&((_c.dataset.fsem||'')||(_c.dataset.festado||'')||(_c.dataset.fvsv||'')||(_c.dataset.fid||'')||(_c.dataset.fdia||'')))}catch(_){return false}}
-    const _prog=(p,t)=>_setSt(`⏳ Cargando ${_nDias} día${_nDias===1?'':'s'}… ${p}% · ${t}${_nxPend()?' · el filtro se aplica al terminar':''}`,'var(--amber)')
+    const _prog=(p,t)=>_setSt(`⏳ Cargando ${_nDias} día${_nDias===1?'':'s'}… ${p}% · ${t}${_nxPend()?' · el filtro se aplica al terminar':''}${(st&&st.dataset&&st.dataset.lento==='1')?' · va lento (más de 2 min), se espera':''}`,'var(--amber)') // (25sep26 · C1) + aviso "va lento" sin tapar el %
     _prog(5,'ventas')
     // 1) Ventas confirmadas del producto en el rango (mismos filtros canónicos de _mkCuadre)
-    const{data:mp,error:eMp}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('id,cantidad,producto,estado_final,fecha,ad_id,telefono,numero_guia').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+    // ANTES: const{data:mp,error:eMp}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('id,cantidad,producto,estado_final,fecha,ad_id,telefono,numero_guia').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+    const{data:mp,error:eMp}=await window.nxAlm.rango('mapeos',desde,hasta) // 🗄️ (25sep26 · B1) días cerrados del almacén + HOY en vivo (mismas filas, mismo orden)
     if(eMp)throw eMp
     const _conf=[]
     for(const m of (mp||[])){
@@ -30385,13 +30811,13 @@ window._rpFusionRango=async function(slug,cidF){
     // 2) Estructura de las campañas elegidas: adsets → ads (para clasificar ventas y ver ads sin venta)
     const _adsetDeCamp={}
     for(let i=0;i<camps.length;i+=300){
-      const{data:adsets}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','adset').in('parent_id',camps.slice(i,i+300))
+      const{data:adsets}=await _sbFetchAll((_f,_t)=>sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','adset').in('parent_id',camps.slice(i,i+300)).order('meta_id',{ascending:true}).range(_f,_t)) // (25sep26 · B5) paginado con _sbFetchAll: más de 1000 hijos ya no se cortan en silencio
       for(const s of (adsets||[])){if(s.parent_id)_adsetDeCamp[String(s.meta_id)]=String(s.parent_id)}
     }
     const _asIds=Object.keys(_adsetDeCamp)
     const _adDeCamp={}
     for(let i=0;i<_asIds.length;i+=300){
-      const{data:adsB}=await sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','ad').in('parent_id',_asIds.slice(i,i+300))
+      const{data:adsB}=await _sbFetchAll((_f,_t)=>sb.from('meta_campanas').select('meta_id,parent_id').eq('nivel','ad').in('parent_id',_asIds.slice(i,i+300)).order('meta_id',{ascending:true}).range(_f,_t)) // (25sep26 · B5) paginado con _sbFetchAll: más de 1000 hijos ya no se cortan en silencio
       for(const a of (adsB||[])){const cmp=_adsetDeCamp[String(a.parent_id)];if(cmp)_adDeCamp[String(a.meta_id)]=cmp}
     }
     // NUEVO RANGO+: conversaciones 💬 e IDs del aux 🆔 POR DÍA desde reportes_diarios
@@ -30399,7 +30825,7 @@ window._rpFusionRango=async function(slug,cidF){
     // si pertenecen a las campañas del rango (misma filosofía del cuadre).
     const _convDiaR={},_idsDiaR={},_idsCampDiaRg={},_idsAdDiaRg={}
     try{
-      const{data:_repsR}=await sb.from('reportes_diarios').select('fecha,conversaciones,conversaciones_aprox,ad_ids,producto_id,producto_nombre,updated_at').gte('fecha',desde).lte('fecha',hasta).order('updated_at',{ascending:false})
+      const{data:_repsR}=await window.nxAlm.rango('reps',desde,hasta) // 🗄️ (25sep26 · B1) antes: reportes_diarios del rango completo en cada producto (y sin paginar)
       // FIX (6jul26 · Mejora 5): IDs del aux HUÉRFANOS resueltos EN VIVO. Cuando la campaña de
       // testeo se asigna en la mañana y los IDs se suben a mediodía, esos anuncios muchas veces
       // AÚN no están en meta_campanas (el sync de estructura no ha corrido) → _adDeCamp no los
@@ -30458,7 +30884,7 @@ window._rpFusionRango=async function(slug,cidF){
     // 📦 NUEVO RANGO: stock al cierre por fecha (consulta aparte y tolerante a columna ausente)
     const _stkDiaRg={}
     try{
-      const{data:_stkR,error:_stkER}=await sb.from('reportes_diarios').select('fecha,producto_nombre,stock_cierre,updated_at').gte('fecha',desde).lte('fecha',hasta).not('stock_cierre','is',null).order('updated_at',{ascending:false})
+      const{data:_stkR,error:_stkER}=await window.nxAlm.rango('stock',desde,hasta) // 🗄️ (25sep26 · B1) antes: consulta completa en cada producto
       if(!_stkER)for(const r of (_stkR||[])){
         const pnK=(window.resolveProdName?window.resolveProdName(r.producto_nombre||'').nombre:(r.producto_nombre||''))||(r.producto_nombre||'')
         if(pnK!==ctx.nombre)continue
@@ -30472,7 +30898,7 @@ window._rpFusionRango=async function(slug,cidF){
       const{data:cRows}=await sb.from('meta_campanas').select('meta_id,account_id,nombre').eq('nivel','campaign').in('meta_id',camps.slice(i,i+300))
       for(const cp of (cRows||[]))_cInfo[String(cp.meta_id)]={nombre:cp.nombre||String(cp.meta_id),acc:cp.account_id?String(cp.account_id):''}
     }
-    const{data:_ctasR}=await sb.from('meta_cuentas').select('account_id,nombre')
+    const{data:_ctasR}=await window.nxAlm.cuentas() // 🗄️ (25sep26 · B1) nombres de cuentas: una vez, no en cada producto
     const _accNomR={}
     for(const cc of (_ctasR||[]))_accNomR[String(cc.account_id)]=cc.nombre||String(cc.account_id)
     _prog(55,'gasto por día')
@@ -30482,7 +30908,7 @@ window._rpFusionRango=async function(slug,cidF){
     const _cvAdDia={} // NUEVO (3jul26): adId → {fecha: conversaciones Meta} — para CPA META / CONV / CONV/VTA del detalle
     const _mtAdDia={} // NUEVO (3jul26): adId → {fecha: {imp,reach,uoclk}} — para CLI/CON · CTR · CPC · CPM · FREC del detalle
     for(let i=0;i<_adIdsAll.length;i+=300){
-      const{data:insA}=await sb.from('meta_insights').select('meta_id,fecha,spend,conversions,impressions,reach,unique_clicks,unique_outbound_clicks').eq('nivel','ad').in('meta_id',_adIdsAll.slice(i,i+300)).gte('fecha',desde).lte('fecha',hasta)
+      const{data:insA}=await window.nxAlm.porIds('ad',_adIdsAll.slice(i,i+300),desde,hasta) // 🗄️ (25sep26 · B1+B5) días cerrados del almacén + HOY en vivo · paginado (antes 300 anuncios × 8 días se cortaba en 1000)
       for(const r of (insA||[])){
         const id=String(r.meta_id);if(!_gAdDia[id])_gAdDia[id]={}
         _gAdDia[id][r.fecha]=(_gAdDia[id][r.fecha]||0)+(r.spend||0)
@@ -30498,7 +30924,7 @@ window._rpFusionRango=async function(slug,cidF){
     const _mtCampDia={} // NUEVO (3jul26): campId → {fecha: {imp,reach,uoclk}} — para CLI/CON · CTR · CPC · CPM · FREC del detalle
     const _accByCampIns={} // campId → account_id (de insights; cubre campañas recientes no sincronizadas a meta_campanas)
     for(let i=0;i<camps.length;i+=300){
-      const{data:insC}=await sb.from('meta_insights').select('meta_id,fecha,spend,account_id,conversions,impressions,reach,unique_clicks,unique_outbound_clicks').eq('nivel','campaign').in('meta_id',camps.slice(i,i+300)).gte('fecha',desde).lte('fecha',hasta)
+      const{data:insC}=await window.nxAlm.porIds('campaign',camps.slice(i,i+300),desde,hasta) // 🗄️ (25sep26 · B1+B5) días cerrados del almacén + HOY en vivo · paginado
       for(const r of (insC||[])){
         const id=String(r.meta_id);if(!_gCampDia[id])_gCampDia[id]={}
         _gCampDia[id][r.fecha]=(_gCampDia[id][r.fecha]||0)+(r.spend||0)
@@ -31368,9 +31794,24 @@ window._rpFusionRango=async function(slug,cidF,_reintento){
   if(!_reintento)I[cidF]=0
   const st=document.getElementById(cidF+'-rango-status')
   const _txt=()=>String((st&&st.textContent)||'').trim()
+  if(st&&st.dataset)delete st.dataset.lento // (25sep26 · C1) turno nuevo: se borra la marca de "va lento"
   const _relanzar=(ms,motivo)=>{
     if(T[cidF]!==turno)return // ya hay un turno más nuevo (un clic tuyo): este vigilante se calla
     I[cidF]=(I[cidF]||0)+1
+    // (25sep26 · C1) REGLA DE LA DUEÑA: "si un dato no llega, se sigue intentando HASTA QUE CARGUE, en amarillo".
+    // ANTES: a los 5 intentos paraba con ❌ rojo y había que darle a mano. AHORA: 3 · 6 · 12 · 24 · 30 s y luego
+    // cada 60 s SIN límite, con la cuenta atrás viva y 🔄 Ahora. (El bloque viejo de abajo queda apagado.)
+    if(I[cidF]>0){
+      const _ms=I[cidF]>5?60000:ms,_fin=Date.now()+_ms
+      if(st){
+        st.style.color='var(--amber)'
+        let _tk=null
+        const _pinta=()=>{if(T[cidF]!==turno){if(_tk)clearInterval(_tk);return};const _sg=Math.max(0,Math.ceil((_fin-Date.now())/1000));st.innerHTML=`🟡 ${motivo} · reintentando solo, sin parar · intento ${I[cidF]} · próximo en <b>${_sg} s</b> <button onclick="event.stopPropagation();window._rpFusionRango('${slug}','${cidF}')" style="margin-left:6px;background:var(--amber-bg);border:1px solid var(--amber);border-radius:5px;color:var(--amber);font-size:10.5px;font-weight:700;padding:1px 9px;cursor:pointer" title="Vuelve a lanzar la carga del rango YA, con las mismas fechas">🔄 Ahora</button>`}
+        _pinta();_tk=setInterval(_pinta,1000);setTimeout(()=>{if(_tk)clearInterval(_tk)},_ms+1500)
+      }
+      setTimeout(()=>{if(T[cidF]===turno)window._rpFusionRango(slug,cidF,true)},_ms)
+      return
+    }
     if(I[cidF]>5){
       if(st){st.style.color='var(--red)';st.innerHTML=`❌ Meta/Supabase no respondieron en 5 intentos. <button onclick="event.stopPropagation();window._rpFusionRango('${slug}','${cidF}')" style="margin-left:6px;background:var(--red-bg);border:1px solid var(--red);border-radius:5px;color:var(--red);font-size:10.5px;font-weight:700;padding:1px 9px;cursor:pointer" title="Vuelve a lanzar la carga del rango con las mismas fechas (no hay que llenarlas otra vez)">🔄 Reintentar</button>`}
       return
@@ -31378,7 +31819,7 @@ window._rpFusionRango=async function(slug,cidF,_reintento){
     if(st){st.style.color='var(--amber)';st.textContent=`⏳ ${motivo} · reintentando solo (${I[cidF]} de 5) en ${Math.round(ms/1000)} s…`}
     setTimeout(()=>{if(T[cidF]===turno)window._rpFusionRango(slug,cidF,true)},ms)
   }
-  const reloj=setTimeout(()=>{if(T[cidF]===turno&&!/^[✅⚠❌]/.test(_txt())&&st){st.style.color='var(--amber)';st.textContent='⏳ Sigue cargando (más de 2 minutos)… se espera a que termine; si falla, se reintenta solo'}},120000) // (25sep26) Parte 4: sin relanzar encima
+  const reloj=setTimeout(()=>{if(T[cidF]===turno&&!/^[✅⚠❌]/.test(_txt())&&st){st.dataset.lento='1';const _pv=(/(\d+)%/.exec(_txt())||[])[1];st.style.color='var(--amber)';st.textContent='⏳ Sigue cargando'+(_pv?' · va en '+_pv+'%':'')+' (más de 2 minutos)… se espera a que termine; si falla, se reintenta solo'}},120000) // (25sep26) Parte 4: sin relanzar encima · (25sep26 · C1) ya no borra el %
   try{await window._rpFusionRangoMotor(slug,cidF)}catch(_){}
   clearTimeout(reloj)
   if(T[cidF]!==turno)return
@@ -31449,6 +31890,7 @@ function _resumenFechaLabel(desde,hasta,hoy){
 window._actualizarResumenMetaProductos=async function(){
   const cont=document.getElementById('meta-resumen-productos')
   if(!cont)return
+  try{const _rr=window._nxReintentos&&window._nxReintentos['resumen-productos'];if(_rr&&_rr.vivo)_rr.cancelar(true)}catch(_){} // (25sep26 · C1) una carga nueva apaga el reintento viejo
   // MEJORA 7 (3jul26): los inputs viven DENTRO del resumen → mientras está en "Cargando..." no
   // existen. Fallback al rango persistido en window._metaRangoSel (no se pierde el rango elegido).
   const desde=document.getElementById('meta-desde')?.value||window._metaRangoSel?.desde||today()
@@ -31464,7 +31906,30 @@ window._actualizarResumenMetaProductos=async function(){
   }catch(e){
     console.warn('[resumen productos]',e?.message)
     // NUEVO AVISO DE CARGA: antes quedaba VACÍO en silencio — ahora avisa y deja reintentar de una
-    cont.innerHTML=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 12px;background:var(--red-bg);border:1px solid var(--red);border-radius:8px;font-size:11.5px;color:var(--red)"><span style="font-size:14px">❌</span><span><strong>No se pudo cargar el resumen por producto.</strong> ${String((e&&e.message)||'Error desconocido').replace(/</g,'&lt;')}</span><button onclick="_actualizarResumenMetaProductos()" style="margin-left:auto;background:transparent;border:1px solid var(--red);border-radius:6px;color:var(--red);font-size:10.5px;font-weight:700;padding:2px 10px;cursor:pointer" title="Vuelve a cargar el resumen con el mismo rango">🔄 Reintentar</button></div>`
+    // ANTES (hasta 25sep26): cartel ❌ ROJO "No se pudo cargar el resumen por producto" + botón 🔄 Reintentar (a mano).
+    // (25sep26 · C1) REGLA DE LA DUEÑA: si un dato no llega, NEXO sigue intentando SOLA hasta que cargue, en
+    // AMARILLO y con %: motor único _nxReintentar (10 s · 30 s · luego cada 60 s, sin límite). 🔄 Ahora = ya.
+    // Se detiene solo si sales de Meta Ads o cambias el rango (esa carga nueva lo apaga).
+    let _ultErr=String((e&&e.message)||'Error desconocido')
+    const _esc=t=>String(t).replace(/</g,'&lt;')
+    window._nxReintentar('resumen-productos',{
+      sigueVivo:()=>cont.isConnected&&document.getElementById('meta-resumen-productos')===cont,
+      intentar:async(rt)=>{
+        cont.innerHTML='<div class="loading" data-rein="1" style="padding:20px;text-align:center;color:var(--amber);font-size:13px">🟡 Reintentando el resumen por producto… 0%</div>'
+        try{
+          const _h=await _renderResumenProductos(desde,hasta,hoy)
+          if(!rt.vivo||!cont.isConnected)return true // otra carga tomó el lugar: esta no pinta
+          cont.innerHTML=_h||''
+          try{window._rpFusionMainInit&&window._rpFusionMainInit()}catch(_fm){console.warn('[fusión principal]',_fm)}
+          try{window.nxPreCargaProgramar&&window.nxPreCargaProgramar()}catch(_){}
+          return true
+        }catch(e2){_ultErr=String((e2&&e2.message)||'Error desconocido');console.warn('[resumen productos · reintento '+rt.intento+']',_ultErr);return false}
+      },
+      alCambiar:(rt)=>{
+        if(!rt.vivo||rt.corriendo||!cont.isConnected)return // mientras intenta, manda la barra de % del resumen
+        cont.innerHTML=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 12px;background:var(--amber-bg);border:1px solid var(--amber);border-radius:8px;font-size:11.5px;color:var(--amber)"><span style="font-size:14px">🟡</span><span><strong>El resumen por producto no cargó</strong> (${_esc(_ultErr)}) · NEXO reintenta sola, sin parar · reintento ${rt.intento+1} en <b>${rt.proximoEn} s</b></span><button onclick="window._nxReintentos['resumen-productos']&&window._nxReintentos['resumen-productos'].ahora()" style="margin-left:auto;background:transparent;border:1px solid var(--amber);border-radius:6px;color:var(--amber);font-size:10.5px;font-weight:700;padding:2px 10px;cursor:pointer" title="Reintenta ya mismo con el mismo rango">🔄 Ahora</button></div>`
+      }
+    })
   }
 }
 
@@ -31474,7 +31939,22 @@ window._metaCargaError=function(e){
   try{console.error('[portafolio meta]',e)}catch(_){}
   const _el=document.getElementById('meta-portafolio')
   if(!_el)return
-  _el.innerHTML=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:12px 14px;background:var(--red-bg);border:1px solid var(--red);border-radius:8px;font-size:12px;color:var(--red)"><span style="font-size:16px">❌</span><span><strong>No se pudieron cargar los datos del portafolio.</strong> ${String((e&&e.message)||'Error desconocido').replace(/</g,'&lt;')}</span><button onclick="doRefreshPortafolio(this)" style="margin-left:auto;background:transparent;border:1px solid var(--red);border-radius:6px;color:var(--red);font-size:11px;font-weight:700;padding:3px 11px;cursor:pointer" title="Vuelve a cargar todo el portafolio">🔄 Reintentar</button></div>`
+  // ANTES (hasta 25sep26): cartel ❌ ROJO "No se pudieron cargar los datos del portafolio" + botón 🔄 Reintentar (a mano).
+  // (25sep26 · C1) REGLA DE LA DUEÑA: se sigue intentando SOLO hasta que cargue, en AMARILLO, con cuenta atrás
+  // y 🔄 Ahora (motor único _nxReintentar: 10 s · 30 s · cada 60 s, sin límite). Cada intento muestra su % real.
+  let _ultErrP=String((e&&e.message)||'Error desconocido')
+  window._nxReintentar('portafolio',{
+    sigueVivo:()=>_el.isConnected&&document.getElementById('meta-portafolio')===_el,
+    intentar:async(rt)=>{
+      _el.innerHTML='<div class="loading" style="color:var(--amber)">🟡 Reintentando el portafolio…</div>'
+      try{await renderMetaPortafolio(_el,currentRol()==='admin');return true}
+      catch(e2){_ultErrP=String((e2&&e2.message)||'Error desconocido');try{console.warn('[portafolio meta · reintento '+rt.intento+']',_ultErrP)}catch(_){};return false}
+    },
+    alCambiar:(rt)=>{
+      if(!rt.vivo||rt.corriendo||!_el.isConnected)return
+      _el.innerHTML=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:12px 14px;background:var(--amber-bg);border:1px solid var(--amber);border-radius:8px;font-size:12px;color:var(--amber)"><span style="font-size:16px">🟡</span><span><strong>El portafolio no cargó</strong> (${_ultErrP.replace(/</g,'&lt;')}) · NEXO reintenta sola, sin parar · reintento ${rt.intento+1} en <b>${rt.proximoEn} s</b></span><button onclick="window._nxReintentos['portafolio']&&window._nxReintentos['portafolio'].ahora()" style="margin-left:auto;background:transparent;border:1px solid var(--amber);border-radius:6px;color:var(--amber);font-size:11px;font-weight:700;padding:3px 11px;cursor:pointer" title="Reintenta ya mismo">🔄 Ahora</button></div>`
+    }
+  })
 }
 // ════════════════════════════════════════════════════════════════════════════
 // 🟢 META ADS · HOY PRIMERO (24sep26 · Fase B)
@@ -31510,7 +31990,7 @@ window._nxHoyPrimero=async function(el){
       cont.innerHTML=html||''
       try{window._rpFusionMainInit&&window._rpFusionMainInit()}catch(_fm){console.warn('[fusión principal]',_fm)}
       window._nxHoyNodo=cont // el mismo nodo (con lo que el usuario ya abrió) se MUEVE a la página completa cuando esté
-      const av=document.getElementById('nx-hoy-aviso');if(av)av.innerHTML='✅ <b>HOY listo</b> — gasto, ventas y CPA de hoy cargados. 🟡 Cargando cuentas y campañas…'
+      const av=document.getElementById('nx-hoy-aviso');if(av)av.innerHTML='✅ <b>HOY listo</b> — gasto, ventas y CPA de hoy cargados. ⏳ Cuentas y campañas: el avance (%) va abajo ⬇️' // (25sep26 · C1) antes: "🟡 Cargando cuentas y campañas…" sin %
     }
     return html==null?null:(html||'')
   }catch(e){console.warn('[HOY primero] se usa el flujo de siempre:',e&&e.message);return null}
@@ -31560,7 +32040,7 @@ async function nxPreCargaCorrer(seq){
     let hechos=total-pend.length
     // Primero los datos vivos comunes (estados + entrega), una sola vez, como al primer desglose
     if(window._nexoCargaVivos&&window._nexoVivosListo!=='ok'){
-      try{window._nxPillCarga&&window._nxPillCarga('precarga','⏳ Adelantando productos · trayendo estados en vivo…','carga')}catch(_){}
+      try{window._nxPillCarga&&window._nxPillCarga('precarga',`⏳ Adelantando productos · paso previo: estados en vivo · ${Math.round(hechos/total*100)}% <span style="font-family:monospace">${window._nxBarra(Math.round(hechos/total*100))}</span>`,'carga')}catch(_){} // (25sep26 · C1) + %
       try{await window._nexoCargaVivos()}catch(_){}
       if(!vivo())return
     }
@@ -31571,12 +32051,12 @@ async function nxPreCargaCorrer(seq){
         const ocupado=(Date.now()-P.ultimoClic)<8000
         const lento=!!(window.nxPuerta&&window.nxPuerta.lento&&window.nxPuerta.lento())
         if(!ocupado&&!lento)break
-        try{window._nxPillCarga&&window._nxPillCarga('precarga',`⏸️ Adelantando productos · ${hechos} de ${total} · ${lento?'esperando a Supabase':'esperando a que termines'}…`,'reintento')}catch(_){}
+        try{window._nxPillCarga&&window._nxPillCarga('precarga',`⏸️ Adelantando productos · ${hechos} de ${total} · ${Math.round(hechos/total*100)}% · ${lento?'esperando a Supabase':'esperando a que termines'}…`,'reintento')}catch(_){} // (25sep26 · C1) + %
         await _nxPreEspera(1000)
       }
       if(!vivo())return
       if(window._rpAuto8Done&&window._rpAuto8Done[slug]){hechos++;continue} // el usuario lo abrió mientras tanto
-      try{window._nxPillCarga&&window._nxPillCarga('precarga',`⏳ Adelantando productos · ${hechos+1} de ${total} · ${_nxPreNombre(slug)}`,'carga')}catch(_){}
+      try{window._nxPillCarga&&window._nxPillCarga('precarga',`⏳ Adelantando productos · ${hechos+1} de ${total} · ${Math.round(hechos/total*100)}% <span style="font-family:monospace">${window._nxBarra(Math.round(hechos/total*100))}</span> · ${_nxPreNombre(slug)}`,'carga')}catch(_){} // (25sep26 · C1) + % (terminados ÷ total)
       try{
         window._rpAuto8Done=window._rpAuto8Done||{}
         if(document.getElementById('cuadf_'+slug+'-wrap')&&window._rpFusionRango){
@@ -31588,7 +32068,7 @@ async function nxPreCargaCorrer(seq){
       hechos++
       await _nxPreEspera(1500) // pausa entre productos: despacio pero constante
     }
-    try{window._nxPillCarga&&window._nxPillCarga('precarga',`✅ Productos adelantados · ${total} de ${total}`,'ok')}catch(_){}
+    try{window._nxPillCarga&&window._nxPillCarga('precarga',`✅ Productos adelantados · ${total} de ${total} · 100%`,'ok')}catch(_){} // (25sep26 · C1) 100 % SOLO aquí, al terminar
   }finally{P.corriendo=false}
 }
 // Arranca sola cuando el resumen por producto ya quedó pintado (con el flujo de siempre o con HOY primero)
@@ -31650,10 +32130,15 @@ async function renderMetaPortafolio(el,isAdmin){
   window._metaCargaInfo={fallas:[],gastoVivo:'',estadosLive:0,entrega:''}
   const _hoyProm=(typeof window._nxHoyPrimero==='function')?window._nxHoyPrimero(el):null // 🟢 (Fase B): HOY primero, en paralelo con la BD
   let _resumenPre=null
+  // (25sep26 · C1) "Cuentas y campañas" (debajo del resumen de HOY): 6 pasos REALES con %. Antes decía
+  // "🟡 Después / Armando cuentas y campañas…" fijo, sin avance. El 100 % es cuando la página aparece.
+  const _restoPaso=(k,txt)=>{try{const _r=document.getElementById('nx-hoy-resto')||((el&&el.firstElementChild&&el.firstElementChild.classList&&el.firstElementChild.classList.contains('loading'))?el.firstElementChild:null);if(!_r)return;const _n=6,_p=Math.min(99,Math.round(k/_n*100));_r.textContent=`⏳ Cuentas y campañas · paso ${Math.min(k+1,_n)} de ${_n}: ${txt} · ${_p}% ${window._nxBarra(_p)}`}catch(_){}}
+  _restoPaso(0,'cuentas y campañas guardadas')
   const{data:cuentas}=await sb.from('meta_cuentas').select('*').order('nombre')
   const{data:campanas}=await _sbFetchAll((_f,_t)=>sb.from('meta_campanas').select('*').eq('nivel','campaign').order('nombre').order('meta_id',{ascending:true}).range(_f,_t)) // (25sep26) Parte 5: paginado (antes se cortaba en 1000 campañas)
   const lastSync=await getConfig('meta_sync_last')
   const lastStr=lastSync?new Date(lastSync).toLocaleString('es-CO'):'Nunca'
+  _restoPaso(1,'métricas por cuenta') // (25sep26 · C1)
 
   if(!cuentas?.length){
     el.innerHTML=`<div class="alert alert-blue">Sin datos de Meta. ${isAdmin?'Configura el token y sincroniza arriba.':'Pide al admin que sincronice.'}</div>`
@@ -31676,6 +32161,7 @@ async function renderMetaPortafolio(el,isAdmin){
     const{count}=await sb.from('meta_insights').select('id',{count:'exact',head:true}).eq('nivel','campaign').eq('account_id',c.account_id)
     insCountByAcc[c.account_id]=count||0
   }
+  _restoPaso(2,'esperando el resumen de HOY') // (25sep26 · C1)
 
   // Gasto por campaña en el rango. Lógica idéntica a _renderResumenProductos:
   //   - Rango incluye HOY o AYER → datos VIVOS desde Meta API (fuente: cache de
@@ -31729,7 +32215,8 @@ async function renderMetaPortafolio(el,isAdmin){
         window._metaCargaInfo.gastoVivo='api'
       }
     }catch(_){}
-    try{const _r=document.getElementById('nx-hoy-resto');if(_r)_r.textContent='🟡 Armando cuentas y campañas…'}catch(_){}
+    // ANTES: try{const _r=document.getElementById('nx-hoy-resto');if(_r)_r.textContent='🟡 Armando cuentas y campañas…'}catch(_){}
+    _restoPaso(3,'gasto por cuenta') // (25sep26 · C1)
   }
   // 2) Si no había cache pero el rango incluye hoy/ayer → fetch Meta API ahora
   if(!_liveListo&&_hIncluyeVivos){
@@ -31790,6 +32277,7 @@ async function renderMetaPortafolio(el,isAdmin){
     }
   }
 
+  _restoPaso(4,'productos archivados y cuentas del BM') // (25sep26 · C1)
   // Cuenta es ACTIVA si: tiene campañas ACTIVE registradas Y tiene gasto > 0 en el rango
   const tieneGastoRango={}
   for(const c of cuentas){
@@ -31891,13 +32379,13 @@ async function renderMetaPortafolio(el,isAdmin){
         // 2) FALLBACK BD: cascada con meta_campanas.estado (lo último sincronizado)
         const _adsetsC=[]
         for(let i=0;i<_campsConGasto.length;i+=300){
-          const{data:asx}=await sb.from('meta_campanas').select('meta_id,parent_id,estado').eq('nivel','adset').in('parent_id',_campsConGasto.slice(i,i+300))
+          const{data:asx}=await _sbFetchAll((_f,_t)=>sb.from('meta_campanas').select('meta_id,parent_id,estado').eq('nivel','adset').in('parent_id',_campsConGasto.slice(i,i+300)).order('meta_id',{ascending:true}).range(_f,_t)) // (25sep26 · B5) paginado con _sbFetchAll: más de 1000 hijos ya no se cortan en silencio
           for(const a of (asx||[]))_adsetsC.push(a)
         }
         const _asIdsC=_adsetsC.map(a=>String(a.meta_id))
         const _adsActivosPorAdset={}
         for(let i=0;i<_asIdsC.length;i+=300){
-          const{data:adx}=await sb.from('meta_campanas').select('parent_id,estado').eq('nivel','ad').in('parent_id',_asIdsC.slice(i,i+300))
+          const{data:adx}=await _sbFetchAll((_f,_t)=>sb.from('meta_campanas').select('parent_id,estado').eq('nivel','ad').in('parent_id',_asIdsC.slice(i,i+300)).order('meta_id',{ascending:true}).range(_f,_t)) // (25sep26 · B5) paginado con _sbFetchAll: más de 1000 hijos ya no se cortan en silencio
           for(const ad of (adx||[])){
             if((ad.estado||'')==='ACTIVE')_adsActivosPorAdset[String(ad.parent_id)]=true
           }
@@ -32078,6 +32566,7 @@ async function renderMetaPortafolio(el,isAdmin){
   // (25sep26) 🤖 ROBOT v2: los chips SOLO creen en el sello (✓ completo · 🟡 a medias · ❌ no corrió).
   // Se retiran la huella synced_at y el conteo de fotos ⭐ Dropi (el robot ya no toma fotos):
   // 2 consultas pesadas menos al abrir Meta Ads. Quien pinta: window._nxChipsRobot (arriba).
+  _restoPaso(5,'sellos del robot y armando la página') // (25sep26 · C1)
   let _cronChip=''
   try{
     const _hoyB=today()
@@ -32280,7 +32769,18 @@ window._bpToggleArchivados=async()=>{
       const{data,error}=await sb.from('productos').select('*').eq('archivado',true).order('nombre',{ascending:true})
       if(error)throw error
       window._prodArchCache=data||[]
-    }catch(e){if(info)info.textContent='❌ No se pudieron traer: '+((e&&e.message)||'error');return}
+    }catch(e){
+      // ANTES: }catch(e){if(info)info.textContent='❌ No se pudieron traer: '+((e&&e.message)||'error');return}
+      // (25sep26 · C1) 🟡 reintento SOLO (10 s · 30 s · cada 60 s) mientras la ventana esté abierta
+      const _mA=String((e&&e.message)||'error').slice(0,60)
+      if(info)info.textContent='🟡 No se pudieron traer ('+_mA+') · reintentando sola…'
+      if(window._nxReintentar)window._nxReintentar('bp-archivados',{
+        sigueVivo:()=>!!document.getElementById('bp-arch-list')&&!window._prodArchCache,
+        intentar:async()=>{const{data,error}=await sb.from('productos').select('*').eq('archivado',true).order('nombre',{ascending:true});if(error)return false;window._prodArchCache=data||[];const _w=document.getElementById('bp-arch-list');if(_w)_w.style.display='none';await window._bpToggleArchivados();return true},
+        alCambiar:(rt)=>{const _i=document.getElementById('bp-arch-info');if(!_i||!rt.vivo||rt.corriendo)return;_i.textContent=`🟡 No se pudieron traer (${_mA}) · reintento ${rt.intento+1} en ${rt.proximoEn} s`}
+      })
+      return
+    }
   }
   const lista=window._prodArchCache||[]
   if(!lista.length){wrap.innerHTML='<div style="text-align:center;color:var(--muted);font-size:11.5px;padding:8px">— No hay productos archivados —</div>'}
@@ -33631,13 +34131,15 @@ window._rpFusionMassPausa=(slugProd)=>{
 // · AYER: su cadena del día + el punto ⭐ del cruce Dropi de HOY que CIERRA el día de ayer
 //   (si el cruce aún no se corre, muestra el slot punteado "esperando cruce").
 // Carga perezosa: 1 sola consulta por campaña la primera vez que la abres; no toca nada más.
-window._rpFusionSemLoad=async function(ccid){
+window._rpFusionSemLoad=async function(ccid,_rein){ // (25sep26 · C1) _rein = lo llama el reintento amarillo
   try{
     const reg=window._rpFusionSemReg&&window._rpFusionSemReg[ccid]
     if(!reg||reg._cargado)return
-    reg._cargado=true
+    reg._cargado=true;reg._fallo=false // (25sep26 · C1) _fallo: para saber si el reintento sí cargó
     const wrap=document.getElementById(ccid+'-semwrap')
-    if(wrap)wrap.innerHTML='<div style="font-size:10px;color:var(--subtle);padding:2px 8px">⏳ cargando semáforos...</div>'
+    // ANTES: if(wrap)wrap.innerHTML='<div style="font-size:10px;color:var(--subtle);padding:2px 8px">⏳ cargando semáforos...</div>'
+    const _smPaso=(k,txt)=>{try{if(wrap)wrap.innerHTML=`<div style="font-size:10px;color:${_rein?'var(--amber)':'var(--subtle)'};padding:2px 8px">${_rein?'🟡 Reintentando · ':'⏳ '}cargando semáforos · paso ${k+1} de 2: ${txt} · ${window.nxPctPasos(k,2)}%</div>`}catch(_){}} // (25sep26 · C1)
+    _smPaso(0,'conjuntos de los anuncios')
     const _d2=(dt)=>`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`
     const _hoyL=_d2(new Date())
     const _ayerL=_d2(new Date(Date.now()-86400000))
@@ -33664,6 +34166,7 @@ window._rpFusionSemLoad=async function(ccid){
         }
       }
     }catch(_){}
+    _smPaso(1,'historial de semáforos') // (25sep26 · C1)
     let rows=[]
     // NUEVO (12jun26 · captura completa): traer también metricas_extra para el tooltip del desglose completo.
     // Blindaje: si la BD aún no tiene la columna, se reintenta sin ella (las tiras nunca se rompen).
@@ -33767,7 +34270,21 @@ window._rpFusionSemLoad=async function(ccid){
       const _hTrasA=_mkDiaPrevA(reg.adsTras,_trasL)
       el.innerHTML=_hHoyA+_hAyerA+_hAntierA+_hTrasA
     }
-  }catch(e){console.warn('[fusion-sem] error:',e&&e.message)}
+  }catch(e){console.warn('[fusion-sem] error:',e&&e.message)
+    // (25sep26 · C1) ANTES: si algo fallaba, "⏳ cargando semáforos..." se quedaba PEGADO para siempre (y ya no se
+    // volvía a intentar). AHORA: 🟡 se reintenta SOLO (10 s · 30 s · cada 60 s) mientras la campaña esté abierta.
+    try{
+      const _rg=window._rpFusionSemReg&&window._rpFusionSemReg[ccid];if(_rg){_rg._cargado=false;_rg._fallo=true;_rg._err=String((e&&e.message)||'error').slice(0,60)}
+      if(!_rein&&window._nxReintentar&&document.getElementById(ccid+'-semwrap')){
+        const _msgS=String((e&&e.message)||'error').slice(0,60).replace(/</g,'&lt;')
+        window._nxReintentar('sem-'+ccid,{
+          sigueVivo:()=>!!document.getElementById(ccid+'-semwrap'),
+          intentar:async()=>{await window._rpFusionSemLoad(ccid,true);const _r2=window._rpFusionSemReg&&window._rpFusionSemReg[ccid];return !!(_r2&&_r2._cargado&&!_r2._fallo)},
+          alCambiar:(rt)=>{const _w2=document.getElementById(ccid+'-semwrap');if(!_w2||!rt.vivo||rt.corriendo)return;const _r3=window._rpFusionSemReg&&window._rpFusionSemReg[ccid];_w2.innerHTML=`<div style="font-size:10px;color:var(--amber);padding:2px 8px">🟡 Los semáforos no cargaron (${String((_r3&&_r3._err)||_msgS).replace(/</g,'&lt;')}) · reintento ${rt.intento+1} en ${rt.proximoEn} s</div>`}
+        })
+      }
+    }catch(_){}
+  }
 }
 window.massStart=async(accountId,action,listaOverride)=>{
   // NUEVO (Mejora 10): listaOverride = lista explícita de campañas [{campId,nombre}] (p.ej. desde la vista fusionada,
@@ -37048,8 +37565,9 @@ window._marcarSemRefrescado=(ids)=>{
 window.refrescarUltimoSemaforo=async(metaId,nivel,btnEl)=>{
   if(!metaId)return
   const origHtml=btnEl?btnEl.innerHTML:''
+  const _ruPaso=(k,txt)=>{try{if(btnEl)btnEl.innerHTML=`⏳ Paso ${k+1} de 5: ${txt} · ${window.nxPctPasos(k,5)}%`}catch(_){}} // (25sep26 · C1) % real
   try{
-    if(btnEl){btnEl.disabled=true;btnEl.innerHTML='⏳ Refrescando...'}
+    if(btnEl){btnEl.disabled=true;_ruPaso(0,'último punto de hoy')} // ANTES: btnEl.innerHTML='⏳ Refrescando...'
     const hoy=today()
     // 1) Buscar el último punto de HOY para este meta_id con triggered_by='reporte_dia'
     const{data:ultimoArr}=await sb.from('semaforo_historial')
@@ -37062,6 +37580,7 @@ window.refrescarUltimoSemaforo=async(metaId,nivel,btnEl)=>{
       return
     }
     const ultimo=ultimoArr[0]
+    _ruPaso(1,'reportes de hoy') // (25sep26 · C1)
     // 2) Recolectar los ad_ids de los reportes de HOY que pertenecen a esta cuenta
     const{data:reportes}=await sb.from('reportes_diarios')
       .select('ad_ids,updated_at,producto_id,producto_nombre')
@@ -37090,6 +37609,7 @@ window.refrescarUltimoSemaforo=async(metaId,nivel,btnEl)=>{
       if(btnEl){btnEl.innerHTML='❌ Sin ad_ids';setTimeout(()=>{btnEl.innerHTML=origHtml;btnEl.disabled=false},2000)}
       return
     }
+    _ruPaso(2,'conjuntos y anuncios') // (25sep26 · C1)
     // 3) Resolver descendencia del meta_id apretado (vía meta_campanas.parent_id)
     //    para refrescar campaña + adsets + ads CON LA MISMA HORA, no solo este punto.
     const metaIdsAfectados=new Set([metaId])
@@ -37113,6 +37633,7 @@ window.refrescarUltimoSemaforo=async(metaId,nivel,btnEl)=>{
       // nivel 'ad' → solo él mismo (ya está en el set)
     }catch(e){console.warn('[SEM-refresh] no se pudo resolver descendencia, refresco solo el punto:',e?.message||e)}
 
+    _ruPaso(3,'puntos a actualizar') // (25sep26 · C1)
     // 4) Buscar el ÚLTIMO punto de HOY (reporte_dia) de CADA meta_id afectado
     const ultimoPorMeta={[metaId]:{id:ultimo.id}}
     try{
@@ -37124,6 +37645,7 @@ window.refrescarUltimoSemaforo=async(metaId,nivel,btnEl)=>{
       ;(puntos||[]).forEach(p=>{if(!ultimoPorMeta[p.meta_id])ultimoPorMeta[p.meta_id]={id:p.id}})
     }catch(e){console.warn('[SEM-refresh] no se pudieron traer puntos hijos:',e?.message||e)}
 
+    _ruPaso(4,'calculando y guardando') // (25sep26 · C1)
     // 5) Modo "refresh batch" → UPDATE puntual a cada meta_id (campaña + adsets + ads)
     //    con la MISMA hora_calculo nueva. Reusa el mecanismo ya probado del refresh de cuenta.
     // (23sep26) la lista va como PARÁMETRO (antes pizarra global window._semRefreshBatch: 2 refrescos a la vez se pisaban)
@@ -37158,8 +37680,9 @@ window.refrescarUltimoSemaforo=async(metaId,nivel,btnEl)=>{
 window.refrescarSemaforosCuenta=async(accountId,btnEl,_reint)=>{
   if(!accountId)return
   const origHtml=btnEl?btnEl.innerHTML:''
+  const _rcPaso=(k,txt)=>{try{if(btnEl)btnEl.innerHTML=`${_reint?'🟡 Reintentando · ':'⏳ '}Paso ${k+1} de 6: ${txt} · ${window.nxPctPasos(k,6)}%`}catch(_){}} // (25sep26 · C1) % real
   try{
-    if(btnEl){btnEl.disabled=true;btnEl.innerHTML='⏳ Refrescando...'}
+    if(btnEl){btnEl.disabled=true;_rcPaso(0,'puntos de hoy')} // ANTES: btnEl.innerHTML='⏳ Refrescando...'
     const hoy=today()
     // 1) Traer todos los puntos de HOY de esta cuenta con triggered_by='reporte_dia'
     // Quedarnos con el ÚLTIMO punto por meta_id
@@ -37180,6 +37703,7 @@ window.refrescarSemaforosCuenta=async(accountId,btnEl,_reint)=>{
     const ultimos=Object.values(ultimoPorMeta)
     console.log('[SEM-refresh-cuenta]',ultimos.length,'puntos a refrescar en cuenta',accountId)
 
+    _rcPaso(1,'reportes de hoy') // (25sep26 · C1)
     // 2) Recolectar ad_ids de los reportes de HOY
     const{data:reportes}=await sb.from('reportes_diarios')
       .select('ad_ids,updated_at,producto_id,producto_nombre')
@@ -37213,7 +37737,7 @@ window.refrescarSemaforosCuenta=async(accountId,btnEl,_reint)=>{
     //     Sincroniza niveles campaign + adset + ad — solo el día de HOY.
     //     Si falla → abortar y avisar (no guardamos snapshot con datos viejos).
     try{
-      if(btnEl)btnEl.innerHTML='⏳ Trayendo gasto en vivo...'
+      _rcPaso(2,'gasto en vivo de campañas') // (25sep26 · C1) ANTES: if(btnEl)btnEl.innerHTML='⏳ Trayendo gasto en vivo...'
       const token=await getConfig('meta_access_token')
       if(!token)throw new Error('Sin token de Meta configurado')
       const actId='act_'+accountId
@@ -37226,6 +37750,7 @@ window.refrescarSemaforosCuenta=async(accountId,btnEl,_reint)=>{
         _nxL24.push({meta_id:i.campaign_id,nivel:'campaign',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()})
       }
       await window._nxUpsertLote('meta_insights',_nxL24,'meta_id,nivel,fecha')
+      _rcPaso(3,'gasto en vivo de conjuntos') // (25sep26 · C1)
       // Nivel adset
       const sIns=await metaGet(`/${actId}/insights`,token,{fields:'adset_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'adset',time_increment:'1',limit:'500'},{timeoutMs:30000,sinEspera:true})
       const _nxL25=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
@@ -37234,6 +37759,7 @@ window.refrescarSemaforosCuenta=async(accountId,btnEl,_reint)=>{
         _nxL25.push({meta_id:i.adset_id,nivel:'adset',account_id:accountId,fecha:i.date_start,spend:parseFloat(i.spend)||0,impressions:parseInt(i.impressions)||0,clicks:parseInt(i.clicks)||0,reach:parseInt(i.reach)||0,ctr:parseFloat(i.ctr)||0,cpm:parseFloat(i.cpm)||0,cpc:parseFloat(i.cpc)||0,frequency:parseFloat(i.frequency)||0,conversions:metaConv(i.actions),cost_per_result:metaCPR(i.cost_per_action_type),actions_json:i.actions?JSON.stringify(i.actions):null,outbound_clicks:metaOutbound(i.outbound_clicks),unique_clicks:parseInt(i.unique_clicks)||0,unique_outbound_clicks:metaOutbound(i.unique_outbound_clicks),synced_at:new Date().toISOString()})
       }
       await window._nxUpsertLote('meta_insights',_nxL25,'meta_id,nivel,fecha')
+      _rcPaso(4,'gasto en vivo de anuncios') // (25sep26 · C1)
       // Nivel ad
       const aIns=await metaGet(`/${actId}/insights`,token,{fields:'ad_id,spend,impressions,clicks,ctr,cpm,cpc,reach,frequency,actions,cost_per_action_type,outbound_clicks,unique_clicks,unique_outbound_clicks',time_range:timeRange,level:'ad',time_increment:'1',limit:'500'},{timeoutMs:30000,sinEspera:true})
       const _nxL26=[] // (23sep26) EN LOTE: antes UNA petición a Supabase por fila; ahora se juntan aquí y van en 1 lote (misma fila, mismo onConflict)
@@ -37263,7 +37789,7 @@ window.refrescarSemaforosCuenta=async(accountId,btnEl,_reint)=>{
       return
     }
 
-    if(btnEl)btnEl.innerHTML='⏳ Refrescando...'
+    _rcPaso(5,'calculando y guardando') // (25sep26 · C1) ANTES: if(btnEl)btnEl.innerHTML='⏳ Refrescando...'
 
     // 3) Modo "refresh batch": _calcularYGuardarSemaforos hará UPDATE puntual a CADA
     // meta_id presente en _semRefreshBatch (en vez de INSERT lote)
@@ -42339,7 +42865,8 @@ async function _hbGenerarFinal(){
   const listos=st.files.filter(x=>x.estado==='listo')
   if(!listos.length){window._hbGenerandoFinal=false;return}
   const btn=document.getElementById('hb-btn-gen'),out=document.getElementById('hb-result')
-  if(btn){btn.disabled=true;btn.textContent='⏳ Generando y guardando...'}
+  if(btn){btn.disabled=true;btn.textContent='⏳ Paso 1 de 5: armando la hoja · 0%'} // (25sep26 · C1) antes: '⏳ Generando y guardando...' sin %
+  const _gbPaso=(k,txt,sub)=>{try{if(btn)btn.textContent=`⏳ Paso ${k+1} de 5: ${txt} · ${window.nxPctPasos(k,5,sub)}%`}catch(_){}} // (25sep26 · C1)
   const err=[]
   try{
     const _prueba=window._hbPrueba===true // MEJORA C (8jul26): simulacro — ninguna escritura en Storage ni BD
@@ -42355,7 +42882,9 @@ async function _hbGenerarFinal(){
     const MIME='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     const carpeta=`${st.hoy}/lote_${hora}`
     const regs=[]
+    let _gbI=0 // (25sep26 · C1)
     if(!_prueba)for(const f of listos){
+      _gbPaso(1,`respaldo de archivos (${_gbI+1} de ${listos.length})`,_gbI/Math.max(1,listos.length));_gbI++ // (25sep26 · C1)
       const safe=f.name.replace(/[^\w.\-]/g,'_')
       let path=`${carpeta}/${safe}`,hash=''
       try{hash=await hbSha256(f.buf)}catch(_){}
@@ -42375,6 +42904,7 @@ async function _hbGenerarFinal(){
           repetidos_quitados:(f.repetidos||[]).filter(x=>x.resuelto==='quitar').length||undefined,
           repetidos_recompra:(f.repetidos||[]).filter(x=>x.resuelto==='recompra').length||undefined},usuario_id:currentMe().id})
     }
+    _gbPaso(2,'respaldo de la hoja y constancia') // (25sep26 · C1)
     let hojaPath=`${carpeta}/${hojaNombre}`,hojaHash=''
     try{hojaHash=await hbSha256(xbytes.buffer)}catch(_){}
     if(!_prueba)try{
@@ -42413,7 +42943,9 @@ async function _hbGenerarFinal(){
     // ventas tardías solo acumulan de ANTIER hacia atrás. AYER y HOY son SIEMPRE del auxiliar a mano.
     const _sinIds=new Set([...(st.esperadas||[]),st.hoy,hbAddDays(st.hoy,-1)]);if(st.ultima)_sinIds.add(st.ultima)
     const repLineas=[]
+    let _gbG=0;const _gbGN=Object.keys(grupos).length // (25sep26 · C1)
     for(const g of Object.values(grupos)){
+      _gbPaso(3,`reportes diarios (${_gbG+1} de ${_gbGN})`,_gbG/Math.max(1,_gbGN));_gbG++ // (25sep26 · C1)
       // ── NUEVO (13jul26 · Mejora 4) · LEY DE ORO: JAMÁS una fila con IDs y sin producto. ──
       // Si el grupo no tiene producto identificado (agente sin mapeo, producto archivado, etc.),
       // NO se escribe fila huérfana: los IDs van a la BANDEJA de pendientes (visible en Reporte del
@@ -42475,6 +43007,7 @@ async function _hbGenerarFinal(){
       }
     }
     st._convManual=null // no re-escribir si el auxiliar vuelve a generar en la misma sesión
+    _gbPaso(4,'cerrando') // (25sep26 · C1)
     // 4) refrescar "última fecha" y resumen final (SIN recargar la página)
     st.ultima=await hbUltimaFechaProcesada()
     hbPintarVentana();hbListarHojasHoy()
@@ -43966,7 +44499,8 @@ async function nxEsc3Progs(mapeoIds){ // Set<String(mapeo_id)> con programación
 // de que existiera la línea de tiempo no tienen huella → zona gris, no se tocan.
 window.nxEsc3Reparar=async()=>{
   const btn=document.getElementById('btn-esc3-reparar')
-  if(btn){btn.disabled=true;btn.innerHTML='⏳ Analizando línea de tiempo...'}
+  if(btn){btn.disabled=true;btn.innerHTML='⏳ Análisis · paso 1 de 4: línea de tiempo · 0%'} // (25sep26 · C1) antes: '⏳ Analizando línea de tiempo...'
+  const _e3Paso=(k,txt,sub)=>{try{if(btn)btn.innerHTML=`⏳ Análisis · paso ${k+1} de 4: ${txt} · ${window.nxPctPasos(k,4,sub)}%`}catch(_){}} // (25sep26 · C1)
   try{
     // 1) Toda la línea de tiempo relevante (append-only): cambios de Dropi + decisiones manuales
     const{data:evs,error:evErr}=await _sbFetchAll((_f,_t)=>sb.from('mapeo_eventos')
@@ -43977,6 +44511,7 @@ window.nxEsc3Reparar=async()=>{
     const porMapeo={}
     for(const e of (evs||[])){const k=String(e.mapeo_id);(porMapeo[k]=porMapeo[k]||[]).push(e)}
     for(const k of Object.keys(porMapeo))porMapeo[k].sort((a,b)=>String(a.created_at||'').localeCompare(String(b.created_at||'')))
+    _e3Paso(1,'candidatos') // (25sep26 · C1)
     // 2) Candidatos: último evento de Dropi que pisó a cancelado, con estado_anterior=P.CONF
     const candBase=[] // {mapeo_id, target, pisada_at, viaProg:false}
     const candProgIds=[] // pisados desde OTRO estado_anterior → solo cuentan si tienen programación ACTIVA
@@ -44001,6 +44536,7 @@ window.nxEsc3Reparar=async()=>{
       if(pisada.anterior==='PENDIENTE CONFIRMACION')candBase.push({mapeo_id:mid,target:'PENDIENTE CONFIRMACION',pisada_at:pisada.e.created_at})
       else if(pisada.anterior){candProgIds.push(mid);candProgTmp[mid]={target:pisada.anterior,pisada_at:pisada.e.created_at}}
     }
+    _e3Paso(2,'programaciones activas') // (25sep26 · C1)
     // 3) Los pisados desde otro estado solo se devuelven si tienen programación ACTIVA (el Excel nunca la toca)
     const progSet=await nxEsc3Progs(candProgIds)
     const candProg=candProgIds.filter(id=>progSet.has(String(id))).map(id=>({mapeo_id:id,...candProgTmp[id],viaProg:true}))
@@ -44008,6 +44544,7 @@ window.nxEsc3Reparar=async()=>{
     // 4) Verificar el estado ACTUAL: solo se repara lo que HOY sigue en cancelado (si ya se recuperó solo, no se toca)
     const vivos=[]
     for(let i=0;i<cand.length;i+=100){
+      _e3Paso(3,`estado actual (${Math.min(i+100,cand.length)} de ${cand.length})`,i/Math.max(1,cand.length)) // (25sep26 · C1)
       const b=cand.slice(i,i+100)
       const{data:ms}=await sb.from('mapeos').select('id,estado_final,telefono,producto').in('id',b.map(c=>c.mapeo_id))
       const by={};for(const m of (ms||[]))by[String(m.id)]=m
@@ -44023,6 +44560,7 @@ window.nxEsc3Reparar=async()=>{
     if(!confirm(`🛡️ REPARACIÓN ÚNICA — esto es lo que encontré:\n\n✅ Para DEVOLVER al triaje: ${vivos.length}\n   · pisados estando en P. Confirmación: ${nP}\n   · pisados con programación de envío activa: ${nG}\n⛔ Respetados (cancelados A MANO por el auxiliar): ${respetadosManual}\n⛔ Cancelados genuinos: no se tocan.\n\nEjemplos:\n${muestra}${vivos.length>8?`\n  ... y ${vivos.length-8} más`:''}\n\nCada uno vuelve a su estado EXACTO anterior (cero adivinanza) y queda huella 'esc3_reparado'.\n\n¿Ejecutar la devolución?`))return
     let okN=0,failN=0
     for(const v of vivos){
+      if(btn)btn.innerHTML=`⏳ Devolviendo ${okN+failN+1} de ${vivos.length} · ${window.nxPctPasos(okN+failN,vivos.length)}%` // (25sep26 · C1)
       const{error}=await sb.from('mapeos').update({estado_final:v.target}).eq('id',v.mapeo_id)
       if(error){failN++;continue}
       okN++
@@ -44109,7 +44647,8 @@ window.fragProcesar=async()=>{
   if(av)av.innerHTML='';if(out)out.innerHTML=''
   const f=inp&&inp.files&&inp.files[0]
   if(!f){if(av)av.innerHTML='<div class="alert alert-red">Primero elige el archivo del masivo.</div>';return}
-  if(btn){btn.disabled=true;btn.textContent='⏳ Procesando...'}
+  if(btn){btn.disabled=true;btn.textContent='⏳ Paso 1 de 4: leyendo el archivo · 0%'} // (25sep26 · C1) antes: '⏳ Procesando...' sin %
+  const _frPaso=(k,txt,sub)=>{try{if(btn)btn.textContent=`⏳ Paso ${k+1} de 4: ${txt} · ${window.nxPctPasos(k,4,sub)}%`}catch(_){}} // (25sep26 · C1)
   try{
     const buf=await f.arrayBuffer()
     const wb=XLSX.read(buf,{type:'array'})
@@ -44148,6 +44687,7 @@ window.fragProcesar=async()=>{
       return
     }
     // ── Fragmentar: numeración corrida del día leída de la carpeta de HOY ──
+    _frPaso(1,'numeración de hoy') // (25sep26 · C1)
     const dia=await fragLeerDia(hoyIso)
     const verificado=dia.ok
     let sig=verificado?dia.sig:1
@@ -44155,6 +44695,7 @@ window.fragProcesar=async()=>{
     const nParts=Math.ceil(datos.length/N)
     const fechaNom=fragFechaNombre(hoyIso)
     const partes=[]
+    _frPaso(2,'armando las partes') // (25sep26 · C1)
     for(let i=0;i<nParts;i++){
       const bloque=datos.slice(i*N,(i+1)*N)
       const ws=XLSX.utils.aoa_to_sheet([header].concat(bloque))
@@ -44184,6 +44725,7 @@ window.fragProcesar=async()=>{
     logAction('frag_masivo',{filas:datos.length,partes:nParts,desde:partes[0].num,hasta:partes[partes.length-1].num,verificado,archivo:f.name}).catch(()=>{})
     if(!verificado)return
     // ── Constancia: original + todas las partes a la carpeta de HOY ──
+    _frPaso(3,'guardando el original') // (25sep26 · C1)
     let errs=[]
     try{
       const hora=hbHoraBogota().replace(/:/g,'-')
@@ -44192,6 +44734,7 @@ window.fragProcesar=async()=>{
       if(eO)errs.push('original: '+eO.message)
     }catch(e){errs.push('original: '+((e&&e.message)||e))}
     for(let i=0;i<partes.length;i++){
+      _frPaso(3,`guardando parte ${i+1} de ${partes.length}`,(i+1)/(partes.length+1)) // (25sep26 · C1)
       const p=partes[i],tag=document.getElementById('frag-up-'+i)
       try{
         const{error:eP}=await sb.storage.from(HB_BUCKET).upload(`${FRAG_CARPETA}/${hoyIso}/${p.nombre}`,p.blob,{upsert:false,contentType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})
@@ -44359,14 +44902,14 @@ window._massVerifUI=()=>{
   const excl=st.budItems.filter(it=>it.excluida).length
   const btn=document.getElementById('massbud-apply')
   if(btn){
-    if(verificando>0){btn.disabled=true;btn.style.opacity='.55';btn.textContent='⏳ Verificando presupuestos…'}
+    if(verificando>0){btn.disabled=true;btn.style.opacity='.55';const _totV=st.budItems.filter(it=>!it.excluida).length;btn.textContent=`⏳ Verificando presupuestos… ${_totV-verificando} de ${_totV} · ${window.nxPctPasos(_totV-verificando,_totV)}%`} // (25sep26 · C1) + %
     else if(noVerif>0){btn.disabled=true;btn.style.opacity='.55';btn.textContent=`🚫 ${noVerif} sin verificar — reintenta o quítalas`}
     else if(!listas){btn.disabled=true;btn.style.opacity='.55';btn.textContent='🚫 Nada verificado para aplicar'}
     else{btn.disabled=false;btn.style.opacity='1';btn.textContent=`✅ Aplicar todos los cambios (${listas})`}
   }
   const bar=document.getElementById('massbud-verifbar')
   if(bar){
-    if(verificando>0)bar.innerHTML='<div style="border:1px solid var(--amber);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12px;color:var(--amber)">⏳ Verificando los presupuestos REALES con Meta (los mismos del administrador de anuncios)…</div>'
+    if(verificando>0)bar.innerHTML='<div style="border:1px solid var(--amber);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12px;color:var(--amber)">'+(()=>{const _t=st.budItems.filter(it=>!it.excluida).length,_p=window.nxPctPasos(_t-verificando,_t);return `${_t-verificando} de ${_t} · ${_p}% <span style="font-family:monospace">${window._nxBarra(_p)}</span> · `})()+'⏳ Verificando los presupuestos REALES con Meta (los mismos del administrador de anuncios)…</div>'
     else if(noVerif>0)bar.innerHTML=`<div style="border:2px solid var(--red);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12px">
       <span style="color:var(--red);font-weight:700">⚠️ ${noVerif} sin verificar</span> <span style="color:var(--muted)">· ${listas} verificadas listas${excl?` · ${excl} excluidas`:''}. Las no verificadas NO se pueden aplicar.</span>
       <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
@@ -46259,11 +46802,13 @@ async function _ccCopSubir(){
 // Vista FECHA: todo lo que SE MOVIÓ ese día (envío o mensaje), incluyendo ocultos.
 async function _wchCargar(){
   const st=window._wchState
+  _wchCargandoPaso(0,'catálogos y reglas') // (25sep26 · C1)
   await _wchCatLoad()
   try{await _ccRRCargar()}catch(_){} // 🔁 (31jul26) reglas de cierre y reingreso (cacheadas: una sola consulta)
   try{await _ccTRCargar()}catch(_){}  // 🔀 (31jul26) reglas de transición de etiqueta (cacheadas)
   try{await _ccRapCargar()}catch(_){} // ⚡ (31jul26) respuestas rápidas del chat (cacheadas)
   try{if(!window._ccCop.mapa||(Date.now()-window._ccCop.ts)>30000)await _ccCopCargar()}catch(_){} // 📋 marcas de copiado (refresco máx. cada 30s)
+  _wchCargandoPaso(1,'conversaciones') // (25sep26 · C1)
   const sec=st.sec,fecha=st.fecha // null = hoy/vivo
   const diaSel=fecha||_wchHoy()
   try{
@@ -46439,11 +46984,13 @@ async function _wchCargar(){
   }
   st._err=null
   // ⏰ (30jul26) antes de pintar: repara lo que el motor disparó estando la ventana vencida
+  _wchCargandoPaso(3,'ventanas de 24 h') // (25sep26 · C1)
   await _wchReconciliar24(st.convs)
   _wchAplicarVista()
 }
 // Completa _lastOutHum (¿el último saliente fue humano?) y deriva estado + visibilidad
 async function _wchEnriquecer(convs,secDe){
+  _wchCargandoPaso(2,'datos de cada conversación') // (25sep26 · C1)
   const ids=convs.filter(c=>c.id).map(c=>c.id)
   const lastOut={}
   for(let i=0;i<ids.length;i+=150){
@@ -47265,7 +47812,14 @@ function _wchCargandoOff(){
   const el=document.getElementById('wch-lista');if(el){el.style.opacity='';el.style.pointerEvents=''}
   const b=document.getElementById('wch-cargando');if(b)b.style.display='none'
 }
+// (25sep26 · C1) % REAL de la carga de la lista: 4 pasos (catálogos y reglas · conversaciones · datos de cada
+// una · ventanas de 24 h). Solo pinta si el globito está a la vista (el refresco de fondo sigue callado).
+function _wchCargandoPaso(k,txt){
+  try{const b=document.getElementById('wch-cargando');if(!b||b.style.display==='none')return
+    b.innerHTML='<span style="display:inline-block;animation:wchpulse 1s infinite">⏳</span>'+_wchEsc(`Paso ${k+1} de 4: ${txt} · ${window.nxPctPasos(k,4)}%`)}catch(_){}
+}
 window._wchRecargar=async function(suave){
+  if(!suave)try{window.nxReintentoApagar&&window.nxReintentoApagar('wch-lista')}catch(_){} // (25sep26 · C1) una carga tuya apaga el reintento viejo
   if(!suave)_wchCargandoOn() // el refresco de fondo (60s) NO molesta: entra callado
   try{
     await _wchCargar()
@@ -47274,7 +47828,19 @@ window._wchRecargar=async function(suave){
     _wchListaRender()
     _wchFranjaContadores()
     _wchTabsBadges()
-  }finally{if(!suave)_wchCargandoOff()}
+  }catch(e){
+    // (25sep26 · C1) ANTES: si la lista no cargaba, se apagaba el globito y quedaba la lista vieja SIN avisar.
+    // AHORA: 🟡 en el globito + reintento SOLO (10 s · 30 s · cada 60 s) mientras el Centro esté abierto.
+    if(!suave&&window._nxReintentar){
+      const _mW=String((e&&e.message)||'error').slice(0,60)
+      window._nxReintentar('wch-lista',{
+        sigueVivo:()=>!!document.getElementById('wch-lista'),
+        intentar:async()=>{try{await window._wchRecargar(true);try{_wchFranjaRender()}catch(_){};return true}catch(_){return false}},
+        alCambiar:(rt)=>{if(!rt.vivo){_wchCargandoOff();return}if(rt.corriendo)return;_wchCargandoOn();const _bW=document.getElementById('wch-cargando');if(_bW){_bW.style.color='var(--amber)';_bW.style.borderColor='var(--amber)';_bW.textContent=`🟡 La lista no cargó (${_mW}) · reintento ${rt.intento+1} en ${rt.proximoEn} s`}}
+      })
+    }
+    throw e
+  }finally{if(!suave&&!(window._nxReintentos&&window._nxReintentos['wch-lista']&&window._nxReintentos['wch-lista'].vivo))_wchCargandoOff()} // (25sep26 · C1) si quedó reintentando, el globito 🟡 se queda
 }
 // ── 🔄 REFRESCO EN EL SITIO (28jul26) ───────────────────────────────────────
 // REGLA DE ORO: el auxiliar NUNCA pierde dónde va. Este refresco actualiza los
@@ -47979,6 +48545,125 @@ window._wchSugToggle=function(convId){
   if(btn)btn.style.opacity=abierto?'.55':'1'
 }
 // ── MODAL 2 — la conversación ──
+// ═══ 💬 RITMO INTELIGENTE DE LA CONVERSACIÓN ABIERTA (25sep26 · D1) ═══════════
+// ANTES: cada ventana de conversación abierta le preguntaba a Supabase cada 3 s,
+// SIEMPRE (~1.200 pedidos por hora por ventana), aunque nadie escribiera y aunque
+// la pestaña estuviera escondida. Era la mayor parte de los ~30.000 pedidos diarios.
+// AHORA (de raíz; lo que se ve en pantalla es idéntico, lo pinta el mismo _wchHiloPintar):
+//  · ⚡ RÁPIDO (ccHiloRapidoSeg, 3 s) durante 1 minuto después de cualquier movimiento:
+//    llegó o salió un mensaje, cambió una palomita ✓✓, o el auxiliar tocó/escribió en
+//    esa ventana (así, después de ENVIAR, las palomitas y la respuesta llegan rápido).
+//  · 🐢 QUIETA → se espacia sola: 3 → 5 → 8 → 12 → 15 s (tope ccHiloLentoSeg).
+//  · 🙈 Pestaña escondida → NO pregunta nada. Al volver a la pestaña: pinta al instante.
+//  · 📡 Tiempo real (ccTiempoReal=1): si Supabase avisa un mensaje nuevo o un cambio de
+//    palomita, pinta YA. Si el tiempo real no está activo en la base (o falla), se apaga
+//    solo en esta pestaña y el ritmo de arriba sigue igual: nada depende de él.
+//  · Nunca dos consultas encima de la misma ventana (antes, con internet lento, sí).
+//  · ✕ y ✕✕ Cerrar todas lo apagan como siempre (st.chatTimers) + su canal de tiempo real.
+//  · Diagnóstico en consola: nxChatRitmo()
+const _wchRitmo={} // convId → estado del ritmo de esa ventana
+const _wchRT={eventos:0,falla:'',avisado:false}
+const _WCH_RAPIDO_MS=60000 // cuánto dura el modo rápido después del último movimiento
+function _wchRitmoSeg(r){
+  const rap=Math.max(2,nxSysVal('ccHiloRapidoSeg')||3)
+  const len=Math.max(rap,nxSysVal('ccHiloLentoSeg')||15)
+  if(Date.now()<r.rapidoHasta)return rap
+  const esc=[rap,5,8,12]
+  const s=r.paso<esc.length?esc[r.paso]:len
+  return Math.min(Math.max(s,rap),len)
+}
+function _wchRitmoProgramar(convId,msForzado){
+  const r=_wchRitmo[convId];if(!r||r.parado)return
+  const ms=(msForzado!=null)?msForzado:_wchRitmoSeg(r)*1000
+  if(r.t)clearTimeout(r.t)
+  r.t=setTimeout(()=>{_wchRitmoTick(convId)},ms)
+  r.proximo=Date.now()+ms
+  try{const st=window._wchState;if(st&&st.chatTimers)st.chatTimers[convId]=r.t}catch(_){} // ✕ lo sigue apagando por el camino de siempre
+}
+async function _wchRitmoTick(convId){
+  const r=_wchRitmo[convId];if(!r||r.parado)return
+  r.t=null;r.proximo=0
+  if(!document.getElementById('wch-chat-'+convId)){_wchRitmoParar(convId);return} // la ventana ya no existe
+  if(document.hidden){r.dormido=true;return} // 🙈 nadie está mirando: cero pedidos (despierta con visibilitychange)
+  if(r.enVuelo){r.otraVez=true;return}
+  r.enVuelo=true
+  try{await r.pintar();r.vueltas++}catch(_){}
+  r.enVuelo=false
+  if(r.parado)return
+  const el=document.getElementById('wch-hilo-'+convId)
+  const f=(el&&el._wchFirma)||''
+  if(f&&f!==r.firma){r.firma=f;r.paso=0;r.rapidoHasta=Date.now()+_WCH_RAPIDO_MS} // hubo movimiento
+  else r.paso++
+  const otra=r.otraVez;r.otraVez=false
+  _wchRitmoProgramar(convId,otra?300:null)
+}
+// Movimiento (el auxiliar usa la ventana, o llega un aviso de tiempo real) → modo rápido YA.
+function _wchRitmoMovimiento(convId,ya){
+  const r=_wchRitmo[convId];if(!r||r.parado)return
+  r.rapidoHasta=Date.now()+_WCH_RAPIDO_MS;r.paso=0
+  if(document.hidden){r.dormido=true;return}
+  if(r.enVuelo){if(ya)r.otraVez=true;return}
+  const ms=ya?350:Math.max(2,nxSysVal('ccHiloRapidoSeg')||3)*1000
+  if(!r.proximo||(r.proximo-Date.now())>ms)_wchRitmoProgramar(convId,ms)
+}
+function _wchRitmoCanal(convId,r){
+  if(!(nxSysVal('ccTiempoReal')>0))return
+  if(_wchRT.falla)return // ya falló en esta pestaña: no se insiste (el ritmo sigue solo)
+  if(!sb||typeof sb.channel!=='function')return
+  try{
+    const ch=sb.channel('nx-hilo-'+convId+'-'+Date.now())
+    ch.on('postgres_changes',{event:'*',schema:'public',table:'mensajes',filter:'conversacion_id=eq.'+convId},()=>{
+      _wchRT.eventos++;r.eventosRT++
+      _wchRitmoMovimiento(convId,true)
+    })
+    ch.subscribe((estado,err)=>{
+      r.canalEstado=estado
+      if(estado==='CHANNEL_ERROR'||estado==='TIMED_OUT'){
+        _wchRT.falla=estado+(err&&err.message?(': '+err.message):'')
+        if(!_wchRT.avisado){_wchRT.avisado=true;console.info('[chat 📡] Tiempo real NO disponible ('+_wchRT.falla+'). Las conversaciones siguen con el refresco inteligente (3→15 s). Para activarlo: Supabase → SQL → alter publication supabase_realtime add table public.mensajes;')}
+        try{Object.keys(_wchRitmo).forEach(id=>{const x=_wchRitmo[id];if(x&&x.canal){try{sb.removeChannel(x.canal)}catch(_){}x.canal=null}})}catch(_){}
+      }
+    })
+    r.canal=ch
+  }catch(e){_wchRT.falla='no se pudo abrir: '+(e&&e.message||e)}
+}
+function _wchRitmoArrancar(convId,pintar){
+  _wchRitmoParar(convId) // nunca dos ritmos para la misma ventana
+  const el=document.getElementById('wch-hilo-'+convId)
+  const r=_wchRitmo[convId]={pintar,t:null,proximo:0,paso:0,firma:(el&&el._wchFirma)||'',rapidoHasta:Date.now()+_WCH_RAPIDO_MS,enVuelo:false,otraVez:false,dormido:false,parado:false,vueltas:0,eventosRT:0,canal:null,canalEstado:'',desde:Date.now()}
+  _wchRitmoCanal(convId,r)
+  _wchRitmoProgramar(convId)
+}
+function _wchRitmoParar(convId){
+  const r=_wchRitmo[convId];if(!r)return
+  r.parado=true
+  if(r.t){clearTimeout(r.t);r.t=null}
+  if(r.canal){try{sb.removeChannel(r.canal)}catch(_){}r.canal=null}
+  delete _wchRitmo[convId]
+}
+if(!window._wchRitmoOyentes){ // se instala UNA sola vez
+  window._wchRitmoOyentes=true
+  const _oye=e=>{try{const w=e.target&&e.target.closest&&e.target.closest('[id^="wch-chat-"]');if(w)_wchRitmoMovimiento(w.id.slice(9),false)}catch(_){}}
+  document.addEventListener('pointerdown',_oye,true)
+  document.addEventListener('keydown',_oye,true)
+  document.addEventListener('visibilitychange',()=>{
+    if(document.hidden)return
+    let i=0
+    Object.keys(_wchRitmo).forEach(id=>{ // 👀 volvió a la pestaña: pinta ya (escalonado para no disparar todo junto)
+      const r=_wchRitmo[id];if(!r||r.parado)return
+      r.dormido=false;r.paso=0
+      if(!r.enVuelo)_wchRitmoProgramar(id,80+(i++)*150)
+    })
+  })
+}
+window.nxChatRitmo=function(){ // 🔎 diagnóstico: cómo va cada conversación abierta
+  const filas=Object.keys(_wchRitmo).map(id=>{const r=_wchRitmo[id];return{conversacion:id,'cada (s)':_wchRitmoSeg(r),'modo':Date.now()<r.rapidoHasta?'⚡ rápido':'🐢 quieta','consultas hechas':r.vueltas,'abierta hace (min)':((Date.now()-r.desde)/60000).toFixed(1),'📡 tiempo real':r.canal?(r.canalEstado||'conectando'):'no','avisos 📡':r.eventosRT,'pestaña':document.hidden?'escondida (pausa)':'visible'}})
+  try{console.table(filas)}catch(_){console.log(filas)}
+  const info={abiertas:filas.length,tiempoReal:nxSysVal('ccTiempoReal')>0?(_wchRT.falla?('no disponible · '+_wchRT.falla):'prendido'):'apagado',avisosTiempoReal:_wchRT.eventos,pedidosSupabaseTotal:(window.nxPuerta&&window.nxPuerta.info)?window.nxPuerta.info().pedidos:null}
+  console.log('[chat ⏱️]',info)
+  return info
+}
+// ═══ FIN RITMO INTELIGENTE ═══
 window._wchChatAbrir=async function(convId){
   const st=window._wchState
   const c=st.convs.find(x=>x.id===convId)
@@ -48108,7 +48793,8 @@ window._wchChatAbrir=async function(convId){
   _wchSugerencias(convId,c)
   const pintar=()=>_wchHiloPintar(convId)
   await pintar()
-  st.chatTimers[convId]=setInterval(pintar,3000)
+  // ANTES (hasta 25sep26): st.chatTimers[convId]=setInterval(pintar,3000) → 1.200 consultas/hora por ventana
+  _wchRitmoArrancar(convId,pintar) // (25sep26 · D1) ⚡ 3 s con movimiento · 🐢 hasta 15 s quieta · 🙈 0 con pestaña escondida · 📡 tiempo real
   // Abrir el hilo = visto → no_leidos a 0 (con verificación; si falla, solo queda el log)
   try{
     const{data,error}=await sb.from('conversaciones').update({no_leidos:0}).eq('id',convId).select('id')
@@ -48143,6 +48829,7 @@ function _wchCerrarTodasNum(){
 }
 window._wchChatCerrar=function(convId){
   const st=window._wchState
+  try{_wchRitmoParar(convId)}catch(_){} // (25sep26 · D1) apaga el ritmo inteligente + su canal 📡
   if(st.chatTimers[convId]){clearInterval(st.chatTimers[convId]);delete st.chatTimers[convId]}
   if(st.chatMeta)delete st.chatMeta[convId]
   if(st.activo===convId)st.activo=null

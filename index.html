@@ -20223,6 +20223,82 @@ window.waAgregarApp=async()=>{
 
 // Guardar número. Si la sección elegida ya la tiene OTRO número activo del mismo
 // modo, ese otro se LIBERA solo (seccion=null) — pedido de ADS: reemplazo en 2 clics.
+// ═════════════════════════════════════════════════════════════════
+// 🔑 (24sep26) PRUEBA DE LLAVE antes de guardar un número
+// Cada App/Portafolio es una LLAVE (token de Meta) y solo abre las cuentas de
+// WhatsApp que Meta le dio permiso de abrir. Cambiar el portafolio en NEXO no
+// cambia la cerradura en Meta: si la llave nueva no abre la cuenta del número,
+// el número queda sin poder enviar ni ver plantillas.
+// Por eso, si cambió el portafolio (o la cuenta / Phone Number ID) de un número
+// API activo, ANTES de guardar se prueba la llave con Meta (sync_templates: solo
+// lee). Si Meta dice "no existe / sin permiso" o "token malo" → se devuelve la
+// llave anterior y NO se guarda nada. Si falla por otra cosa (internet, servidor)
+// → reintenta 1 vez y luego pregunta si guardar igual.
+async function _waProbarLlave(id,upd){
+  const msg=document.getElementById('wam-msg')
+  const est=(p,t)=>{if(msg)msg.innerHTML=`<div class="alert alert-amber">⏳ Probando la llave con Meta… ${p}% · ${_waEsc(t)}</div>`}
+  try{
+    if(upd.modo!=='api'||upd.estado!=='activo'||!upd.wa_app_id||!upd.waba_id)return{ok:true} // nada que probar
+    est(10,'leyendo el número')
+    const{data:old,error:eO}=await sb.from('wa_numeros').select('wa_app_id,waba_id,phone_number_id').eq('id',id).maybeSingle()
+    if(eO||!old){if(msg)msg.innerHTML='';return{ok:true}} // sin lectura: se guarda como siempre
+    const _s=v=>String(v==null?'':v)
+    const cambioApp=_s(old.wa_app_id)!==_s(upd.wa_app_id)
+    const cambio=cambioApp||_s(old.waba_id)!==_s(upd.waba_id)||_s(old.phone_number_id)!==_s(upd.phone_number_id)
+    if(!cambio){if(msg)msg.innerHTML='';return{ok:true}} // misma llave y misma cuenta: nada que probar
+    const apps=((window._waState||{}).apps)||[]
+    const nomApp=aid=>{const a=apps.find(x=>x.id===aid);return a?a.etiqueta:'(sin portafolio)'}
+    const antes={wa_app_id:old.wa_app_id||null,waba_id:old.waba_id||null,phone_number_id:old.phone_number_id||null}
+    est(35,'poniendo la llave de prueba')
+    const{error:eT}=await sb.from('wa_numeros').update({wa_app_id:upd.wa_app_id,waba_id:upd.waba_id,phone_number_id:upd.phone_number_id}).eq('id',id)
+    if(eT){if(msg)msg.innerHTML='';return{ok:true}} // si ni deja escribir, el guardado normal muestra su error de siempre
+    const _clas=err=>/does not exist|missing permission|not authorized|Unsupported get request|\(#100\)|\(#200\)|\(#10\)|permis/i.test(err)?'perm'
+      :/\(#190\)|access token|session has expired|OAuthException|token/i.test(err)?'token':'otro'
+    est(65,'preguntándole a Meta')
+    let r=await _waSend({action:'sync_templates',numero_id:id})
+    let err=String((r&&r.error)||'sin respuesta'),tipo=(r&&r.ok)?'ok':_clas(err)
+    if(tipo==='otro'){ // falla que no es de permisos (internet, servidor): 1 reintento
+      est(80,'Meta no respondió, reintentando')
+      await new Promise(res=>setTimeout(res,3000))
+      r=await _waSend({action:'sync_templates',numero_id:id})
+      err=String((r&&r.error)||'sin respuesta');tipo=(r&&r.ok)?'ok':_clas(err)
+    }
+    if(tipo==='ok'){if(msg)msg.innerHTML='<div class="alert alert-green">✅ 100% · Llave probada: Meta abre la cuenta de este número. Guardando…</div>';return{ok:true}}
+    // ❌ Falló → la llave de antes vuelve SIEMPRE, antes de cualquier otra cosa
+    const{error:eR}=await sb.from('wa_numeros').update(antes).eq('id',id)
+    const nNuevo=nomApp(upd.wa_app_id),nViejo=nomApp(antes.wa_app_id)
+    if(eR){
+      const t=`❌ OJO: la llave de «${nNuevo}» no funcionó y NO pude devolver la anterior («${nViejo}»). Ponla a mano en «App / Portafolio» y dale 💾 Guardar. (${eR.message})`
+      if(msg)msg.innerHTML=`<div class="alert alert-red">${_waEsc(t)}</div>`;try{waToast(_waEsc(t),'error')}catch(_){}
+      return{ok:false}
+    }
+    const _volverSelect=()=>{if(cambioApp){const sel=document.getElementById('wan-ap-'+id);if(sel)sel.value=antes.wa_app_id||''}}
+    const _crudo=`<div style="font-size:10.5px;opacity:.8;margin-top:4px">Meta respondió: ${_waEsc(err)}</div>`
+    if(tipo==='otro'){
+      if(confirm(`⚠️ No pude probar la llave con Meta (no es un problema de permisos: parece internet o el servidor).\n\nMeta respondió: ${err}\n\n¿Guardar el número igual con «${nNuevo}»?`)){
+        if(msg)msg.innerHTML='';return{ok:true}
+      }
+      _volverSelect()
+      if(msg)msg.innerHTML=`<div class="alert alert-amber">↩️ No se guardó nada: el número sigue con «${_waEsc(nViejo)}».${_crudo}</div>`
+      return{ok:false}
+    }
+    _volverSelect()
+    const cta=_waEsc(upd.waba_id)
+    const cuerpo=tipo==='perm'
+      ?`⚠️ <strong>La llave de «${_waEsc(nNuevo)}» no tiene permiso sobre la cuenta de WhatsApp ${cta}</strong> de este número.`
+      :`⚠️ <strong>La llave de «${_waEsc(nNuevo)}» está vencida o mala</strong>: Meta la rechazó. Pega un token nuevo en ese portafolio.`
+    const como=tipo==='perm'?`<div style="font-size:11px;margin-top:4px">Para usar esta llave, dale permiso en Meta: <strong>Configuración del negocio → Usuarios del sistema → Asignar activos → Cuentas de WhatsApp → ${cta} → control total</strong>, y vuelve a generar el token.</div>`:''
+    if(msg)msg.innerHTML=`<div class="alert alert-red">${cuerpo} <strong>NO se guardó nada:</strong> el número sigue con «${_waEsc(nViejo)}».${como}${_crudo}</div>`
+    try{waToast(`⚠️ La llave de «${_waEsc(nNuevo)}» no abre la cuenta de este número. No se guardó: sigue con «${_waEsc(nViejo)}».`,'error')}catch(_){}
+    try{logAction('wa_llave_rechazada',{id,app_nueva:upd.wa_app_id,app_anterior:antes.wa_app_id,waba:upd.waba_id,tipo,error:err.slice(0,300)}).catch(()=>{})}catch(_){}
+    return{ok:false}
+  }catch(e){
+    // Error inesperado de NEXO: no se bloquea el guardado de siempre, pero queda anotado
+    console.warn('[wa] prueba de llave falló:',e&&e.message)
+    if(msg)msg.innerHTML=''
+    return{ok:true}
+  }
+}
 window.waGuardarNumero=async(id)=>{
   const msg=document.getElementById('wam-msg')
   const g=(p)=>document.getElementById(p+id)?.value?.trim()||''
@@ -20241,6 +20317,8 @@ window.waGuardarNumero=async(id)=>{
   if(modo==='api'&&estado==='activo'&&secciones.length&&(!upd.phone_number_id||!upd.wa_app_id)){
     waToast('⚠️ Un número API activo con secciones necesita Phone Number ID y App. Complétalos o déjalo dormido.','aviso');return
   }
+  // (24sep26) 🔑 si cambió el portafolio/cuenta, se prueba la llave con Meta ANTES de guardar
+  if(typeof _waProbarLlave==='function'){const _pl=await _waProbarLlave(id,upd);if(!_pl||!_pl.ok)return}
   let liberados=[]
   try{
     // Liberar cada sección elegida de OTROS números activos del mismo modo
@@ -20966,6 +21044,10 @@ async function _waChipCargar(){
       }
     }
     const{data:nums}=await sb.from('wa_numeros').select('id,etiqueta,display,waba_id,phone_number_id,seccion,secciones').eq('modo','api').eq('estado','activo') // (26jul26) sección para filtrar chips coherentes
+    // (24sep26) 📱 a qué portafolio (App) pertenece cada número, para la tabla número → estado.
+    // Consulta APARTE y tolerante: si falla, la tabla muestra solo la cuenta (···últimos dígitos).
+    const _apN={}
+    try{const[_rN,_rA]=await Promise.all([sb.from('wa_numeros').select('id,wa_app_id'),sb.from('wa_apps').select('id,etiqueta')]);const _ae={};((_rA&&_rA.data)||[]).forEach(a=>{_ae[a.id]=a.etiqueta});((_rN&&_rN.data)||[]).forEach(x=>{if(x.wa_app_id&&_ae[x.wa_app_id])_apN[x.id]=_ae[x.wa_app_id]})}catch(_){}
     const est={},cont={},cat={}
     ;(tpls||[]).forEach(t=>{
       (est[t.nombre]=est[t.nombre]||{})[t.waba_id]=t.estado
@@ -20973,8 +21055,9 @@ async function _waChipCargar(){
       // Lo que Meta tiene REALMENTE guardado, para detectar textos desfasados
       if(!cont[t.nombre]&&t.cuerpo_meta)cont[t.nombre]={cuerpo:t.cuerpo_meta,footer:t.footer||null,boton:t.boton||null,vars:t.variables||null}
     })
-    window._waChipData={estados:est,contenido:cont,categorias:cat,numeros:(nums||[]).filter(n=>n.phone_number_id&&n.waba_id)}
+    window._waChipData={estados:est,contenido:cont,categorias:cat,numeros:(nums||[]).filter(n=>n.phone_number_id&&n.waba_id),portafolios:_apN} // (24sep26) + portafolios
     await _waTplNombresCargar(true) // ✏️ sobrenombres al día antes de pintar las cards
+    try{window._waAutoSyncMaybe&&window._waAutoSyncMaybe()}catch(_){} // (24sep26) si hay "en revisión", pregunta a Meta solo (máx. 1 vez cada 10 min)
   }catch(_){window._waChipData={estados:{},categorias:{},numeros:[]}}
 }
 // (11ago26) 🏷️ Chip de categoría: al lado del estado, para ver de un vistazo si
@@ -21384,27 +21467,93 @@ function _waNombreTpl(seccion,etiqueta,idx){
 // Los chips leen wa_plantillas, y esa tabla solo se refrescaba al abrir el
 // visor 🧪. Por eso una plantilla ya aprobada seguía viéndose "en revisión".
 // Esto le pregunta a Meta el estado real de TODAS las cuentas y repinta.
-window.waSyncEstados=async function(btn){
-  const nums=((window._waState||{}).nums||[]).filter(n=>n.modo==='api'&&n.estado==='activo'&&n.waba_id&&n.phone_number_id)
-  if(!nums.length){try{waToast('No hay números API activos que sincronizar.','aviso')}catch(_){}return false}
+window.waSyncEstados=async function(btn,_auto){
+  window._waAutoSyncUlt=Date.now() // (24sep26) toda sincronización (manual o sola) reinicia el reloj de 10 min
+  // (24sep26) FIX: la lista de números se llenaba SOLO al abrir 💬 Mensajería. Si entrabas directo a
+  // Textos/Mensajes, el botón decía "No hay números" y no le preguntaba nada a Meta. Ahora, si la
+  // lista no está en memoria, se trae de Supabase (misma tabla wa_numeros).
+  let _todos=((window._waState||{}).nums||[])
+  if(!_todos.length){try{const{data}=await sb.from('wa_numeros').select('id,etiqueta,modo,estado,waba_id,phone_number_id');_todos=data||[]}catch(_){}}
+  const nums=_todos.filter(n=>n.modo==='api'&&n.estado==='activo'&&n.waba_id&&n.phone_number_id)
+  if(!nums.length){if(!_auto){try{waToast('No hay números API activos que sincronizar.','aviso')}catch(_){}}return false}
   const txtPrev=btn?btn.innerHTML:null
   if(btn){btn.disabled=true;btn.innerHTML='🔄 Sincronizando…'}
+  const _antes=JSON.stringify(((window._waChipData||{}).estados)||{})
   let ok=0,fallo=0
+  const errs=[] // (24sep26) qué cuenta falló y POR QUÉ (antes solo decía "1 con error")
   const vistas=new Set()
+  const _cuentas=new Set(nums.map(n=>n.waba_id)).size
   for(const n of nums){
     if(vistas.has(n.waba_id))continue // una sola vez por cuenta de WhatsApp
     vistas.add(n.waba_id)
+    if(btn){btn.innerHTML=`⏳ Preguntando a Meta… ${Math.round((vistas.size-1)/_cuentas*100)}%`;btn.style.color='var(--amber)'} // (24sep26) amarillo con %
     try{
       const r=await _waSend({action:'sync_templates',numero_id:n.id})
-      if(r&&r.ok)ok++;else fallo++
-    }catch(_){fallo++}
+      if(r&&r.ok)ok++;else{fallo++;errs.push((n.etiqueta||'número')+': '+String((r&&r.error)||'sin respuesta'))}
+    }catch(e){fallo++;errs.push((n.etiqueta||'número')+': '+String((e&&e.message)||e))}
   }
+  if(btn)btn.innerHTML='⏳ Preguntando a Meta… 100%'
   await _waChipCargar()
-  try{if(typeof cargarTextosAdmin==='function')cargarTextosAdmin()}catch(_){}
-  try{if(typeof cargarNovedadesAdmin==='function')cargarNovedadesAdmin()}catch(_){}
-  if(btn){btn.disabled=false;btn.innerHTML=txtPrev}
-  try{waToast(fallo?('🔄 '+ok+' cuenta(s) sincronizadas · '+fallo+' con error'):('✅ Estados al día ('+ok+' cuenta'+(ok===1?'':'s')+')'),fallo?'aviso':'ok')}catch(_){}
-  return true
+  // (24sep26) En modo AUTOMÁTICO solo se repinta si Meta cambió algo Y no estás escribiendo
+  // (repintar borraría lo que tengas sin guardar). A mano (botón) se repinta siempre, como antes.
+  const _cambio=_antes!==JSON.stringify(((window._waChipData||{}).estados)||{})
+  const _edita=!!(_auto&&_cambio&&_waEditando())
+  if(!_auto||(_cambio&&!_edita)){
+    try{if(typeof cargarTextosAdmin==='function')cargarTextosAdmin()}catch(_){}
+    try{if(typeof cargarNovedadesAdmin==='function')cargarNovedadesAdmin()}catch(_){}
+  }
+  if(btn){btn.disabled=false;btn.innerHTML=txtPrev;btn.style.color=''}
+  if(errs.length)console.warn('[wa] estados de Meta con error:',errs)
+  const _det=errs.length?(' — '+errs.map(x=>_waEsc(x)).join(' · ')):''
+  if(!_auto){
+    try{waToast(fallo?('🔄 '+ok+' cuenta(s) sincronizadas · '+fallo+' con error'+_det):('✅ Estados al día ('+ok+' cuenta'+(ok===1?'':'s')+')'),fallo?(ok?'aviso':'error'):'ok')}catch(_){}
+  }else if(_cambio){
+    try{waToast(_edita?'🟢 Meta ya respondió: hay estados nuevos. Guarda lo que estás escribiendo y toca 🔄 Estados de Meta para verlos.':'🟢 Estados de Meta actualizados solos.',_edita?'aviso':'ok')}catch(_){}
+  }
+  return {ok,fallo,errs,cambio:_cambio}
+}
+// (24sep26) ¿Estás escribiendo algo SIN GUARDAR en Textos o Novedades? → no repintar solo.
+// Ante la duda responde "sí": lo peor que pasa es que el repintado espere a tu clic en 🔄.
+function _waEditando(){
+  try{
+    const a=document.activeElement
+    for(const id of ['txt-list','txt-novedades']){
+      const r=document.getElementById(id);if(!r)continue
+      if(a&&r.contains(a)&&/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))return true
+      for(const el of r.querySelectorAll('textarea,input,select')){
+        if(el.tagName==='SELECT'){const d=[...el.options].findIndex(o=>o.defaultSelected);if(!el.multiple&&el.selectedIndex!==(d<0?0:d))return true;continue}
+        if(el.type==='checkbox'||el.type==='radio'){if(el.checked!==el.defaultChecked)return true;continue}
+        if(el.value!==el.defaultValue)return true
+      }
+    }
+  }catch(_){return true}
+  return false
+}
+// (24sep26) 🔄 AUTOMÁTICO: si algún chip dice "🔵 en revisión", NEXO le pregunta a Meta SOLO, en
+// segundo plano (sin pasar por Mensajería ni tocar el botón). Máximo 1 vez cada 10 minutos. Si Meta
+// o el servidor fallan, reintenta solo a los 15 s, 30 s y 60 s, con aviso amarillo.
+window._waAutoSyncMaybe=function(){
+  try{
+    const est=((window._waChipData||{}).estados)||{}
+    const hayPend=Object.values(est).some(o=>Object.values(o||{}).includes('PENDING'))
+    if(!hayPend||window._waAutoSyncCorriendo)return
+    if(Date.now()-(window._waAutoSyncUlt||0)<600000)return
+    window._waAutoSyncCorriendo=true
+    setTimeout(async()=>{
+      try{
+        for(let i=0;i<4;i++){
+          const btn=[...document.querySelectorAll('button[onclick^="waSyncEstados"]')].find(b=>b.offsetParent!==null&&!b.disabled)||null
+          const r=await window.waSyncEstados(btn,true)
+          if(!r||!r.fallo)break // sin números, o todo bien → listo
+          if(i===3){try{waToast('⚠️ Meta no respondió los estados (4 intentos): '+r.errs.map(x=>_waEsc(x)).join(' · '),'aviso')}catch(_){}break}
+          const seg=15*Math.pow(2,i)
+          try{waToast(`⏳ Meta no respondió los estados · reintentando solo en ${seg} s (${i+1} de 3)`,'aviso')}catch(_){}
+          await new Promise(res=>setTimeout(res,seg*1000))
+        }
+      }catch(_){}
+      window._waAutoSyncCorriendo=false
+    },800)
+  }catch(_){window._waAutoSyncCorriendo=false}
 }
 
 // Intentos previos (nombres quemados) de una variante, por su nombre automático
@@ -21569,6 +21718,66 @@ window.waTplRenombrar=async(auto)=>{
   try{if(typeof cargarNovedadesAdmin==='function')cargarNovedadesAdmin()}catch(_){}
 }
 
+// ═════════════════════════════════════════════════════════════════
+// 📱 (24sep26) TABLA "NÚMERO → ESTADO" debajo de cada plantilla
+// Una fila por número de la sección: a la izquierda el número (y su cuenta de
+// WhatsApp), a la derecha el estado REAL que Meta reporta en esa cuenta.
+// Meta aprueba por CUENTA (WABA): dos números de la misma cuenta muestran
+// siempre el mismo estado; por eso se ve la cuenta de cada uno.
+// Reconoce TODOS los estados de Meta (antes: solo aprobada/revisión/rechazada;
+// lo demás salía como "sin enviar", y eso engañaba).
+// [icono, nombre, color, plural]
+const _WA_EST_TODOS={
+  APPROVED:['🟢','Aprobada','var(--green)','aprobadas'],
+  PENDING:['🔵','En revisión','#3b82f6','en revisión'],
+  REJECTED:['🔴','Rechazada','var(--red)','rechazadas'],
+  PAUSED:['🟠','Pausada por mala calidad','var(--amber)','pausadas'],
+  DISABLED:['⚫','Desactivada','#94a3b8','desactivadas'],
+  IN_APPEAL:['🟣','En apelación','#a78bfa','en apelación'],
+  PENDING_DELETION:['🗑️','Borrándose','#94a3b8','borrándose'],
+  DELETED:['🗑️','Borrada','#94a3b8','borradas'],
+  ARCHIVED:['📦','Archivada','#94a3b8','archivadas'],
+  LIMIT_EXCEEDED:['⛔','Límite de plantillas lleno','var(--red)','con límite lleno']
+}
+function _waEstInfo(e){
+  if(!e)return['⚪','Sin enviar','#94a3b8','sin enviar']
+  const k=String(e).toUpperCase()
+  return _WA_EST_TODOS[k]||['❔',String(e),'var(--muted)',String(e)]
+}
+// Chip global para estados que no son aprobada/revisión/rechazada (ej. pausada)
+function _waEstOtroChip(vals){
+  try{
+    const _pri=['PAUSED','IN_APPEAL','DISABLED','LIMIT_EXCEEDED','PENDING_DELETION','ARCHIVED','DELETED'] // conocidos primero, en este orden
+    const otros=(vals||[]).filter(v=>v&&!['APPROVED','PENDING','REJECTED'].includes(String(v).toUpperCase()))
+    if(!otros.length)return ''
+    const _r=v=>{const i=_pri.indexOf(String(v).toUpperCase());return i<0?99:i}
+    const e=otros.slice().sort((x,y)=>_r(x)-_r(y))[0]
+    const[ic,lab,col]=_waEstInfo(e)
+    return `<span style="color:${col};font-weight:700">${ic} ${_waEsc(lab.toLowerCase())} en Meta</span>`
+  }catch(_){return ''}
+}
+function _waTablaNumeros(nombre,nums,porWaba){
+  try{
+    if(!Array.isArray(nums)||!nums.length)return ''
+    const port=((window._waChipData||{}).portafolios)||{}
+    const cuentas=new Set(nums.map(n=>n.waba_id))
+    const conteo={}
+    const filas=nums.map(n=>{
+      const e=(porWaba||{})[n.waba_id]
+      const[ic,lab,col,plu]=_waEstInfo(e)
+      const k=ic+'|'+lab
+      conteo[k]=conteo[k]||{ic,lab,plu,c:0};conteo[k].c++
+      const w=String(n.waba_id||'')
+      const comp=nums.filter(x=>x.waba_id===n.waba_id&&x.id!==n.id).map(x=>x.etiqueta||'otro número')
+      const cta=(port[n.id]?_waEsc(port[n.id])+' · ':'')+'cuenta ···'+_waEsc(w.slice(-5))
+        +(comp.length?` · <span title="Meta aprueba por CUENTA: estos números comparten siempre el mismo estado">misma cuenta que ${comp.map(_waEsc).join(', ')}</span>`:'')
+      const enviar=!e?` <button onclick="waTplReenviar('${_waEsc(nombre)}','${n.id}')" style="border:1px solid ${col};background:none;color:${col};border-radius:20px;cursor:pointer;font-size:10px;padding:1px 8px;font-weight:800" title="Enviar a aprobación en la cuenta de este número">↻ enviar</button>`:''
+      return `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 10px;vertical-align:top"><strong style="color:var(--text)">${_waEsc(n.etiqueta||'—')}</strong> <span style="color:var(--muted)">${_waEsc(n.display||'')}</span><div style="font-size:9.5px;color:var(--muted)" title="ID de la cuenta de WhatsApp (WABA): ${_waEsc(w)}">${cta}</div></td><td style="padding:5px 10px;vertical-align:top;white-space:nowrap;color:${col};font-weight:700">${ic} ${_waEsc(lab)}${enviar}</td></tr>`
+    }).join('')
+    const res=Object.values(conteo).map(x=>`${x.ic} ${x.c} ${_waEsc(x.c===1?x.lab.toLowerCase():x.plu)}`).join(' · ')
+    return `<div class="nx-tpl-nums" style="margin-top:6px;border:1px solid var(--border);border-radius:8px;overflow:hidden;max-width:640px"><div style="padding:4px 10px;font-size:10px;color:var(--muted);background:rgba(255,255,255,.03)">📱 <strong style="color:var(--text)">${nums.length} número${nums.length===1?'':'s'}</strong> · ${res} · en ${cuentas.size} cuenta${cuentas.size===1?'':'s'} de WhatsApp</div><div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="text-align:left;color:var(--muted);font-size:9.5px;text-transform:uppercase;letter-spacing:.04em"><th style="padding:4px 10px;font-weight:700">📱 Número</th><th style="padding:4px 10px;font-weight:700">Estado en Meta</th></tr></thead><tbody>${filas}</tbody></table></div></div>`
+  }catch(_){return ''}
+}
 function _waChipMulti(nombre,texto,secFiltro,footer,boton,destino){
   // destino = {tipo:'texto'|'novedad', sec, idx, texto, footer, boton} → para ↩ usar
   const _destinoVer=JSON.stringify(destino||null).replace(/"/g,'&quot;')
@@ -21591,7 +21800,7 @@ function _waChipMulti(nombre,texto,secFiltro,footer,boton,destino){
   const chipG=(global==='APPROVED'?'<span style="color:var(--green);font-weight:700">🟢 aprobada en Meta</span>'
     :global==='PENDING'?'<span style="color:#3b82f6;font-weight:700">🔵 en revisión de Meta</span>'
     :global==='REJECTED'?'<span style="color:var(--red);font-weight:700">🔴 rechazada por Meta — renómbrala con ✏️ para reintentar</span>'
-    :'<span style="color:#94a3b8;font-weight:700">⚪ sin enviar a aprobación</span>')+(typeof _waCatChip==='function'?_waCatChip(nombre):'') // (11ago26) 🏷️ + categoría real de Meta
+    :((typeof _waEstOtroChip==='function'&&_waEstOtroChip(vals))||'<span style="color:#94a3b8;font-weight:700">⚪ sin enviar a aprobación</span>'))+(typeof _waCatChip==='function'?_waCatChip(nombre):'') // (11ago26) 🏷️ + categoría real de Meta
   // circulitos por número: estado de la plantilla en SU portafolio
   const bolas=nums.map(n=>{
     const e=porWaba[n.waba_id]
@@ -21629,7 +21838,7 @@ function _waChipMulti(nombre,texto,secFiltro,footer,boton,destino){
     <span><strong>⚠️ Este texto ya no es el que Meta tiene aprobado.</strong> Si se envía así, al cliente le llega el texto anterior.</span>
     <button onclick="waTplVersionarYa('${_auto}',${_destinoVer})" style="border:1px solid var(--amber);background:none;color:var(--amber);border-radius:20px;cursor:pointer;font-size:10px;padding:2px 9px;font-weight:800">🏷️ Crear versión nueva</button>
   </div>`:''
-  return `<div style="font-size:10.5px;margin-top:6px"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--muted)">📄 <code style="background:rgba(255,255,255,.06);padding:1px 6px;border-radius:5px;color:var(--text)">${nombre}</code>${_lapiz}${_avisoRenom} · ${chipG} ${bolas?'· '+bolas:''}</div>${_avisoDesf}${_histHtml}</div>`
+  return `<div style="font-size:10.5px;margin-top:6px"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--muted)">📄 <code style="background:rgba(255,255,255,.06);padding:1px 6px;border-radius:5px;color:var(--text)">${nombre}</code>${_lapiz}${_avisoRenom} · ${chipG} ${bolas?'· '+bolas:''}</div>${typeof _waTablaNumeros==='function'?_waTablaNumeros(nombre,nums,porWaba):''}${_avisoDesf}${_histHtml}</div>` // (24sep26) 📱 tabla número → estado
 }
 // ═══ 📤 VERIFICACIÓN DE PLANTILLAS (27jul26) ═══════════════════════════════
 // Envía a aprobación de Meta, EN LA CUENTA de un número, todas las plantillas
@@ -33452,7 +33661,7 @@ window.massStart=async(accountId,action,listaOverride)=>{
     const budget=(_ov>0?_ov:(c.daily_budget||c.lifetime_budget||0))
     return {meta_id:c.meta_id,nivel:'campaign',nombre:c.nombre,estado:c.estado,semCode:c.semCode,budget,esCBO:budget>0}
   })
-  window._massState={action,accountId,items,selected:new Set(),perItem:{},filtroUrg:'all',budItems:null}
+  window._massState={action,accountId,items,selected:new Set(),perItem:{},filtroUrg:'all',filtroEst:(action==='activar'?'inactivas':'activas'),budItems:null} // (24sep26) filtroEst: abre en 🟢 Activas (en ▶️ Activar varias abre en ⚫ Inactivas, que son las que se pueden prender)
   window._massRenderSelect()
   // NUEVO (4ago26): el monto que se ve al MARCAR se confirma EN VIVO con Meta (ver _massVerifBudgetsVivo).
   // Va sin await para que el modal abra instantáneo; las celdas se repintan solas cuando Meta contesta.
@@ -33573,13 +33782,25 @@ window._massRenderSelect=()=>{
              pausar:{t:'⏸️ Pausar varias',hint:'Marca las que quieres PAUSAR (las activas resaltadas; las ya pausadas, apagadas).',color:'var(--red)'},
              presupuesto:{t:'💰 Cambiar presupuesto a varias',hint:'Marca a cuáles cambiarles el presupuesto. Las ABO se abren en sus conjuntos al continuar.',color:'var(--accent)'}}[st.action]
   const urgDefs=[['all','Todas','var(--muted)'],['stop','🔴 Pausar','var(--red)'],['precaucion','🟡 Cuidado','var(--amber)'],['fuego','🟣 Doblar','var(--purple)'],['escalar','🟢 Escalar','var(--green)'],['sin_ventas','⏳ Esperar','var(--muted)']]
-  const cont={};for(const it of st.items)cont[it.semCode]=(cont[it.semCode]||0)+1
+  // (24sep26) 🟢/⚫ FILTRO DE ESTADO (Todas · Activas · Inactivas) — se CRUZA con la urgencia:
+  // cada fila de botones cuenta solo lo que deja pasar la otra fila.
+  const _fe=st.filtroEst||'all'
+  const _esAct=it=>it.estado==='ACTIVE' // mismo criterio del letrero 🟢 activa / ⚫ pausada de cada fila
+  const _pasaEst=it=>_fe==='all'||(_fe==='activas'?_esAct(it):!_esAct(it))
+  const _baseEst=st.items.filter(it=>st.filtroUrg==='all'||it.semCode===st.filtroUrg)
+  const estBtns=[['all','Todas','var(--muted)'],['activas','🟢 Activas','var(--green)'],['inactivas','⚫ Inactivas','#94a3b8']].map(([code,lbl,col])=>{
+    const n=code==='all'?_baseEst.length:_baseEst.filter(it=>code==='activas'?_esAct(it):!_esAct(it)).length
+    const activo=_fe===code
+    return `<button class="btn-sm ${activo?'btn-primary':'btn-outline'}" onclick="massFilterEst('${code}')" style="padding:5px 11px;font-size:12px;${activo?'':'border-color:'+col+';color:'+col}">${lbl} ${n}</button>`
+  }).join('')
+  const _itemsEst=st.items.filter(_pasaEst)
+  const cont={};for(const it of _itemsEst)cont[it.semCode]=(cont[it.semCode]||0)+1 // (24sep26) cuenta dentro del estado elegido
   const filtroBtns=urgDefs.map(([code,lbl,col])=>{
-    const n=code==='all'?st.items.length:(cont[code]||0)
+    const n=code==='all'?_itemsEst.length:(cont[code]||0) // (24sep26) dentro del estado elegido
     const activo=st.filtroUrg===code
     return `<button class="btn-sm ${activo?'btn-primary':'btn-outline'}" onclick="massFilterUrg('${code}')" style="padding:5px 11px;font-size:12px;${activo?'':'border-color:'+col+';color:'+col}">${lbl} ${n}</button>`
   }).join('')
-  const visibles=st.items.filter(it=>st.filtroUrg==='all'||it.semCode===st.filtroUrg)
+  const visibles=st.items.filter(it=>(st.filtroUrg==='all'||it.semCode===st.filtroUrg)&&_pasaEst(it)) // (24sep26) + estado
   // NUEVO (Mejora 11): orden de MEJOR a PEOR semáforo en TODOS los filtros (incluido "Todas").
   // Peso local (NO nexoOrdenUrgencia, que es por urgencia con stop primero — aquí es el orden inverso conceptual):
   // 1 🟣 FUEGO · 2 🟢 ESCALAR · 3 🟡 CUIDADO · 4 ⏳ ESPERAR · 5 🔴 APAGAR / PRENDER YA · 6 sin dato
@@ -33607,7 +33828,8 @@ window._massRenderSelect=()=>{
     <div class="modal-title" style="color:${cfg.color}">${cfg.t}</div>
     <div style="font-size:12px;color:var(--muted);margin-bottom:6px">${cfg.hint}</div>
     ${st.action==='presupuesto'?`<div id="mass-budverif" style="font-size:11.5px;line-height:1.5;margin-bottom:7px">${st._budResumen||''}</div>`:''}
-    <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">${filtroBtns}</div>
+    <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px;align-items:center"><span style="font-size:10px;color:var(--muted);font-weight:700;letter-spacing:.05em;min-width:66px">ESTADO</span>${estBtns}</div>
+    <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;align-items:center"><span style="font-size:10px;color:var(--muted);font-weight:700;letter-spacing:.05em;min-width:66px">URGENCIA</span>${filtroBtns}</div>
     <input id="mass-search" type="text" placeholder="🔎 Buscar por ID o nombre..." oninput="massBuscar()" autocomplete="off" style="width:100%;padding:8px 10px;margin-bottom:8px;background:var(--card);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:12px;outline:none">
     <div style="display:flex;gap:6px;margin-bottom:8px">
       <button class="btn-sm btn-outline" onclick="massSelTodas(1)" title="Marca TODAS las campañas que se ven en la lista (respeta el filtro y el buscador)" style="border-color:var(--green);color:var(--green);padding:5px 11px;font-size:12px">✅ Seleccionar todas</button>
@@ -33624,7 +33846,19 @@ window._massRenderSelect=()=>{
 window.massFilterUrg=(code)=>{
   const st=window._massState;if(!st)return
   st.filtroUrg=code
+  window._massRerender() // (24sep26) antes: _massRenderSelect() — borraba lo escrito en 🔎
+}
+// (24sep26) filtro de estado: Todas / 🟢 Activas / ⚫ Inactivas (se cruza con la urgencia)
+window.massFilterEst=(code)=>{
+  const st=window._massState;if(!st)return
+  st.filtroEst=code
+  window._massRerender()
+}
+// (24sep26) repinta el paso 1 conservando lo escrito en el buscador 🔎 (y lo vuelve a aplicar)
+window._massRerender=()=>{
+  const q=(document.getElementById('mass-search')||{}).value||''
   window._massRenderSelect()
+  if(q){const i=document.getElementById('mass-search');if(i){i.value=q;try{window.massBuscar()}catch(_){}}}
 }
 window.massBuscar=()=>{
   // Filtra la lista del modal masivo por ID o nombre (sin re-render → no pierde el foco al teclear)

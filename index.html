@@ -29617,33 +29617,97 @@ window._rpFusionLifetime=async function(slug,btn){
 // Invoca la Edge meta-sync-nocturno modo 'semanal': por cuenta baja SOLO desde su marca hasta
 // hoy, avanza las marcas y (si termina completo) actualiza meta_sync_last y sella semanal_ok.
 // CERO recargas: el resultado sale como aviso al lado del botón y el botón cambia de color.
-// Si la Edge corta por tiempo (primera vez con mucho atraso), el botón queda en "Continuar
-// sync" y con otro clic sigue EXACTO donde quedó (las marcas ya avanzadas no se repiten).
+// ★ (25sep26 · tarde) YA NO hay que darle "Continuar sync": el botón SIGUE SOLO vuelta tras vuelta
+// hasta el 100 % REAL (el % lo calcula el robot) — cada vuelta sigue EXACTO donde quedó la anterior.
 window.runSyncIncremental=async function(btn){
-  const _o=btn?btn.textContent:''
-  if(btn){btn.disabled=true;btn.textContent='⏳ Sincronizando...'}
+  // (25sep26 · tarde) SIGUE SOLO HASTA EL 100 % REAL. Mientras el robot trabaja, NEXO lee cada 3 s su
+  // progreso (config.semanal_estado_HOY.prog): barra AMARILLA con % mientras carga · VERDE al 100 %
+  // (= terminó de verdad). Sin respuesta → reintenta solo (4 veces). Meta pide pausa → espera 60 s y
+  // sigue. 3 vueltas seguidas sin avanzar → se detiene y lo dice. Un solo proceso a la vez.
+  if(window._nxSyncIncrOn)return
+  window._nxSyncIncrOn=true
+  if(btn&&!btn.dataset._txt)btn.dataset._txt=btn.textContent
+  const _o=btn?btn.dataset._txt:''
+  if(btn){btn.disabled=true;btn.textContent='⏳ Sincronizando… 0%'}
   let _res=document.getElementById('sync-incr-res')
-  if(!_res&&btn){_res=document.createElement('span');_res.id='sync-incr-res';_res.style.cssText='margin-left:8px;font-size:11px;vertical-align:middle';btn.insertAdjacentElement('afterend',_res)}
+  if(!_res&&btn){_res=document.createElement('span');_res.id='sync-incr-res';btn.insertAdjacentElement('afterend',_res)}
+  if(_res)_res.style.cssText='flex-basis:100%;display:block;margin-top:6px;font-size:11px'
+  const _dormir=(ms)=>new Promise(r=>setTimeout(r,ms))
+  const _esc=(t)=>String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  let _pctVisto=0
+  const _pintar=(pct,txt,est)=>{ // est: 'carga' | 'aviso' (amarillo) · 'ok' (verde) · 'error' (rojo)
+    pct=Math.max(0,Math.min(100,Math.round(Number(pct)||0)))
+    if(est!=='ok')pct=Math.max(pct,_pctVisto) // en pantalla el % nunca retrocede
+    _pctVisto=Math.max(_pctVisto,pct)
+    const col=est==='ok'?'var(--green)':(est==='error'?'var(--red)':'var(--amber)')
+    if(_res)_res.innerHTML=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><div style="flex:0 0 160px;height:7px;background:var(--border);border-radius:999px;overflow:hidden"><div style="width:${pct}%;height:100%;background:${col};transition:width .4s"></div></div><span style="color:${col};font-weight:700">${pct}%</span><span style="color:${col}">${_esc(txt)}</span></div>`
+    if(btn&&(est==='carga'||est==='aviso'))btn.textContent='⏳ Sincronizando… '+pct+'%'
+  }
+  const _txtProg=(p)=>{
+    if(!p)return 'trabajando…'
+    if(p.fase==='revisando')return `revisando cuentas ${p.cuentas_revisadas||0} de ${p.cuentas_total||0}`
+    if(p.fase==='bajando')return `bajando datos: ${p.bloques_hechos||0} de ${p.bloques_total||0} bloques · ${p.cuentas_bajando||0} cuenta${p.cuentas_bajando===1?'':'s'} con gasto`
+    return 'terminando…'
+  }
+  const _pctDe=(s)=>{ // el % real lo manda el robot; con el robot anterior se calcula por cuentas
+    if(s&&s.progreso&&typeof s.progreso.pct==='number')return s.progreso.pct
+    const t=(s&&s.cuentas_activas)||0,pe=((s&&s.cuentas_pendientes)||[]).length
+    return t?Math.min(99,Math.floor(100*(t-pe)/t)):0
+  }
+  const _poll=setInterval(async()=>{try{const raw=await getConfig('semanal_estado_'+today());const e=raw?JSON.parse(raw):null;if(e&&e.prog&&typeof e.prog.pct==='number'&&e.prog.pct<100)_pintar(e.prog.pct,'⏳ '+_txtProg(e.prog),'carga')}catch(_){}},3000)
+  let s=null,vueltas=0,errSeg=0,sinAvance=0,ultUnid=null,fin='',errFin=null,okTot=0,filasTot=0
+  _pintar(0,'⏳ arrancando el robot…','carga')
   try{
-    const{data,error}=await sb.functions.invoke('meta-sync-nocturno',{body:{modo:'semanal'}})
-    if(error)throw error
-    const s=(data&&data.semanal)||{}
-    const _okTxt=`✅ ${s.cuentas_ok||0} cuenta${(s.cuentas_ok||0)===1?'':'s'} sincronizada${(s.cuentas_ok||0)===1?'':'s'} · ${s.cuentas_al_dia||0} ya al día · ${fmt(s.filas_upsert||0)} filas`
-    if(s.cortado_por_tiempo||((s.cuentas_pendientes||[]).length>0)){
-      if(_res){_res.style.color='var(--amber)';_res.textContent=`⏳ Avanzó pero quedaron ${(s.cuentas_pendientes||[]).length} cuenta(s) — dale otra vez: continúa donde quedó. (${_okTxt})`}
-      if(btn){btn.disabled=false;btn.textContent='🗓 Continuar sync'}
-    }else if((s.cuentas_fail||0)>0){
-      if(_res){_res.style.color='var(--red)';_res.textContent=`⚠️ ${s.cuentas_fail} cuenta(s) fallaron (detalle en consola) · ${_okTxt}`}
-      console.warn('[sync incremental] errores:',s.errores)
-      if(btn){btn.disabled=false;btn.textContent=_o}
-    }else{
-      if(_res){_res.style.color='var(--green)';_res.textContent=_okTxt+(s.sellado?' · Última sync actualizada ✓':'')+' — se refleja en todo cuando recargues manualmente'}
-      if(btn){btn.textContent='✅ Al día';btn.style.borderColor='var(--green)';btn.style.color='var(--green)';btn.style.cursor='default'}
-      logAction('sync_incremental_manual',{cuentas_ok:s.cuentas_ok||0,filas:s.filas_upsert||0,sellado:!!s.sellado}).catch(()=>{})
+    while(vueltas<60){
+      vueltas++
+      let data=null,error=null
+      try{({data,error}=await sb.functions.invoke('meta-sync-nocturno',{body:{modo:'semanal'}}))}catch(e){error=e}
+      if(error){
+        errSeg++
+        if(errSeg>4){fin='error';errFin=error;break}
+        _pintar(_pctVisto,`🟡 el robot no respondió, reintentando solo (${errSeg} de 4)…`,'aviso')
+        await _dormir(5000*errSeg);continue
+      }
+      errSeg=0
+      s=(data&&data.semanal)||{}
+      okTot+=s.cuentas_ok||0;filasTot+=s.filas_upsert||0
+      const pct=_pctDe(s)
+      if(s.sellado){fin='ok';break}
+      if(s.ocupado){_pintar(pct,'⏳ otra vuelta del robot está trabajando, esperando…','carga');await _dormir(8000);continue}
+      const par=s.progreso&&s.progreso.parada
+      if(par==='token'){fin='token';break}
+      const pend=(s.cuentas_pendientes||[]).length
+      if(!pend&&!s.cortado_por_tiempo){fin='fallas';break} // terminó, pero con cuentas que fallaron 3 veces
+      const unid=(s.progreso&&typeof s.progreso.unidades==='number')?s.progreso.unidades:-pend
+      if(ultUnid!==null&&unid<=ultUnid)sinAvance++;else sinAvance=0
+      ultUnid=ultUnid===null?unid:Math.max(ultUnid,unid)
+      if(sinAvance>=3){fin='atascado';break}
+      if(par==='limite'){_pintar(pct,'🟡 Meta pidió una pausa: sigo solo en 60 s…','aviso');await _dormir(60000);continue}
+      _pintar(pct,'⏳ '+_txtProg(s.progreso),'carga')
     }
-  }catch(e){
-    if(_res){_res.style.color='var(--red)';_res.textContent='❌ '+((e&&e.message)||'Error invocando la Edge')}
-    if(btn){btn.disabled=false;btn.textContent=_o}
+    if(!fin)fin='atascado'
+  }finally{clearInterval(_poll);window._nxSyncIncrOn=false}
+  const _sp=((s&&s.sin_permiso)||[]).length
+  const _vuelve=()=>{if(btn){btn.disabled=false;btn.textContent=_o}}
+  if(fin==='ok'){
+    _pintar(100,`✅ Al día · ${okTot} cuenta${okTot===1?'':'s'} con datos nuevos · ${fmt(filasTot)} filas${_sp?` · ${_sp} sin permiso de Meta (no frenan)`:''} · Última sync actualizada ✓ — se refleja en todo cuando recargues manualmente`,'ok')
+    if(btn){btn.textContent='✅ Al día';btn.style.borderColor='var(--green)';btn.style.color='var(--green)';btn.style.cursor='default'}
+    logAction('sync_incremental_manual',{cuentas_ok:okTot,filas:filasTot,sellado:true,vueltas}).catch(()=>{})
+  }else if(fin==='fallas'){
+    const nf=(s&&s.cuentas_fail)||0
+    _pintar(100,`🟡 Terminó, pero ${nf} cuenta${nf===1?'':'s'} fallaron 3 veces (detalle en consola) · ${fmt(filasTot)} filas`,'aviso')
+    console.warn('[sync incremental] errores:',s&&s.errores)
+    _vuelve()
+  }else if(fin==='token'){
+    _pintar(_pctVisto,'❌ Se detuvo: el token de Meta está vencido o no sirve (revisa Credenciales).','error')
+    _vuelve()
+  }else if(fin==='atascado'){
+    _pintar(_pctVisto,`🟡 Se detuvo en ${_pctVisto}% porque no avanzó en 3 vueltas seguidas — dale otra vez: sigue donde quedó.`,'aviso')
+    console.warn('[sync incremental] no avanzó:',s&&s.errores)
+    _vuelve()
+  }else{
+    _pintar(_pctVisto,'❌ '+((errFin&&errFin.message)||'Error invocando la Edge')+' — dale otra vez: sigue donde quedó.','error')
+    _vuelve()
   }
 }
 // ════════ SYNC GASTO (botón de la barra lifetime) → Edge Function meta-sync-nocturno ════════

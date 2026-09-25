@@ -23657,6 +23657,22 @@ function metaDateChunks(since,until,chunkDays=90){
 }
 
 const _metaWait=ms=>new Promise(r=>setTimeout(r,ms))
+// (25sep26) Meta pidió una pausa (rate limit): UNA sola píldora 🟡 compartida por todas las cargas, con
+// cuenta atrás y cuántas cargas esperan; se quita sola cuando ya ninguna está esperando.
+const _nxEsperasMeta=new Map() // id → {fin,intento}
+let _nxEsperaTimer=null
+window._nxEsperaMeta=async function(seg,intento){
+  const id=Symbol('espera');_nxEsperasMeta.set(id,{fin:Date.now()+seg*1000,intento})
+  const pinta=()=>{
+    let fin=0,it=1;for(const e of _nxEsperasMeta.values()){if(e.fin>fin){fin=e.fin;it=e.intento}}
+    const q=Math.max(0,Math.ceil((fin-Date.now())/1000))
+    try{window._nxPillCarga('meta-espera',`🟡 Meta pidió una pausa · sigo solo en ${q} s (intento ${it} de 3)${_nxEsperasMeta.size>1?' · '+_nxEsperasMeta.size+' cargas esperando':''}`,'reintento')}catch(_){}
+  }
+  if(!_nxEsperaTimer)_nxEsperaTimer=setInterval(pinta,1000)
+  pinta()
+  try{await _metaWait(seg*1000)}
+  finally{_nxEsperasMeta.delete(id);if(!_nxEsperasMeta.size){clearInterval(_nxEsperaTimer);_nxEsperaTimer=null;try{window._nxPillCarga('meta-espera','','quitar')}catch(_){}}}
+}
 let _metaLastCall=0
 
 // (23sep26) P1 · fetch con TOPE de tiempo: si Meta no responde en `ms` se corta (AbortController) y
@@ -23694,9 +23710,9 @@ async function metaGet(path,token,params={},opts={}){
       if(isRateLimit&&retries<2&&!(opts&&opts.sinEspera)){ // (23sep26) P1: en modo interactivo no se espera
         retries++
         const waitSec=30*retries
-        const prog=document.getElementById('sync-progress')
-        if(prog)prog.innerHTML+=`<div style="font-size:12px;color:var(--amber)">⏳ Rate limit — esperando ${waitSec}s (intento ${retries}/3)...</div>`
-        await _metaWait(waitSec*1000)
+        // (25sep26) La pausa se avisa en la píldora 🟡 de abajo a la derecha (cuenta atrás) y se QUITA sola
+        // al terminar. Antes se escribía en el cuadro "Sincronización global" y se quedaba ahí para siempre.
+        await window._nxEsperaMeta(waitSec,retries)
         continue
       }
       throw new Error(e.error?.message||`Error ${r.status}`)

@@ -749,6 +749,7 @@ window.nxPuerta=(function(){
         if(sig&&sig.aborted)throw e // la propia app la canceló a propósito: no es falla de red
         const esTimeout=e&&e.name==='AbortError'
         ultimoErr=esTimeout?new Error('Supabase no respondió en '+Math.round(c.ms/1000)+' s'+(intentos>1?' (intento '+i+' de '+intentos+')':'')):e
+        if(esTimeout&&tipo==='functions'){try{ultimoErr.nxCorteEdge=true;ultimoErr.nxEdge=edgeDe(url);est.edgeCortes=(est.edgeCortes||0)+1;est.ultimoCorteEdge={fn:ultimoErr.nxEdge,cuando:new Date().toISOString()}}catch(_){}} // ✂️ (25sep26 · B8) se cortó AQUÍ, pero el servidor SIGUE trabajando (hasta 400 s en Pro): quien reintente debe esperar (nxEsCorteEdge)
         falla(tipo,ultimoErr&&ultimoErr.message)
         if(i<intentos){est.reintentos++;await espera(i);continue}
         throw ultimoErr
@@ -756,7 +757,29 @@ window.nxPuerta=(function(){
     }
     throw ultimoErr||new Error('Supabase no respondió')
   }
-  return{fetch:fetchPuerta,estado:()=>est.estado,lento:()=>est.estado==='lento',info:()=>({...est}),CFG,cortes:()=>(est.cortes||[]).slice()} // (25sep26 · B5) + cortes()
+  // ✍️ (25sep26 · B1-b) ESCRITURAS DEL SERVIDOR → mismo aviso 'nx:escritura' que las de REST.
+  // ANTES: una Edge Function que escribe tablas (el robot meta-sync-nocturno: 🗓 Sync incremental, Sync gasto,
+  // Sync estructura) no avisaba nada → el almacén de días cerrados (nxAlm) podía mostrar datos viejos hasta 10 min.
+  // AHORA: cuando la llamada TERMINA (bien, con error o cortada: pudo escribir algo igual) se avisa una escritura
+  // por cada tabla que esa función escribe. Para agregar otra Edge que escriba tablas: sumarla aquí.
+  const EDGE_ESCRIBE={'meta-sync-nocturno':['meta_insights','meta_campanas']}
+  const EDGE_MAX_MS=400000 // Supabase plan Pro: una Edge Function vive como máximo 400 s (Free: 150 s)
+  const c0=CFG.functions
+  function edgeDe(u){const m=/\/functions\/v1\/([a-z0-9_-]+)/i.exec(urlDe(u));return m?m[1]:''}
+  function avisarEdge(fn){
+    for(const t of (EDGE_ESCRIBE[fn]||[])){try{window.dispatchEvent(new CustomEvent('nx:escritura',{detail:{url:'/rest/v1/'+t,metodo:'EDGE '+fn,cuerpo:''}}))}catch(_){}}
+  }
+  async function fetchConAvisoEdge(url,init){
+    const fn=tipoDe(urlDe(url))==='functions'?edgeDe(url):''
+    if(!fn||!EDGE_ESCRIBE[fn])return fetchPuerta(url,init) // todo lo demás: exactamente igual que antes
+    try{return await fetchPuerta(url,init)}
+    catch(e){ // cortada: el servidor SIGUE escribiendo hasta 400 s (plan Pro) → 2º aviso cuando seguro terminó
+      if(e&&e.nxCorteEdge){try{setTimeout(()=>avisarEdge(fn),Math.max(0,EDGE_MAX_MS-(c0.ms||0))+10000)}catch(_){}}
+      throw e
+    }finally{avisarEdge(fn)}
+  }
+  // ANTES: return{fetch:fetchPuerta,estado:()=>est.estado,lento:()=>est.estado==='lento',info:()=>({...est}),CFG,cortes:()=>(est.cortes||[]).slice()} // (25sep26 · B5) + cortes()
+  return{fetch:fetchConAvisoEdge,estado:()=>est.estado,lento:()=>est.estado==='lento',info:()=>({...est}),CFG,cortes:()=>(est.cortes||[]).slice()} // (25sep26 · B5) + cortes() · (25sep26 · B1-b) fetch avisa las escrituras de las Edge
 })()
 // ═══ FIN PUERTA ÚNICA ═══
 const sb=createClient(SURL,SKEY,{global:{fetch:(window.nxPuerta&&window.nxPuerta.fetch)||undefined}}) // 🚪 (24sep26): todas las consultas pasan por la puerta única (tiempo máximo + reintento + aviso)
@@ -2202,6 +2225,12 @@ const NX_SYS_ORIG={
   // (25sep26 · B1) ALMACÉN DE DÍAS CERRADOS de Meta Ads — 0 lo apaga (todo vuelve a bajarse completo como antes)
   metaAlmacenMin:{v:10,min:0,max:120,label:'🗄️ Minutos que Meta Ads guarda en memoria los días YA CERRADOS (0 = apagado)',mod:'Meta Ads',
     explica:'Ventas, reportes y gasto de los días que ya pasaron se bajan UNA sola vez y todos los productos, el rango global y la precarga leen de ahí (antes se bajaban una vez por producto). HOY siempre se trae en vivo. Lo guardado se borra solo al pasar estos minutos, al actualizar el resumen, al cambiar el número de días o cuando NEXO guarda algo en esas tablas. 0 = apagado: todo como antes.'},
+  // (25sep26 · B8) ESPERA TRAS UN CORTE DE EDGE — 0 = como antes (reintenta a los 10 s)
+  edgeEsperaCorteSeg:{v:300,min:0,max:900,label:'⏳ Segundos que NEXO espera antes de reintentar un sync del SERVIDOR que se cortó a los 120 s (0 = como antes)',mod:'Meta Ads',
+    explica:'NEXO deja de esperar a una función del servidor a los 120 s, pero el servidor puede seguir trabajando hasta 400 s (plan Pro de Supabase). Si NEXO reintenta antes, quedan DOS corridas a la vez del mismo sync (no duplica datos, pero dobla el trabajo). Con 300 s el reintento llega cuando la primera ya terminó. Solo aplica a Sync gasto y Sync estructura del producto, y solo cuando hubo un corte por tiempo; cualquier otro error se reintenta como siempre (10 s · 30 s · 60 s).'},
+  // (25sep26 · D2) REFRESCOS QUE DUERMEN CON LA PESTAÑA ESCONDIDA — 0 = como antes
+  pausaEscondida:{v:1,min:0,max:1,label:'⏸️ Pausar los refrescos automáticos cuando la pestaña de NEXO está escondida (1 = sí · 0 = no)',mod:'Toda la app',
+    explica:'Con la pestaña escondida (otra pestaña, minimizada) nadie está mirando: la lista del Centro de Chats, su latido y el globito 💬 dejan de preguntar a Supabase. Al volver a la pestaña se ponen al día AL INSTANTE (una vuelta) y siguen su ritmo normal. 0 = siguen preguntando siempre, como antes.'},
   // (25sep26 · C1) VIGÍA DE CARGAS — 0 lo apaga
   cargaVigia:{v:1,min:0,max:1,label:'👀 Mostrar cuánto lleva cada "Cargando…" de una sola consulta (1 = sí · 0 = no)',mod:'Toda la app',
     explica:'Las cargas con pasos muestran su % real. Las de UNA sola consulta no tienen pasos que contar (inventar un % sería mentir): a esas se les agrega cuánto llevan (⏳ 7 s) y, si Supabase va lento, lo dicen en amarillo (NEXO reintenta sola). Nunca dicen 100 %: cuando termina, simplemente aparece el contenido.'}
@@ -2389,6 +2418,19 @@ async function logAction(accion,detalles){
   try{
     await sb.rpc('log_action',{p_accion:accion,p_detalles:detalles||{},p_user_agent:navigator.userAgent.slice(0,200)})
   }catch(e){console.warn('logAction fail:',e)}
+}
+// (25sep26 · E1-d) TRADUCTOR ÚNICO de errores de Supabase Auth (llegan en inglés desde manage-user).
+// Si el texto no está en la lista, sale tal cual (no se inventa nada). Agregar traducciones AQUÍ.
+window.nxErrorClaro=function(m){
+  m=String(m==null?'':m)
+  const T=[
+    [/known to be weak and easy to guess/i,'Esa contraseña es muy conocida o fácil de adivinar (la protección de contraseñas filtradas la rechazó). Usa una más fuerte: por ejemplo 3 palabras y un número.'],
+    [/password should be at least (\d+)/i,(x)=>'La contraseña debe tener al menos '+x[1]+' caracteres.'],
+    [/already been registered/i,'Ya existe un usuario con ese correo.'],
+    [/invalid email/i,'Ese correo no es válido.']
+  ]
+  for(const[re,tr]of T){const x=re.exec(m);if(x)return typeof tr==='function'?tr(x):tr}
+  return m
 }
 async function callEdge(action,payload){
   try{
@@ -3319,6 +3361,59 @@ window.nxAlm=(function(){
   }catch(_){}},1000)
 })()
 // ═══ FIN VIGÍA DE CARGAS ═══
+// ═══ ⏸️ INTERVALO QUE DUERME CON LA PESTAÑA ESCONDIDA (25sep26 · D2) ══════════════════════════
+// ANTES: los refrescos automáticos (setInterval) seguían preguntando a Supabase aunque nadie mirara
+// la pestaña (otra pestaña, minimizada). La lista del Centro de Chats: latido cada 12 s + refresco
+// cada 60 s + globito 💬 cada 60 s, todo el día.
+// AHORA: window.nxIntervaloVisible(fn, ms, {clave, vivo}) — igual que setInterval (devuelve el MISMO
+// número: clearInterval lo sigue apagando), pero:
+//   · 🙈 pestaña escondida → NO llama a fn (solo anota que se perdió una vuelta).
+//   · 👀 al volver → si se perdió alguna vuelta, llama a fn UNA vez al instante (escalonado) y sigue su
+//     ritmo normal. Si se escondió menos que una vuelta, no hace nada extra.
+//   · clave: una clave nueva con el mismo nombre REEMPLAZA a la anterior (así un "abrir otra vez" nunca
+//     deja dos al día). vivo(): false = su dueño ya no existe (ej. se cerró el Centro) → no se pone al día.
+//   · Interruptor: valor del sistema pausaEscondida = 0 → todo como antes (pregunta siempre).
+//   · Diagnóstico en consola: nxIntervaloVisible.info()
+// ════════════════════════════════════════════════════════════════════════════
+;(function(){
+  if(window.nxIntervaloVisible)return
+  const REG=new Map() // clave → {id,fn,ms,vivo,perdida,vueltas,saltadas,alDia}
+  const pausar=()=>{try{return nxSysVal('pausaEscondida')>0}catch(_){return true}}
+  window.nxIntervaloVisible=function(fn,ms,opts){
+    opts=opts||{}
+    const clave=opts.clave||('iv-'+Math.random().toString(36).slice(2,8))
+    const e={clave,fn,ms,vivo:opts.vivo||null,perdida:false,vueltas:0,saltadas:0,alDia:0,id:null}
+    e.id=setInterval(()=>{
+      if(document.hidden&&pausar()){e.perdida=true;e.saltadas++;return} // 🙈 nadie mira: cero pedidos
+      e.vueltas++;e.ultima=Date.now()
+      try{const r=fn();if(r&&typeof r.catch==='function')r.catch(err=>console.warn('[intervalo '+clave+']',err&&err.message))}catch(err){console.warn('[intervalo '+clave+']',err&&err.message)}
+    },ms)
+    REG.set(clave,e) // reemplaza al anterior con la misma clave (ese ya fue apagado por su dueño con clearInterval)
+    return e.id
+  }
+  window.nxIntervaloVisible.info=function(){
+    const filas=[...REG.values()].map(e=>({clave:e.clave,'cada (s)':Math.round(e.ms/1000),vueltas:e.vueltas,'saltadas (escondida)':e.saltadas,'puestas al día':e.alDia,'dueño vivo':e.vivo?!!e.vivo():'—'}))
+    try{console.table(filas)}catch(_){}
+    return filas
+  }
+  document.addEventListener('visibilitychange',()=>{
+    if(document.hidden)return
+    let i=0
+    REG.forEach((e,k)=>{
+      try{if(e.vivo&&!e.vivo()){REG.delete(k);return}}catch(_){REG.delete(k);return} // dueño muerto (ej. Centro cerrado): se olvida
+      if(!e.perdida)return
+      e.perdida=false
+      setTimeout(()=>{ // 👀 volvió: al día YA (escalonado para no disparar todo junto)
+        if(document.hidden){e.perdida=true;return}
+        try{if(e.vivo&&!e.vivo())return}catch(_){return}
+        if(e.ultima&&Date.now()-e.ultima<e.ms)return // ya corrió una vuelta normal al volver: no se repite
+        e.alDia++;e.ultima=Date.now()
+        try{const r=e.fn();if(r&&typeof r.catch==='function')r.catch(err=>console.warn('[intervalo '+e.clave+']',err&&err.message))}catch(err){console.warn('[intervalo '+e.clave+']',err&&err.message)}
+      },120+(i++)*150)
+    })
+  })
+})()
+// ═══ FIN INTERVALO QUE DUERME ═══
 
 // ══ H3 (15jul26) · TICKET DE SECUENCIA (mismo patrón que _repLoadSeq en cargarReporteData) ══
 // Al TECLEAR una fecha el onchange dispara varias recargas en paralelo; sin ticket, la que
@@ -6295,22 +6390,24 @@ async function pageAdminProductos(c){
       <div class="divider"></div>
       <div class="section-title">🏷️ Ofertas iniciales (deja en 0 las que no aplican)</div>
       <div class="form-grid g4">
-        <div class="fld"><label>Precio 1u</label><input type="number" id="np-p1" value="0"></div>
-        <div class="fld"><label>Precio 2u</label><input type="number" id="np-p2" value="0"></div>
-        <div class="fld"><label>Precio 3u</label><input type="number" id="np-p3" value="0"></div>
-        <div class="fld"><label>Precio 4u</label><input type="number" id="np-p4" value="0"></div>
-        <div class="fld"><label>Costo 1u</label><input type="number" id="np-c1" value="0"></div>
-        <div class="fld"><label>Costo 2u</label><input type="number" id="np-c2" value="0"></div>
-        <div class="fld"><label>Costo 3u</label><input type="number" id="np-c3" value="0"></div>
-        <div class="fld"><label>Costo 4u</label><input type="number" id="np-c4" value="0"></div>
+        <!-- (25sep26 · P-T6) precios/costos/fletes con punto de mil (nx-miles); % y unidades quedan igual.
+             ANTES cada campo de plata era: <input type="number" id="np-XX" value="N"> (np-p1..p4, np-c1..c4, np-fo 21000, np-fd 18000, np-cc 100) -->
+        <div class="fld"><label>Precio 1u</label><input type="text" inputmode="numeric" autocomplete="off" class="nx-miles" id="np-p1" value="${window.nxMilesVer(0)}"></div>
+        <div class="fld"><label>Precio 2u</label><input type="text" inputmode="numeric" autocomplete="off" class="nx-miles" id="np-p2" value="${window.nxMilesVer(0)}"></div>
+        <div class="fld"><label>Precio 3u</label><input type="text" inputmode="numeric" autocomplete="off" class="nx-miles" id="np-p3" value="${window.nxMilesVer(0)}"></div>
+        <div class="fld"><label>Precio 4u</label><input type="text" inputmode="numeric" autocomplete="off" class="nx-miles" id="np-p4" value="${window.nxMilesVer(0)}"></div>
+        <div class="fld"><label>Costo 1u</label><input type="text" inputmode="numeric" autocomplete="off" class="nx-miles" id="np-c1" value="${window.nxMilesVer(0)}"></div>
+        <div class="fld"><label>Costo 2u</label><input type="text" inputmode="numeric" autocomplete="off" class="nx-miles" id="np-c2" value="${window.nxMilesVer(0)}"></div>
+        <div class="fld"><label>Costo 3u</label><input type="text" inputmode="numeric" autocomplete="off" class="nx-miles" id="np-c3" value="${window.nxMilesVer(0)}"></div>
+        <div class="fld"><label>Costo 4u</label><input type="text" inputmode="numeric" autocomplete="off" class="nx-miles" id="np-c4" value="${window.nxMilesVer(0)}"></div>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-top:6px">💡 Después de crear el producto, puedes agregar más ofertas (5u, 6u...) desde el botón "➕ Agregar oferta"</div>
       <div class="divider"></div>
       <div class="form-grid g4">
-        <div class="fld"><label>Flete outbound</label><input type="number" id="np-fo" value="21000"></div>
-        <div class="fld"><label>Flete devolución</label><input type="number" id="np-fd" value="18000"></div>
+        <div class="fld"><label>Flete outbound</label><input type="text" inputmode="numeric" autocomplete="off" class="nx-miles" id="np-fo" value="${window.nxMilesVer(21000)}"></div>
+        <div class="fld"><label>Flete devolución</label><input type="text" inputmode="numeric" autocomplete="off" class="nx-miles" id="np-fd" value="${window.nxMilesVer(18000)}"></div>
         <div class="fld"><label>% Devolución</label><input type="number" step="0.01" id="np-dp" value="19"></div>
-        <div class="fld"><label>Costo/conversación</label><input type="number" id="np-cc" value="100"></div>
+        <div class="fld"><label>Costo/conversación</label><input type="text" inputmode="numeric" autocomplete="off" class="nx-miles" id="np-cc" value="${window.nxMilesVer(100)}"></div>
       </div>
       <div class="form-grid g2" style="margin-top:10px">
         <div class="fld"><label title="Cuántas conversaciones se necesitan para lograr 1 venta">💬 Conversaciones por venta</label>
@@ -7620,7 +7717,8 @@ window.nxMixFila=(prodId)=>{
     <span style="font-size:11px;color:var(--muted);min-width:80px">Proveedor ${box.children.length+1}</span>
     <input type="number" placeholder="Unidades" min="0" step="1" class="nxmix-u" oninput="nxMixCalc('${prodId}')" style="width:100px;font-size:12px;padding:6px 8px">
     <span style="font-size:11px;color:var(--muted)">×</span>
-    <input type="number" placeholder="Costo c/u" min="0" class="nxmix-c" oninput="nxMixCalc('${prodId}')" style="width:120px;font-size:12px;padding:6px 8px">
+    <!-- (25sep26 · P-T6) ANTES: <input type="number" placeholder="Costo c/u" min="0" class="nxmix-c" ...> -->
+    <input type="text" inputmode="numeric" autocomplete="off" placeholder="Costo c/u" class="nxmix-c nx-miles" oninput="nxMixCalc('${prodId}')" style="width:120px;font-size:12px;padding:6px 8px">
     <button type="button" class="btn-sm btn-red" style="padding:2px 7px;font-size:10px" onclick="this.parentElement.remove();nxMixCalc('${prodId}')" title="Quitar este proveedor">🗑️</button>
   </div>`)
 }
@@ -9093,7 +9191,8 @@ window.doCreateUser=async()=>{
   btn.disabled=true;btn.textContent='Creando...'
   const res=await callEdge('create_user',payload)
   if(!res.ok){
-    msg.innerHTML=`<div class="alert alert-red">${res.error}</div>`
+    // ANTES: msg.innerHTML=`<div class="alert alert-red">${res.error}</div>`
+    msg.innerHTML=`<div class="alert alert-red">${window.nxErrorClaro(res.error)}</div>` // (25sep26 · E1-d) en español
     btn.disabled=false;btn.textContent='Crear usuario'
     return
   }
@@ -9329,7 +9428,8 @@ window.doChangePwd=async(user_id)=>{
   if(password_nota)payload.password_nota=password_nota
   const res=await callEdge('change_password',payload)
   if(!res.ok){
-    msg.innerHTML=`<div class="alert alert-red">${res.error}</div>`
+    // ANTES: msg.innerHTML=`<div class="alert alert-red">${res.error}</div>`
+    msg.innerHTML=`<div class="alert alert-red">${window.nxErrorClaro(res.error)}</div>` // (25sep26 · E1-d) en español
     btn.disabled=false;btn.textContent='Cambiar'
     return
   }
@@ -21533,7 +21633,11 @@ function _nxbCierreBloqueado(b){
 function _nxWaBarrasArrancarPoll(){
   if(window._nxBarrasTimer)return
   _nxWaBarrasPoll()
-  window._nxBarrasTimer=setInterval(_nxWaBarrasPoll,20000)
+  // ANTES: window._nxBarrasTimer=setInterval(_nxWaBarrasPoll,20000)
+  // ⏸️ (25sep26 · D3) con la pestaña escondida no pregunta (hasta 3.000 filas cada 20 s); al volver, al día YA
+  window._nxBarrasTimer=window.nxIntervaloVisible
+    ?window.nxIntervaloVisible(_nxWaBarrasPoll,20000,{clave:'wa-barras',vivo:()=>{try{return Object.values(window._nxBarras||{}).some(x=>!x.cerrada)}catch(_){return false}}})
+    :setInterval(_nxWaBarrasPoll,20000)
 }
 function _nxWaBarrasPararPoll(){if(window._nxBarrasTimer){clearInterval(window._nxBarrasTimer);window._nxBarrasTimer=null}}
 
@@ -22134,8 +22238,12 @@ function _waChipMulti(nombre,texto,secFiltro,footer,boton,destino){
   const bolas=nums.map(n=>{
     const e=porWaba[n.waba_id]
     // 4 colores: 🟢 aprobada · 🔵 en revisión · 🔴 rechazada · ⚪ sin enviar
-    const c=e==='APPROVED'?'var(--green)':e==='PENDING'?'#3b82f6':e==='REJECTED'?'var(--red)':'#94a3b8'
-    const t=e==='APPROVED'?'aprobada en esta cuenta de WhatsApp':e==='PENDING'?'en revisión en esta cuenta (espera a Meta)':e==='REJECTED'?'rechazada en esta cuenta — renómbrala con ✏️ para reintentar':'sin enviar en esta cuenta'
+    // (25sep26 · P-T7) un estado RARO (PAUSED, DISABLED…) ya no se disfraza de "sin enviar": usa _waEstInfo (los mismos nombres de la tabla)
+    const _otro=(e&&!['APPROVED','PENDING','REJECTED'].includes(String(e).toUpperCase()))?_waEstInfo(e):null
+    // ANTES: const c=e==='APPROVED'?'var(--green)':e==='PENDING'?'#3b82f6':e==='REJECTED'?'var(--red)':'#94a3b8'
+    const c=e==='APPROVED'?'var(--green)':e==='PENDING'?'#3b82f6':e==='REJECTED'?'var(--red)':_otro?_otro[2]:'#94a3b8'
+    // ANTES: const t=e==='APPROVED'?'aprobada en esta cuenta de WhatsApp':e==='PENDING'?'en revisión en esta cuenta (espera a Meta)':e==='REJECTED'?'rechazada en esta cuenta — renómbrala con ✏️ para reintentar':'sin enviar en esta cuenta'
+    const t=e==='APPROVED'?'aprobada en esta cuenta de WhatsApp':e==='PENDING'?'en revisión en esta cuenta (espera a Meta)':e==='REJECTED'?'rechazada en esta cuenta — renómbrala con ✏️ para reintentar':_otro?(_otro[0]+' '+_waEsc(String(_otro[1]).toLowerCase())+' en esta cuenta'):'sin enviar en esta cuenta'
     const sinEnviar=!e // solo lo NUNCA enviado ofrece ↻ (un nombre rechazado no se puede reusar)
     return `<span style="display:inline-flex;align-items:center;gap:3px;border:1px solid ${c};border-radius:20px;padding:1px 8px;font-size:10px" title="${_waEsc(n.etiqueta)} (${_waEsc(n.display||'')}): ${t}">
       <span style="width:8px;height:8px;border-radius:50%;background:${c};display:inline-block"></span>${_waEsc(n.etiqueta)}
@@ -25462,7 +25570,8 @@ window._nxReintentar=function(clave,cfg){
   const avisar=()=>{try{cfg.alCambiar&&cfg.alCambiar(rt)}catch(_){}}
   rt.cancelar=(silencio)=>{limpiar();rt.vivo=false;if(window._nxReintentos[clave]===rt)delete window._nxReintentos[clave];if(!silencio)avisar()}
   const programar=()=>{
-    const ms=[10000,30000][rt.intento]||60000
+    let ms=[10000,30000][rt.intento]||60000 // ANTES: const ms=[10000,30000][rt.intento]||60000
+    try{const _x=cfg.espera&&cfg.espera(rt);if(_x>0)ms=_x}catch(_){} // ⏳ (25sep26 · B8) espera a la medida (ej. tras un corte de Edge); sin cfg.espera = igual que siempre
     rt.proximoEn=Math.round(ms/1000)
     rt.tick=setInterval(()=>{rt.proximoEn=Math.max(0,rt.proximoEn-1);avisar()},1000)
     rt.timer=setTimeout(correr,ms)
@@ -25494,13 +25603,26 @@ window.nxPctPasos=(hechos,total,sub)=>Math.max(0,Math.min(99,Math.round(((hechos
 // Un clic tuyo en el botón vuelve a lanzar la carga de siempre (y esa carga apaga este reintento).
 window.nxReintentoBoton=function(clave,btn,cfg){
   cfg=cfg||{}
+  // (25sep26 · B8) cfg.error = el error que hizo fallar la carga · cfg.esperaTrasCorte = ms a esperar si fue un
+  // CORTE de Edge Function (el servidor sigue trabajando: reintentar antes lo ENCIMARÍA con la corrida viva).
+  cfg._corte=!!(cfg.error&&window.nxEsCorteEdge&&window.nxEsCorteEdge(cfg.error))
+  cfg.huboCorte=cfg._corte // pegajosa: una vez que hubo corte, rehacer() puede decidir NO volver a lanzar el servidor
+  try{if(btn&&btn.dataset&&btn.dataset._tt==null)btn.dataset._tt=btn.title||''}catch(_){} // (25sep26 · B8) guarda el tooltip original (el reintento lo cambia) para devolverlo al terminar
+  if(cfg._corte&&cfg.esperaTrasCorte>0)cfg.motivo='el servidor sigue trabajando'
   return window._nxReintentar(clave,{
     sigueVivo:()=>!!(btn&&btn.isConnected)&&(!cfg.sigueVivo||cfg.sigueVivo()),
-    intentar:async(rt)=>{try{return !!(await cfg.rehacer(rt))}catch(e){cfg.motivo=String((e&&e.message)||e||'').slice(0,60);return false}},
-    alCambiar:(rt)=>{try{if(!btn||!rt.vivo||rt.corriendo)return;btn.disabled=false;btn.style.pointerEvents='';btn.style.opacity='';btn.title='Clic = reintentar ya';btn.textContent=`🟡 No cargó${cfg.motivo?' ('+cfg.motivo+')':''} · reintento ${rt.intento+1} en ${rt.proximoEn} s`}catch(_){}}
+    espera:()=>(cfg._corte&&cfg.esperaTrasCorte>0)?cfg.esperaTrasCorte:0, // (25sep26 · B8) sin corte = 10 s · 30 s · 60 s de siempre
+    // ANTES: intentar:async(rt)=>{try{return !!(await cfg.rehacer(rt))}catch(e){cfg.motivo=String((e&&e.message)||e||'').slice(0,60);return false}},
+    intentar:async(rt)=>{try{return !!(await cfg.rehacer(rt))}catch(e){cfg._corte=!!(window.nxEsCorteEdge&&window.nxEsCorteEdge(e));if(cfg._corte)cfg.huboCorte=true;cfg.motivo=(cfg._corte&&cfg.esperaTrasCorte>0)?'el servidor sigue trabajando':String((e&&e.message)||e||'').slice(0,60);return false}},
+    // ANTES: alCambiar:(rt)=>{try{if(!btn||!rt.vivo||rt.corriendo)return;btn.disabled=false;btn.style.pointerEvents='';btn.style.opacity='';btn.title='Clic = reintentar ya';btn.textContent=`🟡 No cargó${cfg.motivo?' ('+cfg.motivo+')':''} · reintento ${rt.intento+1} en ${rt.proximoEn} s`}catch(_){}}
+    // (25sep26 · B8) durante un corte el tooltip dice la verdad (el resto de la línea, igual)
+    alCambiar:(rt)=>{try{if(!btn||!rt.vivo||rt.corriendo)return;btn.disabled=false;btn.style.pointerEvents='';btn.style.opacity='';btn.title=(cfg._corte&&cfg.esperaTrasCorte>0)?'El servidor sigue trabajando: NEXO espera a que termine y recarga solo. Un clic lo vuelve a lanzar YA (quedarían dos corridas a la vez).':'Clic = reintentar ya';btn.textContent=`🟡 No cargó${cfg.motivo?' ('+cfg.motivo+')':''} · reintento ${rt.intento+1} en ${rt.proximoEn} s`}catch(_){}}
   })
 }
 window.nxReintentoApagar=function(clave){try{const r=window._nxReintentos&&window._nxReintentos[clave];if(r&&r.vivo)r.cancelar(true)}catch(_){}}
+// (25sep26 · B8) ¿La llamada a una Edge Function se CORTÓ por tiempo en NEXO (120 s) mientras el servidor sigue?
+// La puerta marca ese error (nxCorteEdge); supabase-js lo guarda en error.context ("Failed to send a request…").
+window.nxEsCorteEdge=function(e){try{const c=e&&e.context;return !!((e&&e.nxCorteEdge)||(c&&c.nxCorteEdge))}catch(_){return false}}
 // ═══════════════════════════════════════════════════════════════════════════════════════
 // (23sep26) HASTA QUE CARGUE · piezas comunes para TODAS las cargas de Meta
 // ═══════════════════════════════════════════════════════════════════════════════════════
@@ -30188,7 +30310,8 @@ window.runSyncIncremental=async function(btn){
 // ════════ SYNC GASTO (botón de la barra lifetime) → Edge Function meta-sync-nocturno ════════
 // Trae de Meta el gasto histórico real de CADA campaña del producto (sin importar la cuenta)
 // y lo guarda en meta_insights. Al terminar, recarga el lifetime para que el total cuadre con Meta.
-window._rpSyncGastoProducto=async function(slug,btn,_rein){ // (25sep26 · C1) _rein = lo llama el reintento amarillo
+// ANTES: la firma era (slug,btn,_rein) — sin _soloRecargar
+window._rpSyncGastoProducto=async function(slug,btn,_rein,_soloRecargar){ // (25sep26 · C1) _rein = lo llama el reintento amarillo · (25sep26 · B8) _soloRecargar = el servidor ya trabajó solo tras un corte: no se vuelve a lanzar
   if(!_rein)try{window.nxReintentoApagar&&window.nxReintentoApagar('syncgasto-'+slug)}catch(_){}
   const ctx=window._rpFusionCtx&&window._rpFusionCtx[slug]
   if(!ctx){if(btn)btn.textContent='⚠️ Abre la fusión primero';return}
@@ -30197,8 +30320,10 @@ window._rpSyncGastoProducto=async function(slug,btn,_rein){ // (25sep26 · C1) _
   if(btn){if(!_rein||!btn.dataset._t)btn.dataset._t=btn.textContent;btn.style.pointerEvents='none';btn.style.opacity='.7';btn.textContent='⏳ Trayendo gasto de Meta…'}
   // (25sep26 · C1) 2 pasos reales: 1) el servidor le pide a Meta (se ven los segundos: no se puede medir por dentro) · 2) recargar el histórico
   const _t0G=Date.now(),_segG=setInterval(()=>{try{if(btn)btn.textContent=`⏳ Paso 1 de 2: el servidor trae el gasto de Meta · ${Math.round((Date.now()-_t0G)/1000)} s · 0%`}catch(_){}},1000)
+  if(_soloRecargar)clearInterval(_segG) // (25sep26 · B8) el paso 1 ya lo hizo el servidor solo
   try{
-    const{data,error}=await sb.functions.invoke('meta-sync-nocturno',{body:{modo:'gasto',producto_id:ctx.prodId}}).finally(()=>clearInterval(_segG))
+    // ANTES: const{data,error}=await sb.functions.invoke('meta-sync-nocturno',{body:{modo:'gasto',producto_id:ctx.prodId}}).finally(()=>clearInterval(_segG))
+    const{data,error}=_soloRecargar?{data:null,error:null}:await sb.functions.invoke('meta-sync-nocturno',{body:{modo:'gasto',producto_id:ctx.prodId}}).finally(()=>clearInterval(_segG))
     if(error)throw error
     if(btn)btn.textContent='⏳ Paso 2 de 2: recargando el histórico · 50%' // (25sep26 · C1)
     // Recargar el lifetime con el gasto fresco: apagar y volver a prender (re-consulta meta_insights)
@@ -30207,13 +30332,15 @@ window._rpSyncGastoProducto=async function(slug,btn,_rein){ // (25sep26 · C1) _
       await window._rpFusionLifetime(slug,lifeBtn)
       await window._rpFusionLifetime(slug,lifeBtn)
     }
-    if(btn){btn.style.pointerEvents='';btn.style.opacity='';btn.textContent='✅ Gasto sincronizado';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}
+    // ANTES: if(btn){btn.style.pointerEvents='';btn.style.opacity='';btn.textContent='✅ Gasto sincronizado';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}
+    if(btn){btn.style.pointerEvents='';btn.style.opacity='';btn.textContent=_soloRecargar?'✅ Listo · el servidor no confirmó (se cortó la espera)':'✅ Gasto sincronizado';if(_soloRecargar)btn.title='NEXO dejó de esperar a los 2 min y el servidor siguió solo (hasta 400 s). Ya pasó ese tiempo y se recargó lo que hay en la base, pero el servidor no pudo confirmar que terminó bien: si algún número no cuadra, dale otra vez.';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t;if(btn.dataset._tt!=null)btn.title=btn.dataset._tt},3500)} // (25sep26 · B8) el tooltip original vuelve
   }catch(e){console.warn('sync gasto error',e);clearInterval(_segG)
     // ANTES: if(btn){...btn.textContent='⚠️ Error — reintentar';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}
     // (25sep26 · C1) 🟡 reintento SOLO (10 s · 30 s · cada 60 s) mientras veas el producto; clic = ya
     if(btn){btn.style.pointerEvents='';btn.style.opacity=''}
     if(_rein)throw e
-    if(btn&&window.nxReintentoBoton)window.nxReintentoBoton('syncgasto-'+slug,btn,{motivo:String((e&&e.message)||'').slice(0,60),rehacer:async()=>{await window._rpSyncGastoProducto(slug,btn,true);return true}})
+    // ANTES: if(btn&&window.nxReintentoBoton)window.nxReintentoBoton('syncgasto-'+slug,btn,{motivo:String((e&&e.message)||'').slice(0,60),rehacer:async()=>{await window._rpSyncGastoProducto(slug,btn,true);return true}})
+    if(btn&&window.nxReintentoBoton){const _cR={motivo:String((e&&e.message)||'').slice(0,60),error:e,esperaTrasCorte:nxSysVal('edgeEsperaCorteSeg')*1000,rehacer:async()=>{await window._rpSyncGastoProducto(slug,btn,true,!!(_cR.huboCorte&&_cR.esperaTrasCorte>0));return true}};window.nxReintentoBoton('syncgasto-'+slug,btn,_cR)} // (25sep26 · B8) corte de 120 s → espera a que el servidor termine y SOLO recarga (no lo relanza)
     else if(btn){btn.textContent='⚠️ Error — reintentar';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}
   }
 }
@@ -30222,7 +30349,8 @@ window._rpSyncGastoProducto=async function(slug,btn,_rein){ // (25sep26 · C1) _
 // Rellena meta_campanas con el árbol ad→adset→campaign de las campañas VIEJAS del producto (las que no
 // corrieron en los días visibles), tomando los ad_id de mapeos que aún no están mapeados. Después de esto,
 // cada orden se atribuye a su campaña → la suma de filas cuadra con el total de arriba. Correr UNA vez.
-window._rpSyncEstructuraProducto=async function(slug,btn,_rein){ // (25sep26 · C1) _rein = lo llama el reintento amarillo
+// ANTES: la firma era (slug,btn,_rein) — sin _soloRecargar
+window._rpSyncEstructuraProducto=async function(slug,btn,_rein,_soloRecargar){ // (25sep26 · C1) _rein = lo llama el reintento amarillo · (25sep26 · B8) _soloRecargar = el servidor ya trabajó solo tras un corte: no se vuelve a lanzar
   if(!_rein)try{window.nxReintentoApagar&&window.nxReintentoApagar('syncestr-'+slug)}catch(_){}
   const ctx=window._rpFusionCtx&&window._rpFusionCtx[slug]
   if(!ctx){if(btn)btn.textContent='⚠️ Abre la fusión primero';return}
@@ -30231,22 +30359,27 @@ window._rpSyncEstructuraProducto=async function(slug,btn,_rein){ // (25sep26 · 
   if(btn){if(!_rein||!btn.dataset._t)btn.dataset._t=btn.textContent;btn.style.pointerEvents='none';btn.style.opacity='.7';btn.textContent='⏳ Trayendo estructura…'}
   // (25sep26 · C1) 2 pasos reales: 1) el servidor le pide a Meta (se ven los segundos) · 2) recargar el histórico
   const _t0E=Date.now(),_segE=setInterval(()=>{try{if(btn)btn.textContent=`⏳ Paso 1 de 2: el servidor trae la estructura · ${Math.round((Date.now()-_t0E)/1000)} s · 0%`}catch(_){}},1000)
+  if(_soloRecargar)clearInterval(_segE) // (25sep26 · B8) el paso 1 ya lo hizo el servidor solo
   try{
-    const{data,error}=await sb.functions.invoke('meta-sync-nocturno',{body:{modo:'estructura',producto_id:ctx.prodId}}).finally(()=>clearInterval(_segE))
+    // ANTES: const{data,error}=await sb.functions.invoke('meta-sync-nocturno',{body:{modo:'estructura',producto_id:ctx.prodId}}).finally(()=>clearInterval(_segE))
+    const{data,error}=_soloRecargar?{data:null,error:null}:await sb.functions.invoke('meta-sync-nocturno',{body:{modo:'estructura',producto_id:ctx.prodId}}).finally(()=>clearInterval(_segE))
     if(error)throw error
     if(btn)btn.textContent='⏳ Paso 2 de 2: recargando el histórico · 50%' // (25sep26 · C1)
     const _r=(data&&data.estructura)||{}
-    const _msg='✅ '+(_r.resueltos!=null?_r.resueltos:0)+' anuncios mapeados'
+    // ANTES: const _msg='✅ '+(_r.resueltos!=null?_r.resueltos:0)+' anuncios mapeados'
+    const _msg=_soloRecargar?'✅ Listo · el servidor no confirmó (se cortó la espera)':'✅ '+(_r.resueltos!=null?_r.resueltos:0)+' anuncios mapeados' // (25sep26 · B8)
     // recargar el lifetime para que las campañas viejas ya muestren sus órdenes (apagar y volver a prender)
     const lifeBtn=document.querySelector('[onclick*="_rpFusionLifetime(\''+slug+'\'"]')
     if(lifeBtn&&lifeBtn.dataset.lifeOn==='1'){await window._rpFusionLifetime(slug,lifeBtn);await window._rpFusionLifetime(slug,lifeBtn)}
-    if(btn){btn.style.pointerEvents='';btn.style.opacity='';btn.textContent=_msg;setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},4000)}
+    // ANTES: if(btn){btn.style.pointerEvents='';btn.style.opacity='';btn.textContent=_msg;setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},4000)}
+    if(btn){btn.style.pointerEvents='';btn.style.opacity='';btn.textContent=_msg;if(_soloRecargar)btn.title='NEXO dejó de esperar a los 2 min y el servidor siguió solo (hasta 400 s). Ya pasó ese tiempo y se recargó lo que hay en la base, pero el servidor no pudo confirmar que terminó bien: si algo no cuadra, dale otra vez.';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t;if(btn.dataset._tt!=null)btn.title=btn.dataset._tt},4000)} // (25sep26 · B8) el tooltip original vuelve
   }catch(e){console.warn('sync estructura error',e);clearInterval(_segE)
     // ANTES: if(btn){...btn.textContent='⚠️ Error — reintentar';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}
     // (25sep26 · C1) 🟡 reintento SOLO (10 s · 30 s · cada 60 s) mientras veas el producto; clic = ya
     if(btn){btn.style.pointerEvents='';btn.style.opacity=''}
     if(_rein)throw e
-    if(btn&&window.nxReintentoBoton)window.nxReintentoBoton('syncestr-'+slug,btn,{motivo:String((e&&e.message)||'').slice(0,60),rehacer:async()=>{await window._rpSyncEstructuraProducto(slug,btn,true);return true}})
+    // ANTES: if(btn&&window.nxReintentoBoton)window.nxReintentoBoton('syncestr-'+slug,btn,{motivo:String((e&&e.message)||'').slice(0,60),rehacer:async()=>{await window._rpSyncEstructuraProducto(slug,btn,true);return true}})
+    if(btn&&window.nxReintentoBoton){const _cR={motivo:String((e&&e.message)||'').slice(0,60),error:e,esperaTrasCorte:nxSysVal('edgeEsperaCorteSeg')*1000,rehacer:async()=>{await window._rpSyncEstructuraProducto(slug,btn,true,!!(_cR.huboCorte&&_cR.esperaTrasCorte>0));return true}};window.nxReintentoBoton('syncestr-'+slug,btn,_cR)} // (25sep26 · B8) corte de 120 s → espera a que el servidor termine y SOLO recarga (no lo relanza)
     else if(btn){btn.textContent='⚠️ Error — reintentar';setTimeout(()=>{if(btn.dataset._t)btn.textContent=btn.dataset._t},3500)}
   }
 }
@@ -34463,13 +34596,17 @@ window._massRenderSelect=()=>{
   const cfg={activar:{t:'▶️ Activar varias',hint:'Marca las que quieres ACTIVAR (las pausadas resaltadas; las ya activas, apagadas).',color:'var(--green)'},
              pausar:{t:'⏸️ Pausar varias',hint:'Marca las que quieres PAUSAR (las activas resaltadas; las ya pausadas, apagadas).',color:'var(--red)'},
              presupuesto:{t:'💰 Cambiar presupuesto a varias',hint:'Marca a cuáles cambiarles el presupuesto. Las ABO se abren en sus conjuntos al continuar.',color:'var(--accent)'}}[st.action]
-  const urgDefs=[['all','Todas','var(--muted)'],['stop','🔴 Pausar','var(--red)'],['precaucion','🟡 Cuidado','var(--amber)'],['fuego','🟣 Doblar','var(--purple)'],['escalar','🟢 Escalar','var(--green)'],['sin_ventas','⏳ Esperar','var(--muted)']]
+  const urgDefs=[['all','Todas','var(--muted)'],['stop','🔴 Pausar','var(--red)'],['precaucion','🟡 Cuidado','var(--amber)'],['fuego','🟣 Doblar','var(--purple)'],['escalar','🟢 Escalar','var(--green)'],['sin_ventas','⏳ Esperar','var(--muted)'],['sin_sem','⚪ Sin semáforo','#94a3b8']] // (25sep26 · P-T5) las que no tienen urgencia también se filtran
   // (24sep26) 🟢/⚫ FILTRO DE ESTADO (Todas · Activas · Inactivas) — se CRUZA con la urgencia:
   // cada fila de botones cuenta solo lo que deja pasar la otra fila.
   const _fe=st.filtroEst||'all'
   const _esAct=it=>it.estado==='ACTIVE' // mismo criterio del letrero 🟢 activa / ⚫ pausada de cada fila
   const _pasaEst=it=>_fe==='all'||(_fe==='activas'?_esAct(it):!_esAct(it))
-  const _baseEst=st.items.filter(it=>st.filtroUrg==='all'||it.semCode===st.filtroUrg)
+  // (25sep26 · P-T5) 'sin_sem' = sin urgencia conocida (sin semáforo o con un código que no tiene botón): así los botones SIEMPRE suman "Todas"
+  const _urgConBoton=new Set(urgDefs.map(d=>d[0]).filter(c=>c!=='all'&&c!=='sin_sem'))
+  const _pasaUrg=(it,code)=>code==='all'||(code==='sin_sem'?!(it.semCode&&_urgConBoton.has(it.semCode)):it.semCode===code)
+  // ANTES: const _baseEst=st.items.filter(it=>st.filtroUrg==='all'||it.semCode===st.filtroUrg)
+  const _baseEst=st.items.filter(it=>_pasaUrg(it,st.filtroUrg))
   const estBtns=[['all','Todas','var(--muted)'],['activas','🟢 Activas','var(--green)'],['inactivas','⚫ Inactivas','#94a3b8']].map(([code,lbl,col])=>{
     const n=code==='all'?_baseEst.length:_baseEst.filter(it=>code==='activas'?_esAct(it):!_esAct(it)).length
     const activo=_fe===code
@@ -34478,11 +34615,13 @@ window._massRenderSelect=()=>{
   const _itemsEst=st.items.filter(_pasaEst)
   const cont={};for(const it of _itemsEst)cont[it.semCode]=(cont[it.semCode]||0)+1 // (24sep26) cuenta dentro del estado elegido
   const filtroBtns=urgDefs.map(([code,lbl,col])=>{
-    const n=code==='all'?_itemsEst.length:(cont[code]||0) // (24sep26) dentro del estado elegido
+    // ANTES: const n=code==='all'?_itemsEst.length:(cont[code]||0) // (24sep26) dentro del estado elegido
+    const n=code==='all'?_itemsEst.length:_itemsEst.filter(it=>_pasaUrg(it,code)).length // (25sep26 · P-T5) mismo conteo para todos los botones (dentro del estado elegido)
     const activo=st.filtroUrg===code
     return `<button class="btn-sm ${activo?'btn-primary':'btn-outline'}" onclick="massFilterUrg('${code}')" style="padding:5px 11px;font-size:12px;${activo?'':'border-color:'+col+';color:'+col}">${lbl} ${n}</button>`
   }).join('')
-  const visibles=st.items.filter(it=>(st.filtroUrg==='all'||it.semCode===st.filtroUrg)&&_pasaEst(it)) // (24sep26) + estado
+  // ANTES: const visibles=st.items.filter(it=>(st.filtroUrg==='all'||it.semCode===st.filtroUrg)&&_pasaEst(it)) // (24sep26) + estado
+  const visibles=st.items.filter(it=>_pasaUrg(it,st.filtroUrg)&&_pasaEst(it)) // (25sep26 · P-T5) misma regla única
   // NUEVO (Mejora 11): orden de MEJOR a PEOR semáforo en TODOS los filtros (incluido "Todas").
   // Peso local (NO nexoOrdenUrgencia, que es por urgencia con stop primero — aquí es el orden inverso conceptual):
   // 1 🟣 FUEGO · 2 🟢 ESCALAR · 3 🟡 CUIDADO · 4 ⏳ ESPERAR · 5 🔴 APAGAR / PRENDER YA · 6 sin dato
@@ -47466,7 +47605,9 @@ window._wchPillInit=function(){
   })
   document.body.appendChild(d)
   _wchPillBadge()
-  setInterval(_wchPillBadge,60000)
+  // ANTES: setInterval(_wchPillBadge,60000)
+  if(window.nxIntervaloVisible)window.nxIntervaloVisible(_wchPillBadge,60000,{clave:'wch-globito'}) // ⏸️ (25sep26 · D2) con la pestaña escondida no pregunta; al volver, al día YA
+  else setInterval(_wchPillBadge,60000)
 }
 async function _wchPillBadge(){
   try{
@@ -47546,9 +47687,14 @@ window._wchAbrir=async function(){
   _wchTabsRender()
   await _wchRecargar()
   if(st.timer)clearInterval(st.timer)
-  st.timer=setInterval(()=>{_wchRecargar(true)},60000) // refresco suave: contadores en el sitio
+  // ANTES: st.timer=setInterval(()=>{_wchRecargar(true)},60000) // refresco suave: contadores en el sitio
+  // ⏸️ (25sep26 · D2) mismo refresco y mismo latido, pero con la pestaña escondida no preguntan; al volver, al día YA
+  const _wchVivo=()=>!!document.getElementById('wch-modal')
+  const _iv=window.nxIntervaloVisible?(fn,ms,clave)=>window.nxIntervaloVisible(fn,ms,{clave,vivo:_wchVivo}):(fn,ms)=>setInterval(fn,ms)
+  st.timer=_iv(()=>{_wchRecargar(true)},60000,'wch-refresco') // refresco suave: contadores en el sitio
   if(st.latido)clearInterval(st.latido)
-  st.latido=setInterval(_wchLatido,(nxSysVal('ccLatidoSeg')||12)*1000) // 💓 rieles al día sin esperar el minuto (segundos configurables)
+  // ANTES: st.latido=setInterval(_wchLatido,(nxSysVal('ccLatidoSeg')||12)*1000) // 💓 rieles al día sin esperar el minuto (segundos configurables)
+  st.latido=_iv(_wchLatido,(nxSysVal('ccLatidoSeg')||12)*1000,'wch-latido') // 💓 rieles al día sin esperar el minuto (segundos configurables)
 }
 window._wchCerrar=function(){
   const st=window._wchState
@@ -48593,7 +48739,8 @@ async function _wchRitmoTick(convId){
   const el=document.getElementById('wch-hilo-'+convId)
   const f=(el&&el._wchFirma)||''
   if(f&&f!==r.firma){r.firma=f;r.paso=0;r.rapidoHasta=Date.now()+_WCH_RAPIDO_MS} // hubo movimiento
-  else r.paso++
+  else if(Date.now()>=r.rapidoHasta)r.paso++ // (25sep26 · D1-c) la escalera 5 → 8 → 12 → 15 s empieza cuando TERMINA el minuto rápido
+  // ANTES: else r.paso++   ← sumaba también DURANTE el minuto rápido → al terminarlo saltaba directo a 15 s
   const otra=r.otraVez;r.otraVez=false
   _wchRitmoProgramar(convId,otra?300:null)
 }

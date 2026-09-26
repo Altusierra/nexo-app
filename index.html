@@ -909,6 +909,7 @@ async function loadProductos(){
   try{await cargarCostosEsperados()}catch(_){} // 💰 verificador Dropi (8jul26): índice de costos esperados + IDs paralelos
   try{if(typeof stkLoad==='function')await stkLoad()}catch(_){} // 📦 stock por ID de Dropi (27jul26): totales para el Simulador
   await cargarMensajesDinamicos()
+  try{window._confTurnosSyncPronto&&window._confTurnosSyncPronto()}catch(_){} // (25sep26 · T1) ⏰ al abrir NEXO se agendan los turnos que falten (sin tener que entrar a 📅 Confirmar)
 }
 
 // ═══ NUEVO (7jul26 · URLs rápidas): helpers de botones 🔗 Dropi/SellerChat ═══════════════════
@@ -1001,6 +1002,7 @@ async function cargarMensajesDinamicos(){
       if(!textos.length)continue // vacía → conservar fallback quemado
       arr.length=0
       for(const t of textos)arr.push(t)
+      ;(window.MSG_IDXS=window.MSG_IDXS||{})[sec]=_porSec[sec].map(x=>x.idx) // (25sep26 · T1) posición → idx de la tarjeta (CONF_MSGS no tiene huecos: 0,2,3 → 0,1,2)
       _tot+=textos.length
     }
     // Cuotas / config por sección (cuántos mensajes/día y tope total)
@@ -12480,6 +12482,7 @@ async function pageAuxReservado(c){
     if(error){msgEl.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
     const accionLogProg=progAnterior?'envio_reprogramado':'envio_programado'
     logAction(accionLogProg,{mapeo_id:m.id,telefono:m.telefono,fecha_envio:fecha,programacion_id:data?.id,nota:nota||null,fecha_anterior:progAnterior?.fecha_envio_programada||null}).catch(()=>{})
+    try{window._confTurnosSyncPronto&&window._confTurnosSyncPronto()}catch(_){} // (25sep26 · T1) ⏰ se agendan los 3 turnos de la fecha nueva
 
     // Fase 3 — event sourcing: registrar la programación (o reprogramación) en mapeo_eventos.
     // Si falla, NO aborta el flujo (la programación ya está guardada).
@@ -12762,7 +12765,7 @@ function _confDiasFalta(fechaEnvio){
 // ANTES pedía idx 1 el día 2-antes (2do mensaje) — esa plantilla NUNCA existió, así
 // que caía al fallback CONF_MSGS[0] y REPETÍA el mensaje de la mañana. Y los días
 // 0 y vencidos reusaban idx 3 ("sigue programado"), que ya no aplica.
-function getNivelMensajeConfirmacion(diasFalta,enviosHoy){
+function getNivelMensajeConfirmacion_12ago(diasFalta,enviosHoy){ // (25sep26 · T1) ANTES se llamaba getNivelMensajeConfirmacion (2 días → 1 msj · 1 día → 2). Se conserva intacta, sin uso
   if(diasFalta===2){
     if(enviosHoy===0)return{idxTpl:0,etiqueta:'1er mensaje (2 días antes)',nivel:1,puede:true}
     return{idxTpl:0,etiqueta:'1er mensaje (2 días antes)',nivel:1,puede:false,motivo:'A 2 días va UN solo mensaje — ya salió hoy. El siguiente es mañana.'}
@@ -12776,6 +12779,497 @@ function getNivelMensajeConfirmacion(diasFalta,enviosHoy){
   if(diasFalta<0)return{idxTpl:3,etiqueta:'Vencido',nivel:2,puede:false,motivo:'La fecha ya pasó. Trabájalo desde ⏰/📨 Vencidos en el Centro de Chats, o reprográmalo.'}
   return{idxTpl:0,etiqueta:'1er mensaje (2 días antes)',nivel:1,puede:false,motivo:`Faltan ${diasFalta} días. El ciclo arranca 2 días antes del envío.`}
 }
+
+// ══ ⏰ TURNOS FIJOS DE CONFIRMACIÓN (25sep26 · T1) ═══════════════════════════
+// Pedido de la dueña (25sep26), SOLO para pedidos que YA tienen fecha de envío:
+//   · 2 días antes → DOS plantillas: T1 a las 7:00 a. m. y T2 a las 11:00 a. m.
+//   · 1 día antes  → UNA plantilla:  T3 a las 7:00 a. m.            (3 en total)
+// Cada turno manda SIEMPRE su plantilla ⭐ (se elige en Textos → 📅 Confirmar → ⏰
+// Turnos), nunca una al azar. ANTES el 🤖 ROTABA entre las 3 aprobadas de la
+// sección y el candado de la base solo frenaba "la MISMA plantilla el mismo día":
+// por eso el 25sep a un cliente le llegaron las 3 el mismo día (2 en el mismo minuto).
+// Cómo funciona ahora:
+//   1) waEncolarConfTurnos() deja los 3 turnos AGENDADOS en envios_cola (estado
+//      'programado' + su hora en programado_para) apenas el pedido tiene fecha.
+//   2) En Supabase, nx_conf_turnos_liberar() (pg_cron cada minuto) los pasa a
+//      'pendiente' a su hora, revisando que el pedido siga programado, que hoy no
+//      se le haya escrito ya, que el cliente no haya respondido, y nunca 2 juntos.
+//   3) wa-dispatch los manda como siempre, aunque NADIE tenga NEXO abierto.
+// Candado nuevo en la base (envios_cola_turno_uq): pedido + turno + fecha de envío
+// = 1 sola fila PARA SIEMPRE. El SQL va aparte: nexo_turnos_confirmacion.sql.
+const _CONF_TURNOS_DEF={v:1,pararSiResponde:true,gapMin:180,ventanaDe:'07:00',ventanaA:'19:00',turnos:[
+  {k:'T1',dias:2,hora:'07:00',plantilla:'nexo_confirmacion_dia_2_antes_1er_mensaje_0_v1',idx:0},
+  {k:'T2',dias:2,hora:'11:00',plantilla:'nexo_confirmacion_dia_1_antes_recordatorio_final_3_v1',idx:3},
+  {k:'T3',dias:1,hora:'07:00',plantilla:'nexo_confirmacion_dia_1_antes_1er_mensaje_2_v1',idx:2}
+]}
+window._confTurnos=window._confTurnos||null
+const _CONF_HORA_OK=(h)=>/^([01]\d|2[0-3]):[0-5]\d$/.test(String(h||''))
+// Mezcla lo guardado con los valores de fábrica. Los DÍAS de cada turno son fijos (2 · 2 · 1).
+function _confTurnosNorm(o){
+  const d=_CONF_TURNOS_DEF
+  const src=(o&&typeof o==='object')?o:{}
+  const lista=Array.isArray(src.turnos)?src.turnos:[]
+  const turnos=d.turnos.map(t=>{
+    const x=lista.find(y=>y&&y.k===t.k)||{}
+    return{
+      k:t.k,dias:t.dias,
+      hora:_CONF_HORA_OK(x.hora)?x.hora:t.hora,
+      plantilla:(typeof x.plantilla==='string'&&x.plantilla.trim())?x.plantilla.trim():t.plantilla,
+      idx:Number.isInteger(x.idx)?x.idx:t.idx
+    }
+  })
+  const gap=parseInt(src.gapMin,10)
+  return{v:1,
+    pararSiResponde:src.pararSiResponde===false?false:true,
+    gapMin:(isNaN(gap)||gap<0||gap>720)?d.gapMin:gap,
+    ventanaDe:_CONF_HORA_OK(src.ventanaDe)?src.ventanaDe:d.ventanaDe,
+    ventanaA:_CONF_HORA_OK(src.ventanaA)?src.ventanaA:d.ventanaA,
+    turnos}
+}
+function _confTurnosCfg(){return window._confTurnos||_confTurnosNorm(null)}
+async function _confTurnosCargar(force){
+  if(window._confTurnos&&!force)return window._confTurnos
+  let o=null
+  try{const raw=await getConfig('wa_conf_turnos');if(raw)o=JSON.parse(raw)}catch(_){o=null}
+  window._confTurnos=_confTurnosNorm(o)
+  return window._confTurnos
+}
+// Guarda en config 'wa_conf_turnos' con verificación de ida y vuelta (si RLS se lo traga, se dice)
+async function _confTurnosGuardar(cfg){
+  const limpio=_confTurnosNorm(cfg)
+  const js=JSON.stringify(limpio)
+  const{error}=await sb.from('config').upsert({clave:'wa_conf_turnos',valor:js,updated_at:new Date().toISOString()},{onConflict:'clave'})
+  let eco=null;try{eco=await getConfig('wa_conf_turnos')}catch(_){}
+  if(error||eco!==js){await _confTurnosCargar(true);return{ok:false,error:(error&&error.message)||'la nube no devolvió lo guardado (¿RLS en config?)'}}
+  window._confTurnos=limpio
+  try{logAction('wa_turnos_guardados',{turnos:limpio.turnos.map(t=>t.k+' '+t.hora+' '+t.plantilla),pararSiResponde:limpio.pararSiResponde}).catch(()=>{})}catch(_){}
+  return{ok:true,cfg:limpio}
+}
+// "07:00" → "7:00 a. m." (como lo dice la gente)
+function _confHora12(h){
+  const m=String(h||'').match(/^(\d{2}):(\d{2})$/);if(!m)return String(h||'')
+  const H=parseInt(m[1],10),ap=H<12?'a. m.':'p. m.',h12=((H+11)%12)+1
+  return h12+':'+m[2]+' '+ap
+}
+// "AAAA-MM-DD" menos n días (se opera a mediodía UTC: sin líos de zona horaria)
+function _confFechaMenos(f,n){
+  const d=new Date(String(f).slice(0,10)+'T12:00:00Z');d.setUTCDate(d.getUTCDate()-n)
+  return d.toISOString().slice(0,10)
+}
+// Hora de Bogotá AHORA en "HH:MM" (Colombia no cambia de hora en el año: UTC-5 siempre)
+function _confHoraBog(){return new Date().toLocaleTimeString('en-GB',{timeZone:'America/Bogota',hour:'2-digit',minute:'2-digit',hourCycle:'h23'})}
+// Posición en CONF_MSGS del texto de una TARJETA (idx de app_mensajes). CONF_MSGS se llena en
+// orden y SIN huecos (idx 0,2,3 → posiciones 0,1,2): por eso NO se puede usar el idx directo.
+function _confPosDeIdx(cardIdx){
+  const l=(window.MSG_IDXS||{}).confirmacion
+  if(Array.isArray(l)){const p=l.indexOf(cardIdx);if(p>=0)return p}
+  return(Number.isInteger(cardIdx)&&cardIdx>=0&&cardIdx<CONF_MSGS.length)?cardIdx:0
+}
+// "hoy a las 11:00 a. m." / "mañana a las 7:00 a. m." / "en los próximos minutos"
+function _confCuando(f){
+  try{
+    const d=new Date(f.programado_para)
+    if(isNaN(d.getTime()))return 'a su hora'
+    if(d.getTime()<=Date.now()+60000)return 'en los próximos minutos'
+    const dia=d.toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
+    const h=d.toLocaleTimeString('en-GB',{timeZone:'America/Bogota',hour:'2-digit',minute:'2-digit',hourCycle:'h23'})
+    const t=today()
+    return(dia===t?'hoy':(dia===_confFechaMenos(t,-1)?'mañana':('el '+dia)))+' a las '+_confHora12(h)
+  }catch(_){return 'a su hora'}
+}
+// ¿Qué turno toca HOY para un pedido? Misma forma que la versión del 12ago
+// ({idxTpl,etiqueta,nivel,puede,motivo}) + turno y plantilla ⭐. La usan la tarjeta,
+// el envío manual 📱, el ▶️ API, el reenvío 🔁 y el Modo envío rápido: una sola verdad.
+// Si se le pasa el pedido (item, con item._turnos), también sabe lo que tiene el ROBOT:
+// un turno agendado o saliendo NO se ofrece a mano (así no llegan 2 iguales o 2 juntos).
+function getNivelMensajeConfirmacion(diasFalta,enviosHoy,item){
+  const cfg=_confTurnosCfg()
+  const maxDias=Math.max(...cfg.turnos.map(t=>t.dias))
+  if(diasFalta===0)return{idxTpl:0,etiqueta:'Día del envío',nivel:0,puede:false,motivo:'HOY sale el pedido: ya no se mandan plantillas. Confirma o cancela a mano.'}
+  if(diasFalta==null||diasFalta<0)return{idxTpl:0,etiqueta:'Vencido',nivel:0,puede:false,motivo:'La fecha ya pasó. Trabájalo desde ⏰/📨 Vencidos en el Centro de Chats, o reprográmalo.'}
+  if(diasFalta>maxDias)return{idxTpl:_confPosDeIdx(cfg.turnos[0].idx),etiqueta:cfg.turnos[0].k+' · 1er mensaje',nivel:1,puede:false,motivo:`Faltan ${diasFalta} días. El ciclo arranca ${maxDias} días antes del envío.`,turno:cfg.turnos[0].k,plantilla:cfg.turnos[0].plantilla}
+  const delDia=cfg.turnos.filter(t=>t.dias===diasFalta).sort((a,b)=>a.hora.localeCompare(b.hora))
+  if(!delDia.length)return{idxTpl:0,etiqueta:'Sin turno',nivel:0,puede:false,motivo:'Hoy no toca mensaje para este pedido.'}
+  const n=Math.max(0,parseInt(enviosHoy,10)||0)
+  const ord=['1er','2do','3er','4to']
+  const dTxt=diasFalta===1?'1 día antes':(diasFalta+' días antes')
+  const lbl=(t,i)=>`${t.k} · ${ord[i]||((i+1)+'º')} mensaje (${dTxt} · ${_confHora12(t.hora)})`
+  const nivelDe=(t)=>cfg.turnos.findIndex(x=>x.k===t.k)+1 // T1→1 · T2→2 · T3→3 (se guarda en confirmacion_envios)
+  if(n<delDia.length){
+    const t=delDia[n]
+    const base={idxTpl:_confPosDeIdx(t.idx),etiqueta:lbl(t,n),nivel:nivelDe(t),puede:true,turno:t.k,plantilla:t.plantilla}
+    const f=(item&&Array.isArray(item._turnos))?item._turnos.find(x=>x.turno===t.k):null
+    if(f&&f.estado==='programado')return{...base,puede:false,motivo:`⏰ ${t.k} sale SOLO ${_confCuando(f)} por el robot — no hace falta mandarlo a mano.`}
+    if(f&&f.estado==='pendiente')return{...base,puede:false,motivo:`🕓 ${t.k} ya está saliendo por el robot (en cola, unos minutos). No lo repitas a mano.`}
+    if(f&&f.estado==='cancelado'&&/^💬/.test(String(f.error_detalle||'')))return{...base,puede:false,motivo:'💬 El cliente ya respondió: atiéndelo en el chat (el robot no le manda más turnos).'}
+    return base
+  }
+  const u=delDia[delDia.length-1]
+  const sig=cfg.turnos.filter(t=>t.dias<diasFalta).sort((a,b)=>(b.dias-a.dias)||a.hora.localeCompare(b.hora))[0]
+  const motivo=(delDia.length===1?`A ${dTxt.replace(' antes','')} del envío va UN solo mensaje — ya salió hoy.`:`Ya salieron los ${delDia.length} mensajes de hoy.`)
+    +(sig?` El siguiente es ${sig.dias===diasFalta-1?'mañana':('en '+(diasFalta-sig.dias)+' días')} a las ${_confHora12(sig.hora)} (${sig.k}).`:' No quedan más mensajes: el día del envío se confirma o cancela a mano.')
+  return{idxTpl:_confPosDeIdx(u.idx),etiqueta:lbl(u,delDia.length-1),nivel:nivelDe(u),puede:false,motivo,turno:u.k,plantilla:u.plantilla}
+}
+// ¿El error dice que falta el SQL de los turnos? (columnas nuevas o el estado 'programado')
+function _confTurnosSinSql(e){
+  if(!e)return false
+  const c=String(e.code||''),t=String(e.message||'')+' '+String(e.details||'')
+  return c==='PGRST204'||c==='42703'||(c==='23514'&&/estado/i.test(t))||/\b(turno|fecha_envio|programado_para)\b/i.test(t)
+}
+function _confTurnosAvisoSql(){
+  window._confTurnosFaltaSql=true
+  if(window._confTurnosAvisoSqlYa)return
+  window._confTurnosAvisoSqlYa=true
+  try{waToast('🛑 ⏰ Turnos de 📅 Confirmar: falta correr el SQL <b>nexo_turnos_confirmacion.sql</b> en Supabase. Mientras tanto NO se agenda nada automático en 📅 Confirmar (así no se duplica nada).','error')}catch(_){}
+  try{logAction('wa_turnos_sin_sql',{}).catch(()=>{})}catch(_){}
+}
+// 🤖 ENCOLADOR POR TURNOS (reemplaza la rotación en 📅 Confirmar). Recibe los pedidos
+// programados (mismos campos que arma cargarPendientesConfirmacion) y deja agendado
+// cada turno UNA vez. Se puede llamar las veces que sea: lo que ya existe no se repite.
+async function waEncolarConfTurnos(itemsRaw){
+  const seccion='confirmacion'
+  if(!_waTomarCandado(seccion)){console.warn('[turnos confirmacion] ya hay uno corriendo — se salta esta pasada');return}
+  try{
+    const cfgSec=await _waSecCfgLoad()
+    const c=cfgSec&&cfgSec[seccion]
+    if(!c||(!c.auto_on&&!c.por_plantilla))return // 🤖 apagado en 📅 Confirmar = no se agenda nada (igual que antes)
+    const _pre=await _waPuedeEnviarSeccion(seccion)
+    if(!_pre.ok){
+      if(_pre.codigo!=='auto_off'){
+        waToast('⚠️ No se agendó ningún turno en 📅 Confirmar: '+_pre.motivo+'.','aviso')
+        logAction('wa_encolado_bloqueado',{seccion,codigo:_pre.codigo}).catch(()=>{})
+      }
+      return
+    }
+    const wabaSec=_pre.num.waba_id // 🛡️ solo plantillas de LA CUENTA del número que envía (evita 132001)
+    const tc=await _confTurnosCargar(true)
+    const nombres=[...new Set(tc.turnos.map(t=>t.plantilla).filter(Boolean))]
+    let q=sb.from('wa_plantillas').select('nombre,variables,auto_on').in('nombre',nombres).eq('estado','APPROVED')
+    if(wabaSec)q=q.eq('waba_id',wabaSec)
+    const{data:tpls,error:eT}=await q
+    if(eT)throw new Error(eT.message)
+    const tplDe={};(tpls||[]).forEach(t=>{if(t&&t.nombre&&!tplDe[t.nombre])tplDe[t.nombre]=t})
+    const soloAuto=!!(c.por_plantilla&&!c.auto_on) // 🔀 Por tipo: solo las que tienen 🤖 (igual que el encolador de siempre)
+    const turnos=tc.turnos.filter(t=>tplDe[t.plantilla]&&(!soloAuto||tplDe[t.plantilla].auto_on))
+    const malos=tc.turnos.filter(t=>!turnos.includes(t))
+    if(malos.length&&!window._confTurnosAvisoTpl){
+      window._confTurnosAvisoTpl=true
+      waToast('⚠️ ⏰ '+malos.map(t=>t.k).join(', ')+': su plantilla ⭐ no está aprobada'+(soloAuto?' (o no tiene 🤖)':'')+' en la cuenta del número de 📅 Confirmar. Ese turno NO se agenda. Elige otra en Textos → ⏰ Turnos.','aviso')
+      logAction('wa_turnos_sin_plantilla',{turnos:malos.map(t=>t.k+' '+t.plantilla)}).catch(()=>{})
+    }
+    if(!turnos.length)return
+    const ahora=Date.now()
+    const hoyB=today()
+    const horaB=_confHoraBog()
+    const enVentana=horaB>=tc.ventanaDe&&horaB<tc.ventanaA // turno atrasado solo sale en horario decente
+    const items=(itemsRaw||[]).filter(r=>r&&r.mapeo_id!=null&&r.fecha_envio_programada&&typeof r.dias_falta==='number'&&r.dias_falta>=1)
+    if(!items.length)return
+    // 1) Lo que YA existe de turnos para estos pedidos (cualquier estado: el candado es PARA SIEMPRE)
+    const ids=[...new Set(items.map(i=>i.mapeo_id))]
+    const existe={}
+    const kDe=(mapeo,turno,fEnv)=>mapeo+'|'+turno+'|'+fEnv
+    for(let i=0;i<ids.length;i+=150){
+      const{data,error}=await sb.from('envios_cola').select('id,mapeo_id,turno,fecha_envio,estado,plantilla,parametros,programado_para,error_detalle,fecha').eq('seccion',seccion).not('turno','is',null).in('mapeo_id',ids.slice(i,i+150)).limit(3000)
+      if(error){if(_confTurnosSinSql(error)){_confTurnosAvisoSql();return}throw new Error(error.message)}
+      for(const r of(data||[]))existe[kDe(r.mapeo_id,r.turno,String(r.fecha_envio||'').slice(0,10))]=r
+    }
+    window._confTurnosFaltaSql=false
+    // 2) Reprogramados: los 'programado' de ESTOS pedidos con OTRA fecha ya no aplican
+    const fechaDe={};items.forEach(i=>{fechaDe[i.mapeo_id]=String(i.fecha_envio_programada).slice(0,10)})
+    const viejos=Object.values(existe).filter(r=>r.estado==='programado'&&fechaDe[r.mapeo_id]&&String(r.fecha_envio||'').slice(0,10)!==fechaDe[r.mapeo_id]).map(r=>r.id)
+    for(let i=0;i<viejos.length;i+=100){
+      try{await sb.from('envios_cola').update({estado:'cancelado',error_detalle:'🗓️ Turno cancelado: el pedido se reprogramó para otra fecha (se agendan los turnos de la fecha nueva).'}).in('id',viejos.slice(i,i+100)).eq('estado','programado')}catch(_){}
+    }
+    // 3) Chats CERRADOS VIGENTES (Resuelta, sin respuesta posterior) → no se agenda (igual que siempre)
+    let _cerr=null
+    try{_cerr=await _waTelsCerradosVigentes(items.map(r=>{const d=String(r.telefono||r.tel||'').replace(/\D/g,'');return d?(d.startsWith('57')?d:('57'+d)):''}))}catch(_){}
+    const nuevos=[];let actual=0,rearm=0,_sinDatos=0,_cerrN=0
+    for(const raw of items){
+      const m=_waNormItem(raw)
+      if(m.id==null)m.id=raw.mapeo_id
+      const telLimpio=String(m.tel||'').replace(/\D/g,'')
+      if(telLimpio.length<10)continue
+      const telFull=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
+      const fEnv=String(raw.fecha_envio_programada).slice(0,10)
+      const plan=turnos.map(t=>{const dia=_confFechaMenos(fEnv,t.dias);return{t,dia,ts:new Date(dia+'T'+t.hora+':00-05:00').getTime()}}).sort((a,b)=>(a.ts-b.ts)||a.t.k.localeCompare(b.t.k))
+      // Si ya pasó la hora de uno o más turnos SIN fila: sale UNO solo (el primero de HOY y en
+      // horario decente); los demás quedan "saltados" con su motivo. Nunca 2 juntos.
+      const vencSin=plan.filter(p=>p.ts<=ahora&&!existe[kDe(m.id,p.t.k,fEnv)])
+      const elegido=enVentana?(vencSin.find(p=>p.dia===hoyB)||null):null
+      const cerrado=!!(_cerr&&_cerr.has(telFull))
+      for(const p of plan){
+        const tp=tplDe[p.t.plantilla]
+        const parametros=(Array.isArray(tp.variables)?tp.variables:[]).map(tag=>_waValorReal(tag,m))
+        const hueco=nxHuecosMensaje(parametros.join(' | ')).length>0
+        const ya=existe[kDe(m.id,p.t.k,fEnv)]
+        if(ya){
+          if(hueco)continue
+          if(ya.estado==='programado'){
+            // Se pone al día si cambió la ⭐, la hora o un dato del pedido (uno ya vencido no se mueve)
+            const difHora=p.ts>ahora&&new Date(ya.programado_para).getTime()!==p.ts
+            if(ya.plantilla!==p.t.plantilla||JSON.stringify(ya.parametros||[])!==JSON.stringify(parametros)||difHora){
+              const{error}=await sb.from('envios_cola').update({plantilla:p.t.plantilla,parametros,programado_para:p.ts>ahora?new Date(p.ts).toISOString():ya.programado_para,fecha:p.ts>ahora?p.dia:ya.fecha}).eq('id',ya.id).eq('estado','programado')
+              if(!error)actual++
+            }
+          }else if(ya.estado==='cancelado'&&/^🗓️/.test(String(ya.error_detalle||''))&&p.ts>ahora&&!cerrado){
+            // El pedido VOLVIÓ a quedar programado para ESA fecha (se deshizo, o se volvió a la fecha) → se rearma
+            const{error}=await sb.from('envios_cola').update({estado:'programado',error_detalle:null,plantilla:p.t.plantilla,parametros,programado_para:new Date(p.ts).toISOString(),fecha:p.dia}).eq('id',ya.id).eq('estado','cancelado')
+            if(!error)rearm++
+          }
+          continue
+        }
+        let estado='programado',prog=new Date(p.ts).toISOString(),det=null
+        if(p.ts<=ahora){
+          if(p===elegido)prog=new Date(ahora).toISOString()
+          else{estado='cancelado';det='⏭️ Turno saltado: cuando NEXO lo agendó, su hora ya había pasado. Sale 1 solo mensaje por vez, nunca 2 juntos.'}
+        }
+        if(estado==='programado'){
+          if(hueco){_sinDatos++;continue} // 🛑 sin datos del pedido NO se agenda (queda para la próxima pasada)
+          if(cerrado){_cerrN++;continue}  // 🟢 chat cerrado vigente → no se agenda
+        }
+        nuevos.push({mapeo_id:m.id,telefono:telFull,nombre:m.nombre||null,seccion,tipo:null,plantilla:p.t.plantilla,parametros,origen:'turno',estado,error_detalle:det,fecha:p.dia,turno:p.t.k,fecha_envio:fEnv,programado_para:prog,_ya:p===elegido})
+      }
+    }
+    // 4) Insertar de a 50. Si un lote choca (otra pestaña agendó lo mismo), se reintenta de a uno
+    //    y el repetido se ignora: el candado de la base (envios_cola_turno_uq) manda.
+    let okProg=0,okYa=0,okSalt=0
+    const cuenta=(f)=>{if(f.estado!=='programado')okSalt++;else{okProg++;if(f._ya)okYa++}}
+    for(let i=0;i<nuevos.length;i+=50){
+      const lote=nuevos.slice(i,i+50)
+      const filas=lote.map(({_ya,...f})=>f)
+      const{error}=await sb.from('envios_cola').insert(filas)
+      if(!error){lote.forEach(cuenta);continue}
+      if(_confTurnosSinSql(error)){_confTurnosAvisoSql();return}
+      for(let j=0;j<lote.length;j++){
+        const{error:e1}=await sb.from('envios_cola').insert(filas[j])
+        if(!e1)cuenta(lote[j])
+        else if(e1.code!=='23505')console.warn('[turnos confirmacion]',e1.message)
+      }
+    }
+    if(okProg||rearm){
+      waToast('⏰ 📅 Confirmar: '+okProg+' turno(s) agendado(s)'+(okYa?' · '+okYa+' sale(n) en los próximos minutos':'')+(rearm?' · '+rearm+' reactivado(s)':'')+'. Salen solos a su hora ('+turnos.map(t=>t.k+' '+_confHora12(t.hora)).join(' · ')+').','ok')
+    }
+    if(okProg||rearm||actual||okSalt)logAction('wa_turnos_agendados',{agendados:okProg,salen_ya:okYa,rearmados:rearm,actualizados:actual,saltados:okSalt,sin_datos:_sinDatos,cerrados:_cerrN}).catch(()=>{})
+    if(_sinDatos>0){
+      waToast('🛑 '+_sinDatos+' turno(s) de 📅 Confirmar NO se agendaron: al pedido le falta el producto u otro dato. Recarga la sección; si sigue, revisa esos pedidos.','aviso')
+      logAction('wa_encolado_sin_datos',{seccion,sin_datos:_sinDatos}).catch(()=>{})
+    }
+  }catch(e){console.error('[turnos confirmacion]',e)}
+  finally{_waSoltarCandado(seccion)}
+}
+// Agenda los turnos de TODOS los pedidos programados, sin tener que abrir 📅 Confirmar.
+// Se llama sola después de programar/reprogramar una fecha y al guardar los ⏰ Turnos.
+window._confTurnosSync=async function(){
+  try{
+    if(window._waEncolandoSec&&window._waEncolandoSec.confirmacion){ // 🔒 hay otra pasada corriendo: se reintenta en 4 s (máx. 5 veces)
+      window._confTurnosSyncReint=(window._confTurnosSyncReint||0)+1
+      if(window._confTurnosSyncReint<=5)window._confTurnosSyncPronto()
+      return
+    }
+    window._confTurnosSyncReint=0
+    const cfgSec=await _waSecCfgLoad()
+    const c=cfgSec&&cfgSec.confirmacion
+    if(!c||(!c.auto_on&&!c.por_plantilla))return
+    await _confTurnosCargar()
+    const manana=_confFechaMenos(today(),-1)
+    const{data:progs,error}=await _sbFetchAll((_f,_t)=>sb.from('programaciones_envio').select('id,mapeo_id,telefono,fecha_envio_programada').eq('estado','programado').gte('fecha_envio_programada',manana).order('id',{ascending:true}).range(_f,_t))
+    if(error||!progs||!progs.length)return
+    const ids=[...new Set(progs.map(p=>p.mapeo_id).filter(x=>x!=null))]
+    const mapById={}
+    for(let i=0;i<ids.length;i+=100){
+      const{data,error:eM}=await sb.from('mapeos').select('id,telefono,nombre_cliente,producto,cantidad,ciudad,transportadora,precio_dropi,producto_id').in('id',ids.slice(i,i+100))
+      if(eM)return // sin los datos completos del pedido NO se agenda (el freno de huecos lo exige)
+      for(const m of(data||[]))mapById[m.id]=m
+    }
+    const items=progs.filter(p=>mapById[p.mapeo_id]).map(p=>{const m=mapById[p.mapeo_id];return{prog_id:p.id,mapeo_id:p.mapeo_id,telefono:p.telefono||m.telefono,nombre_cliente:m.nombre_cliente,producto:m.producto,cantidad:m.cantidad,ciudad:m.ciudad,carrier:m.transportadora||'',precio_dropi:m.precio_dropi,producto_id:m.producto_id,fecha_envio_programada:p.fecha_envio_programada,dias_falta:_confDiasFalta(p.fecha_envio_programada)}})
+    await waEncolarConfTurnos(items)
+  }catch(e){console.warn('[turnos sync]',(e&&e.message)||e)}
+}
+window._confTurnosSyncPronto=function(){
+  try{clearTimeout(window._confTurnosSyncT)}catch(_){}
+  window._confTurnosSyncT=setTimeout(()=>{try{window._confTurnosSync()}catch(_){}},4000)
+}
+// Envíos por API/turnos de cada pedido: se SUMAN al contador de HOY de la tarjeta (antes solo
+// contaba los 📱 manuales y el auxiliar veía "0 hoy" aunque el 🤖 ya le hubiera escrito → podía
+// mandarle otro igual). Y deja en item._turnos el estado de T1/T2/T3 para pintarlo.
+async function _confTurnosAdjuntar(items,mapeoIds){
+  const ids=(mapeoIds||[]).filter(x=>x!=null)
+  if(!ids.length)return
+  const hoyB=today()
+  let filas=[],conTurno=true
+  for(let i=0;i<ids.length;i+=150){
+    const lote=ids.slice(i,i+150)
+    let r=await sb.from('envios_cola').select('mapeo_id,estado,fecha,turno,fecha_envio,programado_para,enviado_en,error_detalle').eq('seccion','confirmacion').in('mapeo_id',lote).limit(3000)
+    if(r.error&&_confTurnosSinSql(r.error)){conTurno=false;r=await sb.from('envios_cola').select('mapeo_id,estado,fecha,enviado_en,error_detalle').eq('seccion','confirmacion').in('mapeo_id',lote).limit(3000)}
+    if(r.error)return
+    filas=filas.concat(r.data||[])
+  }
+  const porMapeo={};for(const f of filas)(porMapeo[f.mapeo_id]=porMapeo[f.mapeo_id]||[]).push(f)
+  for(const it of(items||[])){
+    const fs=porMapeo[it.mapeo_id]||[]
+    const env=fs.filter(f=>f.estado==='enviado')
+    const hoyApi=env.filter(f=>String(f.fecha||'').slice(0,10)===hoyB).length
+    it.envios_hoy_manual=it.envios_hoy||0
+    it.envios_api_hoy=hoyApi
+    it.envios_hoy=(it.envios_hoy||0)+hoyApi
+    it.envios_total=(it.envios_total||0)+env.length
+    if(conTurno)it._turnos=fs.filter(f=>f.turno&&String(f.fecha_envio||'').slice(0,10)===String(it.fecha_envio_programada||'').slice(0,10))
+  }
+}
+// Línea "⏰ T1 ✅ 7:02 a. m. · T2 🗓️ hoy 11:00 a. m. · T3 🗓️ mañana 7:00 a. m." en la tarjeta del pedido
+function _confTurnosLinea(item){
+  try{
+    const filas=Array.isArray(item&&item._turnos)?item._turnos:null
+    if(!filas)return ''
+    const cfg=_confTurnosCfg()
+    const tHoy=today(),tMan=_confFechaMenos(tHoy,-1)
+    const dia=(d)=>{if(d===tHoy)return 'hoy';if(d===tMan)return 'mañana';try{return new Date(d+'T12:00:00').toLocaleDateString('es-CO',{weekday:'short',day:'numeric'})}catch(_){return d}}
+    const hh=(iso)=>{try{return new Date(iso).toLocaleTimeString('es-CO',{hour:'numeric',minute:'2-digit',timeZone:'America/Bogota'})}catch(_){return ''}}
+    const partes=cfg.turnos.map(t=>{
+      const f=filas.find(x=>x.turno===t.k)
+      if(!f)return `<span title="Todavía sin agendar" style="white-space:nowrap">${t.k} ⚪</span>`
+      const ic=f.estado==='cancelado'?((String(f.error_detalle||'').match(/^\S+/)||['⏭️'])[0]):({programado:'🗓️',pendiente:'🕓',enviado:'✅',fallido:'❌',sin_plantilla:'⚠️'}[f.estado]||'•')
+      const cuando=f.estado==='enviado'?(f.enviado_en?hh(f.enviado_en):''):(f.estado==='cancelado'?'':((f.fecha?dia(String(f.fecha).slice(0,10))+' ':'')+(f.programado_para?hh(f.programado_para):'')))
+      const tit=f.error_detalle||({programado:'Agendado: sale solo a su hora',pendiente:'En cola: sale en los próximos minutos',enviado:'Ya le llegó',fallido:'No salió',sin_plantilla:'Esperando plantilla aprobada'}[f.estado]||f.estado)
+      return `<span title="${_waEsc(tit)}" style="white-space:nowrap">${t.k} ${ic}${cuando?' '+_waEsc(cuando):''}</span>`
+    })
+    return `<div style="margin-top:6px;font-size:11px;color:var(--muted);display:flex;gap:8px;flex-wrap:wrap;align-items:center" title="Turnos automáticos de este pedido">⏰ ${partes.join('<span style="opacity:.4">·</span>')}</div>`
+  }catch(_){return ''}
+}
+// Plantillas APROBADAS en la(s) cuenta(s) del número de 📅 Confirmar
+function _confTurnosAprobadas(){
+  const d=window._waChipData||{},est=d.estados||{}
+  const nums=(d.numeros||[]).filter(n=>(Array.isArray(n.secciones)&&n.secciones.includes('confirmacion'))||n.seccion==='confirmacion')
+  const wabas=new Set(nums.map(n=>n.waba_id))
+  const enTurno=new Set(_confTurnosCfg().turnos.map(t=>t.plantilla))
+  return Object.keys(est).filter(nom=>(nom.startsWith('nexo_confirmacion_')||enTurno.has(nom))&&Object.entries(est[nom]||{}).some(([w,e])=>e==='APPROVED'&&(!wabas.size||wabas.has(w)))).sort()
+}
+// Nombre de Meta → tarjeta de Textos que lo usa (su nombre actual o una versión anterior)
+function _confTarjetaDe(nombre,plantillas){
+  for(const p of(plantillas||[])){
+    const a=_waNombreTplAuto('confirmacion',p.etiqueta,p.idx)
+    if(_waTplNombre(a)===nombre||_waTplHist(a).includes(nombre)||Object.keys(_waTplVers(a)).includes(nombre))return p
+  }
+  const mm=String(nombre||'').match(/_(\d+)_v\d+$/)
+  if(mm){const p=(plantillas||[]).find(x=>x.idx===Number(mm[1]));if(p)return p}
+  return null
+}
+// Panel ⏰ TURNOS (Textos → 📅 Confirmar): la ⭐ de cada turno y su hora
+function _confTurnosPanelHtml(plantillas,cfSec){
+  try{
+    const cfg=_confTurnosCfg()
+    // "Mensajes por día" es el tope de seguridad de wa-dispatch: si queda por debajo de los turnos de un día, el último NO sale
+    const _maxDia=Math.max(...Object.values(cfg.turnos.reduce((o,t)=>{o[t.dias]=(o[t.dias]||0)+1;return o},{})))
+    const _cuota=cfSec&&cfSec.cuota_diaria!=null?Number(cfSec.cuota_diaria):null
+    const _avisoCuota=(_cuota!=null&&_cuota<_maxDia)?`<div style="color:var(--red);font-size:11px;font-weight:800;margin-top:6px">⚠️ "Mensajes por día" está en ${_cuota}: el robot corta en ${_cuota} y el turno ${_maxDia} de ese día NO saldría. Súbelo a ${_maxDia} o más y dale 💾 Guardar cupos.</div>`:''
+    const aprob=_confTurnosAprobadas()
+    const esc=_waEsc
+    const filas=cfg.turnos.map(t=>{
+      const okT=aprob.includes(t.plantilla)
+      const opts=[...(okT?[]:[t.plantilla]),...aprob].map(n=>{
+        const p=_confTarjetaDe(n,plantillas)
+        const lbl=(n===t.plantilla?'⭐ ':'')+(p?(p.etiqueta+' — '):'')+n+(aprob.includes(n)?'':' (⚠️ NO aprobada)')
+        return `<option value="${esc(n)}" ${n===t.plantilla?'selected':''}>${esc(lbl)}</option>`
+      }).join('')
+      const dTxt=t.dias===1?'1 día antes':(t.dias+' días antes')
+      return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:6px 0;border-top:1px solid var(--border)">
+        <strong style="min-width:30px">${t.k}</strong>
+        <span style="font-size:11.5px;min-width:92px">${dTxt}</span>
+        <input type="time" id="ct-${t.k}-hora" value="${esc(t.hora)}" title="Hora de Bogotá a la que sale" style="width:110px;padding:4px 6px;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--text)">
+        <select id="ct-${t.k}-tpl" title="⭐ Plantilla que sale en este turno" style="flex:1;min-width:240px;padding:5px 7px;border:1px solid ${okT?'var(--border)':'var(--red)'};border-radius:7px;background:var(--card);color:var(--text);font-size:11.5px">${opts}</select>
+        ${okT?'':`<span style="color:var(--red);font-size:10.5px;font-weight:700">⚠️ esta ⭐ no está aprobada: el turno NO sale</span>`}
+      </div>`
+    }).join('')
+    return `<div style="background:rgba(56,189,248,.07);border:1px solid #38bdf8;border-radius:9px;padding:10px 12px;margin-bottom:14px">
+      <div style="font-size:13px;font-weight:800;margin-bottom:3px">⏰ Turnos de envío automático — 3 mensajes, sin duplicados</div>
+      <div style="font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:6px">Cada turno manda <b>siempre</b> su plantilla ⭐ aprobada, a su hora de Bogotá, aunque nadie tenga NEXO abierto. Si hay 2 o más aprobadas, aquí eliges cuál sale ⭐ (o con los botones ⭐ debajo de cada plantilla). Un pedido + un turno = <b>1 solo mensaje, para siempre</b>. Entre un mensaje y otro pasan <b>mínimo 3 horas</b> (nunca 2 juntos). Si el pedido se confirma, se cancela o se reprograma, los turnos que faltan se cancelan solos. "Mensajes por día" de arriba sigue siendo el tope de seguridad.</div>
+      ${filas}
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px">
+        <label style="font-size:11.5px;display:flex;gap:5px;align-items:center;cursor:pointer"><input type="checkbox" id="ct-parar" ${cfg.pararSiResponde?'checked':''}> 💬 Si el cliente responde, no mandar los turnos que faltan</label>
+        <button class="btn-sm btn-primary" onclick="txtConfTurnosGuardar()">💾 Guardar turnos</button>
+      </div>
+      ${_avisoCuota}
+      <div id="ct-estado" class="loading" style="font-size:11px;margin-top:6px;color:var(--muted)">⏳ Revisando el robot de turnos…</div>
+    </div>`
+  }catch(e){return `<div class="alert alert-red">⏰ Turnos: ${_waEsc(e.message||String(e))}</div>`}
+}
+window.txtConfTurnosGuardar=async function(){
+  const cfg=JSON.parse(JSON.stringify(_confTurnosCfg()))
+  const pl=((window._txtState||{}).confirmacion||{}).plantillas||[]
+  for(const t of cfg.turnos){
+    const h=(document.getElementById('ct-'+t.k+'-hora')||{}).value
+    const n=(document.getElementById('ct-'+t.k+'-tpl')||{}).value
+    if(h){if(!_CONF_HORA_OK(h)){waToast('❌ Hora inválida en '+t.k+'.','error');return}t.hora=h}
+    if(n){t.plantilla=n;const p=_confTarjetaDe(n,pl);if(p)t.idx=p.idx}
+  }
+  for(const a of cfg.turnos)for(const b of cfg.turnos){
+    if(a.k>=b.k||a.dias!==b.dias)continue
+    if(a.hora>=b.hora){waToast('❌ '+a.k+' debe salir ANTES que '+b.k+' (los dos son el mismo día).','error');return}
+    if(a.plantilla===b.plantilla){waToast('❌ '+a.k+' y '+b.k+' salen el mismo día: no pueden mandar la misma plantilla.','error');return}
+    const _min=(h)=>parseInt(h.slice(0,2),10)*60+parseInt(h.slice(3,5),10)
+    if(_min(b.hora)-_min(a.hora)<cfg.gapMin){waToast('❌ '+a.k+' y '+b.k+' deben ir separados mínimo '+Math.round(cfg.gapMin/60)+' horas (el robot nunca manda 2 juntos).','error');return}
+  }
+  cfg.pararSiResponde=!!(document.getElementById('ct-parar')||{}).checked
+  const r=await _confTurnosGuardar(cfg)
+  if(!r.ok){waToast('❌ NO se guardaron los turnos: '+_waEsc(r.error),'error');return}
+  waToast('✅ Turnos guardados: '+r.cfg.turnos.map(t=>t.k+' '+_confHora12(t.hora)).join(' · ')+'. Los ya agendados se ponen al día solos.','ok')
+  try{window._confTurnosSyncPronto&&window._confTurnosSyncPronto()}catch(_){}
+  try{cargarTextosAdmin()}catch(_){}
+}
+// 🫀 ¿Está vivo el robot de turnos de Supabase? (y cuántos hay agendados)
+async function _confTurnosEstadoPintar(){
+  const el=document.getElementById('ct-estado');if(!el)return
+  try{
+    const r=await sb.from('envios_cola').select('id',{count:'exact',head:true}).eq('estado','programado').not('turno','is',null)
+    el.classList.remove('loading')
+    if(r.error){
+      if(_confTurnosSinSql(r.error)){el.innerHTML='<span style="color:var(--red);font-weight:800">🛑 Falta correr el SQL <code>nexo_turnos_confirmacion.sql</code> en Supabase. Sin él NO se agenda nada automático en 📅 Confirmar.</span>';return}
+      throw new Error(r.error.message)
+    }
+    let lat=null;try{const raw=await getConfig('wa_conf_turnos_latido');if(raw)lat=JSON.parse(raw)}catch(_){}
+    const min=lat&&lat.ts?Math.round((Date.now()-new Date(lat.ts).getTime())/60000):null
+    const vivo=min!=null&&min<=5
+    const secC=(window._waSecCfgCache||{}).confirmacion
+    el.innerHTML=(vivo?`<span style="color:var(--green);font-weight:700">🫀 Robot de turnos VIVO</span> · revisó hace ${min} min`:`<span style="color:var(--red);font-weight:800">🚨 El robot de turnos no está corriendo</span> ${min==null?'(nunca ha reportado)':'(última vez hace '+min+' min)'} — revisa que el PASO 2 del SQL creó el cron <code>nexo-conf-turnos</code>.`)
+      +` · 🗓️ <b>${r.count||0}</b> turno(s) agendado(s) esperando su hora`
+      +(lat&&(lat.liberados||lat.cancelados)?` · última vuelta: ${lat.liberados||0} soltado(s), ${lat.cancelados||0} cancelado(s)`:'')
+      +(secC&&!secC.auto_on&&!secC.por_plantilla?' · <span style="color:var(--amber);font-weight:700">⚠️ 🤖 Auto está APAGADO en 📅 Confirmar: no se agenda nada (Mensajería → Modos de envío).</span>':'')
+  }catch(e){el.classList.remove('loading');el.innerHTML='<span style="color:var(--amber)">🟡 No pude revisar el robot de turnos: '+_waEsc(e.message||String(e))+' · toca 💾 o recarga para reintentar.</span>'}
+}
+// ⭐ Debajo de cada plantilla de 📅 Confirmar: en qué turno sale, y botón para ponerla por defecto
+function _confTurnosCardHtml(nombres,wabasVis){
+  try{
+    const cfg=_confTurnosCfg()
+    const est=(window._waChipData||{}).estados||{}
+    const aprob=[...new Set(nombres||[])].filter(n=>Object.entries(est[n]||{}).some(([w,e])=>e==='APPROVED'&&(!wabasVis||!wabasVis.size||wabasVis.has(w))))
+    if(!aprob.length)return ''
+    return aprob.map(n=>{
+      const bts=cfg.turnos.map(t=>{
+        const es=t.plantilla===n
+        const dTxt=t.dias===1?'1 día':(t.dias+' días')
+        return `<button onclick="waConfTurnoUsar('${t.k}','${_waEsc(n)}')" title="${es?'⭐ Esta plantilla ya es la que sale en '+t.k:'Poner esta plantilla por defecto en '+t.k}" style="border:1px solid ${es?'var(--green)':'var(--border)'};background:${es?'rgba(34,197,94,.14)':'none'};color:${es?'var(--green)':'var(--muted)'};border-radius:20px;cursor:pointer;font-size:10px;padding:1px 8px;font-weight:800">${es?'⭐':'☆'} ${t.k} · ${dTxt} · ${_confHora12(t.hora)}</button>`
+      }).join(' ')
+      return `<div style="font-size:10px;margin-top:5px;display:flex;gap:5px;flex-wrap:wrap;align-items:center;color:var(--muted)">⏰ <code style="background:rgba(255,255,255,.04);padding:0 4px;border-radius:4px">${_waEsc(n)}</code> 🟢 sale en: ${bts}</div>`
+    }).join('')
+  }catch(_){return ''}
+}
+window.waConfTurnoUsar=async function(k,nombre){
+  const cfg=JSON.parse(JSON.stringify(_confTurnosCfg()))
+  const t=cfg.turnos.find(x=>x.k===k);if(!t)return
+  if(t.plantilla===nombre){waToast('⭐ '+k+' ya manda esa plantilla.','aviso');return}
+  const otro=cfg.turnos.find(x=>x.k!==k&&x.dias===t.dias&&x.plantilla===nombre)
+  if(otro){waToast('❌ '+otro.k+' ya manda esa plantilla el mismo día. Dos turnos del mismo día no pueden repetir mensaje.','error');return}
+  if(!confirm('⭐ ¿Que el turno '+k+' ('+(t.dias===1?'1 día':t.dias+' días')+' antes · '+_confHora12(t.hora)+') mande esta plantilla?\n\n'+nombre+'\n\n(antes: '+t.plantilla+')'))return
+  t.plantilla=nombre
+  const pl=((window._txtState||{}).confirmacion||{}).plantillas||[]
+  const p=_confTarjetaDe(nombre,pl);if(p)t.idx=p.idx
+  const r=await _confTurnosGuardar(cfg)
+  if(!r.ok){waToast('❌ NO se guardó: '+_waEsc(r.error),'error');return}
+  waToast('⭐ '+k+' ahora manda '+_waEsc(nombre)+'. Los turnos ya agendados se ponen al día solos.','ok')
+  try{window._confTurnosSyncPronto&&window._confTurnosSyncPronto()}catch(_){}
+  try{cargarTextosAdmin()}catch(_){}
+}
+// ══ FIN TURNOS FIJOS DE CONFIRMACIÓN (25sep26 · T1) ══════════════════════════
 
 // Reemplaza [NOMBRE]: con nombre del cliente lo usa tal cual; sin nombre deja un
 // saludo natural ("Hola ..." / "Hola, ...") en vez del literal [NOMBRE]. (fix nombre vacío)
@@ -13025,6 +13519,8 @@ async function cargarPendientesConfirmacion(){
         ultimo_envio:ultimoEnvio
       }
     })
+    try{await _confTurnosCargar()}catch(_){} // (25sep26 · T1) ⏰ horas y ⭐ de cada turno
+    try{await _confTurnosAdjuntar(enriched,mapeoIds)}catch(_){} // (25sep26 · T1) + envíos por API de hoy y estado de T1/T2/T3
     let filtrados=enriched
     if(filtro==='proximos')filtrados=enriched.filter(i=>i.dias_falta!=null&&i.dias_falta>=0&&i.dias_falta<=2)
     else if(filtro==='hoy')filtrados=enriched.filter(i=>i.dias_falta===0)
@@ -13039,7 +13535,8 @@ async function cargarPendientesConfirmacion(){
     const _paraEncolar=filtrados.filter(i=>{
       try{return getNivelMensajeConfirmacion(i.dias_falta,i.envios_hoy).puede!==false}catch(_){return false}
     })
-    try{waEncolarSeccionAuto('confirmacion',_paraEncolar)}catch(_){} // (11ago26) ✂️ SPLIT: PASO 1 = pedidos que YA tienen fecha → sección 📅 confirmacion
+    // ANTES (hasta 25sep26): try{waEncolarSeccionAuto('confirmacion',_paraEncolar)}catch(_){} — ROTABA entre las 3 aprobadas: así le llegaron 3 el mismo día a un cliente
+    try{waEncolarConfTurnos(enriched)}catch(_){} // (25sep26 · T1) ⏰ 3 turnos fijos (T1 2d 7:00 · T2 2d 11:00 · T3 1d 7:00) para TODOS los programados
     renderPendientesConfirmacion(filtrados,filtro)
   }catch(e){
     el.innerHTML=`<div class="alert alert-red">Error: ${e.message}</div>`
@@ -13077,7 +13574,8 @@ function renderPendientesConfirmacion(items,filtro){
     else if(diasFalta===2){urgenciaColor='var(--green)';urgenciaTxt='📅 En 2 días'}
     else{urgenciaColor='var(--muted)';urgenciaTxt=`En ${diasFalta} días`}
 
-    const nivelInfo=getNivelMensajeConfirmacion(diasFalta,item.envios_hoy)
+    // ANTES: const nivelInfo=getNivelMensajeConfirmacion(diasFalta,item.envios_hoy)
+    const nivelInfo=getNivelMensajeConfirmacion(diasFalta,item.envios_hoy,item) // (25sep26 · T1) +item: un turno que el robot ya tiene agendado/saliendo NO se ofrece a mano
     const yaCompletoHoy=item.envios_hoy>=_cuotaDiaria('confirmacion',2)
     const cuotaTxt=`${item.envios_hoy}/${_cuotaDiaria('confirmacion',2)} mensajes hoy`
     const cuotaColor=item.envios_hoy===0?'var(--muted)':(item.envios_hoy===1?'var(--amber)':'var(--green)')
@@ -13118,6 +13616,7 @@ function renderPendientesConfirmacion(items,filtro){
             ${contadorBadge}
             <span class="pill" style="background:rgba(167,139,250,.10);color:${cuotaColor};border:1px solid ${cuotaColor};font-size:11px">📊 ${cuotaTxt}</span>
           </div>
+          ${typeof _confTurnosLinea==='function'?_confTurnosLinea(item):''}
           ${ultimoEnvioBadge}
           ${notaBadge}
         </div>
@@ -13848,7 +14347,8 @@ window.enviarMensajeConfirmacion=async(progId)=>{
   const item=(cache.items||[]).find(i=>i.prog_id===progId)
   if(!item){alert('No se encontró el pedido');return}
   if(item.envios_hoy>=_cuotaDiaria('confirmacion',2)){alert('Ya enviaste los '+_cuotaDiaria('confirmacion',2)+' mensajes de hoy para este pedido.');return}
-  const nivelInfo=getNivelMensajeConfirmacion(item.dias_falta,item.envios_hoy)
+  // ANTES: const nivelInfo=getNivelMensajeConfirmacion(item.dias_falta,item.envios_hoy)
+  const nivelInfo=getNivelMensajeConfirmacion(item.dias_falta,item.envios_hoy,item) // (25sep26 · T1) +item: freno también aquí (Modo envío rápido)
   // (12ago26) 📅 Segundo cerrojo del flujo de 3 mensajes. La tarjeta ya oculta el
   // botón, pero esta función también se llama desde el Modo envío rápido y desde el
   // encolador, así que el freno tiene que estar TAMBIÉN aquí.
@@ -13906,7 +14406,8 @@ window.enviarMensajeConfirmacion=async(progId)=>{
 //  · Freno 🛑 de huecos y límite anti-bloqueo de WhatsApp siguen activos.
 //  · El 🤖 automático y el Modo envío rápido NO reenvían (no pasan por aquí).
 function _puedeReenviarConf(item){
-  return !!item&&(item.envios_hoy||0)>0&&(item.dias_falta===2||item.dias_falta===1)
+  // ANTES: return !!item&&(item.envios_hoy||0)>0&&(item.dias_falta===2||item.dias_falta===1)
+  return !!item&&(item.envios_hoy_manual!=null?item.envios_hoy_manual:(item.envios_hoy||0))>0&&(item.dias_falta===2||item.dias_falta===1) // (25sep26 · T1) solo tras un envío A MANO, como antes (envios_hoy ahora suma los del robot)
 }
 window.reenviarMensajeConfirmacion=async(progId)=>{
   const cache=window._confCache||{}
@@ -14065,7 +14566,8 @@ function _pendColaRender(){
       ultimoTxt=`Último: ${u}`
     }
   }else{
-    const ni=getNivelMensajeConfirmacion(item.dias_falta,item.envios_hoy)
+    // ANTES: const ni=getNivelMensajeConfirmacion(item.dias_falta,item.envios_hoy)
+    const ni=getNivelMensajeConfirmacion(item.dias_falta,item.envios_hoy,item) // (25sep26 · T1) +item
     etiqueta=ni.etiqueta||'mensaje'
     const tot=item.envios_total||0
     enviadosTxt=`📨 Mensajes a este pedido: <strong>${tot}</strong> · hoy: <strong>${item.envios_hoy||0}/${_cuotaDiaria('confirmacion',2)}</strong>`
@@ -18591,6 +19093,7 @@ window.cruceGuardarFechaEnvio=async(mapeoId)=>{
   if(error){if(msgEl)msgEl.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
   const accionLog=progAnterior?'envio_reprogramado':'envio_programado'
   logAction(accionLog,{mapeo_id:m.id,telefono:m.telefono,fecha_envio:fecha,programacion_id:data?.id,nota:nota||null,fecha_anterior:progAnterior?.fecha_envio_programada||null,fuente:'cruce_dropi'}).catch(()=>{})
+  try{window._confTurnosSyncPronto&&window._confTurnosSyncPronto()}catch(_){} // (25sep26 · T1) ⏰ se agendan los 3 turnos de la fecha nueva
   // Event sourcing (mismo patrón): si falla NO aborta — la programación ya quedó guardada
   try{
     const{error:evErr}=await sb.from('mapeo_eventos').insert({
@@ -20012,6 +20515,7 @@ async function cargarTextosAdmin(){  const el=document.getElementById('txt-list'
   const escAttr=(s)=>esc(s).replace(/"/g,'&quot;')
   // Chip multi-portafolio: estados por WABA + circulitos por número
   await _waChipCargar()
+  try{await _confTurnosCargar(true)}catch(_){} // (25sep26 · T1) ⏰ turnos de 📅 Confirmar (para el panel y las ⭐)
   // (11ago26) ✂️ SPLIT Pend.Conf: confirmacion y psf ya NO comparten sección de
   // WhatsApp. Cada una nombra y aprueba SUS propias plantillas por separado
   // (nexo_confirmacion_… y nexo_psf_…), así se pueden asignar a números distintos.
@@ -20035,6 +20539,7 @@ async function cargarTextosAdmin(){  const el=document.getElementById('txt-list'
     if(e1||e2){el.innerHTML=`<div class="alert alert-red">${(e1||e2).message}</div>`;return}
     const cfgBySec={};(cfg||[]).forEach(x=>cfgBySec[x.seccion]=x)
     const tplsBySec={};(tpls||[]).forEach(t=>{(tplsBySec[t.seccion]=tplsBySec[t.seccion]||[]).push(t)})
+    try{await _waTplSanarHuerfanas(tplsBySec)}catch(_){} // (25sep26 · T3) 🔗 título cambiado → vuelve sola a su plantilla YA aprobada
     window._txtState={}
     const _todas=[..._orden,...Object.keys(cfgBySec).filter(s=>!_orden.includes(s))].filter(s=>s!=='general'||cfgBySec['general']) // general solo si ya existe
     let html=''
@@ -20062,6 +20567,7 @@ async function cargarTextosAdmin(){  const el=document.getElementById('txt-list'
           <div class="fld" style="margin:0"><label>Tope total (vacío = sin tope)</label><input type="number" min="0" id="txt-tope-${sec}" value="${cf.tope_total==null?'':cf.tope_total}" style="width:150px"></div>
           <button class="btn-sm btn-primary" onclick="txtGuardarCuota('${sec}')">💾 Guardar cupos</button>
         </div>
+        ${sec==='confirmacion'&&typeof _confTurnosPanelHtml==='function'?_confTurnosPanelHtml(plantillas,cf):''}
         ${plantillas.map(p=>`<div class="card" style="background:var(--card2);margin-bottom:10px;border-left:3px solid var(--primary);padding:12px">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px">
             <input type="text" id="txt-${sec}-${p.idx}-et" value="${escAttr(p.etiqueta)}" placeholder="Etiqueta (ej: Nivel 1 — Cordial)" style="flex:1;font-weight:600;padding:6px 9px;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--text)">
@@ -20082,6 +20588,7 @@ async function cargarTextosAdmin(){  const el=document.getElementById('txt-list'
       </div>`
     }
     el.innerHTML=html
+    try{_confTurnosEstadoPintar()}catch(_){} // (25sep26 · T1) 🫀 robot de turnos vivo + agendados
   }catch(err){
     el.innerHTML=`<div class="alert alert-red">Error cargando textos: ${esc(err&&err.message||String(err))}</div>`
   }
@@ -20134,7 +20641,18 @@ window.txtGuardarPlantilla=async(sec,idx)=>{
   }catch(_){}
   const{error}=await sb.from('app_mensajes').upsert({seccion:sec,idx,etiqueta,texto,activo,footer,boton},{onConflict:'seccion,idx'})
   if(error){if(msg)msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
-  if(msg)msg.innerHTML='<div class="alert alert-green">✅ Plantilla guardada. El auxiliar debe recargar la app para que aplique.'+_avisoVer+'</div>'
+  // (25sep26 · T3) 📌 ¿cambió el TÍTULO? → el nombre en Meta queda CONGELADO (la aprobada sigue siendo la misma)
+  let _avisoCong=''
+  try{
+    const _prevEt=((((window._txtState||{})[sec]||{}).plantillas||[]).find(p=>p.idx===idx)||{}).etiqueta
+    if(_prevEt!=null&&_prevEt!==etiqueta&&_WA_SEC_TXT[sec]){
+      const _rc=await _waTplMigrarEtiqueta(_WA_SEC_TXT[sec],_prevEt,etiqueta,idx)
+      if(_rc.cambio)_avisoCong=' <br><b>📌 Cambiaste el título, NO la plantilla:</b> en Meta sigue siendo <code>'+_waEsc(_rc.nombre)+'</code>. No hay que reenviar nada.'
+      else if(_rc.ok===false)_avisoCong=' <br>⚠️ No pude congelar el nombre en Meta ('+_waEsc(_rc.error)+'). Al abrir Textos se vuelve a intentar solo.'
+    }
+  }catch(_){}
+  // ANTES: if(msg)msg.innerHTML='<div class="alert alert-green">✅ Plantilla guardada. El auxiliar debe recargar la app para que aplique.'+_avisoVer+'</div>'
+  if(msg)msg.innerHTML='<div class="alert alert-green">✅ Plantilla guardada. El auxiliar debe recargar la app para que aplique.'+_avisoVer+_avisoCong+'</div>' // (25sep26 · T3) +_avisoCong
   logAction('textos_plantilla_editada',{sec,idx}).catch(()=>{})
   cargarTextosAdmin()
 }
@@ -21661,7 +22179,8 @@ async function _nxWaBarrasPoll(){
     const b=window._nxBarras[s]
     const mias=filas.filter(r=>r.seccion===s)
     b.errRed=null
-    b.total=mias.length
+    // ANTES: b.total=mias.length
+    b.total=mias.filter(r=>r.estado!=='programado').length // (25sep26 · T1) los ⏰ agendados para más tarde no son "envíos de ahora"
     b.pend=mias.filter(r=>r.estado==='pendiente'||r.estado==='sin_plantilla').length
     b.env=mias.filter(r=>r.estado==='enviado').length
     b.conMeta=mias.filter(r=>r.estado==='enviado'&&r.wa_message_id).length
@@ -22151,6 +22670,145 @@ window.waTplRenombrar=async(auto)=>{
   try{if(typeof cargarNovedadesAdmin==='function')cargarNovedadesAdmin()}catch(_){}
 }
 
+// ══ 📌 NOMBRE EN META CONGELADO + 💡 SUGERENCIA + 🔗 VINCULAR (25sep26 · T3) ══════
+// Problema (25sep26): la dueña cambió el TÍTULO de una tarjeta ("Día 1 antes — 1er
+// mensaje" → "Día 2 antes — 2do mensaje") y NEXO le cambió el NOMBRE a la plantilla
+// (…dia_1_antes_1er_mensaje_2_v1 → …dia_2_antes_2do_mensaje_2_v1): para Meta era una
+// plantilla NUEVA que nunca vio → "⚪ sin enviar a aprobación", aunque el mensaje era
+// el MISMO y ya estaba aprobado. Meta no deja renombrar una plantilla aprobada.
+// Arreglo de raíz: el nombre en Meta queda CONGELADO en cuanto Meta lo conoce.
+//   · Cambiar el título solo cambia lo que tú lees en NEXO (se muda el vínculo en
+//     config 'wa_tpl_nombres' del nombre automático viejo al nuevo, con su historial).
+//   · Tarjetas que YA quedaron huérfanas (renombradas antes de este arreglo): si su
+//     texto es IGUAL al de una plantilla aprobada de su sección, se vinculan solas;
+//     si no es igual, se ofrece el botón 🔗 "Usar esta" (tú decides).
+//   · Debajo de la tarjeta sale la 💡 sugerencia de registrar también el nombre nuevo
+//     (opcional): mientras Meta lo revisa, la aprobada SIGUE siendo la ⭐.
+const _WA_SEC_TXT={confirmacion:'confirmacion',psf:'psf',cancelados:'cancelados',reclame:'reclame'} // espejo de _waSecDe (que vive DENTRO de cargarTextosAdmin)
+window._waTplSugVinculo=window._waTplSugVinculo||{}
+async function _waTplNombresGuardar(m){
+  window._waTplNombres=m
+  const js=JSON.stringify(m)
+  const{error}=await sb.from('config').upsert({clave:'wa_tpl_nombres',valor:js,updated_at:new Date().toISOString()},{onConflict:'clave'})
+  let eco=null;try{eco=await getConfig('wa_tpl_nombres')}catch(_){}
+  if(error||eco!==js){await _waTplNombresCargar(true);return{ok:false,error:(error&&error.message)||'la nube no devolvió lo guardado (¿RLS en config?)'}}
+  return{ok:true}
+}
+// Se llama al GUARDAR una tarjeta de Textos cuyo título cambió (después de guardarla).
+async function _waTplMigrarEtiqueta(secWa,etqVieja,etqNueva,idx){
+  const viejo=_waNombreTplAuto(secWa,etqVieja,idx),nuevo=_waNombreTplAuto(secWa,etqNueva,idx)
+  if(viejo===nuevo)return{ok:true,cambio:false}
+  await _waTplNombresCargar(true)
+  const m=window._waTplNombres||{}
+  const nomViejo=_waTplNombre(viejo)
+  const vals=Object.values((((window._waChipData||{}).estados)||{})[nomViejo]||{})
+  const enMeta=vals.includes('APPROVED')||vals.includes('PENDING')
+  if(!enMeta&&!(viejo in m))return{ok:true,cambio:false} // Meta no la conoce todavía: el nombre sigue al título (como siempre)
+  if(nuevo in m)return{ok:true,cambio:false,aviso:'el título nuevo ya tenía su propio nombre guardado'}
+  m[nuevo]=(viejo in m)?m[viejo]:nomViejo
+  delete m[viejo]
+  const g=await _waTplNombresGuardar(m)
+  if(!g.ok)return{ok:false,error:g.error}
+  try{logAction('wa_tpl_nombre_congelado',{de:viejo,a:nuevo,nombre:nomViejo}).catch(()=>{})}catch(_){}
+  return{ok:true,cambio:true,nombre:_waTplNombre(nuevo)}
+}
+// Al abrir Textos: vincula SOLA cada tarjeta huérfana cuyo texto (cuerpo + pie + botones) es
+// IGUAL al de una plantilla APROBADA de su sección que ninguna otra tarjeta usa. Si no es igual
+// pero hay una aprobada de su mismo número de tarjeta (_2_v1 → tarjeta 2), la deja como 🔗 sugerencia.
+async function _waTplSanarHuerfanas(tplsBySec){
+  window._waTplSugVinculo={}
+  const est=(window._waChipData||{}).estados||{},cont=(window._waChipData||{}).contenido||{}
+  if(!Object.keys(est).length)return 0 // sin estados de Meta no se adivina nada
+  await _waTplNombresCargar()
+  const m=window._waTplNombres||{}
+  const norm=(s)=>String(s==null?'':s).trim()
+  const log=[]
+  for(const sec of Object.keys(tplsBySec||{})){
+    const secWa=_WA_SEC_TXT[sec];if(!secWa)continue
+    const cards=tplsBySec[sec]||[]
+    const tomados=new Set()
+    for(const p of cards){const a=_waNombreTplAuto(secWa,p.etiqueta,p.idx);tomados.add(_waTplNombre(a));_waTplHist(a).forEach(x=>tomados.add(x));Object.keys(_waTplVers(a)).forEach(x=>tomados.add(x))}
+    const aprob=Object.keys(est).filter(n=>n.startsWith('nexo_'+secWa+'_')&&!tomados.has(n)&&Object.values(est[n]||{}).includes('APPROVED'))
+    if(!aprob.length)continue
+    const usados=new Set()
+    for(const p of cards){
+      const a=_waNombreTplAuto(secWa,p.etiqueta,p.idx)
+      if(a in m)continue          // ya tiene nombre propio / versiones: no se toca
+      if(est[a])continue          // Meta ya conoce su nombre: no es huérfana
+      const cuerpo=norm(_waTplConvertir(p.texto).cuerpo)
+      const igual=aprob.filter(n=>{const c=cont[n];return c&&norm(c.cuerpo)===cuerpo&&norm(c.footer)===norm(p.footer)&&norm(c.boton)===norm(p.boton)})
+      const mismoIdx=(lista)=>lista.filter(n=>{const x=n.match(/_(\d+)_v\d+$/);return x&&Number(x[1])===p.idx})
+      const cIgual=mismoIdx(igual)
+      const elegido=cIgual.length===1?cIgual[0]:(igual.length===1?igual[0]:null)
+      if(elegido&&!usados.has(elegido)){
+        usados.add(elegido)
+        m[a]={n:elegido,h:[],t:{},s:1} // s:1 = vinculada sola (mismo texto que la aprobada)
+        log.push({auto:a,nombre:elegido})
+        continue
+      }
+      const sug=mismoIdx(aprob).filter(n=>!usados.has(n))
+      if(sug.length)window._waTplSugVinculo[a]=sug
+    }
+  }
+  if(!log.length)return 0
+  const g=await _waTplNombresGuardar(m)
+  if(!g.ok){console.warn('[wa] no se pudo vincular sola la plantilla aprobada:',g.error);return 0}
+  try{logAction('wa_tpl_nombre_sanado',{vinculos:log}).catch(()=>{})}catch(_){}
+  try{waToast('🔗 '+log.length+' tarjeta(s) volvieron a su plantilla YA aprobada (el título había cambiado, el mensaje no). No hay que reenviar nada.','ok')}catch(_){}
+  return log.length
+}
+// 🔗 Vincular a mano una tarjeta huérfana con una plantilla ya aprobada
+window.waTplVincular=async function(auto,nombre){
+  if(!confirm('🔗 ¿Esta tarjeta es la MISMA plantilla que ya está aprobada en Meta como:\n\n'+nombre+'\n\nSi dices que sí, NEXO usa esa (no hay que aprobar nada). Si el texto de la tarjeta es distinto al aprobado, te lo avisará en amarillo.'))return
+  await _waTplNombresCargar(true)
+  const m=window._waTplNombres||{}
+  if(auto in m){waToast('Esta tarjeta ya tiene un nombre propio guardado.','aviso');return}
+  m[auto]={n:nombre,h:[],t:{},s:2} // s:2 = vinculada a mano
+  const g=await _waTplNombresGuardar(m)
+  if(!g.ok){waToast('❌ No se guardó: '+_waEsc(g.error),'error');return}
+  try{logAction('wa_tpl_vinculada',{auto,nombre}).catch(()=>{})}catch(_){}
+  waToast('🔗 Listo: la tarjeta usa '+_waEsc(nombre)+' (ya aprobada).','ok')
+  await _waChipCargar()
+  try{if(typeof cargarTextosAdmin==='function')cargarTextosAdmin()}catch(_){}
+}
+// 📤 Registrar el nombre NUEVO (el del título) SIN soltar la aprobada: la aprobada queda en
+// "versiones anteriores" (↩ usar · ⭐ en los turnos) y sigue siendo la que sale mientras Meta revisa.
+window.waTplNombreNuevoEnviar=async function(auto,destino){
+  try{
+    await _waTplNombresCargar(true)
+    const actual=_waTplNombre(auto)
+    if(actual===auto){waToast('Esta tarjeta ya usa el nombre nuevo.','aviso');return}
+    const d=destino||{}
+    const texto=d.texto
+    if(!texto||!String(texto).trim()){waToast('❌ No tengo el texto de esta tarjeta. Recarga la página.','error');return}
+    const secWa=_WA_SEC_TXT[d.sec]||d.sec
+    const nums=(((window._waChipData||{}).numeros)||[]).filter(n=>(Array.isArray(n.secciones)&&n.secciones.includes(secWa))||n.seccion===secWa)
+    if(!nums.length){waToast('⚠️ La sección no tiene número API activo: no hay dónde enviarla a aprobación.','aviso');return}
+    if(!confirm('📤 Enviar a aprobación con el nombre nuevo:\n\n'+auto+'\n\nMientras Meta lo revisa, sigue siendo la ya aprobada:\n'+actual+'\n\n¿Enviar?'))return
+    const m=window._waTplNombres||{}
+    const antes=m[auto]
+    const hist=_waTplHist(auto).slice();if(!hist.includes(actual))hist.push(actual)
+    const vers=Object.assign({},_waTplVers(auto));vers[actual]={x:texto,f:d.footer||null,b:d.boton||null}
+    m[auto]={n:auto,h:hist,t:vers}
+    const g=await _waTplNombresGuardar(m)
+    if(!g.ok){waToast('❌ No se guardó el nombre nuevo: '+_waEsc(g.error),'error');return}
+    const conv=_waTplConvertir(texto)
+    let ok=0,fallo=0;const errs=[];const vistas=new Set()
+    for(const n of nums){
+      if(vistas.has(n.waba_id))continue;vistas.add(n.waba_id) // Meta aprueba por CUENTA: 1 vez por cuenta
+      try{
+        const r=await _waSend({action:'create_template',numero_id:n.id,nombre:auto,cuerpo_meta:conv.cuerpo,ejemplos:conv.ejemplos,variables:conv.vars,seccion:secWa,footer:d.footer||null,boton:d.boton||null})
+        if(r&&r.ok)ok++;else{fallo++;errs.push(String((r&&r.error)||'falló'))}
+      }catch(e){fallo++;errs.push(String((e&&e.message)||e))}
+    }
+    waToast(fallo?('⚠️ '+ok+' cuenta(s) enviadas · '+fallo+' con error: '+_waEsc(errs.join(' · '))+'. Puedes reintentar con ↻ enviar.'):('📤 "'+_waEsc(auto)+'" enviada a aprobación. Mientras tanto sigue siendo la aprobada '+_waEsc(actual)+'.'),fallo?'aviso':'ok')
+    try{logAction('wa_tpl_nombre_nuevo_enviado',{auto,aprobada:actual,ok,fallo,antes:antes||null}).catch(()=>{})}catch(_){}
+    await _waChipCargar()
+    try{if(typeof cargarTextosAdmin==='function')cargarTextosAdmin()}catch(_){}
+  }catch(e){try{waToast('❌ '+_waEsc(e.message||String(e)),'error')}catch(_){}}
+}
+// ══ FIN NOMBRE EN META CONGELADO (25sep26 · T3) ═══════════════════════════════
+
 // ═════════════════════════════════════════════════════════════════
 // 📱 (24sep26) TABLA "NÚMERO → ESTADO" debajo de cada plantilla
 // Una fila por número de la sección: a la izquierda el número (y su cuenta de
@@ -22275,7 +22933,17 @@ function _waChipMulti(nombre,texto,secFiltro,footer,boton,destino){
     <span><strong>⚠️ Este texto ya no es el que Meta tiene aprobado.</strong> Si se envía así, al cliente le llega el texto anterior.</span>
     <button onclick="waTplVersionarYa('${_auto}',${_destinoVer})" style="border:1px solid var(--amber);background:none;color:var(--amber);border-radius:20px;cursor:pointer;font-size:10px;padding:2px 9px;font-weight:800">🏷️ Crear versión nueva</button>
   </div>`:''
-  return `<div style="font-size:10.5px;margin-top:6px"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--muted)">📄 <code style="background:rgba(255,255,255,.06);padding:1px 6px;border-radius:5px;color:var(--text)">${nombre}</code>${_lapiz}${_avisoRenom} · ${chipG} ${bolas?'· '+bolas:''}</div>${typeof _waTablaNumeros==='function'?_waTablaNumeros(nombre,nums,porWaba):''}${_avisoDesf}${_histHtml}</div>` // (24sep26) 📱 tabla número → estado
+  // (25sep26 · T3) 💡 Título cambiado → la aprobada SIGUE siendo la plantilla; registrar el nombre nuevo es OPCIONAL
+  const _estAutoV=Object.values((window._waChipData.estados||{})[_auto]||{})
+  const _sugNombre=(_renom&&global==='APPROVED'&&!_estAutoV.length&&!_hist.includes(_auto)&&destino&&destino.tipo==='texto')
+    ?`<div style="font-size:10.5px;margin-top:5px;padding:6px 9px;background:rgba(34,197,94,.08);border:1px solid var(--green);border-radius:7px;color:var(--text);line-height:1.5">💡 <strong>Le cambiaste el título, no el mensaje.</strong> La plantilla sigue siendo la <strong>ya aprobada</strong> <code>${_waEsc(nombre)}</code> ⭐ — no hay que aprobar nada.<br><span style="color:var(--muted)">Opcional: registrar también el nombre nuevo <code>${_waEsc(_auto)}</code> para que coincida con el título. Mientras Meta lo revisa, sigue saliendo la aprobada.</span> <button onclick="waTplNombreNuevoEnviar('${_auto}',${_destinoVer})" style="border:1px solid var(--green);background:none;color:var(--green);border-radius:20px;cursor:pointer;font-size:10px;padding:1px 9px;font-weight:800;margin-left:4px">📤 Reenviar con el nombre nuevo</button></div>`:''
+  // (25sep26 · T3) 🔗 Tarjeta huérfana con texto distinto: ¿es la misma que ya está aprobada?
+  const _vinc=(!global&&!_renom&&destino&&destino.tipo==='texto'&&(window._waTplSugVinculo||{})[_auto])||null
+  const _sugVinc=(_vinc&&_vinc.length)?`<div style="font-size:10.5px;margin-top:5px;padding:6px 9px;background:rgba(56,189,248,.08);border:1px solid #38bdf8;border-radius:7px;color:var(--text);line-height:1.5">🔗 <strong>¿Es la misma que ya está aprobada?</strong> En Meta hay ${_vinc.length===1?'una plantilla aprobada':'plantillas aprobadas'} de esta misma tarjeta: ${_vinc.map(v=>`<code>${_waEsc(v)}</code> <button onclick="waTplVincular('${_auto}','${_waEsc(v)}')" style="border:1px solid #38bdf8;background:none;color:#38bdf8;border-radius:20px;cursor:pointer;font-size:10px;padding:1px 8px;font-weight:800">🔗 Usar esta</button>`).join(' · ')}<br><span style="color:var(--muted)">Si es la misma, úsala y no hay que aprobar nada. Si es un mensaje nuevo, envíalo con ↻ enviar.</span></div>`:''
+  // (25sep26 · T1) ⭐ 📅 Confirmar: en qué turno sale esta plantilla, y botones para ponerla por defecto
+  const _confStar=(destino&&destino.tipo==='texto'&&destino.sec==='confirmacion'&&typeof _confTurnosCardHtml==='function')?_confTurnosCardHtml([nombre,..._hist],wabasVis):''
+  // ANTES: return `…${_avisoDesf}${_histHtml}</div>` (misma línea, sin los 3 bloques nuevos)
+  return `<div style="font-size:10.5px;margin-top:6px"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--muted)">📄 <code style="background:rgba(255,255,255,.06);padding:1px 6px;border-radius:5px;color:var(--text)">${nombre}</code>${_lapiz}${_avisoRenom} · ${chipG} ${bolas?'· '+bolas:''}</div>${typeof _waTablaNumeros==='function'?_waTablaNumeros(nombre,nums,porWaba):''}${_avisoDesf}${_sugNombre}${_sugVinc}${_histHtml}${_confStar}</div>` // (24sep26) 📱 tabla número → estado · (25sep26 · T1/T3) + 💡 🔗 ⭐
 }
 // ═══ 📤 VERIFICACIÓN DE PLANTILLAS (27jul26) ═══════════════════════════════
 // Envía a aprobación de Meta, EN LA CUENTA de un número, todas las plantillas
@@ -22529,19 +23197,60 @@ window.waDespacharItem=async(seccion,raw)=>{
     if(!tpls||!tpls.length){waToast('⚠️ No hay plantillas APROBADAS para '+seccion+' en la cuenta de WhatsApp de su número. Apruébalas ahí con el chip ↻ de Textos.','aviso');return}
     // Rotar por cantidad de envíos previos del pedido (nivel 1 → 2 → 3)
     const nPrev=Number(raw.enviosHoy||raw.waCount||raw.nivel||0)
-    const tpl=tpls[Math.min(nPrev,tpls.length-1)]
+    // ANTES: const tpl=tpls[Math.min(nPrev,tpls.length-1)]
+    let tpl=tpls[Math.min(nPrev,tpls.length-1)] // (25sep26 · T1) let: en 📅 Confirmar la cambia la ⭐ del turno (abajo)
+    // (25sep26 · T1) ⏰ 📅 Confirmar NO rota: sale la ⭐ del turno que toca HOY. Si ese turno ya estaba
+    // agendado, se ADELANTA esa misma fila (no se crea otra → imposible duplicar con el 🤖).
+    let _confFila=null
+    if(seccion==='confirmacion'){
+      try{await _confTurnosCargar()}catch(_){}
+      const _ni=getNivelMensajeConfirmacion(raw&&raw.dias_falta,(raw&&raw.envios_hoy)||0)
+      if(_ni&&_ni.puede===false){waToast('🔒 '+_waEsc(_ni.motivo||'Hoy no toca mandar mensaje a este pedido.'),'aviso');return}
+      if(_ni&&_ni.plantilla){
+        const _tn=tpls.find(t=>t.nombre===_ni.plantilla)
+        if(!_tn){waToast('⚠️ La plantilla ⭐ de '+_ni.turno+' ('+_waEsc(_ni.plantilla)+') no está aprobada (o no tiene ▶️) en la cuenta del número de 📅 Confirmar. Elige otra en Textos → ⏰ Turnos.','aviso');return}
+        tpl=_tn
+        const _fEnv=String((raw&&raw.fecha_envio_programada)||'').slice(0,10)
+        if(m.id!=null&&_fEnv&&_ni.turno){
+          try{
+            const{data:_tr,error:_eTr}=await sb.from('envios_cola').select('id,estado,error_detalle').eq('mapeo_id',m.id).eq('turno',_ni.turno).eq('fecha_envio',_fEnv).limit(1)
+            if(!_eTr&&_tr&&_tr[0]){
+              if(_tr[0].estado==='enviado'||_tr[0].estado==='pendiente'){waToast('✅ El turno '+_ni.turno+' de este pedido ya '+(_tr[0].estado==='enviado'?'salió':'está en cola y sale en minutos')+'. No se duplica.','aviso');return}
+              if(_tr[0].estado==='programado')_confFila={..._tr[0],turno:_ni.turno}
+              else if(_tr[0].estado==='cancelado'){
+                const _det=String(_tr[0].error_detalle||'')
+                if(/^💬/.test(_det)){waToast('💬 El cliente ya respondió: atiéndelo en el chat. El robot no le manda más turnos.','aviso');return}
+                if(/^⏭️/.test(_det))_confFila={..._tr[0],turno:_ni.turno,rearmar:true} // ⏭️ saltado → se REARMA y el robot lo suelta con TODOS sus frenos (nunca 2 juntos)
+              }
+            }
+          }catch(_){}
+        }
+      }
+    }
     const vars=Array.isArray(tpl.variables)?tpl.variables:[]
     const parametros=vars.map(tag=>_waValorReal(tag,m))
     const telFull=telLimpio.startsWith('57')?telLimpio:('57'+telLimpio)
     if(!confirm('▶️ Despachar por API:\n\nPlantilla: '+tpl.nombre+'\nA: '+(m.nombre||'')+' ('+telFull+')\n\n¿Enviar?'))return
     // 🛡️ (Mejora #8) Sin mapeo_id el índice único NO aplica → dedupe por teléfono contra la BASE
     if(m.id==null&&await _waYaEncoladoHoy(telFull,tpl.nombre)){waToast('⚠️ Esa plantilla ya está encolada o enviada HOY a este teléfono. No se duplica.','aviso');return}
-    const{data:fila,error}=await sb.from('envios_cola').insert({
+    // (25sep26 · T1) ⏰ turno ⏭️ saltado: se REARMA ya (programado) y el robot lo manda con sus frenos
+    if(_confFila&&_confFila.rearmar){
+      const{error:_eR}=await sb.from('envios_cola').update({estado:'programado',error_detalle:null,plantilla:tpl.nombre,parametros,origen:'despacho_manual',usuario_id:me?.id||null,programado_para:new Date().toISOString(),fecha:today()}).eq('id',_confFila.id).eq('estado','cancelado')
+      if(_eR){waToast('❌ No se pudo rearmar el turno: '+_waEsc(_eR.message),'error');return}
+      waToast('⏰ Listo: '+_confFila.turno+' quedó en fila. El robot lo manda en 1-5 min, o apenas pasen 3 h del último mensaje (nunca 2 juntos).','ok')
+      logAction('wa_despacho_manual',{seccion,tel:telFull,plantilla:tpl.nombre,turno:_confFila.turno,rearmado:true}).catch(()=>{})
+      return
+    }
+    // (25sep26 · T1) ⏰ si el turno ya estaba agendado, se ADELANTA esa fila; si no, se crea como siempre
+    const{data:fila,error}=_confFila
+      ?await sb.from('envios_cola').update({estado:'pendiente',error_detalle:null,plantilla:tpl.nombre,parametros,origen:'despacho_manual',usuario_id:me?.id||null,programado_para:new Date().toISOString(),fecha:today()}).eq('id',_confFila.id).eq('estado','programado').select('id').single()
+      :await sb.from('envios_cola').insert({
       mapeo_id:m.id,telefono:telFull,nombre:m.nombre||null,
       seccion,tipo:null,plantilla:tpl.nombre,parametros,
       origen:'despacho_manual',usuario_id:me?.id||null
     }).select('id').single()
     if(error){
+      if(_confFila&&error.code==='PGRST116'){waToast('⚠️ Ese turno cambió de estado hace un momento (ya salió o se canceló). Recarga la lista.','aviso');return} // (25sep26 · T1)
       if(error.code==='23505'){waToast('⚠️ Esa plantilla ya se envió HOY a este pedido. No se duplica.','aviso');return}
       throw error
     }
@@ -22705,7 +23414,9 @@ async function cargarWaCola(){
         _latHtml=`<div style="background:rgba(148,163,184,.08);border:1px dashed var(--border);border-radius:10px;padding:9px 12px;margin-bottom:10px;font-size:12px;color:var(--muted)">🫀 Sin latido del despachador todavía — se registra solo cuando la versión nueva de wa-dispatch esté desplegada y corra su primera vez.</div>`
       }
     }catch(_){}
-    const chip=(e)=>({pendiente:'🕓',sin_plantilla:'⚠️',enviado:'✅',fallido:'❌',cancelado:'🚫'})[e]||e
+    // ANTES: const chip=(e)=>({pendiente:'🕓',sin_plantilla:'⚠️',enviado:'✅',fallido:'❌',cancelado:'🚫'})[e]||e
+    const chip=(e)=>({pendiente:'🕓',sin_plantilla:'⚠️',enviado:'✅',fallido:'❌',cancelado:'🚫',programado:'🗓️'})[e]||e // (25sep26 · T1) +🗓️ agendado (turno)
+    // (25sep26 · T1) En la lista: origen 'turno' → ⏰ T1/T2/T3 y, si está 🗓️ agendado, 'sale HH:MM'. ANTES: ${r.origen==='cruce'?'🤖':'👤'} y solo la hora de enviado
     el.innerHTML=`${_latHtml}<div class="cards-row c4" style="margin-bottom:12px">
       <div class="card" style="border-left:3px solid var(--green)"><div class="card-label">✅ Enviados hoy</div><div class="card-val" style="color:var(--green)">${cnt('enviado')}</div></div>
       <div class="card" style="border-left:3px solid var(--blue)"><div class="card-label">🕓 Pendientes</div><div class="card-val" style="color:var(--blue)">${cnt('pendiente')}</div></div>
@@ -22717,7 +23428,7 @@ async function cargarWaCola(){
     ${rows.length?`<div style="max-height:280px;overflow-y:auto">${rows.slice(0,30).map(r=>`
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:11.5px;border-bottom:1px solid var(--border);padding:6px 2px;flex-wrap:wrap">
         <div style="flex:1;min-width:180px">${chip(r.estado)} <strong>${_waEsc(r.nombre||r.telefono)}</strong> · ${_waEsc(r.plantilla||'—')}</div>
-        <div style="color:var(--muted)">${_waEsc(r.seccion)} · ${r.origen==='cruce'?'🤖':'👤'} ${r.enviado_en?new Date(r.enviado_en).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}):''}</div>
+        <div style="color:var(--muted)">${_waEsc(r.seccion)} · ${r.origen==='cruce'?'🤖':(r.origen==='turno'?'⏰ '+_waEsc(r.turno||''):'👤')} ${r.enviado_en?new Date(r.enviado_en).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}):(r.estado==='programado'&&r.programado_para?'sale '+new Date(r.programado_para).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}):'')}</div>
         ${r.estado==='fallido'?`<button class="btn btn-sm" onclick="waColaReintentar('${r.id}')">↻</button>`:''}
         ${r.error_detalle?`<div style="width:100%;color:var(--red);font-size:11px;font-weight:800">${(window._wchErrCorto?window._wchErrCorto(r.error_detalle):_waEsc(r.error_detalle))}</div><div style="width:100%;color:var(--muted);font-size:9px;opacity:.7">${_waEsc(r.error_detalle)}</div>`:''}
       </div>`).join('')}</div>`:'<div style="color:var(--muted);font-size:12px">Sin envíos hoy. La cola se llena al despachar desde las secciones del auxiliar.</div>'}`
@@ -46991,7 +47702,8 @@ async function _wchCargar(){
       // (Mejora #3) también su ESTADO — el más reciente por teléfono, para que la
       // tarjeta sin hilo diga la verdad (🕓 en cola / ❌ falló / 🚫 cancelado) en
       // vez de caer siempre en "Disparada".
-      const{data:envs,error:e1}=await sb.from('envios_cola').select('telefono,seccion,fecha,estado,creado_en').eq('seccion',sec).eq('fecha',diaSel).order('creado_en',{ascending:false}).limit(1500)
+      // ANTES: …eq('seccion',sec).eq('fecha',diaSel).order(…) (sin excluir los ⏰ agendados)
+      const{data:envs,error:e1}=await sb.from('envios_cola').select('telefono,seccion,fecha,estado,creado_en').eq('seccion',sec).eq('fecha',diaSel).neq('estado','programado').order('creado_en',{ascending:false}).limit(1500) // (25sep26 · T1) un turno que AÚN no sale no es un "envío del día"
       if(e1)throw e1
       const _envEstDe={}
       for(const ev of(envs||[])){const t=_wchTel(ev.telefono);if(t){tels.add(t);secDe[t]=ev.seccion;if(!(t in _envEstDe))_envEstDe[t]=ev.estado}}
@@ -48327,9 +49039,12 @@ async function _wchNoDispCargar(){
   const st=window._wchState
   try{
     const fechas=st.fecha?[st.fecha]:[today(),_daysAgo(1)]
-    const{data,error}=await sb.from('envios_cola').select('id,telefono,nombre,plantilla,estado,error_detalle,fecha,creado_en').eq('seccion',st.sec).in('fecha',fechas).in('estado',['pendiente','sin_plantilla','fallido','cancelado']).order('creado_en',{ascending:false}).limit(300) // (Mejora #3) + cancelado: antes se colaba por ambos lados
+    // ANTES: const{data,error}=await sb.from('envios_cola').select('id,telefono,nombre,plantilla,estado,error_detalle,fecha,creado_en')… (sin turno) · const items=data||[]
+    const _qND=(cols)=>sb.from('envios_cola').select(cols).eq('seccion',st.sec).in('fecha',fechas).in('estado',['pendiente','sin_plantilla','fallido','cancelado']).order('creado_en',{ascending:false}).limit(300) // (Mejora #3) + cancelado: antes se colaba por ambos lados
+    let{data,error}=await _qND('id,telefono,nombre,plantilla,estado,error_detalle,fecha,creado_en,turno') // (25sep26 · T1) +turno
+    if(error&&typeof _confTurnosSinSql==='function'&&_confTurnosSinSql(error))({data,error}=await _qND('id,telefono,nombre,plantilla,estado,error_detalle,fecha,creado_en')) // sin el SQL de turnos: como antes
     if(error)throw error
-    const items=data||[]
+    const items=(data||[]).filter(it=>!(it.turno&&it.estado==='cancelado')) // (25sep26 · T1) ⏰ turnos cancelados A PROPÓSITO (⏭️ saltado · ✋ ya se le escribió · 💬 respondió · 🗓️ confirmado/reprogramado) no son fallas
     window._wchNoDispState={items}
     document.querySelectorAll('[data-wchn="nodisp"]').forEach(cnt=>{cnt.textContent=items.length;cnt.style.color=items.length?'var(--red)':'var(--green)';cnt.style.fontWeight='800'}) // (28jul26) 🚦 esta píldora vive en 0: verde=todo salió · rojo=avisar al admin YA
     if(!items.length){box.innerHTML='<div style="background:rgba(34,197,94,.10);border:1px solid var(--green);border-radius:10px;padding:11px;font-size:12.5px;color:var(--green);text-align:center;margin-bottom:8px">✅ Todo lo encolado de '+(st.fecha?('el '+st.fecha):'HOY y AYER')+' salió disparado — cero errores en silencio.</div>';return}
@@ -49351,18 +50066,21 @@ async function _wchTplCuerposCargar(force){
   const c=window._wchTplCache
   if(!force&&c.mapa&&(Date.now()-c.ts)<300000)return c.mapa // 5 min de caché: el hilo se repinta cada 3s
   try{
-    const{data}=await sb.from('wa_plantillas').select('nombre,cuerpo_meta,variables')
+    // ANTES: const{data}=await sb.from('wa_plantillas').select('nombre,cuerpo_meta,variables')
+    let{data,error:_eC}=await sb.from('wa_plantillas').select('nombre,cuerpo_meta,variables,footer,boton') // (25sep26 · T2) + pie y botones: la burbuja muestra el mensaje COMPLETO
+    if(_eC)({data}=await sb.from('wa_plantillas').select('nombre,cuerpo_meta,variables')) // tolerante: si faltara una columna, como antes
     const m={}
     ;(data||[]).forEach(t=>{
       if(!t||!t.nombre||!t.cuerpo_meta)return
-      if(!m[t.nombre])m[t.nombre]={cuerpo:String(t.cuerpo_meta),vars:Array.isArray(t.variables)?t.variables:[]}
+      // ANTES: if(!m[t.nombre])m[t.nombre]={cuerpo:String(t.cuerpo_meta),vars:Array.isArray(t.variables)?t.variables:[]}
+      if(!m[t.nombre])m[t.nombre]={cuerpo:String(t.cuerpo_meta),vars:Array.isArray(t.variables)?t.variables:[],footer:t.footer||null,boton:t.boton||null} // (25sep26 · T2)
     })
     c.mapa=m;c.ts=Date.now()
   }catch(_){if(!c.mapa)c.mapa={}}
   return c.mapa
 }
 // Devuelve {nombre,texto} del mensaje de plantilla, o null si no es de plantilla
-function _wchTplPartir(m){
+function _wchTplPartir_v28jul(m){ // (25sep26 · T2) ANTES se llamaba _wchTplPartir — se conserva intacta, sin uso (la nueva está justo abajo)
   const crudo=String((m&&m.cuerpo)||'')
   const marca=crudo.match(/^\s*\[plantilla\]\s*([^\s·]+)\s*(?:·\s*([\s\S]*))?$/)
   const nombre=String((m&&m.plantilla)||(marca&&marca[1])||'').trim()
@@ -49379,6 +50097,77 @@ function _wchTplPartir(m){
   if(!texto)texto=marca?String(marca[2]||'').trim():crudo // no cuadró → lo de siempre, sin inventar
   return{nombre,texto}
 }
+// ══ 💬 BURBUJA = EL MENSAJE COMPLETO QUE LE LLEGÓ AL CLIENTE (25sep26 · T2) ═══════
+// Problema (25sep26): la burbuja de un envío por plantilla salía como
+// "Alejandra, Semilla Negra, 3 unidades, domingo, 27 de septiembre, MOCOA, …"
+// (solo los datos, pegados con comas). Causa: wa-dispatch guarda los datos
+// separados por ", " y la FECHA trae su propia coma ("domingo, 27 de septiembre"):
+// al partir por comas salían 8 pedazos para 7 huecos, la cuenta no cuadraba y la
+// regla de honestidad dejaba la burbuja cruda.
+// Arreglo de raíz:
+//   1) Se usan los datos EXACTOS con que salió cada mensaje: envios_cola.parametros,
+//      buscados por wa_message_id (una sola consulta por mensaje nuevo; luego en memoria).
+//   2) Si no hay fila en la cola (envío desde el chat ⚡), se vuelve a juntar la coma de
+//      la FECHA para que la cuenta cuadre. Si aun así no cuadra, NO se inventa nada.
+//   3) Abajo del texto se ve también el PIE y los BOTONES, como en WhatsApp.
+// La versión anterior (_wchTplPartir_v28jul) queda intacta, sin uso.
+window._wchTplParams=window._wchTplParams||{}
+async function _wchTplParamsCargar(msgs){
+  const faltan=[...new Set((msgs||[]).filter(m=>m&&m.direccion==='out'&&m.plantilla&&m.wa_message_id&&!Object.prototype.hasOwnProperty.call(window._wchTplParams,m.wa_message_id)).map(m=>m.wa_message_id))]
+  if(!faltan.length)return
+  let cambio=false
+  for(let i=0;i<faltan.length;i+=100){
+    const lote=faltan.slice(i,i+100)
+    const{data,error}=await sb.from('envios_cola').select('wa_message_id,parametros').in('wa_message_id',lote)
+    if(error)return // se reintenta en el próximo repintado (no se marca nada)
+    ;(data||[]).forEach(r=>{if(r&&r.wa_message_id&&Array.isArray(r.parametros)){window._wchTplParams[r.wa_message_id]=r.parametros.map(x=>String(x==null?'':x));cambio=true}})
+    lote.forEach(w=>{if(!Object.prototype.hasOwnProperty.call(window._wchTplParams,w))window._wchTplParams[w]=null})
+  }
+  if(cambio)window._wchTplParVer=(window._wchTplParVer||0)+1
+}
+// "dato1, dato2, …" → lista del tamaño justo. Si sobran pedazos, se re-juntan las FECHAS
+// (vienen con coma: "domingo, 27 de septiembre"). Devuelve null si no cuadra.
+function _wchTplParamsDeTexto(s,maxN,vars){
+  if(s==null)return null
+  const p=String(s).split(',').map(x=>x.trim())
+  if(!maxN||p.length===maxN)return p
+  if(p.length<maxN)return null
+  const v=Array.isArray(vars)?vars.map(x=>String(x||'').replace(/^\[|\]$/g,'').toUpperCase()):[]
+  if(v.length!==maxN)return null
+  let sobra=p.length-maxN,i=0
+  const out=[]
+  for(let k=0;k<maxN;k++){
+    if(sobra>0&&/FECHA/.test(v[k])&&i+1<p.length&&/^\p{L}+, \d{1,2} de \p{L}+$/u.test(p[i]+', '+p[i+1])){out.push(p[i]+', '+p[i+1]);i+=2;sobra--} // solo si parece fecha ("domingo, 27 de septiembre")
+    else{out.push(p[i]);i++}
+  }
+  return(sobra===0&&i===p.length)?out:null
+}
+// Devuelve {nombre,texto,footer,botones} del mensaje de plantilla, o null si no es de plantilla
+function _wchTplPartir(m){
+  const crudo=String((m&&m.cuerpo)||'')
+  const marca=crudo.match(/^\s*\[plantilla\]\s*([^\s·]+)\s*(?:·\s*([\s\S]*))?$/)
+  const nombre=String((m&&m.plantilla)||(marca&&marca[1])||'').trim()
+  if(!nombre)return null
+  const tpl=((window._wchTplCache&&window._wchTplCache.mapa)||{})[nombre]
+  let texto='',completo=false
+  if(tpl&&tpl.cuerpo){
+    const nums=(tpl.cuerpo.match(/\{\{\s*\d+\s*\}\}/g)||[]).map(x=>parseInt(x.replace(/\D/g,''),10))
+    const maxN=nums.length?Math.max.apply(null,nums):0
+    if(maxN===0){texto=tpl.cuerpo;completo=true} // plantilla sin variables: el cuerpo ya es el mensaje
+    else{
+      const exactos=(m&&m.wa_message_id&&window._wchTplParams)?window._wchTplParams[m.wa_message_id]:null
+      const params=(Array.isArray(exactos)&&exactos.length===maxN)?exactos:_wchTplParamsDeTexto(marca&&marca[2]!=null?String(marca[2]):null,maxN,tpl.vars)
+      if(params&&params.length===maxN){
+        texto=tpl.cuerpo.replace(/\{\{\s*(\d+)\s*\}\}/g,(s,i)=>{const v=params[parseInt(i,10)-1];return (v==null||v==='')?s:v})
+        completo=true
+      }
+    }
+  }
+  if(!texto)texto=marca?String(marca[2]||'').trim():crudo // no cuadró → lo de siempre, sin inventar
+  const botones=(completo&&tpl&&tpl.boton)?String(tpl.boton).split('|').map(x=>x.trim()).filter(Boolean):[]
+  return{nombre,texto,footer:(completo&&tpl&&tpl.footer)?String(tpl.footer):null,botones}
+}
+// ══ FIN BURBUJA COMPLETA (25sep26 · T2) ══════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
 // (30jul26) 🔤 ERRORES DE META EN CRISTIANO  ·  📎 ADJUNTOS QUE SE VEN SOLOS
 // ──────────────────────────────────────────────────────────────────────────
@@ -49717,9 +50506,11 @@ async function _wchHiloPintar(convId){
   const el=document.getElementById('wch-hilo-'+convId);if(!el)return
   try{await _wchTplCuerposCargar()}catch(_){} // cuerpos de plantilla (cacheados) antes de pintar
   try{await _wchErrCargar()}catch(_){} // (30jul26) diccionario de errores en cristiano (cacheado 5 min)
-  const{data,error}=await sb.from('mensajes').select('id,direccion,tipo,cuerpo,plantilla,estado,ts,usuario_id,media_path,media_mime,error_detalle').eq('conversacion_id',convId).order('ts',{ascending:false}).limit(40)
+  // ANTES: …select('id,direccion,tipo,cuerpo,plantilla,estado,ts,usuario_id,media_path,media_mime,error_detalle')… (sin wa_message_id)
+  const{data,error}=await sb.from('mensajes').select('id,direccion,tipo,cuerpo,plantilla,estado,ts,usuario_id,media_path,media_mime,error_detalle,wa_message_id').eq('conversacion_id',convId).order('ts',{ascending:false}).limit(40) // (25sep26 · T2) +wa_message_id → datos EXACTOS del envío
   if(error){el.innerHTML=`<div class="alert alert-red">${_wchEsc(error.message)}</div>`;return}
   const msgs=(data||[]).slice().reverse()
+  try{await _wchTplParamsCargar(msgs)}catch(_){} // (25sep26 · T2) datos exactos de cada plantilla (1 consulta por mensaje NUEVO; luego en memoria)
   try{ // ¿el cliente escribió mientras esta ventana está detrás? → puntico verde en el dock
     const stD=window._wchState;stD.chatMeta=stD.chatMeta||{}
     const mD=stD.chatMeta[convId]=stD.chatMeta[convId]||{vistoTs:Date.now()}
@@ -49764,6 +50555,7 @@ async function _wchHiloPintar(convId){
   // HTML no se toca y el reproductor sigue andando.
   const _firma=msgs.map(m=>m.id+'~'+(m.estado||'')+'~'+(m.error_detalle||'')+'~'+(m.media_path||'')+'~'+String(m.cuerpo||'').length).join('|')
     +'#'+((window._wchTplCache&&window._wchTplCache.mapa)?1:0)+'#'+(window._wchErrVer||0)
+    +'#'+(window._wchTplParVer||0) // (25sep26 · T2) llegaron datos exactos → se repinta
   if(el._wchFirma===_firma&&el.childElementCount){try{_wchMediaPendientes(el)}catch(_){}return}
   el._wchFirma=_firma
   el.innerHTML=msgs.map(m=>{
@@ -49771,10 +50563,13 @@ async function _wchHiloPintar(convId){
     const hora=new Date(m.ts).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
     let cuerpo=m.cuerpo?_wchEsc(m.cuerpo):''
     let tplHead='',busca=(m.cuerpo||'')
+    let tplPie='' // (25sep26 · T2) pie + botones de la plantilla, como en WhatsApp
     const _tp=_wchTplPartir(m) // 📋 plantilla → nombre chiquito arriba + mensaje real abajo
     if(_tp){
       tplHead=`<div style="font-size:9px;color:#8696a0;opacity:.85;margin-bottom:3px;word-break:break-all;line-height:1.25">📋 ${_wchEsc(_tp.nombre)}</div>`
       if(_tp.texto)cuerpo=_wchEsc(_tp.texto)
+      if(_tp.footer)tplPie+=`<div style="font-size:11px;color:#8696a0;margin-top:5px;white-space:pre-wrap">${_wchEsc(_tp.footer)}</div>` // (25sep26 · T2)
+      if(_tp.botones&&_tp.botones.length)tplPie+=`<div style="margin-top:6px;border-top:1px solid rgba(255,255,255,.12)">${_tp.botones.map(b=>`<div style="text-align:center;color:#53bdeb;font-size:12.5px;padding:5px 4px;border-bottom:1px solid rgba(255,255,255,.06)">↩ ${_wchEsc(b)}</div>`).join('')}</div>` // (25sep26 · T2)
       busca=_tp.nombre+' '+(_tp.texto||'')+' '+busca
     }
     // (30jul26) 📎 el adjunto ya no espera un clic: imagen, audio, video y PDF
@@ -49785,7 +50580,7 @@ async function _wchHiloPintar(convId){
     return `<div class="wch-msg" data-txt="${_wchEsc(busca.toLowerCase())}" style="display:flex;${lado?'':'justify-content:flex-end;'}margin-bottom:7px">
       <div style="max-width:82%;background:${lado?'#202c33':'#005c4b'};border:none;border-radius:10px;padding:7px 10px;color:#e9edef">
         <div style="font-size:9.5px;color:var(--muted);margin-bottom:2px">${lado?'📥 Cliente':'📤 '+(m.usuario_id?'Humano':'Auto')}${m.plantilla?' · 📋':''} · ${hora}${!lado&&m.estado?' '+(m.estado==='failed'?'<span style="color:#ef4444;font-weight:800" title="No se pudo enviar">❗ NO SE ENVIÓ</span>':(m.estado==='read'?'<span style="color:#53bdeb;letter-spacing:-2px" title="Leído">✓✓</span>':((m.estado==='delivered')?'<span style="color:#8696a0;letter-spacing:-2px" title="Entregado">✓✓</span>':((m.estado==='sent'||m.estado==='accepted')?'<span style="color:#8696a0" title="Enviado — aún no le llega">✓</span>':_wchEsc(m.estado))))):''}</div>
-        ${tplHead}<div style="font-size:12.5px;white-space:pre-wrap">${cuerpo?_wchLinkify(cuerpo):((media||contacto)?'':'<em style="color:var(--muted)">['+_wchEsc(m.tipo)+']</em>')}</div>${media}${contacto}${(!lado&&(m.estado==='failed'||m.error_detalle))?_wchErrBloque(m.error_detalle,m.id):''}
+        ${tplHead}<div style="font-size:12.5px;white-space:pre-wrap">${cuerpo?_wchLinkify(cuerpo):((media||contacto)?'':'<em style="color:var(--muted)">['+_wchEsc(m.tipo)+']</em>')}</div>${tplPie}${media}${contacto}${(!lado&&(m.estado==='failed'||m.error_detalle))?_wchErrBloque(m.error_detalle,m.id):''}
       </div></div>`
   }).join('')
   try{_wchMediaPendientes(el)}catch(_){} // (30jul26) los adjuntos sin URL todavía se pintan al llegar
@@ -50066,6 +50861,7 @@ window._wchPcProgramar=async function(convId,tel,btn){
     }).select().maybeSingle()
     if(error)throw new Error(error.message)
     logAction('envio_programado',{mapeo_id:m.id,telefono:m.telefono,fecha_envio:fecha.trim(),programacion_id:data?.id,desde:'centro_chats'}).catch(()=>{})
+    try{window._confTurnosSyncPronto&&window._confTurnosSyncPronto()}catch(_){} // (25sep26 · T1) ⏰ se agendan los 3 turnos de la fecha nueva
     try{await sb.from('mapeo_eventos').insert({mapeo_id:m.id,evento:'envio_programado',fuente:'centro_chats',usuario_id:me?.id||null,detalle:{fecha_envio:fecha.trim(),telefono:m.telefono}})}catch(_){}
     await _wchEtiquetaDirecta(convId,'s_pc_prog')
     try{waToast('📅 Envío programado para '+fecha.trim()+'.','ok')}catch(_){}

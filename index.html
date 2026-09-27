@@ -5972,6 +5972,45 @@ async function loadTracker(){
 }
 
 // ══ F9b (2jul26) · LEY: 1 CAMPAÑA = 1 PRODUCTO, SIEMPRE ══
+// ═══ 🔒 (26sep26) CANDADO DE ASIGNACIONES DE CAMPAÑAS ═══════════════════════════════════════
+// PROBLEMA REAL: varias acciones reescribían la lista COMPLETA productos.campaign_ids con una copia
+// en memoria (o la de la caja del formulario) que podía estar VIEJA. Si alguien había asignado
+// campañas después (otra persona, otra pestaña o el robot), esas asignaciones se BORRABAN sin aviso
+// y las campañas volvían a ⚠️ SIN PRODUCTO.
+// AHORA: nadie reescribe la lista entera. Para AGREGAR se usa la función segura de Supabase
+// (asignar_campana_producto: atómica, además la quita de cualquier otro producto → ley 1 campaña =
+// 1 producto). Para QUITAR se lee la lista FRESCA de la base y se quitan SOLO esas campañas.
+window._nxCampLeerFresco=async(prodId)=>{
+  const{data,error}=await sb.from('productos').select('id,campaign_ids').eq('id',prodId).maybeSingle()
+  if(error)throw error
+  return(data&&Array.isArray(data.campaign_ids))?data.campaign_ids.map(String):[]
+}
+window._nxCampAgregar=async(prodId,cids)=>{
+  const ok=[],fallidas=[]
+  for(const cid of [...new Set((cids||[]).map(String).filter(Boolean))]){
+    let{error}=await sb.rpc('asignar_campana_producto',{p_campaign_id:cid,p_producto_id:prodId})
+    if(error){await new Promise(r=>setTimeout(r,500));({error}=await sb.rpc('asignar_campana_producto',{p_campaign_id:cid,p_producto_id:prodId}))} // 1 reintento (errores de red pasajeros)
+    if(error)fallidas.push({cid,error:error.message||String(error)});else ok.push(cid)
+  }
+  if(fallidas.length){ // respaldo: lectura FRESCA + agregar SOLO las que faltan (jamás pisa lo que otro guardó)
+    try{
+      const actual=await window._nxCampLeerFresco(prodId)
+      const nuevas=[...new Set([...actual,...fallidas.map(f=>f.cid)])]
+      const{error:eU}=await sb.from('productos').update({campaign_ids:nuevas}).eq('id',prodId)
+      if(!eU){ok.push(...fallidas.map(f=>f.cid));fallidas.length=0}
+    }catch(_){}
+  }
+  return{ok,fallidas}
+}
+window._nxCampQuitar=async(prodId,cids)=>{
+  const quitar=new Set((cids||[]).map(String))
+  const actual=await window._nxCampLeerFresco(prodId)
+  const nuevas=actual.filter(c=>!quitar.has(String(c)))
+  if(nuevas.length===actual.length)return{ok:true,sinCambio:true}
+  const{error}=await sb.from('productos').update({campaign_ids:nuevas}).eq('id',prodId)
+  if(error)throw error
+  return{ok:true}
+}
 // Antes de agregar campaign_ids a un producto: si alguna YA vive en OTRO producto,
 // avisa y (con OK) la MUEVE (la quita del otro). Cancelar = no se toca nada.
 window._nexoLeyCampProd=async(cids,prodDestinoId)=>{
@@ -5987,9 +6026,10 @@ window._nexoLeyCampProd=async(cids,prodDestinoId)=>{
   for(const c of conflictos){(porProd[c.prod.id]=porProd[c.prod.id]||{prod:c.prod,cids:[]}).cids.push(c.cid)}
   for(const k in porProd){
     const g=porProd[k]
-    const rest=(Array.isArray(g.prod.campaign_ids)?g.prod.campaign_ids:[]).filter(x=>!g.cids.includes(String(x)))
-    const{error}=await sb.from('productos').update({campaign_ids:rest}).eq('id',g.prod.id)
-    if(error){alert('No pude quitarla de '+g.prod.nombre+': '+error.message);return false}
+    // 🔒 (26sep26) ANTES: rest=(g.prod.campaign_ids en memoria).filter(...) + update → podía borrar asignaciones más nuevas.
+    // AHORA: lectura FRESCA de la base y se quitan SOLO estas campañas.
+    let error=null;try{await window._nxCampQuitar(g.prod.id,g.cids)}catch(e){error=e}
+    if(error){alert('No pude quitarla de '+g.prod.nombre+': '+(error.message||error));return false}
     logAction('campana_movida_ley1a1',{de:g.prod.id,a:prodDestinoId,cids:g.cids}).catch(()=>{})
   }
   return true
@@ -6007,8 +6047,9 @@ window.atribuirUna=async(cid)=>{
   const existing=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
   if(existing.includes(cid)){alert('Esta campaña ya está atribuida a '+prod.nombre);return}
   if(!(await window._nexoLeyCampProd([cid],prod.id)))return // F9b: 1 campaña = 1 producto
-  const{error}=await sb.from('productos').update({campaign_ids:[...existing,cid]}).eq('id',prod.id)
-  if(error){alert(error.message);return}
+  // 🔒 (26sep26) ANTES: update({campaign_ids:[...existing,cid]}) con la lista en memoria → podía borrar asignaciones más nuevas
+  const _rA=await window._nxCampAgregar(prod.id,[cid])
+  if(_rA.fallidas.length){alert(_rA.fallidas[0].error);return}
   await loadProductos()
   logAction('campana_atribuida_tracker',{producto_id:prod.id,campaign_id:cid}).catch(()=>{})
   alert(`✅ Atribuida a ${prod.nombre}`)
@@ -6026,11 +6067,11 @@ window.atribuirSinAtribMasivo=async()=>{
   const prod=productos[idx]
   const existing=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
   if(!(await window._nexoLeyCampProd(seleccionadas,prod.id)))return // F9b: 1 campaña = 1 producto
-  const merged=[...new Set([...existing,...seleccionadas])]
-  const{error}=await sb.from('productos').update({campaign_ids:merged}).eq('id',prod.id)
-  if(error){alert(error.message);return}
+  // 🔒 (26sep26) ANTES: merged=[...existing(memoria),...seleccionadas] + update → podía borrar asignaciones más nuevas
+  const _rM=await window._nxCampAgregar(prod.id,seleccionadas)
+  if(_rM.fallidas.length){alert('No se pudieron atribuir '+_rM.fallidas.length+': '+_rM.fallidas.map(f=>f.cid+' — '+f.error).join('\n'));if(!_rM.ok.length)return}
   await loadProductos()
-  logAction('campanas_atribuidas_masivo',{producto_id:prod.id,n:seleccionadas.length}).catch(()=>{})
+  logAction('campanas_atribuidas_masivo',{producto_id:prod.id,n:seleccionadas.length,campaigns:_rM.ok}).catch(()=>{}) // (26sep26) + IDs → historial para recuperar
   alert(`✅ ${seleccionadas.length} atribuida(s) a ${prod.nombre}`)
   loadTracker()
 }
@@ -6177,6 +6218,11 @@ async function pageAdminProductos(c){
     const g=s=>parseInt(document.getElementById(s+'-'+id).value)||0
     const gf=s=>parseFloat(document.getElementById(s+'-'+id).value)||0
     const cids=(document.getElementById('cids-'+id)?.value||'').split(/[\s,;\n]+/).map(s=>s.trim()).filter(Boolean)
+    // 🔒 (26sep26) CANDADO: la lista de campañas del producto YA NO se reescribe entera al guardar.
+    // Se compara la caja con lo que tenía al abrirse (data-orig) y se aplica SOLO lo que tú cambiaste.
+    // Si la caja no está en pantalla, las campañas NO se tocan (antes quedaban en BLANCO).
+    const _cidsEl=document.getElementById('cids-'+id)
+    const _cidsOrig=_cidsEl?String(_cidsEl.getAttribute('data-orig')||'').split(/[\s,;\n]+/).map(s=>s.trim()).filter(Boolean):null
     const mc=document.getElementById('mc-'+id)?.value||'GEN'
     const nombre=document.getElementById('pname-'+id)?.value?.trim()
     const aliasesRaw=document.getElementById('paliases-'+id)?.value||''
@@ -6213,7 +6259,7 @@ async function pageAdminProductos(c){
     const updateData={
       flete_outbound:g('fo'),flete_devolucion:g('fd'),dev_pct:gf('dp')/100,
       pct_confirmacion:gf('pc')/100,
-      costo_conversacion:g('cc'),conversaciones_por_venta:g('cv'),campaign_ids:cids,maestro_codigo:mc
+      costo_conversacion:g('cc'),conversaciones_por_venta:g('cv'),maestro_codigo:mc // 🔒 (26sep26) ANTES también iba campaign_ids:cids (la lista ENTERA de la caja) → ahora se aplica aparte, solo el cambio
     }
     // Stock: solo actualizar si el aux/admin escribió un valor (no pisar con vacío)
     const stockEl=document.getElementById('stock-'+id)
@@ -6270,6 +6316,27 @@ async function pageAdminProductos(c){
     }
     if(missingCols.length){
       document.getElementById('pmsg-'+id).innerHTML=`<div class="alert alert-amber">⚠️ Guardado parcial. Faltan columnas en DB: ${missingCols.join(', ')}. Ejecuta el SQL al final.</div>`
+    }
+    // 🔒 (26sep26) CAMPAÑAS: solo lo que cambiaste en la caja → agregadas con la función segura, quitadas con
+    // lectura FRESCA. Lo que otra persona haya asignado mientras tanto se RESPETA. Queda constancia.
+    let _campAviso='' // (26sep26) avisos de campañas: se muestran al final (el ✅ Guardado y el repintado del formulario no los borran)
+    if(_cidsEl&&_cidsOrig){
+      const _oS=new Set(_cidsOrig.map(String)),_nS=new Set(cids.map(String))
+      const _add=[..._nS].filter(c=>!_oS.has(c)),_del=[..._oS].filter(c=>!_nS.has(c))
+      if(_add.length||_del.length){
+        try{
+          let _addOk=_add
+          if(_add.length&&!(await window._nexoLeyCampProd(_add,id)))_addOk=[] // ley 1 campaña = 1 producto: si ya son de otro y dices Cancelar → esas no se agregan
+          if(_del.length)await window._nxCampQuitar(id,_del)
+          let _rC={ok:[],fallidas:[]}
+          if(_addOk.length)_rC=await window._nxCampAgregar(id,_addOk)
+          if(_add.length&&!_addOk.length)_campAviso+='<div class="alert alert-amber" style="margin-top:6px">ℹ️ Las campañas nuevas de la caja NO se agregaron porque ya son de otro producto y elegiste no moverlas.</div>'
+          logAction('producto_campanas_editadas',{producto_id:id,producto_nombre:nombre||null,agregadas:_rC.ok,quitadas:_del}).catch(()=>{})
+          if(_rC.fallidas.length)_campAviso+=`<div class="alert alert-amber" style="margin-top:6px">⚠️ Estas campañas NO se pudieron agregar: ${_rC.fallidas.map(f=>f.cid+' — '+f.error).join(' · ')}</div>`
+        }catch(eC){_campAviso+=`<div class="alert alert-red" style="margin-top:6px">⚠️ Las campañas no se guardaron: ${eC.message||eC}</div>`}
+      }
+      // La caja queda con la lista REAL de la base (incluye lo que otros asignaron) y ese es el nuevo punto de partida
+      try{const _fr=await window._nxCampLeerFresco(id);_cidsEl.value=_fr.join(', ');_cidsEl.setAttribute('data-orig',_cidsEl.value);const _pm=(productos||[]).find(p=>p.id===id);if(_pm)_pm.campaign_ids=_fr}catch(_){}
     }
 
     // Guardar ofertas: leer todas las cards y actualizar precios/costos
@@ -6426,6 +6493,7 @@ async function pageAdminProductos(c){
     await renderCampanasEnlazadas(id)
     // Re-renderizar el body del card para refrescar inputs con los datos persistidos
     try{if(typeof renderProdBody==='function'&&document.getElementById('prod-body-'+id))await renderProdBody(id,maestrosList)}catch(_){}
+    if(_campAviso){const _pmC=document.getElementById('pmsg-'+id);if(_pmC)_pmC.innerHTML+=_campAviso} // 🔒 (26sep26) avisos de campañas
     if(_pOfErr){const _pm=document.getElementById('pmsg-'+id);if(_pm)_pm.innerHTML+=`<div class="alert alert-amber" style="margin-top:6px">⚠️ <b>🏷️ Precios de OFERTA:</b> ${hbEsc(_pOfErr)}${/precio_oferta|42703|column|schema/i.test(_pOfErr)?' — falta correr el SQL en Supabase (columna precio_oferta).':''} Lo demás sí quedó guardado.</div>`} // 🏷️ (24sep26)
     // 💰 NUEVO (8jul26): si entró un ID de Dropi nuevo, pedir de una su costo esperado en los Excel
     try{
@@ -7764,7 +7832,7 @@ async function renderProdBody(id,maestrosList){
     <div class="divider"></div>
     <div class="form-grid g2">
       <div class="fld"><label>IDs de campañas Meta (separadas por coma)</label>
-        <textarea id="cids-${id}" rows="2" style="font-family:monospace;font-size:11px">${cids}</textarea>
+        <textarea id="cids-${id}" data-orig="${cids}" rows="2" style="font-family:monospace;font-size:11px">${cids}</textarea><!-- 🔒 (26sep26) data-orig = lista al abrir: al guardar solo se aplica lo que cambies -->
         <div style="font-size:11px;color:var(--muted);margin-top:4px">Atribución directa por ID de campaña.</div></div>
       <div class="fld"><label>Maestro carrier</label>
         <select id="mc-${id}">
@@ -9029,9 +9097,10 @@ window.toggleCampsEnlazadas=(id)=>{
 window.quitarCampanaProd=async(prodId,cid)=>{
   if(!confirm(`¿Quitar campaña ${cid} de este producto?`))return
   const prod=productos.find(p=>p.id===prodId);if(!prod)return
-  const cids=(Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]).filter(x=>x!==cid)
-  const{error}=await sb.from('productos').update({campaign_ids:cids}).eq('id',prodId)
-  if(error){alert(error.message);return}
+  // 🔒 (26sep26) ANTES: cids=(lista en memoria).filter(...) + update → podía borrar asignaciones más nuevas.
+  // AHORA: lectura FRESCA de la base y se quita SOLO esta campaña.
+  let error=null;try{await window._nxCampQuitar(prodId,[cid])}catch(e){error=e}
+  if(error){alert(error.message||error);return}
   await loadProductos()
   await renderCampanasEnlazadas(prodId)
   await refreshProdResumen(prodId)
@@ -9115,13 +9184,16 @@ window.aplicarAtribuir=async(prodId)=>{
   const prod=productos.find(p=>p.id===prodId);if(!prod)return
   const existing=Array.isArray(prod.campaign_ids)?prod.campaign_ids:[]
   if(!(await window._nexoLeyCampProd(nuevasCids,prodId)))return // F9b: 1 campaña = 1 producto
-  const merged=[...new Set([...existing,...nuevasCids])]
+  const merged=[...new Set([...existing,...nuevasCids])] // (se deja por referencia; ya NO se escribe entera — ver abajo)
   const msg=document.getElementById('atr-msg')
   msg.innerHTML='<div class="loading">Aplicando...</div>'
-  const{error}=await sb.from('productos').update({campaign_ids:merged}).eq('id',prodId)
-  if(error){msg.innerHTML=`<div class="alert alert-red">${error.message}</div>`;return}
+  // 🔒 (26sep26) ANTES: update({campaign_ids:merged}) con la lista en memoria → podía borrar asignaciones más nuevas.
+  // AHORA: se agregan SOLO las nuevas con la función segura (y respaldo de lectura fresca).
+  const _rAt=await window._nxCampAgregar(prodId,nuevasCids)
+  if(_rAt.fallidas.length&&!_rAt.ok.length){msg.innerHTML=`<div class="alert alert-red">${_rAt.fallidas.map(f=>f.cid+' — '+f.error).join('<br>')}</div>`;return}
   await loadProductos()
-  logAction('campanas_atribuidas',{producto_id:prodId,nuevas:nuevasCids.length}).catch(()=>{})
+  logAction('campanas_atribuidas',{producto_id:prodId,nuevas:nuevasCids.length,campaigns:_rAt.ok}).catch(()=>{}) // (26sep26) + IDs → historial para recuperar
+  if(_rAt.fallidas.length){msg.innerHTML=`<div class="alert alert-amber">✅ ${_rAt.ok.length} atribuida(s) · ⚠️ ${_rAt.fallidas.length} falló: ${_rAt.fallidas.map(f=>f.cid).join(', ')}</div>`;return}
   msg.innerHTML=`<div class="alert alert-green">✅ ${nuevasCids.length} campaña(s) atribuida(s)</div>`
   setTimeout(async()=>{
     closeModal()
@@ -27566,6 +27638,16 @@ async function _renderResumenProductos(desde,hasta,hoy){
       }
     }catch(_){}
     _listaSp.sort((a,b)=>(b.gasto-a.gasto)||String(a.nombre).localeCompare(String(b.nombre)))
+    // 💡 (26sep26) SUGERENCIA PARA COPIAS: "X - Copia 2" es una campaña NUEVA para Meta (ID nuevo) y no hereda el
+    // producto. Si la ORIGINAL (mismo nombre base) ya tiene producto, se sugiere ese producto de un clic.
+    // Solo se sugiere cuando la original apunta a UN solo producto (sin ambigüedad).
+    const _sugSp={}
+    try{
+      const _baseProd={}
+      const _nomsLS=window._nexoNombreLiveByCampId||{}
+      for(const k in _univSp){const pp=_cTPsp[k];if(!pp)continue;const b=window._nxCampBase((_univSp[k].nombre&&_univSp[k].nombre!==k)?_univSp[k].nombre:(_nomsLS[k]||''));if(b)(_baseProd[b]=_baseProd[b]||{})[String(pp.id)]=pp}
+      for(const it of _listaSp){const b=window._nxCampBase(it.nombre);const ps=b&&_baseProd[b]?Object.values(_baseProd[b]):[];if(ps.length===1)_sugSp[it.id]=ps[0]}
+    }catch(_){}
     _sinProdCount=_listaSp.length
     if(_listaSp.length){
       const _escSp=s=>String(s==null?'':s).replace(/</g,'&lt;').replace(/"/g,'&quot;')
@@ -27579,12 +27661,13 @@ async function _renderResumenProductos(desde,hasta,hoy){
           ?`<span style="display:inline-block;width:9px;height:9px;border-radius:50%;flex:none;background:#f59e0b;border:1.5px solid #d97706;box-shadow:0 0 5px rgba(245,158,11,.7)" title="💸 Entró por GASTO: gastó plata en el período SIN producto, aunque Meta no la reporta activa/entregando ahora mismo (pudo pausarse después de gastar). Ese gasto YA cayó al cajón 'sin asignar' — asígnale producto igual."></span>`
           :`<span style="display:inline-block;width:9px;height:9px;border-radius:50%;flex:none;background:#22c55e;border:1.5px solid #16a34a;box-shadow:0 0 5px rgba(34,197,94,.7)" title="🟢 Activa DE VERDAD: botón prendido en Meta y entregando (misma regla del expand de cuenta)"></span>`
         const _accNom=c.accId?String((window._nexoAccNombreByAcc||{})[String(c.accId)]||c.accId):'—'
-        return`<div class="rp-sp-row" data-spbusca="${_escSp(String((c.nombre||'')+' '+c.id+' '+(c.accId||'')+' '+_accNom).toLowerCase())}" style="display:${i<_spIni?'flex':'none'};align-items:center;gap:8px;padding:6px 8px;border-radius:6px;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-bottom:1px solid rgba(255,255,255,.04);font-size:12px;color:var(--text)">
+        return`<div class="rp-sp-row" data-spcid="${_escSp(c.id)}" data-spbusca="${_escSp(String((c.nombre||'')+' '+c.id+' '+(c.accId||'')+' '+_accNom).toLowerCase())}" style="display:${i<_spIni?'flex':'none'};align-items:center;gap:8px;padding:6px 8px;border-radius:6px;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-bottom:1px solid rgba(255,255,255,.04);font-size:12px;color:var(--text)">
           ${_dotSp}
           <span style="flex:0 0 150px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:700;color:${_colAcc(c.accId||_accNom)}" title="🏢 Cuenta publicitaria: ${_escSp(_accNom)}${c.accId?' · '+_escSp(c.accId):''}">🏢 ${_escSp(_accNom)}</span>
           <span style="flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${_escSp(c.nombre)}">📣 ${_escSp(c.nombre)}</span>
           <span style="flex:0 0 128px;overflow:hidden;text-overflow:ellipsis;font-family:monospace;font-size:10.5px;color:var(--muted);white-space:nowrap" title="${_escSp(c.id)}">${_escSp(c.id)}</span>
           <button data-copyid="${_escSp(c.id)}" onclick="event.stopPropagation();window._rpCopiarId('${_escSp(c.id)}',this)" title="Copiar ID de la campaña" style="background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:5px;color:var(--muted);font-size:10px;padding:1px 7px;cursor:pointer;flex-shrink:0">📋</button>
+          <span class="rp-sp-antes" data-spcid="${_escSp(c.id)}" style="flex:0 1 auto;min-width:0;max-width:330px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:10.5px">${_sugSp[c.id]?window._rpSpSugHTML(c.id,_sugSp[c.id]):''}</span><!-- 🕵️/💡 (26sep26) antes estuvo en… / la original es de… -->
           <span style="flex:0 0 92px;text-align:right;font-size:10.5px;color:var(--amber);white-space:nowrap" title="Gasto del período que está cayendo al cajón 'sin asignar' por no tener producto">${c.gasto>0?('💸 $'+fmt(c.gasto)):''}</span>
           <button onclick="event.stopPropagation();modalAsignarProductoCamp('${_escSp(c.id)}','${_nomEscSp}','${_escSp(c.accId)}')" style="flex:0 0 auto;background:var(--amber-bg);border:1px solid var(--amber);border-radius:6px;color:var(--amber);font-size:10.5px;font-weight:700;padding:3px 10px;cursor:pointer;flex-shrink:0" title="⚠️ Sin producto · clic para asignarle uno (mismo modal de las cards)">⚠️ Asignar producto</button>
         </div>`
@@ -27596,6 +27679,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
           <span style="font-size:10.5px;color:var(--muted)">— gastan plata que no entra al CPA de ningún producto · asígnalas aquí mismo</span>
         </div>
         <div id="rp-sinprod-sub" style="display:none;margin-top:8px">
+          ${window._rpSpBarraHTML()}
           <input id="rp-sp-buscar" type="text" placeholder="🔍 Buscar por nombre, ID o cuenta..." oninput="window._rpSpAplicar()" onclick="event.stopPropagation()" style="width:100%;box-sizing:border-box;margin:0 0 8px;padding:7px 10px;font-size:12px;color:var(--text);background:rgba(255,255,255,.05);border:1px solid rgba(245,158,11,.4);border-radius:8px;outline:none" title="Filtra las campañas sin producto por nombre, ID o cuenta. Al escribir se muestran TODAS las coincidencias (ignora el de-a-10); borra el texto para volver a la lista paginada.">
           <div id="rp-sp-lista">${_filasSp}</div>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px">
@@ -27605,6 +27689,10 @@ async function _renderResumenProductos(desde,hasta,hoy){
           </div>
         </div>
       </div>`
+      try{setTimeout(()=>{try{window._rpSpAntesCargar()}catch(_){}},700)}catch(_){} // 🕵️ (26sep26) al pintarse: revisar el historial y ofrecer ♻️ Devolver
+    }else{
+      // (26sep26) Sin campañas activas/gastando sin producto: igual queda a mano el botón para revisar TODAS (consulta a Meta)
+      _sinProdBlock=`<div id="rp-sinprod-block" style="margin:0 0 12px;padding:8px 12px;background:rgba(34,197,94,.05);border:1px solid rgba(34,197,94,.35);border-radius:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--green)">✅ 0 campañas activas o gastando sin producto${window._rpSpBarraHTML(true)}</div>`
     }
   }catch(_){}
 
@@ -30480,6 +30568,267 @@ window._rpSpAplicar=function(){
 }
 window._rpSpMas=function(){window._spShow=(window._spShow||10)+10;window._rpSpAplicar()}
 window._rpSpMenos=function(){window._spShow=Math.max(10,(window._spShow||10)-10);window._rpSpAplicar()}
+
+// ═══ 🕵️ (26sep26) SIN PRODUCTO: RECUPERAR ASIGNACIONES BORRADAS · 💡 COPIAS · 🔎 VER TODAS ═══════════════
+// · 🕵️ Si una campaña de la lista YA estuvo asignada (historial de acciones), se muestra "antes: 📦 X · quién ·
+//   cuándo" con ♻️ Devolver (y ♻️ Devolver todas). Si la quitaron A MANO, solo se informa (no se ofrece devolver).
+// · 💡 "X - Copia N" es una campaña NUEVA para Meta: si la original tiene producto, se sugiere de un clic.
+// · 🔎 "Ver TODAS": solo al tocarlo se consulta a Meta TODAS las campañas de TODAS las cuentas y se listan las
+//   que no tienen producto (contando archivados como asignados), para asignarlas ahí mismo.
+// Todo asigna con window._nxCampAgregar (función segura: nunca reescribe la lista entera).
+const _rpE=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+const _rpFecha=ts=>{try{return new Date(ts).toLocaleDateString('es-CO',{day:'numeric',month:'short',timeZone:'America/Bogota'})}catch(_){return''}}
+window._nxProdPorId=id=>(productos||[]).find(p=>String(p.id)===String(id))||(window._prodArchTodos||[]).find(p=>String(p.id)===String(id))||(window._prodArchCache||[]).find(p=>String(p.id)===String(id))||null
+// Nombre BASE de una campaña: sin "- Copia N", sin emojis/símbolos y sin las marcas numéricas del inicio (0, 1, 7…)
+window._nxCampBase=function(n){
+  let s=String(n||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase()
+  s=s.replace(/\s*[-–—_]?\s*(copia|copy)(\s*(de)?\s*\d+)?\s*$/i,'')
+  s=s.replace(/[^\p{L}\p{N}]+/gu,' ').trim()
+  s=s.replace(/^[\d\s]+/,'') // marcas numéricas del inicio, pegadas o no ("7 Semilla", "8Semilla" → "semilla")
+  return s.replace(/\s+/g,' ').trim()
+}
+window._rpSpSugHTML=function(cid,prod){
+  if(!prod)return''
+  return `<span title="💡 Esta campaña parece una COPIA de otra que ya es de ${_rpE(prod.nombre)}. Meta le puso un ID nuevo, por eso no heredó el producto." style="color:#38bdf8">💡 la original es de 📦 <b>${_rpE(prod.nombre)}</b></span> <button onclick="event.stopPropagation();window._rpSpAsignarA('${_rpE(cid)}','${_rpE(prod.id)}','sugerencia_copia',this)" style="background:rgba(56,189,248,.12);border:1px solid #38bdf8;border-radius:6px;color:#38bdf8;font-size:10px;font-weight:700;padding:1px 7px;cursor:pointer">Asignar</button>`
+}
+window._rpSpBarraHTML=function(compacta){
+  return `<div style="display:${compacta?'inline-flex':'flex'};align-items:center;gap:8px;flex-wrap:wrap;${compacta?'margin-left:auto':'margin:0 0 8px'}">
+    ${compacta?'':`<button id="rp-sp-devtodas" onclick="event.stopPropagation();window._rpSpDevolverTodas(this)" style="display:none;align-items:center;gap:6px;background:rgba(34,197,94,.12);border:1px solid var(--green);border-radius:8px;color:var(--green);font-size:11.5px;font-weight:800;padding:5px 12px;cursor:pointer" title="Devuelve cada campaña al producto donde estaba antes (según el historial)">♻️ Devolver todas</button>`}
+    <button onclick="event.stopPropagation();window._rpSpTodasAbrir()" style="display:inline-flex;align-items:center;gap:6px;background:rgba(56,189,248,.10);border:1px solid #38bdf8;border-radius:8px;color:#38bdf8;font-size:11.5px;font-weight:800;padding:5px 12px;cursor:pointer" title="Solo al tocarlo se consulta a Meta TODAS las campañas de TODAS las cuentas (también pausadas y viejas) y se listan las que no tienen producto, para asignarlas ahí mismo.">🔎 Ver TODAS las campañas sin producto</button>
+    ${compacta?'':'<span id="rp-sp-antes-est" style="font-size:10.5px;color:var(--muted)"></span>'}
+  </div>`
+}
+// Historial de asignaciones (audit_log) → {campaña: la acción MÁS NUEVA sobre ella}. Caché de 2 min.
+window._rpSpHist=window._rpSpHist||{ts:0,mapa:null,prom:null}
+window._rpSpHistLeer=async function(forzar){
+  const H=window._rpSpHist
+  if(!forzar&&H.mapa&&(Date.now()-H.ts)<120000)return H.mapa
+  if(H.prom)return H.prom
+  H.prom=(async()=>{
+    const acciones=['campana_producto_asignado','campana_atribuida_tracker','campanas_atribuidas','campanas_atribuidas_masivo','producto_campanas_editadas','campana_desvinculada','campana_movida_ley1a1']
+    const desde=new Date(Date.now()-180*864e5).toISOString()
+    const{data,error}=await sb.from('audit_log').select('accion,detalles,created_at,usuarios(nombre)').in('accion',acciones).gte('created_at',desde).order('created_at',{ascending:false}).limit(5000)
+    if(error)throw error
+    const mapa={}
+    const put=(cid,ev)=>{const k=String(cid==null?'':cid).trim();if(k&&!(k in mapa))mapa[k]=ev} // vienen de NUEVA a vieja: la primera manda
+    for(const r of(data||[])){
+      const d=r.detalles||{},u=(r.usuarios&&r.usuarios.nombre)||'',ts=r.created_at
+      const asig=(cids,pid,pn)=>{for(const c of(Array.isArray(cids)?cids:[]))put(c,{tipo:'asig',prodId:pid||null,prodNombre:pn||'',usuario:u,ts,accion:r.accion})}
+      const quita=(cids)=>{for(const c of(Array.isArray(cids)?cids:[]))put(c,{tipo:'quita',usuario:u,ts,accion:r.accion})}
+      if(r.accion==='campana_producto_asignado'||r.accion==='campanas_atribuidas'||r.accion==='campanas_atribuidas_masivo')asig(d.campaigns,d.producto_id,d.producto_nombre)
+      else if(r.accion==='campana_atribuida_tracker')asig([d.campaign_id],d.producto_id,d.producto_nombre)
+      else if(r.accion==='producto_campanas_editadas'){asig(d.agregadas,d.producto_id,d.producto_nombre);quita(d.quitadas)}
+      else if(r.accion==='campana_desvinculada')quita([d.campaign_id])
+      else if(r.accion==='campana_movida_ley1a1')asig(d.cids,d.a,'')
+    }
+    H.mapa=mapa;H.ts=Date.now();return mapa
+  })()
+  try{return await H.prom}finally{H.prom=null}
+}
+// Pinta en cada fila de ⚠️ SIN PRODUCTO lo que dice el historial (y muestra ♻️ Devolver todas)
+window._rpSpAntesCargar=async function(){
+  const spans=[...document.querySelectorAll('.rp-sp-antes[data-spcid]')]
+  if(!spans.length)return
+  const est=document.getElementById('rp-sp-antes-est')
+  if(est)est.innerHTML='<span style="color:var(--muted)">🕵️ Revisando el historial de asignaciones · 0%</span>'
+  let mapa
+  try{mapa=await window._rpSpHistLeer()}
+  catch(e){ // regla NEXO: si no carga, AMARILLO y se sigue intentando solo
+    const _m=String((e&&e.message)||'error').slice(0,60)
+    if(est)est.innerHTML=`<span style="color:var(--amber)">🟡 No pude leer el historial (${_rpE(_m)}) · reintentando solo…</span>`
+    if(window._nxReintentar)window._nxReintentar('rp-sp-hist',{
+      sigueVivo:()=>!!document.querySelector('.rp-sp-antes[data-spcid]'),
+      intentar:async()=>{try{await window._rpSpHistLeer(true);await window._rpSpAntesCargar();return true}catch(_){return false}},
+      alCambiar:(rt)=>{const e2=document.getElementById('rp-sp-antes-est');if(e2&&rt.vivo&&!rt.corriendo)e2.innerHTML=`<span style="color:var(--amber)">🟡 No pude leer el historial · reintento ${rt.intento+1} en ${rt.proximoEn} s</span>`}
+    })
+    return
+  }
+  const cTP=(window._metaPort&&window._metaPort.campToProd)||{}
+  let nDev=0
+  for(const sp of spans){
+    const cid=sp.getAttribute('data-spcid'),ev=mapa[cid]
+    if(!ev||cTP[cid]||sp.getAttribute('data-hist')==='1')continue
+    sp.setAttribute('data-hist','1')
+    if(ev.tipo==='asig'&&ev.prodId){
+      const pr=window._nxProdPorId(ev.prodId)
+      const nom=ev.prodNombre||(pr&&pr.nombre)||'(producto)'
+      nDev++
+      sp.setAttribute('data-devprod',String(ev.prodId))
+      sp.innerHTML=`<span title="🕵️ Esta campaña YA estuvo asignada a ${_rpE(nom)} (lo hizo ${_rpE(ev.usuario||'—')} el ${_rpE(_rpFecha(ev.ts))}). Después quedó sin producto: la quitaron o se borró al guardar con una lista vieja." style="color:var(--green)">🕵️ antes: 📦 <b>${_rpE(nom)}</b> · ${_rpE(ev.usuario||'—')} · ${_rpE(_rpFecha(ev.ts))}</span> <button onclick="event.stopPropagation();window._rpSpAsignarA('${_rpE(cid)}','${_rpE(ev.prodId)}','restaurada',this)" style="background:rgba(34,197,94,.12);border:1px solid var(--green);border-radius:6px;color:var(--green);font-size:10px;font-weight:800;padding:1px 7px;cursor:pointer">♻️ Devolver</button>`
+    }else if(ev.tipo==='quita'){
+      sp.innerHTML=`<span title="La quitaron A MANO de su producto (${_rpE(ev.usuario||'—')}, ${_rpE(_rpFecha(ev.ts))}). Si fue un error, asígnala de nuevo." style="color:var(--muted)">✂️ quitada a mano · ${_rpE(ev.usuario||'—')} · ${_rpE(_rpFecha(ev.ts))}</span> `+sp.innerHTML
+    }
+  }
+  const bt=document.getElementById('rp-sp-devtodas')
+  const tot=document.querySelectorAll('.rp-sp-antes[data-devprod]').length
+  if(bt){bt.style.display=tot?'inline-flex':'none';bt.textContent='♻️ Devolver todas ('+tot+')'}
+  if(est)est.innerHTML=tot?`<span style="color:var(--green)">🕵️ Historial revisado · 100% · ${tot} ya estaban asignadas antes</span>`:'<span style="color:var(--muted)">🕵️ Historial revisado · 100%</span>'
+}
+// Rearma el mapa campaña→producto (activos + archivados) en la MISMA referencia que usa todo Meta Ads
+window._rpSpRefrescarMapa=async function(){
+  try{await loadProductos()}catch(_){}
+  try{const{data}=await sb.from('productos').select('*').eq('archivado',true);window._prodArchTodos=data||[]}catch(_){}
+  if(window._metaPort&&window._metaPort.campToProd){
+    const m=window._metaPort.campToProd
+    for(const k in m)delete m[k]
+    for(const p of (productos||[]))for(const c of (Array.isArray(p.campaign_ids)?p.campaign_ids:[]))if(c&&!m[c])m[c]=p
+    for(const p of (window._prodArchTodos||[]))for(const c of (Array.isArray(p.campaign_ids)?p.campaign_ids:[]))if(c&&!m[c])m[c]=p
+  }
+}
+window._rpSpRefrescarPronto=function(){clearTimeout(window._rpSpRefT);window._rpSpRefT=setTimeout(()=>{window._rpSpRefrescarMapa()},2500)}
+// Asignar UNA campaña a un producto (♻️ Devolver · 💡 copia · 🔎 lista total). El botón queda en ✅ como constancia.
+window._rpSpAsignarA=async function(cid,prodId,origen,btn,sinRefresco){
+  const prod=window._nxProdPorId(prodId)
+  const _t0=btn?btn.textContent:''
+  if(btn){btn.disabled=true;btn.textContent='⏳ Guardando…'}
+  const r=await window._nxCampAgregar(prodId,[cid])
+  if(r.fallidas.length){if(btn){btn.disabled=false;btn.textContent=_t0||'Reintentar'};if(!sinRefresco)alert('❌ No se pudo asignar '+cid+': '+r.fallidas[0].error);return false}
+  logAction('campana_producto_asignado',{producto_id:prodId,producto_nombre:prod?prod.nombre:null,campaigns:[String(cid)],origen:origen||'sin_producto'}).catch(()=>{})
+  try{const H=window._rpSpHist;if(H&&H.mapa)H.mapa[String(cid)]={tipo:'asig',prodId,prodNombre:prod?prod.nombre:'',usuario:(currentMe()||{}).nombre||'',ts:new Date().toISOString(),accion:'campana_producto_asignado'}}catch(_){}
+  if(btn){btn.textContent='✅ '+(origen==='restaurada'?'Devuelta':'Asignada')+(prod?' a '+prod.nombre:'');btn.style.background='var(--green-bg)';btn.style.borderColor='var(--green)';btn.style.color='var(--green)';btn.style.cursor='default'}
+  try{const row=btn&&btn.closest('.rp-sp-row,.rp-spt-row');if(row){row.style.opacity='.55';const sp=row.querySelector('.rp-sp-antes');if(sp)sp.removeAttribute('data-devprod')}}catch(_){}
+  try{const S=window._rpSpTodas;if(S&&S.c2p&&prod)S.c2p[String(cid)]={id:prod.id,nombre:prod.nombre}}catch(_){}
+  if(sinRefresco)window._rpSpRefrescarPronto();else await window._rpSpRefrescarMapa()
+  return true
+}
+// ♻️ Devolver TODAS las que el historial dice dónde estaban (una por una, con % real)
+window._rpSpDevolverTodas=async function(btn){
+  const spans=[...document.querySelectorAll('.rp-sp-antes[data-devprod]')]
+  if(!spans.length)return
+  if(!confirm(`♻️ ¿Devolver ${spans.length} campaña(s) al producto donde estaban antes?\n\nCada una vuelve a SU producto según el historial (quién y cuándo la asignó).`))return
+  let ok=0,mal=0
+  if(btn)btn.disabled=true
+  for(let i=0;i<spans.length;i++){
+    const sp=spans[i],cid=sp.getAttribute('data-spcid'),pid=sp.getAttribute('data-devprod')
+    if(btn)btn.textContent=`♻️ Devolviendo ${i+1} de ${spans.length} · ${Math.round(i/spans.length*100)}%`
+    const b=sp.querySelector('button')
+    const r=await window._rpSpAsignarA(cid,pid,'restaurada',b,true)
+    if(r)ok++;else mal++
+  }
+  await window._rpSpRefrescarMapa()
+  if(btn){btn.textContent=`✅ ${ok} devuelta${ok===1?'':'s'} · 100%`+(mal?` · ⚠️ ${mal} falló`:'');btn.disabled=false}
+  if(mal)alert(`♻️ ${ok} devuelta(s). ⚠️ ${mal} no se pudieron: vuelve a darle ♻️ Devolver en esas filas.`)
+}
+// ── 🔎 VER TODAS LAS CAMPAÑAS SIN PRODUCTO (consulta a Meta SOLO al abrir) ──
+window._rpSpTodas=window._rpSpTodas||{ts:0,items:null,porCuenta:{},sinAcceso:{},c2p:null,cargando:false,show:60}
+window._rpSpTodasAbrir=async function(forzar){
+  openModal(`
+    <div class="modal-title">🔎 Todas las campañas SIN producto</div>
+    <div class="modal-sub" style="line-height:1.5">Se consulta a Meta TODAS las campañas de TODAS las cuentas (también pausadas y viejas) y aquí salen las que no tienen producto. Las de productos archivados cuentan como asignadas. Solo se consulta a Meta al abrir esta ventana.</div>
+    <div id="rp-spt-prog" style="margin:8px 0;font-size:12px"></div>
+    <input id="rp-spt-buscar" type="text" placeholder="🔍 Buscar por nombre, ID o cuenta..." oninput="window._rpSptPintar()" style="width:100%;box-sizing:border-box;padding:8px 10px;margin-bottom:8px;background:var(--card2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:12.5px" autocomplete="off">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;font-size:11.5px">
+      <label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="rp-spt-activas" onchange="window._rpSptPintar()"> Solo activas</label>
+      <button class="btn-sm btn-outline" onclick="window._rpSpTodasAbrir(true)" style="font-size:11px;padding:3px 10px">🔄 Volver a consultar Meta</button>
+      <span id="rp-spt-cont" style="color:var(--muted);margin-left:auto"></span>
+    </div>
+    <div id="rp-spt-lista" style="max-height:58vh;overflow-y:auto"></div>
+    <div style="display:flex;justify-content:flex-end;margin-top:10px"><button class="btn-sm btn-outline" onclick="closeModal()">Cerrar</button></div>`)
+  try{const mb=document.querySelector('#user-modal .modal-box');if(mb)mb.style.maxWidth='1040px'}catch(_){}
+  const S=window._rpSpTodas
+  if(!forzar&&S.items&&(Date.now()-S.ts)<600000){window._rpSptProg(`✅ Lista de hace ${Math.max(1,Math.round((Date.now()-S.ts)/60000))} min (para traerla de nuevo: 🔄 Volver a consultar Meta)`,'var(--green)');window._rpSptPintar();return}
+  if(forzar){S.porCuenta={};S.sinAcceso={}}
+  await window._rpSptCargar()
+}
+window._rpSptProg=function(txt,col){const e=document.getElementById('rp-spt-prog');if(e)e.innerHTML=`<span style="color:${col||'var(--muted)'}">${txt}</span>`}
+window._rpSptCargar=async function(){
+  const S=window._rpSpTodas;if(S.cargando)return;S.cargando=true
+  let faltan=[]
+  try{
+    window._rpSptProg('⏳ Paso 1 de 3: leyendo las asignaciones de la base · 0%')
+    const{data:prods,error:eP}=await sb.from('productos').select('id,nombre,campaign_ids,archivado')
+    if(eP)throw eP
+    S.prods=(prods||[]).filter(p=>p&&p.id)
+    const c2p={};for(const p of S.prods)for(const c of (Array.isArray(p.campaign_ids)?p.campaign_ids:[]))if(c&&!c2p[String(c)])c2p[String(c)]={id:p.id,nombre:p.nombre,archivado:!!p.archivado}
+    S.c2p=c2p
+    window._rpSptProg('⏳ Paso 2 de 3: leyendo las cuentas publicitarias · 5%')
+    const{data:ctas,error:eC}=await sb.from('meta_cuentas').select('account_id,nombre').order('nombre')
+    if(eC)throw eC
+    const cuentas=(ctas||[]).filter(c=>c&&c.account_id)
+    S.cuentas=cuentas
+    let token=(document.getElementById('cfg-token')&&document.getElementById('cfg-token').value||'').trim()
+    if(!token)token=await getConfig('meta_access_token')
+    if(!token)throw new Error('No hay token de Meta configurado')
+    const pend=cuentas.filter(c=>!S.porCuenta[c.account_id]&&!S.sinAcceso[c.account_id])
+    for(let i=0;i<pend.length;i++){
+      const c=pend[i]
+      window._rpSptProg(`⏳ Paso 3 de 3: pidiendo a Meta las campañas de <b>${_rpE(c.nombre||c.account_id)}</b> (${i+1} de ${pend.length}) · ${Math.min(99,10+Math.round(i/Math.max(1,pend.length)*89))}%`)
+      try{
+        const raw=await metaGet(`/act_${c.account_id}/campaigns`,token,{fields:'id,name,status,effective_status,created_time',limit:'500'},{timeoutMs:30000})
+        S.porCuenta[c.account_id]=(raw||[]).map(x=>({id:String(x.id),nombre:x.name||String(x.id),accId:String(c.account_id),accNombre:c.nombre||String(c.account_id),estado:x.effective_status||x.status||'',creada:x.created_time||''}))
+      }catch(e){
+        const m=String((e&&e.message)||'')
+        if(/permission|not authorized|does not exist|unsupported get request|no tiene acceso|access/i.test(m))S.sinAcceso[c.account_id]=m.slice(0,80) // sin acceso: no se reintenta en bucle
+        else faltan.push(c)
+      }
+    }
+    S.items=Object.values(S.porCuenta).flat()
+    try{window._liveCampsAll=window._liveCampsAll||{};for(const it of S.items)if(!window._liveCampsAll[it.id])window._liveCampsAll[it.id]={meta_id:it.id,nombre:it.nombre,account_id:it.accId}}catch(_){}
+    S.ts=Date.now()
+    try{await window._rpSpHistLeer()}catch(_){} // para los "antes: …" (si falla, la lista sale igual)
+    const nSin=Object.keys(S.sinAcceso).length
+    if(faltan.length){
+      window._rpSptProg(`🟡 ${faltan.length} cuenta(s) no respondieron (${_rpE(faltan.map(f=>f.nombre||f.account_id).join(', '))}) · reintentando solas… · ${Math.round((cuentas.length-faltan.length)/Math.max(1,cuentas.length)*100)}%`,'var(--amber)')
+      if(window._nxReintentar)window._nxReintentar('rp-spt',{
+        sigueVivo:()=>!!document.getElementById('rp-spt-lista'),
+        intentar:async()=>{await window._rpSptCargar();return !cuentas.some(c=>!S.porCuenta[c.account_id]&&!S.sinAcceso[c.account_id])},
+        alCambiar:(rt)=>{if(rt.vivo&&!rt.corriendo){const n=cuentas.filter(c=>!S.porCuenta[c.account_id]&&!S.sinAcceso[c.account_id]).length;if(n)window._rpSptProg(`🟡 ${n} cuenta(s) sin responder · reintento ${rt.intento+1} en ${rt.proximoEn} s`,'var(--amber)')}}
+      })
+    }else window._rpSptProg(`✅ Listo · 100% · ${cuentas.length-nSin} cuenta(s) consultadas${nSin?` · 🔒 ${nSin} sin acceso con este token`:''}`,'var(--green)')
+    window._rpSptPintar()
+  }catch(e){
+    const _m=String((e&&e.message)||'error').slice(0,80)
+    window._rpSptProg(`🟡 No se pudo completar (${_rpE(_m)}) · reintentando solo…`,'var(--amber)')
+    if(window._nxReintentar)window._nxReintentar('rp-spt',{sigueVivo:()=>!!document.getElementById('rp-spt-lista'),intentar:async()=>{await window._rpSptCargar();return !!(window._rpSpTodas.items)},alCambiar:(rt)=>{if(rt.vivo&&!rt.corriendo)window._rpSptProg(`🟡 No se pudo completar · reintento ${rt.intento+1} en ${rt.proximoEn} s`,'var(--amber)')}})
+  }finally{S.cargando=false}
+}
+window._rpSptPintar=function(){
+  const S=window._rpSpTodas,el=document.getElementById('rp-spt-lista');if(!el||!S.items)return
+  const q=String((document.getElementById('rp-spt-buscar')||{}).value||'').trim().toLowerCase()
+  const soloAct=!!(document.getElementById('rp-spt-activas')||{}).checked
+  const c2p=S.c2p||{}
+  const baseProd={}
+  for(const it of S.items){const p=c2p[it.id];if(!p)continue;const b=window._nxCampBase(it.nombre);if(b)(baseProd[b]=baseProd[b]||{})[String(p.id)]=p}
+  let lista=S.items.filter(it=>!c2p[it.id]||it._asignadaAqui)
+  const totalSin=S.items.filter(it=>!c2p[it.id]).length
+  if(soloAct)lista=lista.filter(it=>it.estado==='ACTIVE')
+  if(q)lista=lista.filter(it=>(it.nombre+' '+it.id+' '+it.accNombre+' '+it.accId).toLowerCase().includes(q))
+  lista.sort((a,b)=>String(b.creada||'').localeCompare(String(a.creada||'')))
+  const hist=(window._rpSpHist&&window._rpSpHist.mapa)||{}
+  const prodsAct=(S.prods||[]).filter(p=>!p.archivado).sort((a,b)=>String(a.nombre||'').localeCompare(String(b.nombre||'')))
+  const prodsArc=(S.prods||[]).filter(p=>p.archivado).sort((a,b)=>String(a.nombre||'').localeCompare(String(b.nombre||'')))
+  const opts='<option value="">— producto —</option>'+prodsAct.map(p=>`<option value="${_rpE(p.id)}">📦 ${_rpE(p.nombre)}</option>`).join('')+(prodsArc.length?'<optgroup label="📁 Archivados">'+prodsArc.map(p=>`<option value="${_rpE(p.id)}">📁 ${_rpE(p.nombre)}</option>`).join('')+'</optgroup>':'')
+  const colAcc=s=>{let h=0;const t=String(s||'');for(let j=0;j<t.length;j++)h=(h*31+t.charCodeAt(j))>>>0;return'hsl('+(h%360)+',70%,68%)'}
+  const vis=lista.slice(0,S.show||60)
+  el.innerHTML=vis.length?vis.map((it,i)=>{
+    const ev=hist[it.id]
+    let pista=''
+    if(ev&&ev.tipo==='asig'&&ev.prodId){const pr=window._nxProdPorId(ev.prodId)||(S.prods||[]).find(p=>String(p.id)===String(ev.prodId));const nom=ev.prodNombre||(pr&&pr.nombre)||'(producto)';pista=`<span style="color:var(--green)" title="Ya estuvo asignada (${_rpE(ev.usuario||'—')}, ${_rpE(_rpFecha(ev.ts))})">🕵️ antes: 📦 <b>${_rpE(nom)}</b> · ${_rpE(ev.usuario||'—')} · ${_rpE(_rpFecha(ev.ts))}</span> <button onclick="window._rpSpAsignarA('${_rpE(it.id)}','${_rpE(ev.prodId)}','restaurada',this,true)" style="background:rgba(34,197,94,.12);border:1px solid var(--green);border-radius:6px;color:var(--green);font-size:10px;font-weight:800;padding:1px 7px;cursor:pointer">♻️ Devolver</button>`}
+    else{const b=window._nxCampBase(it.nombre),ps=b&&baseProd[b]?Object.values(baseProd[b]):[];if(ps.length===1)pista=window._rpSpSugHTML(it.id,ps[0]).replace("'sugerencia_copia',this)","'sugerencia_copia',this,true)");if(ev&&ev.tipo==='quita')pista=`<span style="color:var(--muted)">✂️ quitada a mano · ${_rpE(ev.usuario||'—')} · ${_rpE(_rpFecha(ev.ts))}</span> `+pista}
+    const est=it.estado==='ACTIVE'?'<span style="color:var(--green);font-weight:700">🟢 activa</span>':`<span style="color:var(--muted)">${_rpE(String(it.estado||'—').toLowerCase())}</span>`
+    const ya=it._asignadaAqui?`<span style="color:var(--green);font-weight:800">✅ Asignada a ${_rpE(it._asignadaAqui)}</span>`:`<select id="rp-spt-sel-${_rpE(it.id)}" style="max-width:190px;font-size:11px;padding:3px 5px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text)">${opts}</select> <button onclick="window._rpSptAsignar('${_rpE(it.id)}',this)" style="background:var(--amber-bg);border:1px solid var(--amber);border-radius:6px;color:var(--amber);font-size:10.5px;font-weight:700;padding:3px 9px;cursor:pointer">⚠️ Asignar</button>`
+    return `<div class="rp-spt-row" style="padding:7px 8px;border-radius:7px;background:${i%2===0?'rgba(255,255,255,.03)':'transparent'};border-bottom:1px solid rgba(255,255,255,.04);font-size:12px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:11px;font-weight:700;color:${colAcc(it.accId)}">🏢 ${_rpE(it.accNombre)}</span>
+        <span style="flex:1 1 260px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${_rpE(it.nombre)}">📣 ${_rpE(it.nombre)}</span>
+        <span style="font-size:10.5px">${est}</span>
+        <span style="font-size:10.5px;color:var(--muted)">${it.creada?'creada '+_rpE(_rpFecha(it.creada)):''}</span>
+        <span style="font-family:monospace;font-size:10.5px;color:var(--muted)">${_rpE(it.id)}</span>
+        <button onclick="window._rpCopiarId&&window._rpCopiarId('${_rpE(it.id)}',this)" title="Copiar ID" style="background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:5px;color:var(--muted);font-size:10px;padding:1px 7px;cursor:pointer">📋</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:5px;font-size:10.5px">${pista}<span style="margin-left:auto;display:inline-flex;gap:6px;align-items:center">${ya}</span></div>
+    </div>`
+  }).join('')+(lista.length>vis.length?`<div style="text-align:center;padding:8px"><button class="btn-sm btn-outline" onclick="window._rpSpTodas.show=(window._rpSpTodas.show||60)+60;window._rpSptPintar()">➕ 60 más (${lista.length-vis.length} restantes)</button></div>`:''):'<div style="text-align:center;color:var(--green);font-size:12.5px;padding:18px">🎉 No hay campañas sin producto'+(q||soloAct?' con ese filtro':'')+'.</div>'
+  const cont=document.getElementById('rp-spt-cont')
+  if(cont)cont.textContent=`${totalSin} sin producto de ${S.items.length} campañas`+(q||soloAct?` · mostrando ${lista.length}`:'')
+}
+window._rpSptAsignar=async function(cid,btn){
+  const sel=document.getElementById('rp-spt-sel-'+cid)
+  const pid=sel&&sel.value
+  if(!pid){if(sel){sel.style.borderColor='var(--red)';sel.focus()}return}
+  const ok=await window._rpSpAsignarA(cid,pid,'todas_sin_producto',btn,true)
+  if(ok){try{const S=window._rpSpTodas,it=(S.items||[]).find(x=>x.id===String(cid)),pr=window._nxProdPorId(pid)||(S.prods||[]).find(p=>String(p.id)===String(pid));if(it)it._asignadaAqui=(pr&&pr.nombre)||'producto';if(S.c2p&&pr)S.c2p[String(cid)]={id:pr.id,nombre:pr.nombre};if(sel)sel.disabled=true;const cont=document.getElementById('rp-spt-cont');if(cont){const n=(S.items||[]).filter(x=>!S.c2p[x.id]).length;cont.textContent=`${n} sin producto de ${S.items.length} campañas`}}catch(_){}}
+}
 window._rpFusGrpToggle=function(slug,forceOpen){
   const bd=document.getElementById('fusgrp-bd-'+slug),ch=document.getElementById('fusgrp-ch-'+slug)
   if(!bd)return
@@ -30490,6 +30839,7 @@ window._rpFusGrpToggle=function(slug,forceOpen){
   if(!abrir)return
   if(slug==='__sinprod__'){
     try{const s=document.getElementById('rp-sinprod-sub');if(s)s.style.display='block'}catch(_){}
+    try{window._rpSpAntesCargar&&window._rpSpAntesCargar()}catch(_){} // 🕵️ (26sep26) historial "antes: …" + ♻️ Devolver
     return
   }
   // NUEVO (11jul26 · Auto-sync HOY): al ABRIR el producto, en segundo plano se decide si toca
@@ -33576,6 +33926,17 @@ async function renderMetaPortafolio(el,isAdmin){
   const margenBE=p2*(1-dp)-c2-fo-(fd*dp)-_ccvG
   const roasBE=margenBE>0?p2/margenBE:999
 
+  // 🔄 (26sep26) Las ASIGNACIONES se releen FRESCAS de la base en cada carga de Meta Ads. Antes se usaba la
+  // lista de productos cargada al abrir NEXO: si alguien asignaba campañas desde otro computador (o el robot),
+  // aquí seguían saliendo como ⚠️ SIN PRODUCTO hasta recargar la página. Solo se trae id + campaign_ids
+  // (liviano) y se actualiza la copia en memoria; si falla, queda exactamente como antes.
+  try{
+    const{data:_asigFresh,error:_eAF}=await sb.from('productos').select('id,campaign_ids').eq('archivado',false)
+    if(!_eAF&&Array.isArray(_asigFresh)){
+      const _porId={};for(const r of _asigFresh)_porId[String(r.id)]=r
+      for(const p of (productos||[])){const r=_porId[String(p.id)];if(r)p.campaign_ids=Array.isArray(r.campaign_ids)?r.campaign_ids:[]}
+    }
+  }catch(_eAF2){console.warn('[campToProd] no se pudieron releer las asignaciones:',_eAF2&&_eAF2.message)}
   // ── BUG FIX: mapa campId → producto (cada campaña usa SU break-even) ──
   // Antes se usaba productos[0] para TODAS las campañas (incorrecto).
   // Ahora cruzamos productos.campaign_ids para que cada campaña tenga su propio margenBE.

@@ -27596,7 +27596,31 @@ async function _renderResumenProductos(desde,hasta,hoy){
   let _sinProdCount=0 // NUEVO (2jul26): conteo hoisted para la pill ⚠️ SIN PRODUCTO de la fusión principal
   let _campsGastoHoyM=0 // NUEVO (3jul26): campañas CON producto asignado que GASTARON en el período (vendieran o no) — para la fila Σ TOTAL de la fusión principal
   try{
-    const _cTPsp=(window._metaPort&&window._metaPort.campToProd)||{}
+    // 📗 (26sep26 · UNA SOLA LIBRETA) Las asignaciones se releen FRESCAS de la base AQUÍ, justo antes de armar
+    // la lista ⚠️ SIN PRODUCTO. ANTES se usaba la fotocopia window._metaPort.campToProd: en la carga "HOY primero"
+    // el resumen se pinta ANTES de que esa fotocopia se arme (o quedaba la de la visita anterior) → campañas YA
+    // asignadas salían como "sin producto" y las 💡 sugerencias no aparecían, aunque la ventanita de asignar
+    // (que mira la libreta real) sí decía "Actualmente: 📦 X". Si la lectura falla, se usa lo que ya hay en
+    // memoria (nunca una libreta vacía) y todo queda exactamente como antes.
+    let _cTPsp={}
+    try{
+      const{data:_todosSp,error:_eTSp}=await sb.from('productos').select('*')
+      if(_eTSp)throw _eTSp
+      const _porIdSp={};for(const r of (_todosSp||[]))_porIdSp[String(r.id)]=r
+      for(const p of (productos||[])){const r=_porIdSp[String(p.id)];if(r)p.campaign_ids=Array.isArray(r.campaign_ids)?r.campaign_ids:[]} // la copia en memoria queda al día
+      window._prodArchTodos=(_todosSp||[]).filter(r=>r&&r.archivado) // archivados completos (mismos campos de siempre)
+      for(const p of (productos||[]))for(const cid of (Array.isArray(p.campaign_ids)?p.campaign_ids:[]))if(cid&&!_cTPsp[String(cid)])_cTPsp[String(cid)]=p
+      for(const r of (window._prodArchTodos||[]))for(const cid of (Array.isArray(r.campaign_ids)?r.campaign_ids:[]))if(cid&&!_cTPsp[String(cid)])_cTPsp[String(cid)]=r
+      if(window._metaPort&&window._metaPort.campToProd){const _mF=window._metaPort.campToProd;for(const k in _mF)delete _mF[k];for(const k in _cTPsp)_mF[k]=_cTPsp[k]} // la fotocopia queda IGUAL a la libreta (misma referencia)
+    }catch(_eLbr){
+      _cTPsp=(window._metaPort&&window._metaPort.campToProd)||{}
+      if(!Object.keys(_cTPsp).length){ // ni base ni fotocopia: se arma con lo que hay en memoria
+        for(const p of (productos||[]))for(const cid of (Array.isArray(p.campaign_ids)?p.campaign_ids:[]))if(cid&&!_cTPsp[String(cid)])_cTPsp[String(cid)]=p
+        for(const p of (window._prodArchTodos||[]))for(const cid of (Array.isArray(p.campaign_ids)?p.campaign_ids:[]))if(cid&&!_cTPsp[String(cid)])_cTPsp[String(cid)]=p
+      }
+      console.warn('[sin producto] no se pudieron releer las asignaciones (se usa la copia en memoria):',_eLbr&&_eLbr.message)
+    }
+    // ANTES: const _cTPsp=(window._metaPort&&window._metaPort.campToProd)||{}
     // NUEVO (3jul26): conteo para la fila Σ TOTAL — toda campaña con producto que gastó >0 en el período entra (con o sin venta). Las SIN producto NO cuentan aquí.
     try{for(const kG in gastoByCampId){if((gastoByCampId[kG]||0)>0&&_cTPsp[String(kG)])_campsGastoHoyM++}}catch(_){}
     const _liveEstSp=window._nexoLiveEstadoByCampId||{}
@@ -27688,7 +27712,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
       _sinProdBlock=`<div id="rp-sinprod-block" style="margin:0 0 12px;padding:10px 12px;background:rgba(245,158,11,.05);border:1px solid rgba(245,158,11,.4);border-radius:10px">
         <div onclick="window._rpToggleCuadre('rp-sinprod')" style="cursor:pointer;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--text)" title="Toca para abrir/cerrar la lista. Entran: 🟢 campañas ACTIVAS sin producto (misma regla activa/inactiva del expand de cuenta) y 🟠 campañas que GASTARON en el período sin producto aunque ya no figuren activas (red de seguridad: ninguna gastadora se cuela). Ordenadas de mayor a menor gasto. Su plata cae al cajón 'sin asignar' y no entra al CPA de ningún producto.">
           <span id="rp-sinprod-chev" style="display:inline-block;width:12px;font-size:9px;color:var(--amber)">▸</span>
-          <span style="font-weight:700;color:var(--amber)">⚠️ ${_listaSp.length} campaña${_listaSp.length===1?'':'s'} sin producto asignado (activas o gastando)</span>
+          <span id="rp-sp-tit" style="font-weight:700;color:var(--amber)">⚠️ ${_listaSp.length} campaña${_listaSp.length===1?'':'s'} sin producto asignado (activas o gastando)</span><!-- (26sep26) id para que la verificación ✅ actualice el conteo en vivo -->
           <span style="font-size:10.5px;color:var(--muted)">— gastan plata que no entra al CPA de ningún producto · asígnalas aquí mismo</span>
         </div>
         <div id="rp-sinprod-sub" style="display:none;margin-top:8px">
@@ -27728,7 +27752,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
       const s=_slugM(d.nombre),dot=_dotM[d.semCode]||'⚪'
       return`<button class="rp-fusmain-pill" data-fslug="${s}" onclick="window._rpFusMainProd('${s}')" style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;padding:5px 12px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.04);color:var(--text);border:1px solid var(--border);cursor:pointer" title="📦 ${_escM(d.nombre)} · Gasto del rango: $${fmt(d.gasto)} · CPA $${fmt(d.cpaReal)} · Semáforo ${dot} · CLIC para ver SOLO la fusión de este producto (clic de nuevo vuelve a TODOS). El chip mismo ya es un mini-semáforo: gasto + color sin abrir nada.">📦 ${_escM(d.nombre)} <span style="color:var(--muted);font-weight:600">${_abrevM(d.gasto)}</span> ${dot}</button>`
     }).join('')
-    const _pillSinProd=_sinProdCount>0?`<button class="rp-fusmain-pill" data-fslug="__sinprod__" onclick="window._rpFusMainProd('__sinprod__')" style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:800;padding:5px 12px;border-radius:999px;white-space:nowrap;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid var(--amber);cursor:pointer" title="⚠️ ${_sinProdCount} campaña${_sinProdCount===1?'':'s'} ACTIVAS gastando plata SIN producto asignado — su gasto no entra al CPA de ningún producto. CLIC para verlas y asignarles producto AQUÍ MISMO con el botón ⚠️ Asignar producto.">⚠️ SIN PRODUCTO: ${_sinProdCount}</button>`:''
+    const _pillSinProd=_sinProdCount>0?`<button class="rp-fusmain-pill" data-fslug="__sinprod__" onclick="window._rpFusMainProd('__sinprod__')" style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:800;padding:5px 12px;border-radius:999px;white-space:nowrap;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid var(--amber);cursor:pointer" title="⚠️ ${_sinProdCount} campaña${_sinProdCount===1?'':'s'} ACTIVAS gastando plata SIN producto asignado — su gasto no entra al CPA de ningún producto. CLIC para verlas y asignarles producto AQUÍ MISMO con el botón ⚠️ Asignar producto."><span id="rp-sp-pill">⚠️ SIN PRODUCTO: ${_sinProdCount}</span></button>`:'' // (26sep26) span con id para que la verificación ✅ baje el conteo en vivo
     const _grupos=_prodsRank.map(d=>{
       const s=_slugM(d.nombre),dot=_dotM[d.semCode]||'⚪'
       const _pctBEg=(d.cpaReal>0&&d.margenBE>0)?Math.round(d.cpaReal/d.margenBE*100):0
@@ -27801,7 +27825,7 @@ async function _renderResumenProductos(desde,hasta,hoy){
     const _grupoSinProd=_sinProdCount>0?`<div class="rp-fusgrp" data-fslug="__sinprod__" style="border:1px solid rgba(245,158,11,.4);border-radius:9px;margin-bottom:6px;overflow:clip">
         <div onclick="window._rpFusGrpToggle('__sinprod__')" style="cursor:pointer;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 11px;background:rgba(245,158,11,.06);font-size:12.5px;color:var(--amber)" title="Campañas ACTIVAS gastando SIN producto asignado. CLIC para abrir la lista y asignarles producto aquí mismo.">
           <span id="fusgrp-ch-__sinprod__" style="display:inline-block;width:13px;font-size:10px;color:var(--amber)">▸</span>
-          <span style="font-weight:800">⚠️ SIN PRODUCTO ASIGNADO: ${_sinProdCount}</span>
+          <span id="rp-sp-grpn" style="font-weight:800">⚠️ SIN PRODUCTO ASIGNADO: ${_sinProdCount}</span><!-- (26sep26) id para que la verificación ✅ baje el conteo en vivo -->
           <span style="font-size:10.5px;color:var(--muted)">— gastan plata que no entra al CPA de ningún producto · asígnalas aquí mismo</span>
         </div>
         <div class="rp-fusgrp-bd" id="fusgrp-bd-__sinprod__" style="display:none;padding:8px"></div>
@@ -30730,8 +30754,41 @@ window._rpSpRefrescarMapa=async function(){
     for(const p of (productos||[]))for(const c of (Array.isArray(p.campaign_ids)?p.campaign_ids:[]))if(c&&!m[c])m[c]=p
     for(const p of (window._prodArchTodos||[]))for(const c of (Array.isArray(p.campaign_ids)?p.campaign_ids:[]))if(c&&!m[c])m[c]=p
   }
+  try{window._rpSpVerificar&&window._rpSpVerificar()}catch(_){} // ✅ (26sep26) libreta recién refrescada → la lista se revisa sola
 }
 window._rpSpRefrescarPronto=function(){clearTimeout(window._rpSpRefT);window._rpSpRefT=setTimeout(()=>{window._rpSpRefrescarMapa()},2500)}
+// ✅ (26sep26) VERIFICACIÓN AUTOMÁTICA de la lista ⚠️ SIN PRODUCTO — corre al terminar la carga de Meta Ads
+// y cada vez que la libreta de asignaciones se refresca (asignar desde la fila, la ventanita, ♻️ Devolver…).
+// Si una campaña de la lista YA tiene producto en la libreta, su fila queda VERDE con "✅ ya tiene: X"
+// (constancia — no se borra) y los 3 conteos bajan solos: la pill ⚠️ SIN PRODUCTO, el título del grupo y el
+// título de la lista. El botón de la fila sigue abriendo la ventanita por si quieres CAMBIARLE el producto.
+// No consulta nada a Supabase: solo compara la lista pintada contra la libreta que ya está en memoria.
+window._rpSpVerificar=function(){
+  try{
+    const rows=[...document.querySelectorAll('.rp-sp-row[data-spcid]')]
+    if(!rows.length)return
+    const m=(window._metaPort&&window._metaPort.campToProd)||{}
+    if(!Object.keys(m).length)return // sin libreta a mano: no se marca nada (jamás marcar en falso)
+    let quedan=0,marcadas=0
+    for(const row of rows){
+      const cid=String(row.getAttribute('data-spcid')||'')
+      const pr=m[cid]
+      if(!pr){if(row.dataset.spok==='1'){delete row.dataset.spok;row.style.opacity='';}quedan++;continue} // si la quitaron otra vez, la fila vuelve a contar
+      if(row.dataset.spok==='1'){marcadas++;continue}
+      row.dataset.spok='1';marcadas++
+      row.style.opacity='.6'
+      const bt=row.querySelector('button[onclick*="modalAsignarProductoCamp"]')
+      if(bt){bt.textContent='✅ ya tiene: '+((pr.nombre)||'producto');bt.style.background='var(--green-bg)';bt.style.borderColor='var(--green)';bt.style.color='var(--green)';bt.title='Verificado contra la base: esta campaña YA está asignada a '+((pr.nombre)||'un producto')+'. Clic si quieres CAMBIARLA de producto.'}
+      const sp=row.querySelector('.rp-sp-antes');if(sp)sp.removeAttribute('data-devprod') // ya asignada → ♻️ Devolver todas no la vuelve a mover
+    }
+    const n=quedan,_pl1=n===1?'':'s'
+    const t=document.getElementById('rp-sp-tit');if(t)t.textContent=`⚠️ ${n} campaña${_pl1} sin producto asignado (activas o gastando)`+(marcadas?` · ✅ ${marcadas} verificada${marcadas===1?'':'s'}: ya tienen producto`:'')
+    const g=document.getElementById('rp-sp-grpn');if(g)g.textContent=`⚠️ SIN PRODUCTO ASIGNADO: ${n}`
+    const pl=document.getElementById('rp-sp-pill');if(pl)pl.textContent=`⚠️ SIN PRODUCTO: ${n}`
+    const bt2=document.getElementById('rp-sp-devtodas')
+    if(bt2){const tot=document.querySelectorAll('.rp-sp-antes[data-devprod]').length;bt2.style.display=tot?'inline-flex':'none';bt2.textContent='♻️ Devolver todas ('+tot+')'}
+  }catch(_){}
+}
 // Asignar UNA campaña a un producto (♻️ Devolver · 💡 copia · 🔎 lista total). El botón queda en ✅ como constancia.
 window._rpSpAsignarA=async function(cid,prodId,origen,btn,sinRefresco){
   const prod=window._nxProdPorId(prodId)
@@ -34208,6 +34265,7 @@ async function renderMetaPortafolio(el,isAdmin){
   // Cargar resumen por producto (en su div placeholder)
   if(_resumenPre!=null){const _c=document.getElementById('meta-resumen-productos');if(_c&&window._nxHoyNodo&&window._nxHoyNodo!==_c){_c.replaceWith(window._nxHoyNodo)}else if(_c){_c.innerHTML=_resumenPre;try{window._rpFusionMainInit&&window._rpFusionMainInit()}catch(_){}}window._nxHoyNodo=null;try{window.nxPreCargaProgramar&&window.nxPreCargaProgramar()}catch(_){}} // 🟢 (Fase B): HOY ya estaba pintado → se mueve tal cual (sin volver a llamar a Meta) · ⏳ (Fase D): arranca la precarga
   else _actualizarResumenMetaProductos()
+  try{setTimeout(()=>{try{window._rpSpVerificar&&window._rpSpVerificar()}catch(_){}},400)}catch(_){} // ✅ (26sep26) al terminar la carga: la lista ⚠️ sin producto se revisa contra la libreta recién armada
 }
 
 // ── Asignar / Cambiar producto de una campaña desde el propio portafolio Meta ──
@@ -34446,6 +34504,7 @@ window._confirmarProdCamp=async(campId,accountId)=>{
     }
   }
   logAction('campana_producto_asignado',{producto_id:prodId,producto_nombre:prodNuevo.nombre,campaigns:lista,asignadas:ok,saltadas,fallidas}).catch(()=>{})
+  try{window._rpSpVerificar&&window._rpSpVerificar()}catch(_){} // ✅ (26sep26) la lista ⚠️ sin producto marca la fila en verde y baja los conteos al instante
   closeModal()
   let msg='✅ '+ok+' campaña'+(ok===1?'':'s')+' asignada'+(ok===1?'':'s')+' a '+prodNuevo.nombre
   if(_verSet)msg+=' (verificado en Supabase ✔)'
@@ -35994,7 +36053,12 @@ window._massRenderSelect=()=>{
   // (24sep26) 🟢/⚫ FILTRO DE ESTADO (Todas · Activas · Inactivas) — se CRUZA con la urgencia:
   // cada fila de botones cuenta solo lo que deja pasar la otra fila.
   const _fe=st.filtroEst||'all'
-  const _esAct=it=>it.estado==='ACTIVE' // mismo criterio del letrero 🟢 activa / ⚫ pausada de cada fila
+  // ANTES: const _esAct=it=>it.estado==='ACTIVE' // mismo criterio del letrero 🟢 activa / ⚫ pausada de cada fila
+  // ✅ (26sep26) MISMA regla del botón "🟢 Activas" del expand de la cuenta (el de junto a los botones de
+  // urgencia): activa DE VERDAD = botón prendido en Meta + ENTREGANDO + no es PRENDER YA. Antes aquí solo se
+  // miraba el botón → campañas con los anuncios/conjuntos apagados salían como "activas" en 💰/▶️/⏸️ masivos.
+  const _entMS=window._nexoEntregaByCampId||{},_pyMS=window._nexoVendeNoGastaByCampId||{}
+  const _esAct=it=>{const k=String(it.meta_id);return it.estado==='ACTIVE'&&!(it.semCode==='prender_ya'||_pyMS[k]===true)&&_entMS[k]!==false}
   const _pasaEst=it=>_fe==='all'||(_fe==='activas'?_esAct(it):!_esAct(it))
   // (25sep26 · P-T5) 'sin_sem' = sin urgencia conocida (sin semáforo o con un código que no tiene botón): así los botones SIEMPRE suman "Todas"
   const _urgConBoton=new Set(urgDefs.map(d=>d[0]).filter(c=>c!=='all'&&c!=='sin_sem'))
@@ -36025,7 +36089,9 @@ window._massRenderSelect=()=>{
     const ok=window._massMatchable(it)
     const checked=st.selected.has(it.meta_id)?'checked':''
     const badge=it.semCode?window.nexoBadgeMega(it.semCode,'sm',false):''
-    const estTxt=it.estado==='ACTIVE'?'<span style="color:var(--green)">🟢 activa</span>':'<span style="color:var(--muted)">⚫ pausada</span>'
+    // ANTES: const estTxt=it.estado==='ACTIVE'?'<span style="color:var(--green)">🟢 activa</span>':'<span style="color:var(--muted)">⚫ pausada</span>'
+    // ✅ (26sep26) letrero honesto: botón prendido pero SIN entregar ya no se disfraza de "activa"
+    const estTxt=_esAct(it)?'<span style="color:var(--green)">🟢 activa</span>':(it.estado==='ACTIVE'?'<span style="color:var(--amber)" title="El botón está prendido en Meta pero NO está entregando (conjuntos/anuncios apagados, o es PRENDER YA). Cuenta como inactiva — la misma regla del filtro 🟢 Activas de la cuenta.">🟢 botón prendido · 🔕 no entrega</span>':'<span style="color:var(--muted)">⚫ pausada</span>')
     // 4ago26: la celda del monto se pinta por _massBudCellHTML (mismo HTML de siempre mientras no
     // haya verificación) y lleva id propio para que Meta la repinte EN SITIO, sin re-render del modal.
     const budTxt=st.action==='presupuesto'?` · <span id="massel-bud-${it.meta_id}">${window._massBudCellHTML(it)}</span>`:''

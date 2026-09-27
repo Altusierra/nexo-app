@@ -654,6 +654,12 @@ window.nxPuerta=(function(){
   const est={estado:'ok',fallas:0,exitos:0,ultimaFalla:'',desde:0,reintentos:0,enVuelo:0}
   const tipoDe=u=>{u=String(u||'');if(u.includes('/rest/v1/'))return'rest';if(u.includes('/auth/v1/'))return'auth';if(u.includes('/storage/v1/'))return'storage';if(u.includes('/functions/v1/'))return'functions';return'otro'}
   const urlDe=u=>typeof u==='string'?u:((u&&u.url)||'')
+  // 🔎 (26sep26) ¿QUÉ TABLA FALLÓ? El aviso amarillo ahora la nombra (ej. "tabla: audit_log") → nunca más adivinar.
+  //   · Falla UNA sola tabla  → es ESA consulta la pesada (se arregla esa).
+  //   · Fallan VARIAS tablas  → es Supabase en general (lento o caído), no una consulta.
+  //   Historial de las últimas 50 fallas (tabla, motivo, hora): nxPuerta.lentas()
+  const tablaDe=u=>{try{const m=/\/(rest|auth|storage|functions)\/v1\/([^?#]+)/.exec(urlDe(u));return m?((m[1]==='rest'?'':m[1]+'/')+decodeURIComponent(m[2])).slice(0,40):''}catch(_){return''}}
+  est.lentas=[];est.porTabla={};est.ultimaTabla=''
   // ¿Es seguro repetirla? Lecturas siempre; upsert (merge-duplicates) también; lo demás NO.
   function repetible(init){
     const m=String((init&&init.method)||'GET').toUpperCase()
@@ -694,7 +700,12 @@ window.nxPuerta=(function(){
       if(est.estado==='lento'){
         const seg=Math.max(0,Math.round((Date.now()-est.desde)/1000))
         b.style.background='#f59e0b';b.style.color='#1a1200'
-        b.innerHTML=`🟡 Supabase va lento — NEXO reintenta sola. Lleva <b>${seg<90?seg+' s':Math.round(seg/60)+' min'}</b> · ${est.fallas} falla${est.fallas===1?'':'s'} seguida${est.fallas===1?'':'s'}${est.ultimaFalla?` · <span style="font-weight:600">motivo: ${String(est.ultimaFalla).replace(/</g,'&lt;').slice(0,90)}</span>`:''} · lo que ya cargó sigue sirviendo`
+        // ANTES: b.innerHTML=`🟡 Supabase va lento — NEXO reintenta sola. Lleva <b>${seg<90?seg+' s':Math.round(seg/60)+' min'}</b> · ${est.fallas} falla${est.fallas===1?'':'s'} seguida${est.fallas===1?'':'s'}${est.ultimaFalla?` · <span style="font-weight:600">motivo: ${String(est.ultimaFalla).replace(/</g,'&lt;').slice(0,90)}</span>`:''} · lo que ya cargó sigue sirviendo`
+        // 🔎 (26sep26) mismo aviso + QUÉ TABLA falló (1 tabla = esa consulta · varias = Supabase en general)
+        const _esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        const _pt=Object.entries(est.porTabla||{}).sort((x,y)=>y[1]-x[1])
+        const _tbTxt=_pt.length>1?` · <span style="font-weight:600">fallan ${_pt.length} tablas: ${_pt.slice(0,3).map(([t,n])=>'<b>'+_esc(t)+'</b> ×'+n).join(', ')}${_pt.length>3?'…':''} → es Supabase en general</span>`:(est.ultimaTabla?` · <span style="font-weight:600">tabla: <b>${_esc(est.ultimaTabla)}</b></span>`:'')
+        b.innerHTML=`🟡 Supabase va lento — NEXO reintenta sola. Lleva <b>${seg<90?seg+' s':Math.round(seg/60)+' min'}</b> · ${est.fallas} falla${est.fallas===1?'':'s'} seguida${est.fallas===1?'':'s'}${est.ultimaFalla?` · <span style="font-weight:600">motivo: ${String(est.ultimaFalla).replace(/</g,'&lt;').slice(0,90)}</span>`:''}${_tbTxt} · lo que ya cargó sigue sirviendo`
       }else{
         b.style.background='#22c55e';b.style.color='#04210f'
         b.innerHTML='✅ Supabase respondió otra vez — todo normal'
@@ -707,8 +718,9 @@ window.nxPuerta=(function(){
     if(est.estado==='lento'&&!_timerLleva)_timerLleva=setInterval(banner,5000)
     if(est.estado==='ok'&&_timerLleva){clearInterval(_timerLleva);_timerLleva=null}
   }
-  function falla(tipo,msg){
+  function falla(tipo,msg,u){ // ANTES: function falla(tipo,msg){  · (26sep26) + u = la dirección, para saber QUÉ TABLA falló
     if(tipo==='storage'||tipo==='functions'||tipo==='otro')return // archivos y funciones son largos por naturaleza: no cuentan
+    try{const _tb=tablaDe(u)||'?';if(est.fallas===0)est.porTabla={};est.porTabla[_tb]=(est.porTabla[_tb]||0)+1;est.ultimaTabla=_tb;est.lentas.push({tabla:_tb,motivo:String(msg||''),cuando:new Date().toISOString()});if(est.lentas.length>50)est.lentas.shift()}catch(_){} // 🔎 (26sep26) racha nueva (fallas en 0) = conteo por tabla nuevo
     est.fallas++;est.exitos=0;est.ultimaFalla=msg||''
     if(est.estado==='ok'&&est.fallas>=2){est.estado='lento';est.desde=Date.now();emitir()}
     else if(est.estado==='lento')emitir()
@@ -736,7 +748,7 @@ window.nxPuerta=(function(){
         const r=await realFetch(url,{...init,signal:ac.signal})
         clearTimeout(t);if(sig)sig.removeEventListener('abort',onAb);est.enVuelo--
         if(r&&r.status>=502&&r.status<=504){ // Supabase caído o saturado
-          falla(tipo,'HTTP '+r.status)
+          falla(tipo,'HTTP '+r.status,url) // ANTES: falla(tipo,'HTTP '+r.status)
           if(i<intentos){est.reintentos++;await espera(i);continue}
           return r
         }
@@ -750,7 +762,7 @@ window.nxPuerta=(function(){
         const esTimeout=e&&e.name==='AbortError'
         ultimoErr=esTimeout?new Error('Supabase no respondió en '+Math.round(c.ms/1000)+' s'+(intentos>1?' (intento '+i+' de '+intentos+')':'')):e
         if(esTimeout&&tipo==='functions'){try{ultimoErr.nxCorteEdge=true;ultimoErr.nxEdge=edgeDe(url);est.edgeCortes=(est.edgeCortes||0)+1;est.ultimoCorteEdge={fn:ultimoErr.nxEdge,cuando:new Date().toISOString()}}catch(_){}} // ✂️ (25sep26 · B8) se cortó AQUÍ, pero el servidor SIGUE trabajando (hasta 400 s en Pro): quien reintente debe esperar (nxEsCorteEdge)
-        falla(tipo,ultimoErr&&ultimoErr.message)
+        falla(tipo,ultimoErr&&ultimoErr.message,url) // ANTES: falla(tipo,ultimoErr&&ultimoErr.message)
         if(i<intentos){est.reintentos++;await espera(i);continue}
         throw ultimoErr
       }
@@ -779,7 +791,8 @@ window.nxPuerta=(function(){
     }finally{avisarEdge(fn)}
   }
   // ANTES: return{fetch:fetchPuerta,estado:()=>est.estado,lento:()=>est.estado==='lento',info:()=>({...est}),CFG,cortes:()=>(est.cortes||[]).slice()} // (25sep26 · B5) + cortes()
-  return{fetch:fetchConAvisoEdge,estado:()=>est.estado,lento:()=>est.estado==='lento',info:()=>({...est}),CFG,cortes:()=>(est.cortes||[]).slice()} // (25sep26 · B5) + cortes() · (25sep26 · B1-b) fetch avisa las escrituras de las Edge
+  // ANTES: return{fetch:fetchConAvisoEdge,estado:()=>est.estado,lento:()=>est.estado==='lento',info:()=>({...est}),CFG,cortes:()=>(est.cortes||[]).slice()} // (25sep26 · B5) + cortes() · (25sep26 · B1-b) fetch avisa las escrituras de las Edge
+  return{fetch:fetchConAvisoEdge,estado:()=>est.estado,lento:()=>est.estado==='lento',info:()=>({...est}),CFG,cortes:()=>(est.cortes||[]).slice(),lentas:()=>(est.lentas||[]).slice()} // (25sep26 · B5) + cortes() · (25sep26 · B1-b) fetch avisa las escrituras de las Edge · 🔎 (26sep26) + lentas() = qué tabla falló y cuándo
 })()
 // ═══ FIN PUERTA ÚNICA ═══
 const sb=createClient(SURL,SKEY,{global:{fetch:(window.nxPuerta&&window.nxPuerta.fetch)||undefined}}) // 🚪 (24sep26): todas las consultas pasan por la puerta única (tiempo máximo + reintento + aviso)
@@ -27689,7 +27702,8 @@ async function _renderResumenProductos(desde,hasta,hoy){
           </div>
         </div>
       </div>`
-      try{setTimeout(()=>{try{window._rpSpAntesCargar()}catch(_){}},700)}catch(_){} // 🕵️ (26sep26) al pintarse: revisar el historial y ofrecer ♻️ Devolver
+      // ANTES: try{setTimeout(()=>{try{window._rpSpAntesCargar()}catch(_){}},700)}catch(_){} // 🕵️ (26sep26) al pintarse: revisar el historial y ofrecer ♻️ Devolver
+      try{setTimeout(()=>{try{if(window._rpSpListaAbierta&&window._rpSpListaAbierta())window._rpSpAntesCargar()}catch(_){}},700)}catch(_){} // 🕵️ (26sep26 · liviano) el historial ya NO corre solo al pintarse: solo si la lista ⚠️ sin producto está ABIERTA (al abrirla se lanza sola)
     }else{
       // (26sep26) Sin campañas activas/gastando sin producto: igual queda a mano el botón para revisar TODAS (consulta a Meta)
       _sinProdBlock=`<div id="rp-sinprod-block" style="margin:0 0 12px;padding:8px 12px;background:rgba(34,197,94,.05);border:1px solid rgba(34,197,94,.35);border-radius:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--green)">✅ 0 campañas activas o gastando sin producto${window._rpSpBarraHTML(true)}</div>`
@@ -29566,6 +29580,7 @@ window._rpToggleCuadre=function(cid){
   const oculto=sub.style.display==='none'
   sub.style.display=oculto?'block':'none'
   if(chev)chev.textContent=oculto?'▼':'▸'
+  if(oculto&&cid==='rp-sinprod')try{window._rpSpAntesCargar&&window._rpSpAntesCargar()}catch(_){} // 🕵️ (26sep26 · liviano) al ABRIR la lista ⚠️ sin producto: historial "antes: …" + ♻️ Devolver
   if(!oculto)try{window._rpVolverAFila(cid)}catch(_){} // MEJORA 2 (16jul26): al cerrar, volver a la fila
   // NUEVO (Mejora 1 · 11jun26): al ABRIR, ubicar el desglose donde el usuario está parado en el
   // scroll horizontal (margin-left = scrollLeft del contenedor ancho + ancho = viewport visible).
@@ -30598,21 +30613,59 @@ window._rpSpBarraHTML=function(compacta){
     ${compacta?'':'<span id="rp-sp-antes-est" style="font-size:10.5px;color:var(--muted)"></span>'}
   </div>`
 }
-// Historial de asignaciones (audit_log) → {campaña: la acción MÁS NUEVA sobre ella}. Caché de 2 min.
+// Historial de asignaciones (audit_log) → {campaña: la acción MÁS NUEVA sobre ella}. Caché de 10 min (ANTES: 2 min).
+// ⚡ (26sep26 · LIVIANO) ANTES: UNA consulta de hasta 5.000 filas (Supabase igual corta en 1.000) con el cruce
+//   usuarios(nombre) en CADA fila y sin tiempo propio: si tardaba, la puerta la repetía 3 veces × 25 s y prendía
+//   el aviso amarillo GLOBAL ("Supabase va lento") en toda la app.
+//   AHORA: · de a 500 filas (hasta 5.000 de verdad) con % REAL (cuántas leídas de cuántas hay)
+//          · los nombres de usuario salen de UNA lectura chica de 'usuarios' (no un cruce por fila)
+//          · cada pedazo tiene su PROPIO tiempo (15 s): si tarda se cancela SIN prender el aviso global ni
+//            repetirse 3 veces → avisa en amarillo SOLO esta sección y reintenta mientras la lista esté abierta
+//          · índice en Supabase (creado 26sep26): audit_log_accion_fecha_idx (accion, created_at desc) → instantánea
+//   ¿Cambiar números? Solo aquí: window._RP_SP_HIST_CFG
 window._rpSpHist=window._rpSpHist||{ts:0,mapa:null,prom:null}
-window._rpSpHistLeer=async function(forzar){
-  const H=window._rpSpHist
-  if(!forzar&&H.mapa&&(Date.now()-H.ts)<120000)return H.mapa
+window._RP_SP_HIST_CFG={dias:180,pedazo:500,maxFilas:5000,msPedazo:15000,cacheMs:600000}
+// Consulta con tiempo PROPIO: al vencer se cancela (abortSignal) y la puerta NO lo cuenta como "Supabase lento"
+window._rpSpConTiempo=async function(q,ms){
+  try{const tope=((window.nxPuerta&&window.nxPuerta.CFG&&window.nxPuerta.CFG.rest&&window.nxPuerta.CFG.rest.ms)||25000)-2000;if(tope>0&&ms>tope)ms=tope}catch(_){} // SIEMPRE antes que el tiempo de la puerta (si no, la puerta lo contaría como "Supabase lento")
+  const ac=(typeof AbortController==='function')?new AbortController():null
+  try{if(ac&&q&&typeof q.abortSignal==='function')q=q.abortSignal(ac.signal)}catch(_){}
+  let t=null
+  try{
+    return await Promise.race([q,new Promise((_,rej)=>{t=setTimeout(()=>{try{ac&&ac.abort()}catch(_){};rej(new Error('tardó más de '+Math.round(ms/1000)+' s'))},ms)})])
+  }finally{clearTimeout(t)}
+}
+// ¿La lista ⚠️ sin producto está ABIERTA y a la vista? (cerrada, grupo cerrado u otra pantalla → false)
+window._rpSpListaAbierta=function(){try{const s=document.getElementById('rp-sinprod-sub');return !!(s&&s.isConnected&&s.style.display!=='none'&&s.getClientRects().length>0)}catch(_){return false}}
+window._rpSpHistLeer=async function(forzar,onProg){ // ANTES: async function(forzar){  · (26sep26) + onProg(%) = avance real
+  const H=window._rpSpHist,C=window._RP_SP_HIST_CFG
+  if(typeof onProg==='function')H.onProg=onProg // el último que pregunta ve el avance
+  if(!forzar&&H.mapa&&(Date.now()-H.ts)<C.cacheMs)return H.mapa // ANTES: (Date.now()-H.ts)<120000
   if(H.prom)return H.prom
+  const prog=(p)=>{try{H.onProg&&H.onProg(p)}catch(_){}}
   H.prom=(async()=>{
     const acciones=['campana_producto_asignado','campana_atribuida_tracker','campanas_atribuidas','campanas_atribuidas_masivo','producto_campanas_editadas','campana_desvinculada','campana_movida_ley1a1']
-    const desde=new Date(Date.now()-180*864e5).toISOString()
-    const{data,error}=await sb.from('audit_log').select('accion,detalles,created_at,usuarios(nombre)').in('accion',acciones).gte('created_at',desde).order('created_at',{ascending:false}).limit(5000)
-    if(error)throw error
+    const desde=new Date(Date.now()-C.dias*864e5).toISOString() // ANTES: Date.now()-180*864e5
+    // ANTES: const{data,error}=await sb.from('audit_log').select('accion,detalles,created_at,usuarios(nombre)').in('accion',acciones).gte('created_at',desde).order('created_at',{ascending:false}).limit(5000)
+    // ANTES: if(error)throw error
+    prog(0)
+    const usr={} // nombres de usuario: UNA lectura chica (si falla, sale "—" y el historial igual sirve)
+    try{const{data:us}=await window._rpSpConTiempo(sb.from('usuarios').select('id,nombre'),C.msPedazo);for(const x of(us||[]))if(x&&x.id!=null)usr[String(x.id)]=x.nombre||''}catch(_){}
+    const data=[];let total=null
+    for(let ini=0;ini<C.maxFilas;ini+=C.pedazo){
+      const q=sb.from('audit_log').select('accion,detalles,created_at,usuario_id',ini===0?{count:'exact'}:undefined).in('accion',acciones).gte('created_at',desde).order('created_at',{ascending:false}).range(ini,ini+C.pedazo-1)
+      const{data:pg,error,count}=await window._rpSpConTiempo(q,C.msPedazo)
+      if(error)throw error
+      if(ini===0&&typeof count==='number')total=Math.min(count,C.maxFilas)
+      for(const r of(pg||[]))data.push(r)
+      prog(total!=null?Math.min(99,Math.round(data.length/Math.max(1,total)*100)):window.nxPctPasos?window.nxPctPasos(ini/C.pedazo+1,C.maxFilas/C.pedazo):Math.min(99,Math.round((ini+C.pedazo)/C.maxFilas*100)))
+      if(!pg||pg.length<C.pedazo||(total!=null&&data.length>=total))break // ya no hay más
+    }
     const mapa={}
     const put=(cid,ev)=>{const k=String(cid==null?'':cid).trim();if(k&&!(k in mapa))mapa[k]=ev} // vienen de NUEVA a vieja: la primera manda
     for(const r of(data||[])){
-      const d=r.detalles||{},u=(r.usuarios&&r.usuarios.nombre)||'',ts=r.created_at
+      // ANTES: const d=r.detalles||{},u=(r.usuarios&&r.usuarios.nombre)||'',ts=r.created_at
+      const d=r.detalles||{},u=(r.usuarios&&r.usuarios.nombre)||usr[String(r.usuario_id)]||'',ts=r.created_at
       const asig=(cids,pid,pn)=>{for(const c of(Array.isArray(cids)?cids:[]))put(c,{tipo:'asig',prodId:pid||null,prodNombre:pn||'',usuario:u,ts,accion:r.accion})}
       const quita=(cids)=>{for(const c of(Array.isArray(cids)?cids:[]))put(c,{tipo:'quita',usuario:u,ts,accion:r.accion})}
       if(r.accion==='campana_producto_asignado'||r.accion==='campanas_atribuidas'||r.accion==='campanas_atribuidas_masivo')asig(d.campaigns,d.producto_id,d.producto_nombre)
@@ -30621,23 +30674,26 @@ window._rpSpHistLeer=async function(forzar){
       else if(r.accion==='campana_desvinculada')quita([d.campaign_id])
       else if(r.accion==='campana_movida_ley1a1')asig(d.cids,d.a,'')
     }
-    H.mapa=mapa;H.ts=Date.now();return mapa
+    H.mapa=mapa;H.ts=Date.now();prog(100);return mapa // ANTES: H.mapa=mapa;H.ts=Date.now();return mapa  · (26sep26) + 100% SOLO al terminar
   })()
-  try{return await H.prom}finally{H.prom=null}
+  try{return await H.prom}finally{H.prom=null;H.onProg=null} // ANTES: finally{H.prom=null}  · (26sep26) el avance no queda "pegado" para la próxima lectura
 }
 // Pinta en cada fila de ⚠️ SIN PRODUCTO lo que dice el historial (y muestra ♻️ Devolver todas)
 window._rpSpAntesCargar=async function(){
   const spans=[...document.querySelectorAll('.rp-sp-antes[data-spcid]')]
   if(!spans.length)return
+  if(window._rpSpListaAbierta&&!window._rpSpListaAbierta())return // ⚡ (26sep26 · liviano) lista ⚠️ sin producto CERRADA → no se consulta nada
   const est=document.getElementById('rp-sp-antes-est')
   if(est)est.innerHTML='<span style="color:var(--muted)">🕵️ Revisando el historial de asignaciones · 0%</span>'
   let mapa
-  try{mapa=await window._rpSpHistLeer()}
+  // ANTES: try{mapa=await window._rpSpHistLeer()}
+  try{mapa=await window._rpSpHistLeer(false,(p)=>{const e1=document.getElementById('rp-sp-antes-est');if(e1&&p<100)e1.innerHTML=`<span style="color:var(--muted)">🕵️ Revisando el historial de asignaciones · ${p}%</span>`});try{window.nxReintentoApagar&&window.nxReintentoApagar('rp-sp-hist')}catch(_){}} // (26sep26) % REAL · si ya cargó, se apaga cualquier reintento pendiente
   catch(e){ // regla NEXO: si no carga, AMARILLO y se sigue intentando solo
     const _m=String((e&&e.message)||'error').slice(0,60)
     if(est)est.innerHTML=`<span style="color:var(--amber)">🟡 No pude leer el historial (${_rpE(_m)}) · reintentando solo…</span>`
     if(window._nxReintentar)window._nxReintentar('rp-sp-hist',{
-      sigueVivo:()=>!!document.querySelector('.rp-sp-antes[data-spcid]'),
+      // ANTES: sigueVivo:()=>!!document.querySelector('.rp-sp-antes[data-spcid]'),
+      sigueVivo:()=>!!(window._rpSpListaAbierta&&window._rpSpListaAbierta()), // ⚡ (26sep26) reintenta SOLO con la lista abierta y a la vista (cerrarla o salir de Meta Ads lo detiene; al reabrirla arranca de nuevo)
       intentar:async()=>{try{await window._rpSpHistLeer(true);await window._rpSpAntesCargar();return true}catch(_){return false}},
       alCambiar:(rt)=>{const e2=document.getElementById('rp-sp-antes-est');if(e2&&rt.vivo&&!rt.corriendo)e2.innerHTML=`<span style="color:var(--amber)">🟡 No pude leer el historial · reintento ${rt.intento+1} en ${rt.proximoEn} s</span>`}
     })

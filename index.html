@@ -10819,7 +10819,11 @@ window.procesarAsignador=async()=>{
       try{
         const adIdsAfectados=[...new Set((insertados||[]).map(r=>r.ad_id).filter(Boolean))]
         if(adIdsAfectados.length){
-          setTimeout(()=>{_calcularYGuardarSemaforos(adIdsAfectados,'asignador').catch(()=>{})},0)
+          // ANTES: el semáforo se calculaba de una, sin anotar antes los anuncios nuevos en la libreta
+          setTimeout(async()=>{
+            if(window._nxCadenaIds&&!window.NX_CADENA_V1){try{await window._nxCadenaIds(adIdsAfectados,{origen:'asignador'})}catch(_eCad){window._nxCadenaReintento(adIdsAfectados,'asignador',_eCad)}} // (27sep26 · IDs) libreta primero
+            _calcularYGuardarSemaforos(adIdsAfectados,'asignador').catch(()=>{})
+          },0)
         }
       }catch(_){}
     }
@@ -12029,6 +12033,9 @@ window.saveReporteV2=async(fecha)=>{
       // real del momento sin depender del botón 🔄 Refrescar. Si el sync falla, el semáforo se
       // calcula igual con el gasto que haya en BD (comportamiento de siempre).
       setTimeout(async()=>{
+        // (27sep26 · IDs) ANTES de traer el gasto: los IDs nuevos se anotan en la libreta (meta_campanas) → el mini-sync
+        // ya encuentra su cuenta y el cuadre los reconoce de una. Si Meta no responde → amarillo sin parar.
+        if(window._nxCadenaIds&&!window.NX_CADENA_V1){try{await window._nxCadenaIds(adIdsUnicos,{origen:'reporte'})}catch(_eCad){window._nxCadenaReintento(adIdsUnicos,'reporte',_eCad)}}
         let _msOk=false
         try{_msOk=await window._miniSyncInsightsDiaParaAds(adIdsUnicos,_fxRep||today())}catch(_){}
         if(!_msOk){const _mw=document.getElementById('rep-msg');if(_mw)_mw.innerHTML+='<div class="alert alert-amber" style="margin-top:8px;font-size:12px">⚠️ El gasto en vivo no se pudo guardar (permisos o Meta no respondió). El semáforo quedó con el gasto del último sync. Avísale a Leidy o corre el 🧪 Probar gasto en vivo en Meta Ads → Credenciales.</div>'}
@@ -20135,6 +20142,8 @@ window.actualizarEstadosDropi=async()=>{
       // antes de calcular el semáforo ★Dropi. Como ese día ya cerró, el gasto no vuelve a cambiar
       // → la captura queda definitiva. Si el sync falla, se calcula igual con el gasto de BD.
       setTimeout(async()=>{
+        // (27sep26 · IDs) ANTES de traer el gasto: los IDs que falten se anotan en la libreta (meta_campanas).
+        if(window._nxCadenaIds&&!window.NX_CADENA_V1){try{await window._nxCadenaIds(adIdsAfectados,{origen:'cruce'})}catch(_eCad){window._nxCadenaReintento(adIdsAfectados,'cruce',_eCad)}}
         let _msOk=false
         try{_msOk=await window._miniSyncInsightsDiaParaAds(adIdsAfectados,_fechaCruce||today())}catch(_){}
         if(!_msOk){const _mw=document.getElementById('dropi-upd-msg');if(_mw)_mw.innerHTML+='<span style="color:var(--amber);font-size:12px;margin-left:8px">⚠️ El gasto en vivo no se pudo guardar (permisos o Meta no respondió). El semáforo ★Dropi quedó con el gasto del último sync.</span>'}
@@ -26449,7 +26458,11 @@ window._nexoSyncDiaTodas=async function(offset,btn,soloCuentas){
       }
       const _huerfanos=_idsArr.filter(id=>!_conocidos.has(id))
       _huerTotal=_huerfanos.length
-      if(_huerfanos.length){
+      if(_huerfanos.length&&window._nxCadenaIds&&!window.NX_CADENA_V1){
+        // (27sep26 · IDs) misma pieza única de la carga, Reportes, Asignador y Cruce (pregunta y guarda SOLO lo que falta)
+        try{const _rC=await window._nxCadenaIds(_huerfanos,{origen:'sync-dia',forzar:true});_huerResueltos+=_rC.resueltos}
+        catch(_eC){_huerResueltos+=((_eC&&_eC.parcial&&_eC.parcial.guardados)||0);if(window._nxCadenaEsPermanente(_eC)&&!window._nxEsSinPermiso(_eC))throw new Error('(permission) '+_eC.message);throw _eC} // lo resuelto ya quedó guardado; el motor de afuera repite lo que falta
+      }else if(_huerfanos.length){
         // Resolver ads por ID (batch ?ids=; si el lote cae por un ID muerto → reintento 1x1 y salto muertos)
         const _fetchIds=async(ids,fields)=>{
           const out={}
@@ -26560,9 +26573,16 @@ window._nexoAutoSyncHoy=async function(slug){
     const _iniHoy=new Date(_hoyBg+'T00:00:00-05:00').toISOString()
     const{data:_lm}=await sb.from('mapeos').select('created_at').gte('created_at',_iniHoy).order('created_at',{ascending:false}).limit(1)
     const _asigAt=(_lm&&_lm[0]&&_lm[0].created_at)?new Date(_lm[0].created_at).getTime():0
+    // (27sep26 · IDs) 2b) Último reporte del aux guardado HOY (trae IDs de anuncios nuevos). Antes solo se miraban
+    // las asignaciones → un reporte con IDs nuevos no despertaba la sync y esos IDs quedaban 🔌 sin campaña.
+    // (la hora la pone el PC del aux: si su reloj va adelantado, el MISMO reporte despierta la sync una sola vez)
+    let _repAt=0,_repRaw=0
+    if(!window.NX_CADENA_V1){try{const{data:_lr,error:_eLr}=await sb.from('reportes_diarios').select('updated_at').eq('fecha',_hoyBg).order('updated_at',{ascending:false}).limit(1);if(_eLr)throw _eLr;_repRaw=(_lr&&_lr[0]&&_lr[0].updated_at)?new Date(_lr[0].updated_at).getTime():0;_repAt=_repRaw>(window._nxRepAtVisto||0)?Math.min(_repRaw,_now):0}catch(_eR){console.warn('[auto-sync-hoy] no pude leer los reportes:',_eR&&_eR.message)}}
     const _viejo=(_now-_syncAt)>window._nexoAutoSyncMs
-    const _hayNueva=_asigAt>_syncAt
+    // ANTES: const _hayNueva=_asigAt>_syncAt
+    const _hayNueva=_asigAt>_syncAt||_repAt>_syncAt
     if(!_viejo&&!_hayNueva)return // todo fresco → cero llamadas a Meta
+    if(_repRaw)window._nxRepAtVisto=Math.max(window._nxRepAtVisto||0,_repRaw) // (27sep26 · IDs) este reporte ya despertó una sync: no la repite
     // 3) Sincronizar HOY en segundo plano con pill flotante (mismo motor del botón 🔃 HOY)
     window._nexoAutoSyncBusy=1
     let _pill=null,_seg=null
@@ -26756,6 +26776,192 @@ window._nxMetaIdsLote=async function(ids,fields,token){
     if(!j1||!window._nxMetaIdMuerto(j1.error))throw new Error((j1&&j1.error&&j1.error.message)||('Meta respondió '+r1.status))
   }
   return out
+}
+// ═════════════════════════════════════════════════════════════════════════════════════
+// (27sep26 · IDs) ANOTAR LOS IDs NUEVOS EN LA LIBRETA (meta_campanas) · PIEZA ÚNICA
+// Antes: un anuncio nuevo del día (venta del Asignador, ID del aux en Reportes Diarios, Cruce) no estaba en
+// meta_campanas → el cuadre "¿De dónde salen los pedidos?" lo marcaba 🔌 "Sin sincronizar con Meta" aunque la
+// tabla del rango sí mostrara su campaña (esa lo buscaba en vivo pero NO lo guardaba). Solo el botón 🔃 HOY lo
+// anotaba, y había que recargar.
+// Ahora: _nxCadenaIds(ids) mira cuáles NO tienen la cadena completa (anuncio → conjunto → campaña con cuenta),
+// le pregunta a Meta SOLO por esos (lector seguro _nxMetaIdsLote, lotes de 50) y guarda los 3 niveles en
+// meta_campanas (mismas columnas y onConflict de la pasada de huérfanos de 🔃 HOY). No pisa campañas ni conjuntos
+// que ya estén completos en la base. Verifica leyendo de vuelta (la base puede "aceptar" sin guardar).
+// Devuelve {total, faltaban, resueltos, guardados, muertos:[IDs que Meta no reconoce], mapa:{adId:{campId,campNombre,accId,adsetId}}}.
+// LANZA si Meta o la base no respondieron: lo resuelto YA quedó guardado y e.parcial trae lo que sí se sabe →
+// quien la llama reintenta en amarillo con _nxCadenaReintento. Dos llamadas con los mismos IDs comparten la consulta.
+// Interruptor: window.NX_CADENA_V1=true → todos los que la llaman vuelven a su camino de antes.
+// ═════════════════════════════════════════════════════════════════════════════════════
+// adId → hora en que Meta dijo "no lo reconozco" (¿mal escrito, borrado o sin permiso?). Se recuerda 24 h en ESTE navegador
+// (solo para no volver a preguntarle a Meta en cada carga; si se borra, simplemente se pregunta otra vez).
+window._nxCadenaMuertos=window._nxCadenaMuertos||(()=>{try{const o=JSON.parse(localStorage.getItem('nx_ids_muertos')||'{}'),h=Date.now(),m={};for(const k in o)if(h-(+o[k]||0)<864e5)m[k]=+o[k];return m}catch(_){return{}}})()
+window._nxCadenaEsMuerto=function(id){const t=window._nxCadenaMuertos[id];return !!t&&(Date.now()-(+t||0))<864e5}
+window._nxCadenaMuertoMarcar=function(id){window._nxCadenaMuertos[id]=Date.now();try{localStorage.setItem('nx_ids_muertos',JSON.stringify(window._nxCadenaMuertos))}catch(_){}}
+window._nxCadenaEnCurso=window._nxCadenaEnCurso||{} // adId → promesa de la consulta que ya va en camino
+window._nxCadenaIds=async function(idsIn,opts){
+  opts=opts||{}
+  const ahoraIso=()=>new Date().toISOString()
+  const lotes=(a,n)=>{const o=[];for(let i=0;i<a.length;i+=n)o.push(a.slice(i,i+n));return o}
+  const todos=[...new Set((idsIn||[]).map(x=>String(x==null?'':x).trim()).filter(x=>x.length>5))]
+  const res={total:todos.length,faltaban:0,resueltos:0,muertos:[],mapa:{}}
+  if(!todos.length)return res
+  const leerBD=async(nivel,campo,vals,cols)=>{
+    const out=[]
+    for(const l of lotes(vals,300)){
+      const{data,error}=await sb.from('meta_campanas').select(cols).eq('nivel',nivel).in(campo,l)
+      if(error)throw new Error('meta_campanas ('+nivel+'): '+error.message)
+      for(const r of (data||[]))out.push(r)
+    }
+    return out
+  }
+  // cadena que la base YA tiene para una lista de anuncios → {adId:{campId,campNombre,accId,adsetId}}
+  const cadenaBD=async(ids)=>{
+    const out={}
+    if(!ids.length)return out
+    const adPar={},asPar={},cpInfo={}
+    for(const r of await leerBD('ad','meta_id',ids,'meta_id,parent_id'))if(r.parent_id)adPar[String(r.meta_id)]=String(r.parent_id)
+    const asIds=[...new Set(Object.values(adPar))]
+    if(asIds.length)for(const r of await leerBD('adset','meta_id',asIds,'meta_id,parent_id'))if(r.parent_id)asPar[String(r.meta_id)]=String(r.parent_id)
+    const cpIds=[...new Set(Object.values(asPar))]
+    if(cpIds.length)for(const r of await leerBD('campaign','meta_id',cpIds,'meta_id,account_id,nombre'))cpInfo[String(r.meta_id)]={acc:r.account_id?String(r.account_id):'',nombre:r.nombre||String(r.meta_id)}
+    for(const id of ids){
+      const s=adPar[id],c=s?asPar[s]:null,ci=c?cpInfo[c]:null
+      if(ci&&ci.acc)out[id]={campId:c,campNombre:ci.nombre,accId:ci.acc,adsetId:s}
+    }
+    return out
+  }
+  // 1) lo que la base ya sabe
+  Object.assign(res.mapa,await cadenaBD(todos))
+  const faltan=[]
+  for(const id of todos){
+    if(res.mapa[id])continue
+    // Meta solo tiene IDs de números; uno que ya dijo "no existe" no se vuelve a preguntar en 24 h (opts.forzar = preguntar igual)
+    if(!/^\d+$/.test(id)||(window._nxCadenaEsMuerto(id)&&!opts.forzar)){if(!window._nxCadenaEsMuerto(id))window._nxCadenaMuertoMarcar(id);res.muertos.push(id);continue}
+    faltan.push(id)
+  }
+  res.faltaban=faltan.length
+  if(!faltan.length)return res
+  // 2) preguntar a Meta SOLO lo que falta, lote por lote, y guardarlo (lo guardado queda aunque un lote después falle)
+  const preguntar=async(ids)=>{
+    const r={mapa:{},muertos:[],resueltos:0}
+    try{
+      const tk=await getConfig('meta_access_token')
+      if(!tk)throw new Error('Sin token de Meta')
+      const leerMeta=async(lista,fields)=>{const o={};for(const l of lotes(lista,50)){const j=await window._nxMetaIdsLote(l,fields,tk);for(const k of Object.keys(j||{}))o[k]=j[k]}return o}
+      for(const lote of lotes(ids,50)){
+        const ads=await leerMeta(lote,'name,status,effective_status,adset_id,campaign_id,account_id')
+        // conjuntos y campañas: se piden a Meta solo los que NO están completos en la base (no se pisa lo que ya está)
+        const asNec=[...new Set(Object.values(ads).map(a=>(a&&a.adset_id)?String(a.adset_id):'').filter(Boolean))]
+        const cpNec=[...new Set(Object.values(ads).map(a=>(a&&a.campaign_id)?String(a.campaign_id):'').filter(Boolean))]
+        const asBD={},cpBD={}
+        if(asNec.length)for(const x of await leerBD('adset','meta_id',asNec,'meta_id,parent_id'))if(x.parent_id)asBD[String(x.meta_id)]=1
+        if(cpNec.length)for(const x of await leerBD('campaign','meta_id',cpNec,'meta_id,account_id,nombre'))if(x.account_id)cpBD[String(x.meta_id)]=x.nombre||String(x.meta_id)
+        const sets=await leerMeta(asNec.filter(x=>!asBD[x]),'name,status,effective_status,campaign_id,account_id')
+        const camps=await leerMeta(cpNec.filter(x=>!cpBD[x]),'name,status,effective_status,objective,account_id')
+        const fC=[],fS=[],fA=[]
+        for(const[cid,c]of Object.entries(camps))fC.push({meta_id:cid,account_id:(c.account_id||'').replace('act_',''),nivel:'campaign',nombre:c.name||'',estado:c.effective_status||c.status||'',objetivo:c.objective||'',synced_at:ahoraIso()})
+        for(const[sid,s]of Object.entries(sets))fS.push({meta_id:sid,account_id:(s.account_id||'').replace('act_',''),nivel:'adset',parent_id:s.campaign_id||'',nombre:s.name||'',estado:s.effective_status||s.status||'',synced_at:ahoraIso()})
+        for(const[aid,a]of Object.entries(ads)){if(a&&a.adset_id&&a.campaign_id)fA.push({meta_id:aid,account_id:(a.account_id||'').replace('act_',''),nivel:'ad',parent_id:String(a.adset_id),nombre:a.name||'',estado:a.effective_status||a.status||'',synced_at:ahoraIso()})}
+        // de arriba hacia abajo (campaña → conjunto → anuncio): si algo se corta, nunca queda un anuncio colgando de la nada
+        await window._nxUpsertLote('meta_campanas',fC,'meta_id,nivel')
+        await window._nxUpsertLote('meta_campanas',fS,'meta_id,nivel')
+        await window._nxUpsertLote('meta_campanas',fA,'meta_id,nivel')
+        // lo que Meta sí sabe queda en memoria aunque la base falle (el cuadre de ESTA carga ya lo usa)
+        for(const id of lote){
+          const a=ads[id]
+          if(!a||!a.campaign_id||!a.adset_id){r.muertos.push(id);continue}
+          const cid=String(a.campaign_id),sid=String(a.adset_id),acc=String(a.account_id||'').replace('act_','')
+          const nom=(camps[cid]&&camps[cid].name)||cpBD[cid]||cid
+          r.mapa[id]={campId:cid,campNombre:nom,accId:acc,adsetId:sid}
+        if(window._nxCadenaMuertos[id]){delete window._nxCadenaMuertos[id];try{localStorage.setItem('nx_ids_muertos',JSON.stringify(window._nxCadenaMuertos))}catch(_){}}
+          try{(window._nexoAdCampCache=window._nexoAdCampCache||{})[id]={campId:cid,nombre:nom,accId:acc,adsetId:sid,adsetNombre:(sets[sid]&&sets[sid].name)||sid}}catch(_){}
+        }
+        // verificar leyendo de vuelta: la base puede "aceptar" sin guardar (RLS silencioso)
+        const idsG=fA.map(f=>f.meta_id),ok=await cadenaBD(idsG),noGuardo=idsG.filter(id=>!ok[id])
+        r.resueltos+=idsG.length-noGuardo.length
+        if(noGuardo.length)throw new Error('La base no guardó '+noGuardo.length+' ID(s) (¿permisos?)')
+      }
+    }catch(e){if(e&&!e.parcial)try{e.parcial=r}catch(_){};throw e}
+    return r
+  }
+  // si otra llamada ya está preguntando por alguno de estos IDs, se espera esa misma (no se pregunta 2 veces)
+  const mios=faltan.filter(id=>!window._nxCadenaEnCurso[id])
+  const ajenas=[...new Set(faltan.filter(id=>window._nxCadenaEnCurso[id]).map(id=>window._nxCadenaEnCurso[id]))]
+  let pMios=null
+  if(mios.length){
+    pMios=preguntar(mios)
+    for(const id of mios)window._nxCadenaEnCurso[id]=pMios
+    const soltar=()=>{for(const id of mios)if(window._nxCadenaEnCurso[id]===pMios)delete window._nxCadenaEnCurso[id]}
+    pMios.then(soltar,soltar)
+  }
+  const enFalta=new Set(faltan)
+  const juntar=(r)=>{
+    if(!r)return
+    for(const id of Object.keys(r.mapa||{}))if(enFalta.has(id))res.mapa[id]=r.mapa[id]
+    for(const id of (r.muertos||[]))if(enFalta.has(id)&&!res.mapa[id]){window._nxCadenaMuertoMarcar(id);if(res.muertos.indexOf(id)<0)res.muertos.push(id)}
+  }
+  let err=null
+  res.guardados=0 // cuántos guardó ESTA llamada (verificados leyendo de vuelta)
+  for(const p of (pMios?[pMios]:[]).concat(ajenas)){
+    try{const r=await p;juntar(r);if(p===pMios)res.guardados=r.resueltos||0}
+    catch(e){juntar(e&&e.parcial);if(p===pMios)res.guardados=(e&&e.parcial&&e.parcial.resueltos)||0;if(!err)err=e}
+  }
+  res.resueltos=faltan.filter(id=>res.mapa[id]).length // asociados (en la base o, si la base falló, al menos en memoria)
+  if(err){const e2=new Error((err&&err.message)||String(err));e2.code=err&&err.code;e2.parcial=res;throw e2} // error NUEVO: el original lo comparten otras llamadas
+  if(res.resueltos)try{console.info(`[IDs] ${res.resueltos} ID(s) nuevo(s) asociados a su campaña y guardados (${opts.origen||'—'})`)}catch(_){}
+  return res
+}
+// Si Meta o la base no respondieron: se sigue intentando SOLO, en amarillo, con % y cuenta atrás (10 s · 30 s · cada
+// 60 s, sin límite) con el motor único _nxHastaQueCargue. Lo que NO se arregla solo (permiso de Meta #200, sin token,
+// la base no deja guardar) sale ⛔ y NO se insiste (mismo trato que el resto de NEXO); igual se cura solo en la próxima
+// carga del resumen, que vuelve a intentarlo.
+// UN solo reintento por origen: si llegan IDs nuevos mientras hay uno vivo, se JUNTAN a su lista (no se apagan entre
+// sí ni se amontonan vueltas contra Meta). alTerminar(res) se llama cuando por fin quedaron anotados.
+window._nxCadenaEsPermanente=(e)=>window._nxEsSinPermiso(e)||/Sin token|no guardó|row-level security|permission denied|violates/i.test(String((e&&e.message)||e||''))
+window._nxCadenaPend=window._nxCadenaPend||{} // origen → {ids:Set, fins:[]} lo que espera el reintento de ese origen
+window._nxCadenaReintento=function(ids,origen,err,alTerminar){
+  try{
+    if(window.NX_CADENA_V1)return
+    const nuevos=[...new Set((ids||[]).map(x=>String(x==null?'':x).trim()).filter(x=>x.length>5))]
+    if(!nuevos.length)return
+    const org=origen||'ids',clave='cadena-'+org
+    if(err&&window._nxCadenaEsPermanente(err)){
+      const m=String((err&&err.message)||err||'').slice(0,90),n0=nuevos.length
+      console.warn('[IDs] no se puede arreglar solo ('+org+'): '+m)
+      if(org==='resumen'||org==='rango')window._nxPillCarga(clave,`⛔ No pude asociar ${n0} ID${n0>1?'s':''} nuevo${n0>1?'s':''} con su campaña: ${m.replace(/</g,'&lt;')} · no se reintenta (revisa el token o los permisos)`,'carga')
+      return
+    }
+    const pend=window._nxCadenaPend[org]=window._nxCadenaPend[org]||{ids:new Set(),fins:[]}
+    for(const id of nuevos)pend.ids.add(id)
+    if(typeof alTerminar==='function'&&pend.fins.indexOf(alTerminar)<0)pend.fins.push(alTerminar)
+    const lista=[...pend.ids],n=lista.length
+    let ultimo=null
+    window._nxHastaQueCargue(clave,{ // misma clave → el motor apaga la vuelta anterior y sigue con la lista juntada
+      titulo:`Asociando ${n} ID${n>1?'s':''} nuevo${n>1?'s':''} con su campaña`,total:1,
+      pendientes:[{nombre:'IDs sin campaña',hacer:async()=>{
+        try{ultimo=await window._nxCadenaIds(lista,{origen:org})}
+        catch(e){if(window._nxCadenaEsPermanente(e)&&!window._nxEsSinPermiso(e))throw new Error('(permission) '+((e&&e.message)||e));throw e} // ⛔ el motor lo deja quieto
+      }}],
+      alTerminar:async()=>{
+        const p=window._nxCadenaPend[org];if(p===pend)delete window._nxCadenaPend[org]
+        if(!ultimo)return // quedó ⛔: nada que corregir
+        for(const f of pend.fins){try{await f(ultimo)}catch(e){console.warn('[IDs] al terminar:',e&&e.message)}}
+      }
+    })
+  }catch(e){console.warn('[IDs] no pude programar el reintento:',e&&e.message)}
+}
+// Repinta EN SITIO (sin moverte ni recargar) las tablas del rango de los productos que tienes abiertos,
+// para que el cuadre por día tome los IDs recién anotados. Un grupo cerrado queda marcado y se repinta al abrirlo.
+window._nxCadenaRepintar=function(){
+  try{
+    document.querySelectorAll('[id^="cuadf_"][id$="-wrap"]').forEach(w=>{
+      const slug=w.id.slice(6,-5)
+      if(!slug||!window._rpFusionRango||!w.isConnected)return
+      const bd=document.getElementById('fusgrp-bd-'+slug)
+      if(bd&&bd.style.display==='none'){(window._nxCadenaSucio=window._nxCadenaSucio||{})[slug]=1;return} // cerrado: se repinta cuando lo abras
+      window._nxRefrescoEnSitio('cuadf_'+slug,()=>window._rpFusionRango(slug,'cuadf_'+slug)).catch(e=>console.warn('[IDs] repintar:',e&&e.message))
+    })
+  }catch(e){console.warn('[IDs] repintar:',e&&e.message)}
 }
 window._nxHoraBogota=()=>{try{return new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit',timeZone:'America/Bogota'})}catch(_){return ''}}
 window._nxGastoOrigenHtml=function(){
@@ -27333,6 +27539,28 @@ async function _renderResumenProductos(desde,hasta,hoy){
           continue
         }
         adToCuenta[adId]={accId:acc,accNombre:_accNombre[acc]||acc,campId:camp,campNombre:_campNombre[camp]||camp}
+      }
+      // (27sep26 · IDs) IDs de ventas/reportes SIN cadena en la libreta (🔌 sin sync o huérfanos) → se anotan SOLOS
+      // aquí mismo, mientras carga (antes: solo con el botón 🔃 HOY + recargar). Tope de 8 s para no frenar la
+      // pantalla: si Meta tarda más, sigue en segundo plano (amarillo, sin límite) y al terminar corrige el cuadre
+      // en sitio. Interruptor: window.NX_CADENA_V1=true → como antes.
+      if(window._nxCadenaIds&&!window.NX_CADENA_V1){
+        const _sinCad=_adIds.filter(id=>!(adToCuenta[id]&&adToCuenta[id].accId))
+        if(_sinCad.length){
+          const _llenarCad=(mapa)=>{let n=0;for(const id of _sinCad){const c=mapa&&mapa[id];if(c&&c.campId&&c.accId){adToCuenta[id]={accId:c.accId,accNombre:_accNombre[c.accId]||c.accId,campId:c.campId,campNombre:c.campNombre||_campNombre[c.campId]||c.campId};n++}}return n}
+          const _finCad=(r)=>{const n=_llenarCad(r&&r.mapa);try{if(n)window._nxPillCarga('cadena-resumen',`✅ ${n} ID${n>1?'s':''} nuevo${n>1?'s':''} asociado${n>1?'s':''} con su campaña`,'ok');else window._nxPillCarga('cadena-resumen','','quitar')}catch(_){};if(n)window._nxCadenaRepintar()}
+          try{_resPintar(`asociando ${_sinCad.length} ID(s) nuevo(s) con su campaña`)}catch(_){}
+          const _pCad=window._nxCadenaIds(_sinCad,{origen:'resumen'})
+          let _rCad=null,_eCad=null
+          try{_rCad=await Promise.race([_pCad,new Promise(r=>setTimeout(()=>r(null),8000))])}catch(e){_eCad=e}
+          if(_rCad){const _nC=_llenarCad(_rCad.mapa);if(_nC)console.info('[cuadre ventas] IDs nuevos asociados al cargar:',_nC)}
+          else if(_eCad){if(_eCad.parcial)_llenarCad(_eCad.parcial.mapa);window._nxCadenaReintento(_sinCad,'resumen',_eCad,_finCad)}
+          else{
+            // Meta va lento: la pantalla sigue cargando y esto termina atrás
+            try{window._nxPillCarga('cadena-resumen',`⏳ Asociando ${_sinCad.length} ID(s) nuevo(s) con su campaña… (Meta va lento)`,'carga')}catch(_){}
+            _pCad.then(_finCad,(e)=>{try{window._nxPillCarga('cadena-resumen','','quitar')}catch(_){};if(e&&e.parcial)_llenarCad(e.parcial.mapa);window._nxCadenaReintento(_sinCad,'resumen',e,_finCad)})
+          }
+        }
       }
     }
   }catch(e){console.warn('[cuadre ventas] no se pudo armar ad→cuenta:',e&&e.message)}
@@ -28562,7 +28790,7 @@ function _renderProductoCardResumen(data,ranking){
     // Sin sincronizar: el ad_id NO existe en meta_campanas (falta sync o ID mal escrito). CERRADO al inicio.
     // Mejora 3: al ABRIR, consulta Meta en vivo a qué campaña pertenece cada ID, agrupa por campaña
     // (misma campaña = una sola fila con desglose de IDs) y deja asignar producto (1 a 1 o TODAS de una).
-    const _sinRows=Object.entries(cu.sinSyncIds||{}).sort((a,b)=>b[1]-a[1]).map(([adId,n],i)=>`<div style="display:flex;align-items:center;font-size:11.5px;color:var(--muted);padding:6px 8px;background:${i%2===0?'rgba(255,255,255,.025)':'transparent'};border-radius:5px"><span style="font-family:monospace">🖼️ ${_esc(adId)}</span>${_btnCopy(adId,'ID del anuncio')}<span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px">${n}</span></div>`).join('')
+    const _sinRows=Object.entries(cu.sinSyncIds||{}).sort((a,b)=>b[1]-a[1]).map(([adId,n],i)=>`<div style="display:flex;align-items:center;font-size:11.5px;color:var(--muted);padding:6px 8px;background:${i%2===0?'rgba(255,255,255,.025)':'transparent'};border-radius:5px"><span style="font-family:monospace">🖼️ ${_esc(adId)}</span>${_btnCopy(adId,'ID del anuncio')}${(window._nxCadenaEsMuerto&&window._nxCadenaEsMuerto(adId))?'<span style="margin-left:8px;font-size:10px;color:var(--amber)" title="Meta no reconoce este ID con el token de NEXO: revisa que esté bien escrito en el reporte o en la asignación, o que la cuenta siga compartida (27sep26 · IDs)">⚠️ ¿ID mal escrito, borrado o sin permiso?</span>':''}<span style="margin-left:auto;color:var(--text);font-weight:700;padding-left:10px">${n}</span></div>`).join('')
     if(cu.sinSync>0){try{(window._rpSinSyncData=window._rpSinSyncData||{})[_cid+'_s']=cu.sinSyncIds||{}}catch(_){}}
     const _sinHtml=cu.sinSync>0?`
       <div onclick="window._rpToggleSinSync('${_cid}_s')" style="cursor:pointer;display:flex;align-items:center;font-size:13px;color:var(--text);padding:5px 0" title="El ad_id no aparece en meta_campanas: falta correr Sync de la cuenta o el ID quedó mal escrito en el reporte. Al abrir, se busca EN VIVO en Meta a qué campaña pertenece cada ID.">
@@ -30958,6 +31186,8 @@ window._rpFusGrpToggle=function(slug,forceOpen){
   // NUEVO (11jul26 · Auto-sync HOY): al ABRIR el producto, en segundo plano se decide si toca
   // sincronizar hoy (asignaciones nuevas o datos >10 min). No bloquea nada: la vista abre igual.
   try{if(window._nexoAutoSyncHoy)setTimeout(()=>{window._nexoAutoSyncHoy(slug)},0)}catch(_){}
+  // (27sep26 · IDs) si mientras estaba cerrado se anotaron IDs nuevos (tabla ya armada por la precarga), se repinta al abrir
+  try{if(window._nxCadenaSucio&&window._nxCadenaSucio[slug]&&window._rpFusionRango&&document.getElementById('cuadf_'+slug+'-wrap')){delete window._nxCadenaSucio[slug];setTimeout(()=>{window._rpFusionRango(slug,'cuadf_'+slug)},0)}}catch(_){}
   const cidF='cuadf_'+slug
   // MEJORA LAZY (3jul26): el PRIMER desglose paga la carga de vivos (estados + entrega + gasto
   // por anuncio) que antes pagaba el arranque. Se avisa con un status arriba del grupo (sin pisar
@@ -32419,7 +32649,16 @@ window._rpFusionRango=async function(slug,cidF){
           for(const idP of (r.ad_ids||'').split(/[\n,;\s]+/).map(s=>s.trim()).filter(s=>s.length>5)){if(!_adDeCamp[idP])_pendHf[idP]=1}
         }
         const _hfIds=Object.keys(_pendHf)
-        if(_hfIds.length){
+        if(_hfIds.length&&window._nxCadenaIds&&!window.NX_CADENA_V1){
+          // (27sep26 · IDs) misma pieza única: pregunta a Meta SOLO lo que no esté en la base y lo GUARDA en meta_campanas
+          // (antes se resolvía solo en memoria → aquí se veía la campaña pero el cuadre seguía diciendo 🔌 sin sync)
+          let _mH=null
+          try{_mH=(await window._nxCadenaIds(_hfIds,{origen:'rango'})).mapa}
+          catch(_eH){_mH=(_eH&&_eH.parcial&&_eH.parcial.mapa)||null;window._nxCadenaReintento(_hfIds,'rango',_eH,()=>window._nxCadenaRepintar())}
+          let _nHf=0
+          for(const idH of _hfIds){const ckH=(_mH&&_mH[idH]&&_mH[idH].campId)?String(_mH[idH].campId):'';if(ckH&&camps.indexOf(ckH)>=0){_adDeCamp[idH]=ckH;_nHf++}}
+          if(_nHf)console.log('[rango] IDs huérfanos del aux asociados (y guardados):',_nHf)
+        }else if(_hfIds.length){
           const _tkHf=await getConfig('meta_access_token')
           if(_tkHf){
             let _nHf=0

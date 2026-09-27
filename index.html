@@ -930,6 +930,73 @@ window._nxProdDropiUrl=(idONombre)=>{
     return (p&&p.dropi_url)?String(p.dropi_url).trim():''
   }catch(_){return ''}
 }
+// ═══ 🔑 NUEVO (26sep26 · ID de SellerChat): la LLAVE del agente es su ID de SellerChat ═══════════
+// · El ID de SellerChat (ej. 6bac3b00-6d7a-4f95-95ff-57d6b4b438f5) es FIJO y ÚNICO por asistente.
+//   El nombre del agente es solo una etiqueta. El ID interno del agente (agentes.id) sigue siendo
+//   el respaldo invisible con el que se amarran producto_agentes y mapeos.agente_id.
+// · La URL YA NO se escribe a mano: se ARMA aquí, en UN SOLO lugar, a partir del ID. Todas las
+//   secciones (Productos, Asignador, Hoja Base, botones 🔗) la toman de estas funciones.
+// · Regla de oro: 1 ID de SellerChat = 1 producto PARA SIEMPRE (índice único en BD + chequeo en pantalla).
+// · TOLERANTE: si la columna agentes.sellerchat_id aún no existe, el ID se saca de la URL vieja
+//   guardada (primer ID después de panel.sellerchat.ai/) y todo sigue andando igual que antes.
+const NX_SC_UUID_RE=/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+window._nxScId=v=>{const m=String(v==null?'':v).match(NX_SC_UUID_RE);return m?m[0].toLowerCase():''} // de un ID o de una URL → ID limpio ('' si no hay)
+window._nxScIdAg=a=>a?(window._nxScId(a.sellerchat_id)||window._nxScId(a.sellerchat_url)):'' // ID vigente de un agente (columna nueva → o la URL vieja)
+window._nxScUrlDeId=id=>{const k=window._nxScId(id);return k?`https://panel.sellerchat.ai/${k}/chat`:''} // ÚNICO lugar donde se arma la URL
+window._nxScUrl=a=>{const k=window._nxScIdAg(a);return k?window._nxScUrlDeId(k):String((a&&a.sellerchat_url)||'').trim()} // sin ID → la URL vieja tal cual (no se pierde nada)
+// SQL que activa la columna del ID (se muestra en los avisos amarillos si aún falta en Supabase)
+window._nxScSql=`ALTER TABLE agentes ADD COLUMN IF NOT EXISTS sellerchat_url text;
+ALTER TABLE agentes ADD COLUMN IF NOT EXISTS sellerchat_id text;
+UPDATE agentes SET sellerchat_id = lower(substring(sellerchat_url from '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')) WHERE sellerchat_id IS NULL AND sellerchat_url ~ '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
+CREATE UNIQUE INDEX IF NOT EXISTS agentes_sellerchat_id_unico ON agentes (lower(sellerchat_id)) WHERE sellerchat_id IS NOT NULL;`
+window._nxScSqlHTML=()=>`<div class="alert alert-amber" style="margin-top:6px;line-height:1.6">⚠️ Falta activar la columna del <b>ID de SellerChat</b> en Supabase. Mientras tanto el ID se guarda dentro de la URL y funciona igual. Para dejarlo fijo, ejecuta en Supabase (SQL Editor):<br><code style="white-space:pre-wrap;font-size:10.5px">${window._nxScSql.replace(/</g,'&lt;')}</code></div>`
+// Select TOLERANTE de agentes: prueba de la consulta más completa a la clásica (columnas nuevas pueden no existir aún).
+// armar(cols) debe devolver la consulta de Supabase ya armada con esas columnas.
+window._nxAgSelect=async(armar)=>{
+  const niveles=['id,nombre,activo,sellerchat_url,vigente,sellerchat_id','id,nombre,activo,sellerchat_url,vigente','id,nombre,activo']
+  let ult={data:null,error:null}
+  for(const cols of niveles){
+    try{const r=await armar(cols);if(r&&!r.error)return r;ult=r||ult}catch(e){ult={data:null,error:e}}
+  }
+  return ult
+}
+// ¿Este agente ya tiene pedidos? (mapeos del Asignador por agente_id + subidas de la Hoja Base).
+// Ante CUALQUIER error de lectura responde true (lo seguro: se archiva, nunca se borra de verdad).
+window._nxAgTienePedidos=async(agenteId,nombre)=>{
+  try{
+    const q1=await sb.from('mapeos').select('agente_id',{count:'exact',head:true}).eq('agente_id',agenteId)
+    if(q1.error)return true
+    if((q1.count||0)>0)return true
+    if(nombre){
+      const q2=await sb.from('constructor_subidas').select('id',{count:'exact',head:true}).eq('tipo','export').eq('agente',nombre).neq('resultado','sin_ventas')
+      if(q2.error)return true
+      if((q2.count||0)>0)return true
+    }
+    const q3=await sb.from('constructor_subidas').select('id',{count:'exact',head:true}).eq('tipo','export').eq('detalle->>agente_id',String(agenteId))
+    if(!q3.error&&(q3.count||0)>0)return true
+    return false
+  }catch(_){return true}
+}
+// Busca si un ID de SellerChat ya pertenece a OTRO agente (activo o archivado) → {agente, productoNombre} o null.
+// Lectura fallida → devuelve {error} (quien llama NO guarda: primero se confirma que el ID esté libre).
+window._nxScDueno=async(scId,excluirAgenteId)=>{
+  const k=window._nxScId(scId);if(!k)return null
+  const r=await window._nxAgSelect(cols=>sb.from('agentes').select(cols))
+  if(r.error)return{error:r.error.message||String(r.error)}
+  const otro=(r.data||[]).find(a=>String(a.id)!==String(excluirAgenteId||'')&&window._nxScIdAg(a)===k)
+  if(!otro)return null
+  let prodNom=''
+  try{
+    const{data:rel}=await sb.from('producto_agentes').select('producto_id').eq('agente_id',otro.id).limit(1)
+    const pid=rel&&rel[0]&&rel[0].producto_id
+    if(pid!=null){
+      const pm=(productos||[]).find(p=>String(p.id)===String(pid))
+      if(pm)prodNom=pm.nombre
+      else{const{data:pr}=await sb.from('productos').select('nombre').eq('id',pid).maybeSingle();prodNom=(pr&&pr.nombre)||''}
+    }
+  }catch(_){}
+  return{agente:otro,productoNombre:prodNom}
+}
 // Caché de agentes por producto (id, nombre, sellerchat_url, vigente) — solo activos. TTL 60s.
 window._nxAgCache=null
 window._nxCargarAgentesUrl=async(force)=>{
@@ -937,17 +1004,12 @@ window._nxCargarAgentesUrl=async(force)=>{
     const _now=Date.now()
     if(!force&&window._nxAgCache&&(_now-window._nxAgCache.t)<60000)return window._nxAgCache
     const{data:rels}=await sb.from('producto_agentes').select('producto_id,agente_id')
-    let ags=null
-    try{
-      const r1=await sb.from('agentes').select('id,nombre,activo,sellerchat_url,vigente').eq('activo',true)
-      if(r1.error)throw r1.error
-      ags=r1.data
-    }catch(_e){ // columnas nuevas aún no existen → select clásico (todos cuentan como vigentes, sin URL)
-      const r2=await sb.from('agentes').select('id,nombre,activo').eq('activo',true)
-      ags=r2.data
-    }
+    // 🔑 (26sep26): select TOLERANTE en 3 niveles (con sellerchat_id → con URL/vigente → clásico). Columnas nuevas
+    // que aún no existan → baja de nivel solo (en el clásico todos cuentan como vigentes, sin URL — igual que antes).
+    const _rAg=await window._nxAgSelect(cols=>sb.from('agentes').select(cols).eq('activo',true))
+    let ags=(_rAg&&_rAg.data)||null
     const byId={}
-    for(const a of (ags||[]))byId[String(a.id)]={id:String(a.id),nombre:a.nombre||'',url:(a.sellerchat_url||'').trim(),vigente:a.vigente!==false}
+    for(const a of (ags||[]))byId[String(a.id)]={id:String(a.id),nombre:a.nombre||'',url:window._nxScUrl(a),scId:window._nxScIdAg(a),vigente:a.vigente!==false} // 🔑 url ARMADA desde el ID de SellerChat (una sola función)
     const byProd={}
     for(const r of (rels||[])){
       const a=byId[String(r.agente_id)]
@@ -6724,37 +6786,60 @@ async function renderAgentesProd(id){
   }
   const ids=(rels||[]).map(r=>r.agente_id)
   let agentes=[]
+  let archivados=[] // 📦 (26sep26): agentes ARCHIVADOS de este producto (activo=false) — se listan aparte con ♻️ Restaurar
+  let _faltaColSc=false // 🔑 (26sep26): la columna agentes.sellerchat_id aún no existe en Supabase
   if(ids.length){
-    // NUEVO (7jul26 · Mejoras 1+4): select TOLERANTE — trae también sellerchat_url y vigente.
-    // Si esas columnas aún no existen en la BD, cae al select clásico y todo sigue andando.
-    let data=null,error=null
-    try{
-      const r1=await sb.from('agentes').select('id,nombre,activo,sellerchat_url,vigente').in('id',ids).eq('activo',true).order('nombre')
-      if(r1.error)throw r1.error
-      data=r1.data
-    }catch(_e){
-      ;({data,error}=await sb.from('agentes').select('id,nombre,activo').in('id',ids).eq('activo',true).order('nombre'))
+    // NUEVO (7jul26 · Mejoras 1+4) + 🔑 (26sep26): select TOLERANTE en 3 niveles — trae sellerchat_id, sellerchat_url y vigente.
+    // Si esas columnas aún no existen en la BD, baja solo hasta el select clásico y todo sigue andando.
+    // 📦 (26sep26): se traen activos Y archivados; los activos se muestran igual que siempre (activo=true).
+    const _rAg=await window._nxAgSelect(cols=>sb.from('agentes').select(cols).in('id',ids).order('nombre'))
+    if(_rAg.error){
+      cont.innerHTML=`<div class="alert alert-red">Error cargando agentes: ${_rAg.error.message||_rAg.error}</div>`;return
     }
-    if(error){
-      cont.innerHTML=`<div class="alert alert-red">Error cargando agentes: ${error.message}</div>`;return
-    }
-    agentes=data||[]
+    const _todos=_rAg.data||[]
+    _faltaColSc=_todos.length>0&&!('sellerchat_id' in _todos[0])
+    agentes=_todos.filter(a=>a.activo===true)
+    archivados=_todos.filter(a=>a.activo===false)
   }
+  const _escA=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+  const _jsA=s=>String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;')
+  // 📦 (26sep26): lista plegable de ARCHIVADOS (no venden; su historial sigue completo) con ♻️ Restaurar
+  const _archHTML=archivados.length?`
+    <details style="margin-top:10px">
+      <summary style="cursor:pointer;font-size:12px;color:var(--muted)">📦 Agentes archivados de este producto (${archivados.length}) — no venden, pero su historial sigue completo</summary>
+      <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
+        ${archivados.map(a=>{const _k=window._nxScIdAg(a);return `<div class="card" style="padding:6px 10px;opacity:.8;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="font-family:monospace;font-size:12px;color:var(--text)">🤖 ${_escA(a.nombre)}</span>
+          <span style="font-size:10px;color:var(--muted);font-family:monospace">${_k?'🔑 '+_k:'🔑 sin ID'}</span>
+          <button class="btn-sm btn-outline" onclick="window._agRestaurar('${a.id}','${id}','${_jsA(a.nombre)}')" title="Restaurar: vuelve a la lista de agentes de este producto (con su mismo ID de SellerChat)" style="margin-left:auto;padding:2px 8px;font-size:11px;border-color:var(--green);color:var(--green)">♻️ Restaurar</button>
+        </div>`}).join('')}
+      </div>
+    </details>`:''
   if(!agentes.length){
     cont.innerHTML=`<div class="alert alert-amber" style="margin-bottom:10px">⚠️ Este producto no tiene agentes asignados. Crea el primero para poder vender este producto desde el asignador.</div>
       <div style="display:flex;gap:8px"><button class="btn-sm btn-primary" onclick="modalCrearAgente('${id}')">➕ Crear nuevo agente</button></div>
+      ${_archHTML}
       <div id="agentes-msg-${id}" style="margin-top:8px"></div>`
     return
   }
+  // 📦 (26sep26): ¿cada agente ya tiene pedidos? → decide 📦 Archivar (con pedidos) o 🗑️ Eliminar (sin pedidos) y el 🔒 del ID
+  const _conPed={}
+  try{await Promise.all(agentes.map(async a=>{_conPed[a.id]=await window._nxAgTienePedidos(a.id,a.nombre)}))}catch(_){}
   cont.innerHTML=`
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
       <div style="font-size:12px;color:var(--muted)">${agentes.length} agente${agentes.length===1?'':'s'} asignado${agentes.length===1?'':'s'} a este producto</div>
       <button class="btn-sm btn-primary" onclick="modalCrearAgente('${id}')" style="margin-left:auto">➕ Crear nuevo agente</button>
     </div>
+    ${_faltaColSc?window._nxScSqlHTML():''}
     <div id="agentes-chips-${id}" style="display:flex;flex-direction:column;gap:8px">
       ${agentes.map(a=>{
         const _vig=a.vigente!==false
-        const _urlA=(a.sellerchat_url||'').replace(/"/g,'&quot;')
+        // 🔑 (26sep26): ID de SellerChat = la llave del agente. La URL se ARMA sola (window._nxScUrlDeId).
+        const _scCol=window._nxScId(a.sellerchat_id) // ID ya guardado en la columna nueva
+        const _sc=window._nxScIdAg(a)               // ID vigente (columna nueva o sacado de la URL vieja)
+        const _deUrl=!_scCol&&!!_sc                 // se sacó de la URL que ya estaba guardada → falta dejarlo fijo
+        const _ped=!!_conPed[a.id]                  // 📦 ya tiene pedidos
+        const _lock=_ped&&!!_scCol                  // 🔒 con pedidos y el ID ya fijo → ya no se cambia
         return `
         <div class="card" style="padding:8px 10px;border:1px solid ${_vig?'var(--border)':'rgba(239,68,68,.45)'};${_vig?'':'opacity:.75'}">
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
@@ -6762,17 +6847,144 @@ async function renderAgentesProd(id){
             <span style="font-size:9.5px;font-weight:800;padding:1px 8px;border-radius:999px;${_vig?'background:rgba(34,197,94,.15);color:var(--green);border:1px solid var(--green)':'background:rgba(239,68,68,.12);color:var(--red,#ef4444);border:1px solid var(--red,#ef4444)'}" title="${_vig?'VIGENTE: el auxiliar lo ve en el Asignador y sus botones 🔗 aparecen en Reporte del día y Cruce':'NO VIGENTE: oculto para el auxiliar en el Asignador (sigue en el histórico)'}">${_vig?'✅ VIGENTE':'⛔ NO VIGENTE'}</span>
             <button class="btn-sm btn-outline" onclick="window._agToggleVigente('${a.id}','${id}',${_vig?1:0})" title="${_vig?'Apagar: dejará de verse en el Asignador':'Prender: vuelve a verse en el Asignador'}" style="padding:2px 8px;font-size:11px;border-color:${_vig?'var(--amber)':'var(--green)'};color:${_vig?'var(--amber)':'var(--green)'}">${_vig?'⏸ Apagar':'▶ Prender'}</button>
             <button class="btn-sm btn-outline" onclick="renombrarAgente('${a.id}','${id}',this)" title="Renombrar" style="padding:2px 6px;font-size:11px;border-color:var(--blue);color:var(--blue)">✏️</button>
-            <button class="btn-sm btn-outline" onclick="desactivarAgente('${a.id}','${id}','${a.nombre.replace(/'/g,"\\'")}')" title="Desactivar (queda en histórico pero no aparece)" style="padding:2px 6px;font-size:11px;border-color:var(--red);color:var(--red)">🗑️</button>
+            ${_ped
+              ?`<button class="btn-sm btn-outline" onclick="desactivarAgente('${a.id}','${id}','${_jsA(a.nombre)}')" title="Archivar: este agente YA tiene pedidos → no se borra; queda en el histórico y se puede restaurar (📦 Agentes archivados)" style="padding:2px 8px;font-size:11px;border-color:var(--amber);color:var(--amber)">📦 Archivar</button>`
+              :`<button class="btn-sm btn-outline" onclick="eliminarAgente('${a.id}','${id}','${_jsA(a.nombre)}')" title="Eliminar: este agente NUNCA tuvo pedidos → se borra de verdad" style="padding:2px 6px;font-size:11px;border-color:var(--red);color:var(--red)">🗑️</button>`}
           </div>
-          <div style="display:flex;gap:6px;align-items:center;margin-top:6px">
-            <span style="font-size:10px;color:var(--muted);white-space:nowrap">🔗 URL SellerChat:</span>
-            <input type="text" id="agurl-${a.id}" value="${_urlA}" placeholder="https://app.sellerchat.ai/... (enlace directo de ESTE agente)" autocapitalize="off" style="flex:1;font-family:monospace;font-size:10.5px;padding:4px 8px">
-            <button class="btn-sm btn-outline" onclick="window._agGuardarUrl('${a.id}','${id}',this)" title="Guardar la URL de este agente (queda amarrada a su ID único)" style="padding:3px 8px;font-size:11px;border-color:var(--green);color:var(--green)">💾</button>
-            <button class="btn-sm btn-outline" onclick="(()=>{const v=(document.getElementById('agurl-${a.id}')?.value||'').trim();if(!v){alert('Pega primero la URL de SellerChat de este agente');return}window.open(/^https?:\\/\\//i.test(v)?v:('https://'+v),'_blank','noopener')})()" title="Abrir la URL de este agente en otra pestaña" style="padding:3px 8px;font-size:11px;border-color:var(--blue,#3b82f6);color:var(--blue,#3b82f6)">🔗</button>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap">
+            <span style="font-size:10px;color:var(--muted);white-space:nowrap">🔑 ID SellerChat:</span>
+            <input type="text" id="agsc-${a.id}" value="${_sc}" placeholder="Pega aquí el ID del asistente (Ej: 6bac3b00-6d7a-4f95-95ff-57d6b4b438f5)" autocapitalize="off" spellcheck="false"${_lock?' readonly title="🔒 Bloqueado: este agente ya tiene pedidos"':''} oninput="window._agScPreview('${a.id}')" style="flex:1;min-width:220px;font-family:monospace;font-size:10.5px;padding:4px 8px${_lock?';opacity:.75;cursor:not-allowed':''}">
+            ${_lock
+              ?`<span title="🔒 El ID quedó fijo porque este agente ya tiene pedidos" style="font-size:13px">🔒</span>`
+              :`<button class="btn-sm btn-outline" onclick="window._agGuardarScId('${a.id}','${id}',this)" title="Guardar el ID de SellerChat de este agente (la URL se arma sola)" style="padding:3px 8px;font-size:11px;border-color:var(--green);color:var(--green)">💾</button>`}
           </div>
+          <div id="agsc-prev-${a.id}" style="margin-top:4px;font-size:10.5px">${window._agScPrevHTML(_sc)}</div>
+          ${_deUrl?`<div style="font-size:10.5px;color:var(--amber);margin-top:2px">🔎 ID tomado de la URL que tenías guardada — toca 💾 para dejarlo fijo.</div>`:''}
+          ${_lock?`<div style="font-size:10px;color:var(--muted);margin-top:2px">🔒 El ID quedó fijo porque este agente ya tiene pedidos.</div>`:''}
         </div>`}).join('')}
     </div>
+    ${_archHTML}
     <div id="agentes-msg-${id}" style="margin-top:8px"></div>`
+}
+// 🔑 (26sep26): vista previa del ID de SellerChat → URL armada (o aviso de que falta / está mal escrito)
+window._agScPrevHTML=(raw)=>{
+  const v=String(raw==null?'':raw).trim()
+  const k=window._nxScId(v)
+  if(k){
+    const u=window._nxScUrlDeId(k)
+    return `<span style="color:var(--muted)">🔗</span> <a href="${u}" target="_blank" rel="noopener" style="font-family:monospace;color:var(--blue,#3b82f6);word-break:break-all">${u}</a>`
+  }
+  if(v)return `<span style="color:var(--red,#ef4444);font-weight:700">❌ Eso no parece un ID de SellerChat. Debe verse así: 6bac3b00-6d7a-4f95-95ff-57d6b4b438f5</span>`
+  return `<span style="color:var(--amber);font-weight:700">⚠️ Falta ID de SellerChat — sin él, NEXO no reconoce los Excel de este agente en la Hoja Base.</span>`
+}
+window._agScPreview=(agenteId)=>{
+  const inp=document.getElementById('agsc-'+agenteId),box=document.getElementById('agsc-prev-'+agenteId)
+  if(box)box.innerHTML=window._agScPrevHTML(inp?inp.value:'')
+}
+// 🔑 (26sep26): guardar el ID de SellerChat de UN agente. Candado + regla de oro + constancia.
+window._agGuardarScId=async(agenteId,prodId,btn)=>{
+  const msg=document.getElementById('agentes-msg-'+prodId)
+  if(msg)msg.innerHTML=''
+  const raw=(document.getElementById('agsc-'+agenteId)?.value||'').trim()
+  const k=window._nxScId(raw)
+  if(!raw){if(msg)msg.innerHTML='<div class="alert alert-red">🔑 Pega el ID de SellerChat de este agente (SellerChat → el asistente → ⚙️ Ajustes → General → ID).</div>';return}
+  if(!k){if(msg)msg.innerHTML='<div class="alert alert-red">❌ Eso no es un ID de SellerChat. Debe verse así: <code>6bac3b00-6d7a-4f95-95ff-57d6b4b438f5</code></div>';return}
+  const _txtO=btn?btn.textContent:'💾'
+  const _fin=t=>{if(btn){btn.disabled=false;btn.textContent=t||_txtO}}
+  if(btn){btn.disabled=true;btn.textContent='⏳'}
+  try{
+    // 1) cómo está HOY este agente (para el candado y la constancia)
+    const rA=await window._nxAgSelect(cols=>sb.from('agentes').select(cols).eq('id',agenteId))
+    if(rA.error)throw rA.error
+    const act=(rA.data||[])[0]
+    if(!act)throw new Error('No encontré este agente en la base de datos.')
+    const antes=window._nxScIdAg(act),antesCol=window._nxScId(act.sellerchat_id)
+    // 2) 🔒 candado: con pedidos y el ID ya fijo, el ID NO se cambia
+    if(antesCol&&antesCol!==k&&await window._nxAgTienePedidos(agenteId,act.nombre)){
+      _fin();if(msg)msg.innerHTML=`<div class="alert alert-red">🔒 Este agente ya tiene pedidos y su ID de SellerChat (<code>${antesCol}</code>) quedó fijo. Si el asistente es otro, crea un agente nuevo.</div>`;return
+    }
+    // 3) regla de oro: 1 ID de SellerChat = 1 producto PARA SIEMPRE (tampoco vale el de un agente archivado)
+    const dueno=await window._nxScDueno(k,agenteId)
+    if(dueno&&dueno.error)throw new Error('No pude revisar si el ID está libre ('+dueno.error+'). Intenta de nuevo.')
+    if(dueno){
+      _fin()
+      const _en=s=>String(s==null?'':s).replace(/</g,'&lt;')
+      if(msg)msg.innerHTML=`<div class="alert alert-red">⛔ Este ID de SellerChat ya pertenece al agente <b>${_en(dueno.agente.nombre)}</b>${dueno.productoNombre?` del producto <b>${_en(dueno.productoNombre)}</b>`:''}${dueno.agente.activo===false?' (archivado)':''}.<br>Regla: <b>1 ID de SellerChat = 1 producto para siempre</b>. Si quieres vender otro producto, crea un asistente nuevo en SellerChat (puedes copiarlo con "Usar referencia").</div>`
+      return
+    }
+    if(antesCol===k){_fin('✅');setTimeout(()=>{if(btn)btn.textContent=_txtO},1500);return} // ya estaba guardado igual
+    // 4) guardar el ID + la URL ARMADA (la URL se sigue llenando para todo lo que aún la lea)
+    const url=window._nxScUrlDeId(k)
+    let _sinCol=false
+    let{error}=await sb.from('agentes').update({sellerchat_id:k,sellerchat_url:url}).eq('id',agenteId)
+    if(error&&(error.code==='42703'||error.code==='PGRST204'||/sellerchat_id/i.test(error.message||''))){ // columna nueva aún no existe → el ID viaja dentro de la URL
+      _sinCol=true
+      ;({error}=await sb.from('agentes').update({sellerchat_url:url}).eq('id',agenteId))
+    }
+    if(error){
+      if(error.code==='23505'||/duplicate|unique/i.test(error.message||'')){_fin();if(msg)msg.innerHTML='<div class="alert alert-red">⛔ Ese ID de SellerChat ya está en otro agente (la base de datos lo bloqueó). Regla: 1 ID = 1 producto para siempre.</div>';return}
+      throw error
+    }
+    logAction('agente_sellerchat_id_guardado',{agente_id:agenteId,producto_id:prodId,sellerchat_id:k,anterior:antes||null,url_anterior:act.sellerchat_url||null}).catch(()=>{})
+    try{window._nxAgCache=null}catch(_){}
+    await renderAgentesProd(prodId)
+    const m2=document.getElementById('agentes-msg-'+prodId)
+    if(m2)m2.innerHTML=`<div class="alert alert-green">✅ ID de SellerChat guardado para <b>${String(act.nombre||'').replace(/</g,'&lt;')}</b>. La URL se arma sola.</div>${_sinCol?window._nxScSqlHTML():''}`
+  }catch(e){
+    _fin()
+    if(msg)msg.innerHTML=`<div class="alert alert-red">${e.message||e}</div>`
+  }
+}
+// 🗑️ (26sep26): ELIMINAR de verdad — SOLO si el agente nunca tuvo pedidos (se vuelve a revisar al hacer clic).
+// Con pedidos → se ARCHIVA. Si la BD no deja borrarlo → también se archiva. Nunca se pierde nada.
+window.eliminarAgente=async(agenteId,prodId,nombre)=>{
+  const msg=document.getElementById('agentes-msg-'+prodId)
+  if(msg)msg.innerHTML=''
+  if(await window._nxAgTienePedidos(agenteId,nombre)){
+    if(msg)msg.innerHTML='<div class="alert alert-amber">📦 Este agente ya tiene pedidos, así que no se borra: se archiva (queda en el histórico y se puede restaurar).</div>'
+    return window.desactivarAgente(agenteId,prodId,nombre)
+  }
+  if(!confirm(`¿ELIMINAR el agente "${nombre}"?\n\nNunca tuvo pedidos, así que se borra de verdad (su nombre y su ID de SellerChat quedan libres).\n\nSi solo quieres que deje de verse en el Asignador, cancela y usa ⏸ Apagar.`))return
+  try{
+    let pivBorrado=false
+    let r1=await sb.from('agentes').delete().eq('id',agenteId).select('id')
+    if(r1.error&&(r1.error.code==='23503'||/foreign key|violates/i.test(r1.error.message||''))){ // la relación con el producto lo sostiene → se suelta primero
+      const{error:eP}=await sb.from('producto_agentes').delete().eq('agente_id',agenteId)
+      if(!eP){pivBorrado=true;r1=await sb.from('agentes').delete().eq('id',agenteId).select('id')}
+    }
+    const borrado=!r1.error&&Array.isArray(r1.data)&&r1.data.length>0
+    if(!borrado){ // no se pudo (permiso o referencia) → se ARCHIVA en su lugar, sin perder nada
+      if(pivBorrado){try{await sb.from('producto_agentes').insert({producto_id:prodId,agente_id:agenteId})}catch(_){}}
+      const{error:eA}=await sb.from('agentes').update({activo:false}).eq('id',agenteId)
+      if(!eA)logAction('agente_desactivado',{agente_id:agenteId,producto_id:prodId,nombre,via:'eliminar_no_permitido'}).catch(()=>{})
+      try{window._nxAgCache=null}catch(_){}
+      await renderAgentesProd(prodId)
+      const m2=document.getElementById('agentes-msg-'+prodId)
+      if(m2)m2.innerHTML=`<div class="alert alert-amber">No se pudo borrar${r1.error?' ('+String(r1.error.message||'').replace(/</g,'&lt;')+')':''}. Quedó 📦 archivado en su lugar — no se perdió nada.</div>`
+      return
+    }
+    if(!pivBorrado){try{await sb.from('producto_agentes').delete().eq('agente_id',agenteId)}catch(_){}} // limpia la relación si la BD no la borró sola
+    logAction('agente_eliminado',{agente_id:agenteId,producto_id:prodId,nombre}).catch(()=>{})
+    try{window._nxAgCache=null}catch(_){}
+    await renderAgentesProd(prodId)
+  }catch(e){
+    if(msg)msg.innerHTML=`<div class="alert alert-red">${e.message||e}</div>`
+  }
+}
+// ♻️ (26sep26): RESTAURAR un agente archivado (vuelve con su mismo ID de SellerChat y su mismo producto)
+window._agRestaurar=async(agenteId,prodId,nombre)=>{
+  const msg=document.getElementById('agentes-msg-'+prodId)
+  if(msg)msg.innerHTML=''
+  if(!confirm(`¿Restaurar el agente "${nombre}"?\n\nVuelve a la lista de agentes de este producto, con su mismo ID de SellerChat.`))return
+  try{
+    const{error}=await sb.from('agentes').update({activo:true}).eq('id',agenteId)
+    if(error)throw error
+    logAction('agente_restaurado',{agente_id:agenteId,producto_id:prodId,nombre}).catch(()=>{})
+    try{window._nxAgCache=null}catch(_){}
+    await renderAgentesProd(prodId)
+  }catch(e){
+    if(msg)msg.innerHTML=`<div class="alert alert-red">${e.message||e}</div>`
+  }
 }
 
 // NUEVO (7jul26 · Mejora 4): prender/apagar la VIGENCIA de un agente. Vigente = el auxiliar lo ve
@@ -6826,13 +7038,14 @@ window._agGuardarUrl=async(agenteId,prodId,btn)=>{
 }
 
 window.desactivarAgente=async(agenteId,prodId,nombre)=>{
-  if(!confirm(`¿Desactivar el agente "${nombre}"?\n\nQuedará registrado en el histórico de ventas pero ya no aparecerá ni podrá vender en el asignador.\n\nEsta acción se puede revertir desde la BD si es necesario.`))return
+  if(!confirm(`📦 ¿Archivar el agente "${nombre}"?\n\nQuedará registrado en el histórico de ventas pero ya no aparecerá ni podrá vender en el asignador.\n\nSe puede restaurar cuando quieras en "📦 Agentes archivados" (abajo, en este mismo producto), con su mismo ID de SellerChat.`))return // 📦 (26sep26): texto de ARCHIVAR (antes: "Desactivar … revertir desde la BD")
   const msg=document.getElementById('agentes-msg-'+prodId)
   if(msg)msg.innerHTML=''
   try{
     const{error}=await sb.from('agentes').update({activo:false}).eq('id',agenteId)
     if(error)throw error
     logAction('agente_desactivado',{agente_id:agenteId,producto_id:prodId,nombre}).catch(()=>{})
+    try{window._nxAgCache=null}catch(_){} // 📦 (26sep26): que el Asignador / botones 🔗 lo dejen de ver de inmediato
     await renderAgentesProd(prodId)
   }catch(e){
     if(msg)msg.innerHTML=`<div class="alert alert-red">${e.message||e}</div>`
@@ -6872,6 +7085,12 @@ window.modalCrearAgente=(prodId)=>{
       <input type="text" id="na-nombre" placeholder="Ej: Neocell_X3_A1" style="font-family:monospace">
       <div style="font-size:11px;color:var(--muted);margin-top:4px">Debe coincidir EXACTAMENTE con el nombre que aparece en la columna AGENTE del asignador. Único en todo el sistema. Quedará asignado solo a este producto.</div>
     </div>
+    <div class="fld" style="margin-top:10px"><!-- 🔑 (26sep26): ID de SellerChat OBLIGATORIO -->
+      <label>🔑 ID de SellerChat del asistente <span style="color:var(--red)">*</span></label>
+      <input type="text" id="na-scid" placeholder="Ej: 6bac3b00-6d7a-4f95-95ff-57d6b4b438f5" autocapitalize="off" spellcheck="false" style="font-family:monospace" oninput="document.getElementById('na-scprev').innerHTML=window._agScPrevHTML(this.value)">
+      <div id="na-scprev" style="font-size:11px;margin-top:4px">${window._agScPrevHTML('')}</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">Está en SellerChat → el asistente → ⚙️ Ajustes → General → <b>ID</b>. Es la llave del agente: no cambia aunque le cambies el nombre, y la URL se arma sola. Un ID solo puede estar en UN producto, para siempre.</div>
+    </div>
     <div style="margin-top:14px;display:flex;gap:8px">
       <button class="btn-sm btn-primary" onclick="saveNuevoAgente('${prodId||''}')">Crear agente</button>
       <button class="btn-sm btn-outline" onclick="document.getElementById('prod-modal-area').innerHTML=''">Cancelar</button>
@@ -6886,14 +7105,33 @@ window.saveNuevoAgente=async(prodId)=>{
   const nombre=(document.getElementById('na-nombre')?.value||'').trim()
   const msg=document.getElementById('na-msg')
   if(!nombre){msg.innerHTML='<div class="alert alert-red">El nombre es obligatorio</div>';return}
+  // 🔑 (26sep26): el ID de SellerChat es OBLIGATORIO, con formato válido y LIBRE (1 ID = 1 producto para siempre)
+  const _scRaw=(document.getElementById('na-scid')?.value||'').trim()
+  const _sc=window._nxScId(_scRaw)
+  if(!_scRaw){msg.innerHTML='<div class="alert alert-red">🔑 El ID de SellerChat es obligatorio (SellerChat → el asistente → ⚙️ Ajustes → General → ID).</div>';return}
+  if(!_sc){msg.innerHTML='<div class="alert alert-red">❌ Eso no es un ID de SellerChat. Debe verse así: <code>6bac3b00-6d7a-4f95-95ff-57d6b4b438f5</code></div>';return}
   try{
-    const{data,error}=await sb.from('agentes').insert({nombre,activo:true}).select().single()
-    if(error){
-      const dup=/duplicate|unique/i.test(error.message||'')
-      msg.innerHTML=`<div class="alert alert-red">${dup?'⚠️ Ya existe un agente con ese nombre. Los nombres son únicos en todo el sistema.':error.message}</div>`
+    const _dueno=await window._nxScDueno(_sc,null)
+    if(_dueno&&_dueno.error){msg.innerHTML=`<div class="alert alert-red">No pude revisar si el ID está libre (${String(_dueno.error).replace(/</g,'&lt;')}). Intenta de nuevo.</div>`;return}
+    if(_dueno){
+      const _en=s=>String(s==null?'':s).replace(/</g,'&lt;')
+      msg.innerHTML=`<div class="alert alert-red">⛔ Este ID de SellerChat ya pertenece al agente <b>${_en(_dueno.agente.nombre)}</b>${_dueno.productoNombre?` del producto <b>${_en(_dueno.productoNombre)}</b>`:''}${_dueno.agente.activo===false?' (archivado)':''}.<br>Regla: <b>1 ID de SellerChat = 1 producto para siempre</b>. Si quieres vender otro producto, crea un asistente nuevo en SellerChat (puedes copiarlo con "Usar referencia").</div>`
       return
     }
-    logAction('agente_creado',{agente_id:data.id,nombre}).catch(()=>{})
+    const _url=window._nxScUrlDeId(_sc)
+    let _sinCol=false
+    let{data,error}=await sb.from('agentes').insert({nombre,activo:true,sellerchat_id:_sc,sellerchat_url:_url}).select().single()
+    if(error&&(error.code==='42703'||error.code==='PGRST204'||/sellerchat_id/i.test(error.message||''))){ // columna nueva aún no existe → el ID viaja dentro de la URL
+      _sinCol=true
+      ;({data,error}=await sb.from('agentes').insert({nombre,activo:true,sellerchat_url:_url}).select().single())
+    }
+    if(error){
+      const dup=/duplicate|unique/i.test(error.message||'')
+      const dupSc=dup&&/sellerchat/i.test(error.message||'')
+      msg.innerHTML=`<div class="alert alert-red">${dupSc?'⛔ Ese ID de SellerChat ya está en otro agente (la base de datos lo bloqueó). Regla: 1 ID = 1 producto para siempre.':dup?'⚠️ Ya existe un agente con ese nombre. Los nombres son únicos en todo el sistema.':error.message}</div>`
+      return
+    }
+    logAction('agente_creado',{agente_id:data.id,nombre,sellerchat_id:_sc}).catch(()=>{})
     // Si vino de un producto, asignar al producto (UNIQUE en agente_id garantiza 1 agente = 1 producto)
     if(prodId){
       const{error:e2}=await sb.from('producto_agentes').insert({producto_id:prodId,agente_id:data.id})
@@ -6904,7 +7142,9 @@ window.saveNuevoAgente=async(prodId)=>{
       logAction('producto_agente_asignado',{producto_id:prodId,agente_id:data.id}).catch(()=>{})
     }
     document.getElementById('prod-modal-area').innerHTML=''
+    try{window._nxAgCache=null}catch(_){} // 🔑 (26sep26): el agente nuevo aparece de inmediato en Asignador / botones 🔗
     if(prodId)await renderAgentesProd(prodId)
+    if(_sinCol&&prodId){const _m2=document.getElementById('agentes-msg-'+prodId);if(_m2)_m2.innerHTML=window._nxScSqlHTML()} // 🔑 falta la columna → aviso con el SQL
   }catch(e){
     msg.innerHTML=`<div class="alert alert-red">${e.message||e}</div>`
   }
@@ -9913,20 +10153,13 @@ async function pageAuxAsignador(c){
         const _agIds=[...new Set((_relAg||[]).map(r=>r.agente_id))]
         const _agNombre={}
         if(_agIds.length){
-          // Select TOLERANTE: con sellerchat_url y vigente si existen; si no, el clásico.
-          let _agData=null
-          try{
-            const _r1=await sb.from('agentes').select('id,nombre,activo,sellerchat_url,vigente').in('id',_agIds).eq('activo',true)
-            if(_r1.error)throw _r1.error
-            _agData=_r1.data
-          }catch(_e){
-            const _r2=await sb.from('agentes').select('id,nombre,activo').in('id',_agIds).eq('activo',true)
-            _agData=_r2.data
-          }
+          // Select TOLERANTE: con sellerchat_id / sellerchat_url y vigente si existen; si no, el clásico. (🔑 26sep26: 3 niveles)
+          const _rAgA=await window._nxAgSelect(cols=>sb.from('agentes').select(cols).in('id',_agIds).eq('activo',true))
+          let _agData=(_rAgA&&_rAgA.data)||null
           for(const a of (_agData||[])){
             if(a.vigente===false)continue // Mejora 4: NO vigente → el auxiliar no lo ve en el Asignador
             _agNombre[a.id]=a.nombre
-            const _uA=(a.sellerchat_url||'').trim()
+            const _uA=window._nxScUrl(a) // 🔑 (26sep26): URL ARMADA desde el ID de SellerChat (una sola función)
             if(_uA)_agUrlByNom[a.nombre]=_uA
           }
         }
@@ -12174,6 +12407,7 @@ async function pageAuxReservado(c){
         <div><strong>📦 Producto:</strong> ${m.producto||'—'} · ${m.cantidad||1}u</div>
         <div><strong>🏙️ Ciudad:</strong> ${m.ciudad||'—'}</div>
         <div><strong>📅 Fecha compra:</strong> ${m.fecha||'—'}</div>
+        ${m.dropi_order_id?`<div><strong>📦 Orden Dropi vigente:</strong> <span style="font-family:monospace">#${m.dropi_order_id}</span>${m.numero_guia?` · 🧾 Guía <span style="font-family:monospace">${m.numero_guia}</span>`:''}</div>`:''}<!-- 📜 (26sep26) -->
         <div><strong>🆔 Mapeo ID:</strong> <span style="font-family:monospace;font-size:11px;color:var(--muted)">${m.id}</span></div>
       </div>`
 
@@ -12206,7 +12440,8 @@ async function pageAuxReservado(c){
         reclame_enviado:'var(--blue)',reclame_resuelta:'var(--green)',
         actualizado:'var(--muted)',
         ad_corregido:'var(--purple)',marcado_organica:'var(--purple)',re_cancelado:'var(--red)',
-        reactivado_deshecho:'var(--red)',resolucion_deshecha:'var(--amber)',canc_mensaje_enviado:'var(--blue)'
+        reactivado_deshecho:'var(--red)',resolucion_deshecha:'var(--amber)',canc_mensaje_enviado:'var(--blue)',
+        orden_dropi_cambiada:'var(--purple)' // 📜 (26sep26)
       }
       const eventoLabel={
         creado:'Orden creada',
@@ -12221,7 +12456,8 @@ async function pageAuxReservado(c){
         cancelado_dropi:'Cancelada (por Dropi)',actualizado:'Estado actualizado',
         ad_corregido:'ID de anuncio corregido',marcado_organica:'Marcada como orgánica (sin anuncio)',
         re_cancelado:'Cliente dijo que NO (definitivo)',reactivado_deshecho:'Reactivación deshecha',
-        resolucion_deshecha:'Resolución deshecha',canc_mensaje_enviado:'Mensaje de recuperación enviado'
+        resolucion_deshecha:'Resolución deshecha',canc_mensaje_enviado:'Mensaje de recuperación enviado',
+        orden_dropi_cambiada:'Nuevo número de orden en Dropi (resubida)' // 📜 (26sep26)
       }
 
       // Render del timeline
@@ -12237,6 +12473,10 @@ async function pageAuxReservado(c){
         const partes=[]
         if(d.estado_anterior&&d.estado_nuevo)partes.push(`<span style="color:var(--muted)">${d.estado_anterior||'—'}</span> → <strong>${d.estado_nuevo}</strong>`)
         if(d.ad_anterior||d.ad_nuevo)partes.push(`🎯 <code style="font-size:10px">${d.ad_anterior||'—'}</code> → <code style="font-size:10px">${d.ad_nuevo||'orgánica'}</code>`)
+        // 📜 (26sep26 · CONSTANCIA): número de orden de Dropi (cambio #viejo → #nuevo, o el de ese cambio de estado) + guía
+        if(d.orden_anterior||d.orden_nueva)partes.push(`📦 Orden <code style="font-size:10px">#${d.orden_anterior||'—'}</code>${d.estado_orden_anterior?` (${d.estado_orden_anterior})`:''} → <code style="font-size:10px">#${d.orden_nueva||'—'}</code>${d.estado_orden_nueva?` <strong>(${d.estado_orden_nueva})</strong>`:''}`)
+        else if(d.dropi_order_id)partes.push(`📦 Orden <code style="font-size:10px">#${d.dropi_order_id}</code>`)
+        if(d.numero_guia)partes.push(`🧾 Guía <code style="font-size:10px">${d.numero_guia}</code>`)
         if(d.motivo)partes.push(`📝 <em>"${d.motivo}"</em>`)
         if(d.fecha_envio)partes.push(`📅 Envío: ${d.fecha_envio}`)
         if(d.fecha_anterior&&d.fecha_envio&&d.fecha_anterior!==d.fecha_envio)partes.push(`(antes: ${d.fecha_anterior})`)
@@ -19749,11 +19989,23 @@ window.actualizarEstadosDropi=async()=>{
         if(r.fecha_reporte)extra.fecha_reporte=r.fecha_reporte
         if(Object.keys(extra).length)await sb.from('mapeos').update(extra).eq('id',r.mapeo.id)
       }catch(_e){}
+      // 📜 (26sep26 · CONSTANCIA): si para este pedido llegó OTRO número de orden de Dropi (resubida), queda la
+      // huella "#viejo → #nuevo" con fecha y hora (created_at). Antes el número viejo se pisaba sin dejar rastro.
+      try{
+        const _oA=String(r.mapeo.dropi_order_id==null?'':r.mapeo.dropi_order_id).trim(),_oN=String(r.id_dropi==null?'':r.id_dropi).trim()
+        if(_oA&&_oN&&_oA!==_oN){
+          const{error:_eOC}=await sb.from('mapeo_eventos').insert({mapeo_id:r.mapeo.id,evento:'orden_dropi_cambiada',fuente:'dropi',usuario_id:me?.id||null,
+            detalle:{orden_anterior:_oA,orden_nueva:_oN,estado_orden_anterior:r.mapeo.estado_final||null,estado_orden_nueva:_estDropi||null,estatus_dropi:r.estatus||null,telefono:r.telefono||null,desde_pagina:'cruce_dropi'}})
+          if(_eOC)console.warn('[mapeo_eventos] orden_dropi_cambiada:',_eOC.message)
+        }
+      }catch(_){}
       // ── Fase 3 paso 3: registrar evento en mapeo_eventos si cambió el estado ──
       const estadoAnterior=r.mapeo.estado_final||null
       const estadoNuevo=_estDropi||null
       // Si protegimos la decisión manual, no registrar una transición falsa a pendiente
-      if(estadoNuevo&&estadoAnterior!==estadoNuevo){
+      // 📜 (26sep26 · CONSTANCIA): con el 🛡️ ESCUDO 3 el estado NO se cambia → tampoco se registra una transición
+      // que no pasó (esa huella ya la deja 'esc3_stock_liberado'). Así el "Camino de estados" no muestra un estado falso.
+      if(!_esc3&&estadoNuevo&&estadoAnterior!==estadoNuevo){
         try{
           const{error:evErr}=await sb.from('mapeo_eventos').insert({
             mapeo_id:r.mapeo.id,
@@ -19768,6 +20020,8 @@ window.actualizarEstadosDropi=async()=>{
               transportadora:r.transportadora||null,
               novedad:r.novedad||null,
               telefono:r.telefono||null,
+              dropi_order_id:r.id_dropi||r.mapeo.dropi_order_id||null, // 📜 (26sep26): número de orden de Dropi de ESTE cambio de estado
+              numero_guia:r.numero_guia||null, // 📜 (26sep26)
               desde_pagina:'cruce_dropi'
             }
           })
@@ -24694,10 +24948,20 @@ window.procesarSeguimiento=async()=>{
             if(r.fecha_reporte)extra.fecha_reporte=r.fecha_reporte
             if(Object.keys(extra).length)await sb.from('mapeos').update(extra).eq('id',r.mapeo.id)
           }catch(_e){}
+          // 📜 (26sep26 · CONSTANCIA): otro número de orden de Dropi para este pedido (resubida) → huella "#viejo → #nuevo"
+          try{
+            const _oA=String(r.mapeo.dropi_order_id==null?'':r.mapeo.dropi_order_id).trim(),_oN=String(r.id_dropi==null?'':r.id_dropi).trim()
+            if(_oA&&_oN&&_oA!==_oN){
+              const{error:_eOC}=await sb.from('mapeo_eventos').insert({mapeo_id:r.mapeo.id,evento:'orden_dropi_cambiada',fuente:'dropi_seguimiento',usuario_id:me?.id||null,
+                detalle:{orden_anterior:_oA,orden_nueva:_oN,estado_orden_anterior:r.mapeo.estado_final||null,estado_orden_nueva:_estSegNorm||null,estatus_dropi:r.estatus||null,telefono:r.telefono||null,desde_pagina:'seguimiento'}})
+              if(_eOC)console.warn('[mapeo_eventos] orden_dropi_cambiada:',_eOC.message)
+            }
+          }catch(_){}
           // ── Fase 3 paso 3: registrar evento en mapeo_eventos si cambió el estado ──
           const estadoAnterior=r.mapeo.estado_final||null
           const estadoNuevo=_estSegNorm||null
-          if(estadoNuevo&&estadoAnterior!==estadoNuevo){
+          // 📜 (26sep26 · CONSTANCIA): con el 🛡️ ESCUDO 3 el estado NO se cambia → no se registra una transición que no pasó
+          if(!_esc3Seg&&estadoNuevo&&estadoAnterior!==estadoNuevo){
             try{
               const{error:evErr}=await sb.from('mapeo_eventos').insert({
                 mapeo_id:r.mapeo.id,
@@ -24713,6 +24977,8 @@ window.procesarSeguimiento=async()=>{
                   novedad:r.novedad||null,
                   telefono:r.telefono||null,
                   fecha_lote:r.fecha_lote||null,
+                  dropi_order_id:r.id_dropi||r.mapeo.dropi_order_id||null, // 📜 (26sep26): número de orden de Dropi de ESTE cambio de estado
+                  numero_guia:r.numero_guia||null, // 📜 (26sep26)
                   desde_pagina:'seguimiento'
                 }
               })
@@ -41396,6 +41662,7 @@ const HB_ORIG={
     obligatorios:true,candado_filas:true,precios_oferta:true,precio_mayoria:true,redondeo900:true,
     stock_conv:true,deteccion_interrap:true,deteccion_estado:true,resaltado_masivo:true,
     precio_lista:true, // 💲 NUEVA (24sep26): precios revisados contra la lista de Productos (normales y ofertas, con tolerancia + candado)
+    id_sellerchat:true, // 🔑 NUEVA (26sep26): el nombre del Excel DEBE traer el ID de SellerChat del agente (filas__NOMBRE__ID__fecha__tanda)
     historial_lotes:false // 🚚 NUEVA (19jul26): mostrar "📦 Historial de lotes" en Ver estado de los envíos — ÚNICA que nace APAGADA
   }
 }
@@ -41602,12 +41869,31 @@ function hbValidarNombre(rawName){
   //   filas__AGENTE__fecha__secuencia__oferta    → 38__Neocell_A6_A2__2026-07-05__1__oferta
   // La 1ª subida del día SIEMPRE lleva __1. Regla 5 del Centro de Control: si el switch
   // "secuencia" está OFF, se acepta también el formato viejo (sin secuencia, tanda=1).
+  // 🔑 NUEVO (26sep26 · ID de SellerChat): después del nombre va el ID de SellerChat del agente:
+  //   filas__NOMBRE__IDSELLERCHAT__fecha__secuencia[__oferta]
+  //   → 38__Neocell_A6_A2__6bac3b00-6d7a-4f95-95ff-57d6b4b438f5__2026-07-05__1
+  //   El NOMBRE es solo decoración (para que el auxiliar reconozca el archivo): NEXO usa SOLO el ID.
+  //   Regla "id_sellerchat" del Centro de Control: ON → el ID es OBLIGATORIO · OFF → también se acepta
+  //   el formato sin ID (se reconoce por nombre, como antes).
   const exigirSec=hbReglaActiva('secuencia')
-  const EJ='38__Neocell_A6_A2__2026-07-05__1'
+  const exigirId=hbReglaActiva('id_sellerchat')
+  const EJ_ID='38__Neocell_A6_A2__6bac3b00-6d7a-4f95-95ff-57d6b4b438f5__2026-07-05__1'
+  let EJ=exigirId?EJ_ID:'38__Neocell_A6_A2__2026-07-05__1'
   if(!name.includes('__'))return{ok:false,error:`Faltan los "__" separadores. Usa doble guion bajo entre cada parte. Ejemplo: ${EJ}`}
   const parts=name.split('__').map(p=>p.trim())
   if(!/^\d+$/.test(parts[0]))return{ok:false,error:`Falta el número de filas al inicio. Ejemplo: ${EJ}`}
-  if(!parts[1])return{ok:false,error:`Falta el AGENTE en la 2ª parte. Ejemplo: ${EJ}`}
+  // 🔑 (26sep26): ¿trae el ID de SellerChat en la 3ª parte? (si vino SIN el nombre-decoración, igual se acepta)
+  const _uuidRe=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  let scId=''
+  if(_uuidRe.test(parts[1]||'')&&!_uuidRe.test(parts[2]||''))parts.splice(1,0,'') // filas__ID__fecha… → falta solo la decoración: se acepta
+  if(_uuidRe.test(parts[2]||'')){scId=parts[2].toLowerCase();parts.splice(2,1);EJ=EJ_ID}
+  else if(exigirId){
+    const _malPuesto=parts.some(p=>NX_SC_UUID_RE.test(p))
+    return{ok:false,error:_malPuesto
+      ?`El 🔑 ID de SellerChat está en un lugar equivocado o tiene caracteres de más. Va justo después del nombre y solo el ID. Formato: filas__NOMBRE__ID__fecha__tanda. Ejemplo: ${EJ_ID}`
+      :`Al nombre le falta el 🔑 ID de SellerChat del agente (va después del nombre). Formato: filas__NOMBRE__ID__fecha__tanda. Ejemplo: ${EJ_ID} — revisa la extensión de SellerChat que nombra los archivos. (Si todavía no la actualizaste, un administrador puede apagar por un tiempo la regla "🔑 ID de SellerChat obligatorio" en el Centro de Control.)`}
+  }
+  if(!scId&&!parts[1])return{ok:false,error:`Falta el AGENTE en la 2ª parte. Ejemplo: ${EJ}`}
   if(!hbFechaValida(parts[2]||''))return{ok:false,error:'Fecha inválida. Debe ser AAAA-MM-DD. Ejemplo: 2026-07-05'}
   let oferta=false,secuencia=1
   if(parts.length===3||(parts.length===4&&parts[3].toLowerCase()==='oferta')){
@@ -41624,31 +41910,52 @@ function hbValidarNombre(rawName){
       oferta=true
     }
   }else{
-    return{ok:false,error:`Sobran partes en el nombre. Formato: filas__AGENTE__fecha__secuencia (y "__oferta" al final si aplica). Ejemplo: ${EJ}`}
+    return{ok:false,error:`Sobran partes en el nombre. Formato: filas__${(scId||exigirId)?'NOMBRE__ID':'AGENTE'}__fecha__secuencia (y "__oferta" al final si aplica). Ejemplo: ${EJ}`}
   }
-  return{ok:true,filas:parseInt(parts[0],10),agenteStr:parts[1],fecha:parts[2],oferta,secuencia}
+  return{ok:true,filas:parseInt(parts[0],10),agenteStr:parts[1],fecha:parts[2],oferta,secuencia,scId} // 🔑 (26sep26): + scId ('' = formato sin ID)
 }
 
 // ── 4. CADENA AGENTE → PRODUCTO (lee las MISMAS tablas del Asignador) ───────
 async function hbCargarCadena(){
-  const[{data:ags},{data:rels}]=await Promise.all([
-    sb.from('agentes').select('id,nombre,activo'),
+  // 🔑 (26sep26): select TOLERANTE (con sellerchat_id / sellerchat_url si existen) para reconocer al agente por su ID de SellerChat
+  const[_rAg,{data:rels}]=await Promise.all([
+    window._nxAgSelect(cols=>sb.from('agentes').select(cols)),
     sb.from('producto_agentes').select('producto_id,agente_id')
   ])
+  const ags=(_rAg&&_rAg.data)||[]
   const byLower={};for(const a of(ags||[]))byLower[String(a.nombre||'').toLowerCase()]=a
+  const byScId={},scDup={} // 🔑 ID de SellerChat → agente · IDs que (por error) están en 2+ agentes
+  for(const a of(ags||[])){
+    const k=window._nxScIdAg(a);if(!k)continue
+    if(byScId[k]&&String(byScId[k].id)!==String(a.id))(scDup[k]=scDup[k]||[byScId[k].nombre]).push(a.nombre)
+    else byScId[k]=a
+  }
   const prodByAg={};for(const r of(rels||[]))if(!(r.agente_id in prodByAg))prodByAg[r.agente_id]=r.producto_id
-  return{byLower,prodByAg}
+  return{byLower,prodByAg,byScId,scDup}
 }
-function hbResolverAgente(agStr,cad){
-  const a=cad.byLower[String(agStr||'').toLowerCase()]
+function hbResolverAgente(agStr,cad,scId){
+  // 🔑 (26sep26): si el archivo trae el ID de SellerChat, el agente se busca SOLO por el ID (el nombre es decoración).
+  //    Sin ID (formato viejo, solo si la regla "id_sellerchat" está apagada) → por nombre, como siempre.
+  let a
+  const _sc=window._nxScId(scId)
+  if(_sc){
+    if(cad.scDup&&cad.scDup[_sc])return{ok:false,error:`El ID de SellerChat ${_sc} está repetido en ${cad.scDup[_sc].length} agentes (${cad.scDup[_sc].join(', ')}). Corrígelo en Productos → tarjeta del producto → 🤖 Agentes autorizados (1 ID = 1 agente).`}
+    a=cad.byScId&&cad.byScId[_sc]
+    if(!a)return{ok:false,error:`El 🔑 ID de SellerChat ${_sc} no está registrado en NEXO. Pégalo en Productos → tarjeta del producto → 🤖 Agentes autorizados → "🔑 ID SellerChat" del agente (o créalo con ➕ Crear nuevo agente) y vuelve a subir este archivo.`}
+  }else{
+    a=cad.byLower[String(agStr||'').toLowerCase()]
+  }
   if(!a)return{ok:false,error:`El agente "${agStr}" no está registrado en NEXO. Créalo en Productos → tarjeta del producto → Agentes autorizados.`}
   if(a.activo===false)return{ok:false,error:`El agente "${a.nombre}" está desactivado.`}
   const pid=cad.prodByAg[a.id]
   if(pid==null)return{ok:false,error:`El agente "${a.nombre}" no está asignado a ningún producto. Asígnalo en Productos → tarjeta del producto.`}
   const p=(productos||[]).find(x=>String(x.id)===String(pid))
   if(!p)return{ok:false,error:`El producto del agente "${a.nombre}" no está en el catálogo activo de NEXO.`}
+  // 🔑 (26sep26): el nombre del archivo es decoración — si no coincide con el de NEXO solo se AVISA (no frena)
+  const _notaNombre=(_sc&&String(agStr||'').trim()&&String(agStr).trim().toLowerCase()!==String(a.nombre||'').toLowerCase())
+    ?`ℹ️ El archivo dice "${agStr}" pero en NEXO este agente se llama "${a.nombre}". Se reconoció por su 🔑 ID de SellerChat (el nombre del archivo es solo decoración).`:''
   // FASE 3 (6jul26) · Mejora 4: arrastrar el ALIAS VISIBLE del producto (el del badge verde del Asignador)
-  return{ok:true,agente:a.nombre,agenteId:a.id,producto:{id:p.id,nombre:p.nombre,dropi_id:String(p.dropi_id||''),alias_visible:(Array.isArray(p.aliases_visibles)&&p.aliases_visibles.length?String(p.aliases_visibles[0]).trim():'')}}
+  return{ok:true,agente:a.nombre,agenteId:a.id,scId:_sc||window._nxScIdAg(a)||'',notaNombre:_notaNombre,producto:{id:p.id,nombre:p.nombre,dropi_id:String(p.dropi_id||''),alias_visible:(Array.isArray(p.aliases_visibles)&&p.aliases_visibles.length?String(p.aliases_visibles[0]).trim():'')}}
 }
 
 // ── 5. CANDADO DE FECHAS POR BRECHA (sin calendario de festivos) ────────────
@@ -41735,6 +42042,7 @@ async function hbProcesarArchivo(file,ctx){
   if(!vn.ok){f.error=vn.error;return f}
   f.filasDecl=vn.filas;f.agenteStr=vn.agenteStr;f.fechaDecl=vn.fecha;f.oferta=vn.oferta
   f.secuencia=vn.secuencia||1 // FASE 6 (6jul26) · M15.A: tanda del día declarada en el nombre
+  f.scId=vn.scId||'' // 🔑 (26sep26): ID de SellerChat declarado en el nombre ('' = formato sin ID)
   // b) fecha del archivo contra la ventana
   if(f.fechaDecl>ctx.hoy){f.error=`La fecha ${f.fechaDecl} es FUTURA. Revisa el nombre del archivo.`;return f}
   // FASE 3 (6jul26) · Mejora 1: los archivos de OFERTA (__oferta) SÍ pueden procesar con fecha HOY sin casilla.
@@ -41752,9 +42060,11 @@ async function hbProcesarArchivo(file,ctx){
     if(f.rows.length!==f.filasDecl){f.error=`Dice ${f.filasDecl} filas pero el Excel trae ${f.rows.length}. Revisá lo que bajaste de Seller Chat y vuelve a subir este archivo.`;return f}
   }
   // e) resolver AGENTE → producto → ID Dropi (el corazón)
-  const res=hbResolverAgente(f.agenteStr,ctx.cadena)
+  const res=hbResolverAgente(f.agenteStr,ctx.cadena,f.scId) // 🔑 (26sep26): con ID → por ID; sin ID → por nombre
   if(!res.ok){f.error=res.error;return f}
   f.agente=res.agente;f.agenteId=res.agenteId;f.producto=res.producto
+  f.scId=res.scId||f.scId // 🔑 (26sep26): ID de SellerChat del agente (queda en la constancia)
+  if(res.notaNombre)f.notas.push(res.notaNombre)
   // ══ FASE 7 (7jul26) · Punto 4: VALIDACIÓN DE SECUENCIA DEL DÍA (tandas __1 → __2 → __3) ══
   // Para la fecha del archivo, la tanda declarada debe ser LA SIGUIENTE a la mayor ya subida
   // (BD: detalle.secuencia de exports de esa fecha — los viejos sin secuencia cuentan como __1 —
@@ -41765,12 +42075,17 @@ async function hbProcesarArchivo(file,ctx){
     // Cada agente lleva su propia numeración __1, __2… y las series normal y __oferta son INDEPENDIENTES
     // (el mismo agente puede tener __1 y __1__oferta el mismo día sin chocar). Agentes DIFERENTES pueden
     // subir ambos __1 de la misma fecha sin bloquearse entre sí.
+    // 🔑 (26sep26 · TANDAS POR ID): la cuenta es por el ID interno del AGENTE (agentes.id), no por su nombre →
+    // si al agente le cambian el nombre, sus tandas NO se descuadran. Subidas viejas (sin agente_id guardado
+    // en la constancia) se siguen reconociendo por el nombre, como antes.
     let _maxSec=0
     const _tipoTanda=f.oferta?'OFERTA':'normal'
     try{
       const{data:_pSec}=await sb.from('constructor_subidas').select('detalle,resultado,agente')
-        .eq('tipo','export').eq('fecha_declarada',f.fechaDecl).eq('agente',f.agente)
+        .eq('tipo','export').eq('fecha_declarada',f.fechaDecl)
       for(const g of(_pSec||[])){
+        const _gAg=g&&g.detalle&&g.detalle.agente_id!=null?String(g.detalle.agente_id):null
+        if(!(_gAg!=null?_gAg===String(f.agenteId):String(g&&g.agente||'')===String(f.agente)))continue // 🔑 solo las tandas de ESTE agente
         if(g&&g.resultado==='sin_ventas')continue // un "día sin ventas" confirmado NO es una tanda de pedidos
         const _ofG=!!(g&&g.detalle&&g.detalle.oferta) // pre-Fase 6 sin la marca = normal
         if(_ofG!==!!f.oferta)continue // serie independiente: normal y oferta NO se cruzan
@@ -41780,7 +42095,8 @@ async function hbProcesarArchivo(file,ctx){
     }catch(_e){console.warn('[hb secuencia] lectura BD:',_e?.message)}
     for(const o of(ctx.archivosSesion||[])){ // tandas ya cargadas en esta sesión (aún sin generar)
       if(o===f||['error','duplicado','nombre_mal'].includes(o.estado))continue
-      if(o.fechaDecl===f.fechaDecl&&o.agente===f.agente&&(!!o.oferta)===(!!f.oferta)){const s=parseInt(o.secuencia)||1;if(s>_maxSec)_maxSec=s}
+      const _mismoAg=(o.agenteId!=null&&f.agenteId!=null)?String(o.agenteId)===String(f.agenteId):o.agente===f.agente // 🔑 (26sep26): por ID del agente
+      if(o.fechaDecl===f.fechaDecl&&_mismoAg&&(!!o.oferta)===(!!f.oferta)){const s=parseInt(o.secuencia)||1;if(s>_maxSec)_maxSec=s}
     }
     const _esperada=_maxSec+1
     if((parseInt(f.secuencia)||1)!==_esperada){
@@ -42036,7 +42352,7 @@ async function hbListaCargar(files,ctx){
   for(const file of(files||[])){
     try{
       const vn=hbValidarNombre(file.name);if(!vn||!vn.ok)continue
-      const res=hbResolverAgente(vn.agenteStr,ctx.cadena);if(!res||!res.ok||!res.producto)continue
+      const res=hbResolverAgente(vn.agenteStr,ctx.cadena,vn.scId);if(!res||!res.ok||!res.producto)continue // 🔑 (26sep26): por ID si lo trae
       const k=String(res.producto.id);if(!pids.includes(k))pids.push(k)
     }catch(_){}
   }
@@ -42602,10 +42918,12 @@ async function pageAuxHojaBase(c){
   </div>
   <div class="card" style="margin-top:12px">
     <div class="section-title">📛 Cómo nombrar cada archivo (obligatorio)</div>
-    <div style="font-size:14px;line-height:1.8"><!-- FASE 6 (6jul26) · M15.A: formato con SECUENCIA de tanda -->
-      Formato: <b style="font-family:monospace">filas__AGENTE__fecha__secuencia</b> (separador = <b>doble</b> guion bajo "__") · si es oferta: <b style="font-family:monospace">...__secuencia__oferta</b><br>
-      ✅ <span style="font-family:monospace">38__Neocell_A6_A2__2026-07-05__1</span> &nbsp;·&nbsp; ✅ <span style="font-family:monospace">10__Neocell_A6_A2__2026-07-05__2</span> &nbsp;·&nbsp; ✅ <span style="font-family:monospace">20__Neocell_A6_A2__2026-07-05__1__oferta</span><br>
-      <span style="color:var(--muted);font-size:12px">1) filas = cuántas ventas trae (candado) · 2) AGENTE tal como está en NEXO · 3) fecha AAAA-MM-DD · 4) secuencia de tanda: <b>__1</b> la primera subida del día (SIEMPRE, aunque sea la única), __2 la segunda tanda con pedidos nuevos, etc. — la cuenta es <b>POR AGENTE</b> (agentes distintos pueden subir __1 de la misma fecha) y la serie de __oferta es independiente de la normal · 5) "oferta" AL FINAL solo si aplica</span>
+    <div style="font-size:14px;line-height:1.8"><!-- FASE 6 (6jul26) · M15.A: formato con SECUENCIA de tanda · 🔑 (26sep26): + ID de SellerChat -->
+      Formato: <b style="font-family:monospace">filas__NOMBRE__ID__fecha__secuencia</b> (separador = <b>doble</b> guion bajo "__") · si es oferta: <b style="font-family:monospace">...__secuencia__oferta</b><br>
+      ✅ <span style="font-family:monospace;word-break:break-all">38__Neocell_A6_A2__6bac3b00-6d7a-4f95-95ff-57d6b4b438f5__2026-07-05__1</span><br>
+      ✅ <span style="font-family:monospace;word-break:break-all">10__Neocell_A6_A2__6bac3b00-6d7a-4f95-95ff-57d6b4b438f5__2026-07-05__2</span> <span style="color:var(--muted);font-size:12px">(2ª tanda del día)</span><br>
+      ✅ <span style="font-family:monospace;word-break:break-all">20__Neocell_A6_A2__6bac3b00-6d7a-4f95-95ff-57d6b4b438f5__2026-07-05__1__oferta</span><br>
+      <span style="color:var(--muted);font-size:12px">1) filas = cuántas ventas trae (candado) · 2) NOMBRE del agente = solo decoración, para reconocerlo · 3) <b>🔑 ID de SellerChat</b> del asistente = <b>la llave</b>: NEXO sabe de qué agente y de qué producto es el archivo SOLO por este ID (debe estar guardado en Productos → 🤖 Agentes autorizados) · 4) fecha AAAA-MM-DD · 5) secuencia de tanda: <b>__1</b> la primera subida del día (SIEMPRE, aunque sea la única), __2 la segunda tanda con pedidos nuevos, etc. — la cuenta es <b>POR AGENTE</b> (agentes distintos pueden subir __1 de la misma fecha) y la serie de __oferta es independiente de la normal · 6) "oferta" AL FINAL solo si aplica</span>
     </div>
   </div>
   <div class="card" style="margin-top:12px">
@@ -42658,6 +42976,7 @@ window.hbOnFiles=async(inp)=>{
   const lista=document.getElementById('hb-lista')
   if(lista&&!window._hb.files.length)lista.innerHTML='<div class="loading">Procesando archivos...</div>'
   try{window._hb.config=await hbLoadConfig()}catch(_){} // FIX (17jul26): config FRESCA de la BD en cada subida — los cambios del Centro de Control (ej. % nombre mal) aplican sin refrescar la página
+  try{const _cadF=await hbCargarCadena();if(_cadF&&_cadF.byLower&&Object.keys(_cadF.byLower).length)window._hb.cadena=_cadF}catch(_){} // 🔑 (26sep26): agentes FRESCOS en cada subida — un ID de SellerChat recién guardado aplica sin refrescar la página
   const ctx={hoy:window._hb.hoy,ultima:window._hb.ultima,cadena:window._hb.cadena,incluirHoy:!!document.getElementById('hb-hoy')?.checked,
     esperadas:(window._hb.esperadas||[]).slice(),archivosSesion:window._hb.files} // FASE 6 (6jul26) · M15.B: brecha + archivos de esta sesión para el anti-duplicado
   try{await hbListaCargar(files,ctx)}catch(e){console.warn('[hb lista]',e&&e.message)} // 💲 (24sep26): lista de precios de Productos de esta subida
@@ -43748,6 +44067,8 @@ async function _hbGenerarFinal(){
         detalle:{oferta:f.oferta,correcciones:hbCorregidas(f).map(r=>r.corr),correcciones_precio:f.corrPrecios||[],
           cantidades_confirmadas:(f.cantConfirmadas||[]), // 🟪 (22jul26) opción B: quién confirmó qué cantidad en SellerChat y cuándo
           secuencia:f.secuencia||1, // FASE 6 (6jul26) · M15.A: tanda declarada en el nombre
+          agente_id:f.agenteId!=null?f.agenteId:undefined, // 🔑 (26sep26): ID interno del agente → las tandas se cuentan por ID (no por nombre)
+          sellerchat_id:f.scId||undefined, // 🔑 (26sep26): ID de SellerChat con el que llegó el archivo (constancia)
           precios_lista:hbListaConstancia(f), // 💲 (24sep26): lista usada + precios puestos solos + verificados (quién y cuándo)
           usuarios:(()=>{const _u=f.rows.filter(r=>!r._excluida&&r._telOriginalWa!=null&&String(r._telOriginalWa).trim()).map(r=>({tel:String(r.tel==null?'':r.tel).replace(/\D/g,''),usuario:String(r._telOriginalWa).trim()})).filter(x=>x.tel);return _u.length?_u:undefined})(), // 👤 (24sep26): pareja teléfono ↔ usuario (ventana 📱 WhatsApp) → fila de USUARIOS del Cruce Dropi
           telefonos:f.rows.filter(r=>!r._excluida).map(r=>String(r.tel==null?'':r.tel).replace(/\D/g,'')).filter(Boolean), // FASE 6 · M15.B: base del anti-duplicado
@@ -44137,6 +44458,10 @@ const HB_CC_REGLAS=[
    explica:'El nombre del Excel declara la tanda del día: __1 la primera subida (SIEMPRE), __2 la segunda con pedidos nuevos, etc. "oferta" va al final. NEXO valida que la tanda sea LA SIGUIENTE, y la cuenta es POR AGENTE y POR TIPO: cada agente lleva su propia numeración, y la serie normal y la de __oferta son independientes (el mismo agente puede tener __1 y __1__oferta el mismo día). Agentes distintos pueden subir __1 de la misma fecha sin bloquearse.',
    pasa:'38__Neocell_A6_A2__2026-07-05__1 → válido. Si __1 de ese agente ya existe, la siguiente con __2 → válido. Y __1 de OTRO agente en la misma fecha → también válido.',bloquea:'Sin secuencia → se rechaza con el formato. Repetir __1 del MISMO agente el mismo día → "esa tanda YA se subió, usa __2". Saltar a __3 sin __2 → "te saltaste una tanda".',
    siApagas:'Se aceptan nombres con el formato viejo (sin secuencia, tanda=1) y NO se valida el orden de las tandas; se pierde una señal para distinguir tandas legítimas de re-subidas.'},
+  {k:'id_sellerchat',label:'🔑 ID de SellerChat obligatorio en el nombre',critica:true, // 🔑 NUEVA (26sep26)
+   explica:'El nombre del Excel trae el ID de SellerChat del asistente justo después del nombre: filas__NOMBRE__ID__fecha__tanda. NEXO reconoce el agente y el producto SOLO por ese ID (el nombre es decoración): aunque le cambien el nombre al agente, nada se descuadra. El ID debe estar guardado en Productos → 🤖 Agentes autorizados.',
+   pasa:'38__Neocell_A6_A2__6bac3b00-6d7a-4f95-95ff-57d6b4b438f5__2026-07-05__1 → se reconoce por el ID.',bloquea:'38__Neocell_A6_A2__2026-07-05__1 (sin ID) → "le falta el ID de SellerChat". Un ID que no está en ningún agente → "ID no registrado".',
+   siApagas:'También se aceptan archivos SIN ID (se reconocen por el NOMBRE del agente, como antes). Los que traen ID se siguen reconociendo por el ID. Úsalo solo mientras se actualiza la extensión que nombra los archivos.'},
   {k:'obligatorios',label:'📋 Campos obligatorios del pedido',critica:true,
    explica:'Una línea sin ciudad, departamento, dirección, teléfono, cantidad, fecha, producto, agente, ID Dropi, precio o nombre/apellido NO procesa (las demás siguen).',
    pasa:'Línea completa → procesa.',bloquea:'Línea sin teléfono → "FALTAN DATOS: TELÉFONO" y no entra.',
@@ -44335,7 +44660,8 @@ async function hbRenderCfg(){
   ${hbCcValorHTML('fragTamano')}`)}
 
   ${_blk('#f97316','🟧 FECHAS Y NOMBRES DE ARCHIVO',`
-  <div style="font-size:12px;color:var(--muted);margin-top:8px">📛 Formato del nombre (regla fija): <b style="font-family:monospace">filas__AGENTE__fecha__secuencia</b> — y "__oferta" al final si aplica. La secuencia es la tanda del día (__1 la primera SIEMPRE).</div>
+  <div style="font-size:12px;color:var(--muted);margin-top:8px">📛 Formato del nombre (regla fija): <b style="font-family:monospace">filas__NOMBRE__ID__fecha__secuencia</b> — y "__oferta" al final si aplica. El 🔑 ID es el de SellerChat del asistente (la llave; el nombre es decoración). La secuencia es la tanda del día (__1 la primera SIEMPRE).</div>
+  ${_reglaHTML('id_sellerchat')}
   ${_reglaHTML('candado_fechas')}
   ${_reglaHTML('nombre_mal')}
   ${hbCcValorHTML('nombreMalPiso')}

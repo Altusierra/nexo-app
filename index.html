@@ -10795,17 +10795,39 @@ window.procesarAsignador=async()=>{
 
   // PASO 3: guardar en sistema (con detección de duplicados)
   let guardadas=0,duplicadas=0
+  window._nxDupSoft=[] // (28sep26 · E45) lista "misma venta con OTRO ID" de ESTE pegado (se limpia siempre)
   if(mapeosAGuardar.length>0){
     // Buscar duplicados existentes en BD
     const telefonos=[...new Set(mapeosAGuardar.map(m=>m.telefono))]
-    const{data:existentes}=await sb.from('mapeos').select('telefono,fecha,producto,ad_id').in('telefono',telefonos)
+    // ANTES (hasta E44): const{data:existentes}=await sb.from('mapeos').select('telefono,fecha,producto,ad_id').in('telefono',telefonos)
+    // (28sep26 · E45) esa consulta se cortaba en 1.000 filas EN SILENCIO (trampa conocida de Supabase):
+    // con teléfonos de mucho historial, un duplicado real podía colarse sin aviso. Ahora va por lotes
+    // de 100 teléfonos y paginada con _sbFetchAll (nunca se corta). +id: lo usa la llave suave de abajo.
+    let existentes=[]
+    for(let _i45=0;_i45<telefonos.length;_i45+=100){
+      const _lote45=telefonos.slice(_i45,_i45+100)
+      const{data:_ex45}=await _sbFetchAll((_f,_t)=>sb.from('mapeos').select('id,telefono,fecha,producto,ad_id').in('telefono',_lote45).order('id',{ascending:true}).range(_f,_t))
+      if(_ex45)existentes=existentes.concat(_ex45)
+    }
     const keySet=new Set((existentes||[]).map(e=>`${e.telefono}|${e.fecha}|${(e.producto||'').toLowerCase().trim()}|${e.ad_id||''}`))
+    // ══ (28sep26 · E45) LLAVE SUAVE (tel+fecha+producto, SIN el ID del anuncio) ══════════════════
+    // El ID de SellerChat a veces CAMBIA para la misma venta (re-atribución a un anuncio más nuevo,
+    // corrección a mano, o Excel que dañó los dígitos). Antes esa venta entraba 2 VECES sin avisar.
+    // Ahora: misma venta con OTRO ID → NO se guarda sola; sale en un aviso ámbar y el aux decide
+    // (✏️ corregir el ID de la existente, o ➕ sí es una compra nueva). Nada entra ni se pierde solo.
+    const _soft45={}
+    for(const e of (existentes||[])){const _sk=`${e.telefono}|${e.fecha}|${(e.producto||'').toLowerCase().trim()}`;if(!(_sk in _soft45))_soft45[_sk]={id:e.id,ad:e.ad_id||''}}
+    const _dupSoft45=window._nxDupSoft // (28sep26 · E45) misma lista: el aviso del PASO 4 la lee de window
     const nuevos=[]
     const vistosEnEsteBatch=new Set()
     for(const m of mapeosAGuardar){
       const k=`${m.telefono}|${m.fecha}|${(m.producto||'').toLowerCase().trim()}|${m.ad_id||''}`
       if(keySet.has(k)||vistosEnEsteBatch.has(k)){duplicadas++;continue}
+      const _sk45=`${m.telefono}|${m.fecha}|${(m.producto||'').toLowerCase().trim()}` // (28sep26 · E45)
+      const _ex45s=_soft45[_sk45]
+      if(_ex45s&&String(_ex45s.ad||'')!==String(m.ad_id||'')){_dupSoft45.push({m,mapeoId:_ex45s.id,antes:_ex45s.ad||'',ahora:m.ad_id||''});continue} // (28sep26 · E45) a decisión del aux
       vistosEnEsteBatch.add(k)
+      if(!_ex45s)_soft45[_sk45]={id:null,ad:m.ad_id||''} // (28sep26 · E45) dentro del mismo pegado también aplica
       nuevos.push(m)
     }
     if(nuevos.length>0&&_esPrueba){guardadas=nuevos.length} // MEJORA D (8jul26): simulacro — SE HABRÍAN guardado, la BD NO se toca
@@ -10867,6 +10889,18 @@ window.procesarAsignador=async()=>{
     ✅ ${filas.length} línea(s) procesada(s) — CSV listo para copiar a Dropi<br>
     💾 ${guardadas} venta(s) guardada(s) en sistema${duplicadas>0?` &nbsp;·&nbsp; ⚠️ ${duplicadas} ya estaban registradas`:''}${correccionesHtml}
   </div>`
+
+  // ══ (28sep26 · E45) AVISO: "misma venta con OTRO ID de anuncio" — el aux decide, una por una ══
+  // Va DESPUÉS del render de arriba para que no lo pise. En SIMULACRO solo informa (sin botones).
+  try{
+    const _dupSoft45=window._nxDupSoft||[] // (28sep26 · E45) la llenó el PASO 3 de ESTE pegado
+    if(_dupSoft45&&_dupSoft45.length){
+      const _fV45=fx=>{const p=String(fx||'').split('-');return p.length===3?`${p[2]}/${p[1]}/${p[0]}`:fx}
+      const _esc45=s=>String(s==null?'':s).replace(/</g,'&lt;')
+      const _filas45=_dupSoft45.map((d,i)=>`<div id="nxdup-${i}" style="padding:7px 8px;border-bottom:1px dashed rgba(255,255,255,.14);font-size:12px;line-height:1.7">📞 <b>${_esc45(d.m.telefono)}</b> · ${_fV45(d.m.fecha)} · ${_esc45(d.m.producto)}<br>🆔 antes: <span style="font-family:monospace">${_esc45(d.antes)||'(sin ID)'}</span> → ahora: <span style="font-family:monospace">${_esc45(d.ahora)||'(sin ID)'}</span>${_esPrueba?' · 🧪 SIMULACRO (sin botones)':` <button class="btn-sm btn-outline" style="margin-left:6px" onclick="window._nxDupSoftAccion(${i},'corregir',this)">✏️ Corregir el ID</button> <button class="btn-sm btn-outline" style="margin-left:4px" onclick="window._nxDupSoftAccion(${i},'insertar',this)">➕ Es venta NUEVA</button>`}</div>`).join('')
+      msg.innerHTML+=`<div class="alert alert-amber" style="margin-top:8px;line-height:1.6">⚠️ <b>${_dupSoft45.length} venta(s) YA existen con OTRO ID de anuncio</b> — no se guardaron solas (así era como se duplicaban).${_filas45}<div style="font-size:11px;color:var(--muted);margin-top:5px">✏️ = es la MISMA venta y el ID cambió en SellerChat → se corrige el ID y queda UNA sola venta · ➕ = de verdad es OTRA compra → se guarda aparte</div></div>`
+    }
+  }catch(_e45av){console.warn('[E45 aviso dup]',_e45av&&_e45av.message)}
 
   // Resumen por estado
   const counts={}
@@ -27043,7 +27077,8 @@ window._nxGastoOrigenHtml=function(){
   if(e.sinToken)return`<div id="nx-gasto-origen" style="${base}var(--amber);background:var(--amber-bg);color:var(--amber)">🟡 <b>Sin token de Meta</b> · todo el gasto viene del dato guardado</div>`
   const perm=(e.guardadas||[]).filter(g=>g.sinPermiso),caidas=(e.guardadas||[]).filter(g=>!g.sinPermiso)
   const n=e.total-perm.length,permTxt=perm.length?` · <span style="color:var(--muted)">⛔ ${perm.length} sin permiso del token (no se reintenta: Meta no lo deja ver)</span>`:''
-  const btn=`<button class="btn-sm btn-outline" style="padding:2px 8px;font-size:10px" onclick="event.stopPropagation();try{window.nxAlm&&window.nxAlm.invalidar(null,'🔄 Actualizar resumen')}catch(_){};window._actualizarResumenMetaProductos&&window._actualizarResumenMetaProductos()">🔄 Actualizar resumen</button>` // 🗄️ (25sep26 · B1) tu 🔄 manual trae TODO fresco (también los días cerrados)
+  // ANTES (hasta E44): const btn=`<button ...>🔄 Actualizar resumen</button>` (solo el 🔄)
+  const btn=`<button class="btn-sm btn-outline" style="padding:2px 8px;font-size:10px" onclick="event.stopPropagation();try{window.nxAlm&&window.nxAlm.invalidar(null,'🔄 Actualizar resumen')}catch(_){};window._actualizarResumenMetaProductos&&window._actualizarResumenMetaProductos()">🔄 Actualizar resumen</button>${(currentMe()?.rol!=='auxiliar')?`<button class="btn-sm btn-outline" style="padding:2px 8px;font-size:10px;margin-left:6px;border-color:var(--purple);color:var(--purple)" onclick="event.stopPropagation();window._nxRepIdsAbrir&&window._nxRepIdsAbrir()" title="Compara los IDs guardados de cada día contra los mapeos (lo que de verdad se subió a Dropi) y repara los días inflados — solo con tu OK, día por día">🩺 Revisar IDs</button>`:''}` // 🗄️ (25sep26 · B1) tu 🔄 manual trae TODO fresco · (28sep26 · E45) + 🩺 reparador de días inflados (solo admin)
   // OJO: 'recuperado' va ANTES que el 🟢: Meta ya respondió, pero los números pintados siguen siendo del dato guardado
   if(e.recuperado)return`<div id="nx-gasto-origen" style="${base}var(--green);background:var(--green-bg);color:var(--green)">✅ <b>100% · Meta ya respondió</b> · ${n} de ${n} cuentas en vivo · los números de arriba todavía son del dato guardado ${btn}</div>`
   if(!caidas.length)return`<div id="nx-gasto-origen" style="${base}var(--green);background:var(--green-bg);color:var(--green)">🟢 <b>100% en vivo desde Meta</b> · ${e.vivo} de ${n} cuentas${e.dormidas?` · ${e.dormidas} dormidas sin preguntar`:''} · ${e.hora}${e.incluyeHoy?' · mismo dato que el Administrador de Anuncios':''}${permTxt}</div>`
@@ -42834,6 +42869,9 @@ async function hbLeerExcel(file){
     const tel=String(r.client_phone==null?'':r.client_phone).trim()
     const nom=String(r.nombre==null?'':r.nombre).trim()
     const adv=String(r.ad_id==null?'':r.ad_id).trim()
+    // (28sep26 · E45) Si el ad_id llega como NÚMERO, Excel solo guarda 15 cifras exactas y el ID
+    // tiene 18 → los últimos dígitos llegan DAÑADOS (por eso "cambia" el ID y Meta no lo reconoce).
+    const adNum=(typeof r.ad_id==='number'&&Math.abs(r.ad_id)>Number.MAX_SAFE_INTEGER)
     if(!tel&&!nom&&!adv)continue // fila totalmente vacía → no cuenta
     const fm=hbPartsFM(r.first_message_created)
     const sc={}
@@ -42841,7 +42879,8 @@ async function hbLeerExcel(file){
       const v=r[h]
       sc[h]=(v==null)?'':(typeof v==='number'&&h!=='first_message_created'?String(v):v)
     }
-    rows.push({sc,tel,adId:adv,fm,fecha:fm?hbISO(fm):'',mdy:fm?hbMDY(fm):'',corr:null,confirmada:false,wa:_waKey?String(r[_waKey]==null?'':r[_waKey]).trim():''}) // 📱 (24sep26): +wa
+    // ANTES (hasta E44): rows.push({sc,tel,adId:adv,fm,fecha:...,mdy:...,corr:null,confirmada:false,wa:...})
+    rows.push({sc,tel,adId:adv,adNum,fm,fecha:fm?hbISO(fm):'',mdy:fm?hbMDY(fm):'',corr:null,confirmada:false,wa:_waKey?String(r[_waKey]==null?'':r[_waKey]).trim():''}) // 📱 (24sep26): +wa · (28sep26 · E45) +adNum
     if(estadoAlt!=null)sc.estado=String(r[estadoAlt]==null?'':r[estadoAlt]) // FASE 5 (6jul26) · Mejora 11: columna alternativa → estado
   }
   return{rows,buf,notaEstado}
@@ -42872,6 +42911,13 @@ async function hbProcesarArchivo(file,ctx){
   if(lec.error){f.error=lec.error;return f}
   f.rows=lec.rows;f.buf=lec.buf
   if(lec.notaEstado)f.notas.push(lec.notaEstado) // FASE 5 (6jul26) · Mejora 11: aviso de columna estado ausente/alternativa
+  // (28sep26 · E45) IDs de anuncio que llegaron como NÚMERO → Excel les dañó los últimos dígitos.
+  // Aviso fuerte en la tarjeta: el aux los corrige con el ID real (revisión/SellerChat) y se pide
+  // que la columna ad_id se exporte como TEXTO. Un ID dañado luego sale ⚠️ "Meta no lo reconoce".
+  try{
+    const _adNum45=f.rows.filter(r=>r.adNum&&r.adId)
+    if(_adNum45.length)f.notas.push(`🚨 ${_adNum45.length} ID(s) de anuncio llegaron como NÚMERO y el Excel les DAÑÓ los últimos dígitos (${_adNum45.slice(0,3).map(r=>'📞 '+r.tel+' → '+r.adId).join(' · ')}${_adNum45.length>3?' · …':''}). Verifícalos contra SellerChat y corrígelos; pide que la columna ad_id venga como TEXTO para que no se dañe.`)
+  }catch(_){}
   // d) CANDADO de filas (doble verificación) — FASE 6 · M16 regla 7: respeta su switch
   if(hbReglaActiva('candado_filas')){
     if(f.rows.length!==f.filasDecl){f.error=`Dice ${f.filasDecl} filas pero el Excel trae ${f.rows.length}. Revisá lo que bajaste de Seller Chat y vuelve a subir este archivo.`;return f}
@@ -44889,6 +44935,7 @@ async function _hbGenerarFinal(){
           precios_lista:hbListaConstancia(f), // 💲 (24sep26): lista usada + precios puestos solos + verificados (quién y cuándo)
           usuarios:(()=>{const _u=f.rows.filter(r=>!r._excluida&&r._telOriginalWa!=null&&String(r._telOriginalWa).trim()).map(r=>({tel:String(r.tel==null?'':r.tel).replace(/\D/g,''),usuario:String(r._telOriginalWa).trim()})).filter(x=>x.tel);return _u.length?_u:undefined})(), // 👤 (24sep26): pareja teléfono ↔ usuario (ventana 📱 WhatsApp) → fila de USUARIOS del Cruce Dropi
           telefonos:f.rows.filter(r=>!r._excluida).map(r=>String(r.tel==null?'':r.tel).replace(/\D/g,'')).filter(Boolean), // FASE 6 · M15.B: base del anti-duplicado
+          tel_fechas:f.rows.filter(r=>!r._excluida).map(r=>String(r.fecha||'')+'|'+String(r.tel==null?'':r.tel).replace(/\D/g,'')).filter(s=>/^\d{4}-\d{2}-\d{2}\|\d{6,}$/.test(s)), // (28sep26 · E45) pareja fecha|tel de CADA venta → candado anti-resuma en días cerrados
           repetidos_quitados:(f.repetidos||[]).filter(x=>x.resuelto==='quitar').length||undefined,
           repetidos_recompra:(f.repetidos||[]).filter(x=>x.resuelto==='recompra').length||undefined},usuario_id:currentMe().id})
     }
@@ -44920,6 +44967,10 @@ async function _hbGenerarFinal(){
       if(!grupos[k])grupos[k]={fecha:r.fecha,producto:f.producto,agente:f.agente,ids:[],n:0}
       grupos[k].n++
       if(r.adId)grupos[k].ids.push(r.adId) // NO deduplicar: cada ID repetido = 1 venta
+      // (28sep26 · E45) pareja por venta [ID, teléfono, ¿de Excel OFERTA?] — la usa la regla
+      // "solo OFERTA suma IDs a días cerrados" y el candado fecha+teléfono contra re-subidas.
+      if(!grupos[k].pares)grupos[k].pares=[]
+      if(r.adId)grupos[k].pares.push({id:r.adId,tel:String(r.tel==null?'':r.tel).replace(/\D/g,''),of:!!f.oferta})
     }
     const _mapConv={} // 'fecha|pid' → valor manual (solo días de brecha, desde la Ventana 2)
     for(const c of(st._convManual||[]))_mapConv[c.fecha+'|'+String(c.producto.id)]=c.val
@@ -44953,6 +45004,23 @@ async function _hbGenerarFinal(){
         repLineas.push(`⏭️ <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${g.ids.length} ID(s) detectado(s) — NO se envían (brecha/HOY: los registra el auxiliar a mano)`)
         continue
       }
+      // ══ (28sep26 · E45) REGLA DE LA DUEÑA: a un día CERRADO solo le suma IDs el Excel de OFERTA ══
+      // El Excel normal va a la hoja y al Cruce Dropi (ahí salen confirmadas/canceladas/pendientes);
+      // sus IDs ya los registró la auxiliar a mano — volver a sumarlos era lo que inflaba productos
+      // (caso AJO 23/09: 8 → ~60). Y CANDADO fecha+teléfono contra las constancias: una oferta
+      // re-subida NO vuelve a sumar lo que ya sumó. Todo lo que no se suma queda avisado clarito.
+      let _e45F=null
+      if(!_manual){
+        try{_e45F=window._hbTardiasFiltrar(g,await window._hbTardiasSkipSet(g.fecha,loteId))}
+        catch(_e45e){
+          _e45F={ids:[],deOferta:0,yaEstaban:0,deNormal:(g.ids||[]).length,fallo:true}
+          err.push(`candado de días cerrados ${g.producto.nombre} ${g.fecha}: ${_e45e&&_e45e.message||_e45e} — por seguridad NO se sumaron IDs en ese día (los de oferta puedes re-subirlos cuando vuelva la conexión)`)
+        }
+        if(!_e45F.ids.length&&cm==null){
+          repLineas.push(`⏭️ <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${(g.ids||[]).length} ID(s) detectado(s) — NO se suman (${_e45F.fallo?'candado sin lectura — reintenta':[_e45F.deNormal?`${_e45F.deNormal} de Excel normal van por el Cruce Dropi`:'',_e45F.yaEstaban?`${_e45F.yaEstaban} de oferta YA estaban sumados (candado)`:''].filter(Boolean).join(' · ')||'nada nuevo'}).`)
+          continue
+        }
+      }
       const pay={fecha:g.fecha,producto_id:g.producto.id,producto_nombre:g.producto.nombre,
         usuario_id:currentMe().id,updated_at:new Date().toISOString()}
       if(!_manual){ // día YA CERRADO (anterior a `ultima`) — venta tardía: ACUMULA, nunca reemplaza
@@ -44965,7 +45033,8 @@ async function _hbGenerarFinal(){
             .eq('fecha',g.fecha).eq('producto_id',g.producto.id).maybeSingle()
           viejos=String(prev?.ad_ids||'').split('\n').filter(Boolean)
         }catch(_e){err.push(`lectura previa ${g.producto.nombre} ${g.fecha}: ${_e?.message||_e} — se escriben solo los nuevos`)}
-        pay.ad_ids=[...viejos,...g.ids].filter(Boolean).join('\n') // ACUMULA (día consolidado)
+        // ANTES (hasta E44): pay.ad_ids=[...viejos,...g.ids].filter(Boolean).join('\n') // ACUMULA (día consolidado)
+        pay.ad_ids=[...viejos,..._e45F.ids].filter(Boolean).join('\n') // (28sep26 · E45) ACUMULA solo lo NUEVO de OFERTA (candado fecha+teléfono)
       }
       if(_manual&&cm!=null){pay.conversaciones=cm;pay.conversaciones_aprox=cm} // SOLO conversaciones — ad_ids NO se toca
       // NUEVO (13jul26 · Mejora 4): verificación de IDA Y VUELTA — un RLS puede "aceptar" el upsert
@@ -44982,16 +45051,18 @@ async function _hbGenerarFinal(){
       if(e1){
         err.push(`reporte ${g.producto.nombre} ${g.fecha}: ${e1.message}`)
         // Los IDs no quedaron → a la bandeja para no perderlos jamás
-        if(!_manual&&!_prueba&&(g.ids||[]).length){
-          await window._idsPendReg({fecha:g.fecha,agente:g.agente||'',ids:(g.ids||[]).filter(Boolean).join('\n'),motivo:`No se pudieron sincronizar a "${g.producto.nombre}": ${e1.message}`,origen:'hoja_base'})
-          repLineas.push(`🚨 <b style="color:var(--red)">NO SINCRONIZÓ</b> <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${(g.ids||[]).length} ID(s) — enviados a la bandeja de pendientes.`)
+        // ANTES (hasta E44): iban TODOS los g.ids — ahora solo los que de verdad se estaban sumando (los de OFERTA nuevos)
+        if(!_manual&&!_prueba&&(((_e45F&&_e45F.ids)||g.ids)||[]).length){
+          await window._idsPendReg({fecha:g.fecha,agente:g.agente||'',ids:(((_e45F&&_e45F.ids)||g.ids)||[]).filter(Boolean).join('\n'),motivo:`No se pudieron sincronizar a "${g.producto.nombre}": ${e1.message}`,origen:'hoja_base'})
+          repLineas.push(`🚨 <b style="color:var(--red)">NO SINCRONIZÓ</b> <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${(((_e45F&&_e45F.ids)||g.ids)||[]).length} ID(s) — enviados a la bandeja de pendientes.`)
         }
       }
       else if(_manual){
         repLineas.push(`${_prueba?'🧪':'💬'} <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${cm} conversaciones (manual) · IDs NO se envían (los registra el auxiliar)${_prueba?' — <b>SIMULACRO: NO enviado</b>':''}`)
       }else{
         const tot=pay.ad_ids.split('\n').filter(Boolean).length
-        repLineas.push(`${_prueba?'🧪':'📤'} <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${tot} IDs (acumulados: +${g.ids.length} nuevos)${_prueba?' — <b>SIMULACRO: NO enviado</b>':''}`)
+        // ANTES (hasta E44): repLineas.push(`${_prueba?'🧪':'📤'} ... ${tot} IDs (acumulados: +${g.ids.length} nuevos) ...`)
+        repLineas.push(`${_prueba?'🧪':'📤'} <b>${hbEsc(g.producto.nombre)}</b> → ${g.fecha}: ${tot} IDs (🏷️ +${_e45F.ids.length} nuevos de OFERTA${_e45F.yaEstaban?` · ${_e45F.yaEstaban} ya estaban (candado)`:''}${_e45F.deNormal?` · ${_e45F.deNormal} de Excel normal van por el Cruce Dropi`:''})${_prueba?' — <b>SIMULACRO: NO enviado</b>':''}`)
       }
     }
     st._convManual=null // no re-escribir si el auxiliar vuelve a generar en la misma sesión
@@ -53317,7 +53388,200 @@ try{nxIntervaloVisible(()=>{try{_dxnBolaInit()}catch(_e){}},2000,{clave:'dxn-bol
 // el buzón se recoge igual (es 1 consulta liviana cada dropiSyncMin minutos). Así basta tener
 // NEXO abierto en cualquier pestaña para que TODO llegue a Supabase, sin mirarlo.
 try{setInterval(()=>{try{if(document.hidden)nxDropiSyncTick()}catch(_e){/* nada */}},Math.max(1,Number(nxSysVal('dropiSyncMin'))||3)*60000)}catch(_e){/* nada */}
-// ═══ FIN (27sep26 · E43) BOLITA + SUGERENCIAS ═══ · (27sep26 · E44) barra de subida + recogida sin dormir
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// (28sep26 · E45) IDs SIN INFLAR — regla "solo OFERTA suma", candado fecha+teléfono, llave suave
+// del Asignador y 🩺 reparador de días inflados. TODO aditivo: nada de lo anterior se borró.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+// ── E45 · CANDADO: parejas fecha|teléfono que YA pasaron por una constancia de export ANTERIOR ──
+// Sirve para que una OFERTA re-subida no vuelva a sumar lo que ya sumó (ni lo que la auxiliar ya
+// registró a mano el día que ese Excel entró por primera vez). Lee las constancias con fecha_lote
+// desde el día consultado (un lote más viejo no puede traer ventas de ese día), EXCLUYENDO el lote
+// actual (su constancia se guarda momentos antes de sumar). Nuevas constancias traen tel_fechas
+// exacto; las viejas se aproximan con telefonos + fecha_declarada (cubre la re-subida clásica).
+window._hbTardiasSkipSet=async(fecha,loteActual)=>{
+  let rows=null
+  try{
+    const r=await _sbFetchAll((_f,_t)=>sb.from('constructor_subidas').select('id,lote_id,fecha_declarada,detalle').eq('tipo','export').gte('fecha_lote',fecha).order('id',{ascending:true}).range(_f,_t))
+    if(r.error)throw r.error
+    rows=r.data||[]
+  }catch(_e){
+    // Respaldo (¿tabla sin columna id?): una sola página con lo más reciente — mejor eso que nada
+    const r2=await sb.from('constructor_subidas').select('lote_id,fecha_declarada,detalle').eq('tipo','export').gte('fecha_lote',fecha).order('fecha_lote',{ascending:false}).limit(1000)
+    if(r2.error)throw r2.error
+    rows=r2.data||[]
+  }
+  const skip=new Set()
+  for(const c of rows){
+    if(loteActual&&String(c.lote_id||'')===String(loteActual))continue // el lote de AHORA no cuenta
+    const d=c.detalle||{}
+    if(Array.isArray(d.tel_fechas)){for(const s of d.tel_fechas){if(s)skip.add(String(s))}}
+    else if(Array.isArray(d.telefonos)&&c.fecha_declarada){for(const t of d.telefonos){const n=String(t||'').replace(/\D/g,'');if(n)skip.add(c.fecha_declarada+'|'+n)}}
+  }
+  return skip
+}
+// ── E45 · FILTRO del ACUMULA: de un grupo (fecha+producto) deja SOLO lo sumable ──
+// Regla de la dueña (27sep26): a un día cerrado solo le suma IDs el Excel de OFERTA; el normal va
+// por el Cruce Dropi. Y del de oferta, solo las ventas cuya pareja fecha|tel NO esté en el candado.
+// Sin parejas (llamada vieja) NO suma nada: fallar cerrado jamás infla.
+window._hbTardiasFiltrar=(g,skip)=>{
+  const out={ids:[],deOferta:0,yaEstaban:0,deNormal:0,fallo:false}
+  const pares=(g&&Array.isArray(g.pares))?g.pares:[]
+  for(const p of pares){
+    if(!p||!p.id)continue
+    if(!p.of){out.deNormal++;continue}
+    out.deOferta++
+    if(p.tel&&skip&&skip.has(String(g.fecha)+'|'+p.tel)){out.yaEstaban++;continue}
+    out.ids.push(p.id)
+  }
+  return out
+}
+// ── E45 · DECISIÓN "misma venta con OTRO ID" (aviso ámbar del Asignador) ──
+// ✏️ corregir = es la MISMA venta y el ID cambió en SellerChat → se corrige el ID de la existente
+// (queda UNA venta, con verificación de ida y vuelta). ➕ insertar = de verdad es OTRA compra.
+window._nxDupSoftAccion=async(i,acc,btn)=>{
+  const d=(window._nxDupSoft||[])[i]
+  if(!d||d._hecho)return
+  if(btn){btn.disabled=true;btn.style.opacity='.5'}
+  const fila=document.getElementById('nxdup-'+i)
+  const _escD=s=>String(s==null?'':s).replace(/</g,'&lt;')
+  try{
+    if(acc==='corregir'){
+      if(!d.mapeoId)throw new Error('no encontré la venta existente en la base')
+      const{error}=await sb.from('mapeos').update({ad_id:d.ahora||null}).eq('id',d.mapeoId)
+      if(error)throw error
+      const{data:_v}=await sb.from('mapeos').select('ad_id').eq('id',d.mapeoId).maybeSingle()
+      if(String(_v?.ad_id||'')!==String(d.ahora||''))throw new Error('la nube NO devolvió el ID corregido (¿RLS de UPDATE en mapeos?)')
+      try{await sb.from('mapeo_eventos').insert({mapeo_id:d.mapeoId,evento:'ad_id_corregido',fuente:'asignador',usuario_id:me?.id||null,detalle:{antes:d.antes||null,despues:d.ahora||null,telefono:d.m.telefono,fecha:d.m.fecha}})}catch(_){}
+      d._hecho=true
+      if(fila)fila.innerHTML=`✅ ID corregido y verificado: la venta de <b>${_escD(d.m.telefono)}</b> quedó con <span style="font-family:monospace">${_escD(d.ahora)||'(sin ID)'}</span> — UNA sola venta.`
+    }else{
+      const{data:_ins,error}=await sb.from('mapeos').insert(d.m).select('id')
+      if(error)throw error
+      const _nid=_ins&&_ins[0]&&_ins[0].id
+      if(!_nid)throw new Error('la nube no devolvió la venta insertada')
+      try{await sb.from('mapeo_eventos').insert({mapeo_id:_nid,evento:'creado',fuente:'asignador',usuario_id:me?.id||null,detalle:{telefono:d.m.telefono,fecha:d.m.fecha,ad_id:d.m.ad_id||null,producto:d.m.producto,estado_inicial:d.m.estado_inicial,nota:'confirmada como venta nueva (mismo tel+fecha+producto con otro ID de anuncio)'}})}catch(_){}
+      d._hecho=true
+      if(fila)fila.innerHTML=`✅ Guardada como venta NUEVA de <b>${_escD(d.m.telefono)}</b> (🆔 <span style="font-family:monospace">${_escD(d.ahora)||'(sin ID)'}</span>).`
+    }
+    try{logAction('asignador_dup_id',{accion:acc,tel:d.m.telefono,fecha:d.m.fecha,antes:d.antes||null,ahora:d.ahora||null}).catch(()=>{})}catch(_){}
+  }catch(e){
+    if(btn){btn.disabled=false;btn.style.opacity=''}
+    if(fila)fila.insertAdjacentHTML('beforeend',`<div style="color:var(--red);font-size:11px">🚫 ${_escD(e&&e.message||e)} — sigue pendiente, intenta de nuevo.</div>`)
+  }
+}
+
+// ── E45 · 🩺 REPARADOR DE DÍAS INFLADOS (solo admin) ─────────────────────────────────────────
+// Compara, día por día y producto por producto, los 🆔 guardados en Reportes Diarios contra los
+// mapeos (la verdad de máquina: cada venta que NEXO subió a Dropi con su ID). Si un día tiene MÁS
+// IDs que ventas reales, ofrece repararlo — y SOLO escribe cuando tú le das clic a ESE día.
+// Lo viejo no se pierde: queda completo en el registro de acciones (ids_reparados).
+window._nxRepIdsCalcular=(repRows,mapeos)=>{
+  const _split=s=>String(s||'').split(/[\n,;\s]+/).map(x=>x.trim()).filter(x=>x.length>5)
+  const _pn=n=>{try{return (resolveProdName(n||'').nombre)||(n||'')}catch(_){return n||''}}
+  const seen=new Set(),unicos=[]
+  for(const r of (repRows||[])){ // regla canónica de siempre: el último reporte por fecha+producto manda
+    const k=(r.fecha||'')+'|'+(r.producto_id||r.producto_nombre||'')
+    if(seen.has(k))continue
+    seen.add(k);unicos.push(r)
+  }
+  const porDia={}
+  for(const m of (mapeos||[])){
+    if(!m||!m.fecha)continue
+    const k=m.fecha+'|'+_pn(m.producto)
+    if(!porDia[k])porDia[k]=[]
+    if(m.ad_id!=null&&String(m.ad_id).trim()!=='')porDia[k].push(String(m.ad_id).trim())
+  }
+  const out=[]
+  for(const r of unicos){
+    const pn=_pn(r.producto_nombre)
+    const idsRep=_split(r.ad_ids)
+    const idsMap=porDia[(r.fecha||'')+'|'+pn]||[]
+    out.push({rowId:r.id,fecha:r.fecha,producto_id:r.producto_id||null,producto_nombre:r.producto_nombre||'',pn,nRep:idsRep.length,nMap:idsMap.length,idsMap,infla:idsRep.length>idsMap.length})
+  }
+  out.sort((a,b)=>(b.nRep-b.nMap)-(a.nRep-a.nMap)||String(b.fecha).localeCompare(String(a.fecha)))
+  return out
+}
+window._nxRepIdsAbrir=()=>{
+  document.getElementById('nxrep-ov')?.remove()
+  const ov=document.createElement('div')
+  ov.id='nxrep-ov'
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9600;display:flex;align-items:center;justify-content:center;padding:16px'
+  ov.innerHTML=`<div style="background:var(--card);border:2px solid var(--purple);border-radius:14px;max-width:760px;width:100%;max-height:86vh;overflow:auto;padding:16px 18px">
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="font-size:15px;font-weight:800;color:var(--purple)">🩺 Revisar IDs guardados vs. ventas reales (mapeos)</div>
+      <button class="btn-sm btn-outline" style="margin-left:auto" onclick="document.getElementById('nxrep-ov').remove()">✕ Cerrar</button>
+    </div>
+    <div style="font-size:12px;color:var(--muted);line-height:1.7;margin:6px 0 10px">Un día "inflado" tiene MÁS 🆔 guardados que ventas reales (pasaba cuando un Excel viejo se re-sumaba). Reparar deja el día con los IDs de sus mapeos — <b>solo se escribe cuando TÚ le das clic a ese día</b>, y lo viejo queda guardado en el registro de acciones. Solo días cerrados (hasta ayer).</div>
+    <div style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-bottom:10px">
+      <div class="fld" style="margin:0"><label>Desde</label><input type="date" id="nxrep-desde" value="${_daysAgo(21)}" max="${_daysAgo(1)}"></div>
+      <div class="fld" style="margin:0"><label>Hasta</label><input type="date" id="nxrep-hasta" value="${_daysAgo(1)}" max="${_daysAgo(1)}"></div>
+      <button class="btn-sm btn-primary" onclick="window._nxRepIdsRevisar(this)">🔍 Revisar</button>
+    </div>
+    <div id="nxrep-out"><div style="font-size:12px;color:var(--subtle)">Elige el rango y dale 🔍 Revisar.</div></div>
+  </div>`
+  document.body.appendChild(ov)
+}
+window._nxRepIdsRevisar=async(btn)=>{
+  const out=document.getElementById('nxrep-out')
+  if(!out)return
+  let desde=document.getElementById('nxrep-desde')?.value||''
+  let hasta=document.getElementById('nxrep-hasta')?.value||''
+  if(!desde||!hasta||desde>hasta){out.innerHTML='<div class="alert alert-amber" style="font-size:12px">Elige un rango válido (Desde ≤ Hasta).</div>';return}
+  if(hasta>=today())hasta=_daysAgo(1) // solo días cerrados: HOY todavía se está escribiendo
+  if(btn){btn.disabled=true;btn.style.opacity='.5'}
+  out.innerHTML='<div style="font-size:12px;color:var(--purple)">⏳ Leyendo reportes y mapeos del rango…</div>'
+  try{
+    const[rReps,rMps]=await Promise.all([
+      _sbFetchAll((_f,_t)=>sb.from('reportes_diarios').select('id,fecha,producto_id,producto_nombre,ad_ids,updated_at').gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','').order('updated_at',{ascending:false}).order('id',{ascending:true}).range(_f,_t)),
+      _sbFetchAll((_f,_t)=>sb.from('mapeos').select('fecha,producto,ad_id').gte('fecha',desde).lte('fecha',hasta).order('id',{ascending:true}).range(_f,_t))
+    ])
+    if(rReps.error)throw rReps.error
+    if(rMps.error)throw rMps.error
+    const lista=window._nxRepIdsCalcular(rReps.data||[],rMps.data||[])
+    window._nxRepIdsPend=lista
+    const _escR=s=>String(s==null?'':s).replace(/</g,'&lt;')
+    const _fR=fx=>{const p=String(fx||'').split('-');return p.length===3?`${p[2]}/${p[1]}/${p[0]}`:fx}
+    const inflados=lista.filter(x=>x.infla)
+    const filas=lista.map((x,i)=>`<tr id="nxrep-fila-${i}"${x.infla?' style="background:var(--red-bg)"':''}>
+      <td data-label="Día">${_fR(x.fecha)}</td>
+      <td data-label="Producto">${_escR(x.pn||x.producto_nombre)}</td>
+      <td data-label="🆔 guardados" style="text-align:right;font-weight:700">${x.nRep}</td>
+      <td data-label="🧾 mapeos" style="text-align:right;font-weight:700">${x.nMap}</td>
+      <td data-label="Estado">${x.infla?`🚨 sobran ${x.nRep-x.nMap} <button class="btn-sm btn-outline" style="margin-left:6px;border-color:var(--red);color:var(--red)" onclick="window._nxRepIdsReparar(${i},this)" title="Deja el día con los ${x.nMap} IDs de sus mapeos. Lo viejo queda en el registro de acciones.">🔧 Reparar → ${x.nMap}</button>`:(x.nRep<x.nMap?`🟡 faltan ${x.nMap-x.nRep} (la auxiliar registró menos — revisa a mano, aquí no se toca)`:'✅ cuadra')}</td>
+    </tr>`).join('')
+    out.innerHTML=`<div style="font-size:12px;color:var(--text);margin-bottom:6px">${lista.length} día·producto con IDs en el rango · <b style="color:${inflados.length?'var(--red)':'var(--green)'}">${inflados.length} inflado(s)</b></div>
+      <div class="table-wrap"><table><tr><th>Día</th><th>Producto</th><th>🆔 guardados</th><th>🧾 mapeos</th><th>Estado</th></tr>${filas||'<tr><td colspan="5" style="color:var(--subtle)">Sin reportes con IDs en ese rango.</td></tr>'}</table></div>`
+  }catch(e){
+    out.innerHTML=`<div class="alert alert-red" style="font-size:12px">🚫 No se pudo revisar: ${String(e&&e.message||e).replace(/</g,'&lt;')}</div>`
+  }finally{
+    if(btn){btn.disabled=false;btn.style.opacity=''}
+  }
+}
+window._nxRepIdsReparar=async(i,btn)=>{
+  const d=(window._nxRepIdsPend||[])[i]
+  if(!d||d._hecho)return
+  if(btn){btn.disabled=true;btn.style.opacity='.5'}
+  const fila=document.getElementById('nxrep-fila-'+i)
+  try{
+    const{data:prev}=await sb.from('reportes_diarios').select('ad_ids').eq('id',d.rowId).maybeSingle()
+    const _antes=String(prev?.ad_ids||'')
+    const _nuevo=(d.idsMap||[]).join('\n')
+    const{error}=await sb.from('reportes_diarios').update({ad_ids:_nuevo,updated_at:new Date().toISOString()}).eq('id',d.rowId)
+    if(error)throw error
+    const{data:_v}=await sb.from('reportes_diarios').select('ad_ids').eq('id',d.rowId).maybeSingle()
+    if(String(_v?.ad_ids||'')!==_nuevo)throw new Error('la nube NO devolvió lo reparado (¿RLS de UPDATE en reportes_diarios?)')
+    try{logAction('ids_reparados',{fecha:d.fecha,producto:d.pn||d.producto_nombre,antes_n:d.nRep,despues_n:(d.idsMap||[]).length,antes:_antes.slice(0,8000)}).catch(()=>{})}catch(_){}
+    d._hecho=true
+    if(fila){fila.style.background='var(--green-bg)';fila.lastElementChild.innerHTML=`✅ Reparado y verificado: ${d.nRep} → ${(d.idsMap||[]).length} IDs (lo viejo quedó en el registro de acciones)`}
+    try{window.nxAlm&&window.nxAlm.invalidar(null,'🩺 reparación de IDs')}catch(_){}
+  }catch(e){
+    if(btn){btn.disabled=false;btn.style.opacity=''}
+    if(fila)fila.lastElementChild.innerHTML+=`<div style="color:var(--red);font-size:11px">🚫 ${String(e&&e.message||e).replace(/</g,'&lt;')} — nada cambió, intenta de nuevo.</div>`
+  }
+}
+// ═══ FIN (27sep26 · E43) BOLITA + SUGERENCIAS ═══ · (27sep26 · E44) barra de subida + recogida sin dormir · (28sep26 · E45) IDs sin inflar (solo OFERTA suma + candado + llave suave + 🩺 reparador)
 
 </script>
 </body>

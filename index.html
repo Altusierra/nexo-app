@@ -2311,6 +2311,14 @@ const NX_SYS_ORIG={
   // (25sep26 · C1) VIGÍA DE CARGAS — 0 lo apaga
   cargaVigia:{v:1,min:0,max:1,label:'👀 Mostrar cuánto lleva cada "Cargando…" de una sola consulta (1 = sí · 0 = no)',mod:'Toda la app',
     explica:'Las cargas con pasos muestran su % real. Las de UNA sola consulta no tienen pasos que contar (inventar un % sería mentir): a esas se les agrega cuánto llevan (⏳ 7 s) y, si Supabase va lento, lo dicen en amarillo (NEXO reintenta sola). Nunca dicen 100 %: cuando termina, simplemente aparece el contenido.'}
+  ,
+  // (27sep26 · E42) DROPI + NEXO — puente con la extensión Dropi Semáforo
+  fleteMaxEnvio:{v:30000,min:0,max:200000,label:'🚚 Flete máximo para despachar (más caro = se sube pero se CANCELA)',mod:'Asignador',
+    explica:'Si el flete más barato de las transportadoras que llegan a esa ciudad pasa de este valor, el pedido se trata como SIN COBERTURA: sale como CANCELAR y se sube a Dropi con la ciudad fija, solo para dejar constancia. 0 apaga la regla.'},
+  dropiSyncMin:{v:3,min:1,max:60,label:'📨 Cada cuántos minutos NEXO recoge el buzón de la extensión Dropi',mod:'Asignador · Productos',
+    explica:'La extensión Dropi Semáforo anota en su buzón lo que aprende (historiales de clientes, bodegas, Torre logística, fletes). NEXO lo recoge, lo guarda en Supabase y le confirma a la extensión. Con la pestaña escondida, duerme.'},
+  pruebaHistorialDropi:{v:1,min:0,max:1,label:'🧪 Botón "Probar historial Dropi" en el Asignador (1 = sí · 0 = no)',mod:'Asignador',
+    explica:'Muestra el botón de prueba 🚦 para buscar un teléfono y ver qué transportadora conviene. Cuando ya no se necesite se apaga con 0 (no se borra nada).'}
 }
 window._nxSysCfg=window._nxSysCfg||{} // overrides vigentes {clave:número}
 function nxSysVal(k){ // getter único: override válido → original del sistema
@@ -10671,6 +10679,7 @@ window.procesarAsignador=async()=>{
   // PASO 2: procesar todas las líneas con el asignador
   msg.innerHTML='<div class="alert alert-blue">Procesando…</div>'
   const{D,M,kw,masterByCode}=await cargarAsignDataSiNecesario()
+  const _cpFija=await nxCiudadPuente() // (27sep26 · E42) la ciudad fija para pedidos sin cobertura ({ciudad, departamento} o {})
   // Construir mapa ad_id → producto correcto (solo si hay adIds)
   const adIdsEnLineas=parsed.filter(p=>p.tipo==='nuevo'&&p.adId).map(p=>p.adId)
   const adProdMap=await buildAdProductMap(adIdsEnLineas)
@@ -10683,6 +10692,7 @@ window.procesarAsignador=async()=>{
     const q=_norm(p.ciudad)
     const df=_fuzzy(D,q,p.dept)
     let estado,carrier,alt='',match='—',ciudadDropi='—',deptoDropi='—'
+    let _cob='directa',_motivoPuente='' // (27sep26 · E42) cobertura de esta línea: directa | puente | sin_ubicar
     let codeMaestro='GEN'
     if(p.tipo==='nuevo'){
       const palabra=p.producto.toLowerCase().trim()
@@ -10695,11 +10705,20 @@ window.procesarAsignador=async()=>{
     const niveles=maestro?.niveles||3
     if(!df||!df.key){
       estado='SIN_COBERTURA';carrier='—';match='❌'
+      _cob='sin_ubicar' // (27sep26 · E42) la ciudad no se ubicó: se corrige a mano, como siempre (celda roja)
     }else{
       const mv=M[codeMaestro]?.[df.key]||M['GEN']?.[df.key]
       const r=_getState(mv,p.qty,p.isI,niveles)
       estado=r.state;carrier=r.carrier;alt=r.alt;match=df.match
       ciudadDropi=D[df.key].nombre;deptoDropi=D[df.key].dept
+      // (27sep26 · E42) SIN COBERTURA PRÁCTICA: ninguna transportadora llega O el flete más barato pasa del tope.
+      // El pedido SÍ se sube (constancia) con la CIUDAD FIJA y sale como 🚫 CANCELAR; la real queda en ciudad/departamento
+      // y también al inicio de la dirección en el Excel (📍). Regla de la dueña del 27-sep.
+      const _fMin=mv?Math.min(...[mv.fe,mv.fc,(p.isI?mv.fi:null)].filter(x=>x!=null&&Number(x)>0).map(Number)):Infinity
+      const _tope=Number(nxSysVal('fleteMaxEnvio'))||0
+      if(estado==='SIN_COBERTURA'){_cob='puente';_motivoPuente='sin cobertura'}
+      else if(_tope>0&&Number.isFinite(_fMin)&&_fMin>_tope){_cob='puente';_motivoPuente='flete '+_fMin.toLocaleString('es-CO')+' > tope '+_tope.toLocaleString('es-CO')}
+      if(_cob==='puente'){estado='CANCELAR';carrier='—';alt=''}
     }
 
     // Resolver producto_id + nombre canónico — CADENA: ID de Dropi MANDA → anuncio → nombre (respaldo)
@@ -10735,6 +10754,7 @@ window.procesarAsignador=async()=>{
     }
 
     filas.push({raw:p,ciudadDropi,deptoDropi,estado,carrier,alt,match,maestro:codeMaestro,prodCorregido,prodEscrito,prodNombre})
+    Object.assign(filas[filas.length-1],{cobertura:_cob,motivoPuente:_motivoPuente}) // (27sep26 · E42) para el Excel masivo y el resumen
 
     // Solo encolar para guardar si es formato nuevo válido
     if(p.tipo==='nuevo'&&p.tel&&p.fecha&&p.producto){
@@ -10761,7 +10781,13 @@ window.procesarAsignador=async()=>{
         // exporta). Antes solo la llenaba el Cruce Dropi → un pedido duplicado que nunca se cruzaba quedaba
         // sin transportadora y el mensaje decía "la transportadora". Formato Dropi (MAYÚSCULAS); el cruce la
         // reemplaza por la REAL de Dropi. '—' / 'Solo Interrapidisimo' (sin cobertura) → null, como antes.
-        transportadora:({Envia:'ENVIA',Coordinadora:'COORDINADORA',Interrapidisimo:'INTERRAPIDISIMO'})[carrier]||null
+        transportadora:({Envia:'ENVIA',Coordinadora:'COORDINADORA',Interrapidisimo:'INTERRAPIDISIMO'})[carrier]||null,
+        // (27sep26 · E42) La venta nace con su DEPARTAMENTO y sus 2 ubicaciones: la REAL (ciudad/departamento,
+        // donde vive la clienta) y la de SUBIDA a Dropi (la ciudad fija si es puente). Trazabilidad en el tiempo.
+        departamento:deptoDropi!=='—'?deptoDropi:(p.dept||null),
+        cobertura:_cob,
+        ciudad_subida:_cob==='puente'?(_cpFija.ciudad||null):(ciudadDropi!=='—'?ciudadDropi:null),
+        departamento_subida:_cob==='puente'?(_cpFija.departamento||null):(deptoDropi!=='—'?deptoDropi:null)
       })
     }
   }
@@ -26963,6 +26989,51 @@ window._nxCadenaRepintar=function(){
     })
   }catch(e){console.warn('[IDs] repintar:',e&&e.message)}
 }
+// ═════════════════════════════════════════════════════════════════════════════════════
+// (27sep26 · VIVOS) 🟢 ACTIVAS CORRECTO EN TODOS LOS PRODUCTOS · piezas globales
+// El bug: al abrir Meta Ads, los datos EN VIVO (⚡ estados + 📡 entrega) se piden UNA vez, pero quien
+// preguntaba "¿ya están?" mientras cargaban recibía "sí" de una (guarda 'cargando') → la precarga pintaba
+// las tablas con el botón YA sabido y la entrega TODAVÍA desconocida → la campaña contaba como inactiva
+// ("🟢 Activas: 0" en unos productos y en otros no, según lo que tardara Meta). Arreglo de raíz en 4 partes:
+// misma promesa para todos · estado+entrega se publican JUNTOS · las tablas pintadas antes de tiempo se
+// corrigen solas (estas piezas) · y si Meta no responde, reintento amarillo sin límite (regla de la dueña).
+// Interruptor: window.NX_VIVOS_V1=true → todo vuelve a como era antes.
+// ═════════════════════════════════════════════════════════════════════════════════════
+// Las tablas del rango que se pintaron ANTES de que llegaran los datos en vivo se corrigen SOLAS:
+// la abierta se repinta en sitio (sin moverte) y la cerrada queda marcada para repintarse al abrirla
+// (la MISMA marca _nxCadenaSucio que ya usa el arreglo de IDs de E40).
+window._nxVivosRepintar=function(){
+  try{
+    if(window.NX_VIVOS_V1)return
+    const hechos=window._rpAuto8Done||{}
+    for(const slug of Object.keys(hechos)){
+      if(!hechos[slug]||!window._rpFusionRango)continue
+      const w=document.getElementById('cuadf_'+slug+'-wrap')
+      if(!w||!w.isConnected)continue
+      const bd=document.getElementById('fusgrp-bd-'+slug)
+      if(bd&&bd.style.display==='none'){(window._nxCadenaSucio=window._nxCadenaSucio||{})[slug]=1;continue}
+      window._nxRefrescoEnSitio('cuadf_'+slug,()=>window._rpFusionRango(slug,'cuadf_'+slug)).catch(e=>console.warn('[vivos] repintar:',e&&e.message))
+    }
+  }catch(e){console.warn('[vivos] repintar:',e&&e.message)}
+}
+// Si los datos en vivo NO llegaron (Meta caída), se sigue intentando SOLO, en amarillo, con cuenta atrás y
+// sin límite (motor único _nxHastaQueCargue, 10 s · 30 s · cada 60 s). Al lograrlo, el worker deja el sello
+// 'ok' y llama al repintado de arriba: todo se corrige sin recargar. Permiso #200 → ⛔ y no se insiste.
+window._nxVivosReintento=function(){
+  try{
+    if(window.NX_VIVOS_V1)return
+    const rt=window._nxReintentos&&window._nxReintentos['vivos-meta']
+    if(rt&&rt.vivo)return // ya hay uno trabajando: no se le encima
+    window._nxHastaQueCargue('vivos-meta',{
+      titulo:'Estados y entrega EN VIVO de Meta',total:1,
+      sigueVivo:()=>!!document.getElementById('meta-resumen-productos'),
+      pendientes:[{nombre:'estados+entrega',hacer:async()=>{
+        await window._nexoCargaVivos()
+        if(window._nexoVivosListo!=='ok')throw new Error('Meta no respondió los estados/entrega en vivo')
+      }}]
+    })
+  }catch(e){console.warn('[vivos] no pude programar el reintento:',e&&e.message)}
+}
 window._nxHoraBogota=()=>{try{return new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit',timeZone:'America/Bogota'})}catch(_){return ''}}
 window._nxGastoOrigenHtml=function(){
   const e=window._nxGastoHoyEstado
@@ -29379,7 +29450,8 @@ function _renderProductoCardResumen(data,ranking){
       const _bdF=(_wF&&_wF._nexoEntregaFuente==='bd')?' · dato del último sync (Meta no respondió en vivo)':''
       const _bdMk=_bdF?'🕓 ':''
       // verde = botón ON + ≥1 anuncio entregando · negro = apagada o sin anuncios entregando · sin dato = no se pinta
-      const _activaRealF=(_estF==='ACTIVE'&&_entF===true)?true:(((_estF&&_estF!=='ACTIVE')||_entF===false)?false:null)
+      // ANTES: const _activaRealF=(_estF==='ACTIVE'&&_entF===true)?true:(((_estF&&_estF!=='ACTIVE')||_entF===false)?false:null)
+      const _activaRealF=window.NX_VIVOS_V1?((_estF==='ACTIVE'&&_entF===true)?true:(((_estF&&_estF!=='ACTIVE')||_entF===false)?false:null)):((_estF==='ACTIVE'&&_entF!==false)?true:(((_estF&&_estF!=='ACTIVE')||_entF===false)?false:null)) // (27sep26 · VIVOS) regla única
       // NUEVO (Mejora 7): 🔴 PRENDER YA — solo indicador. Condición ESTRICTA: gasto HOY === 0 Y ventas > 0 en días anteriores.
       // Fuente única: mapa _fsemBy (que ya resolvió portafolio vs fallback por días de F).
       const _pyF=_fsemBy[String(F.campId)]==='prender_ya'
@@ -29431,6 +29503,7 @@ function _renderProductoCardResumen(data,ranking){
           if(_vtasPerF<=0&&_gtoPerF<=0)return`<span style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)" title="Botón prendido pero ningún anuncio entregando, Y en este período no registró ventas ni gasto: simplemente no participó. Nada urgente que arreglar aquí.${_bdF}">${_bdMk}⚪ SIN ACTIVIDAD</span>`
           return`<span style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.05);color:var(--text);border:1px solid var(--border)" title="TRAMPA de Meta: el botón de la campaña está prendido, pero NINGÚN anuncio suyo está entregando → NO entrega ni gasta AHORA. En este período sí registró: ${_vtasPerF} venta${_vtasPerF===1?'':'s'} · $${fmt(_gtoPerF)} de gasto (por eso está en la lista). Revisa adentro qué está apagado (los ads tienen su punto 🟢/⚫).${_bdF}">${_bdMk}🔕 NO ENTREGA</span>`
         }
+        if(_estF==='ACTIVE'&&_entF===undefined&&!window.NX_VIVOS_V1)return`<span style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:var(--amber-bg);color:var(--amber);border:1px solid var(--amber)" title="Botón prendido en Meta, pero la ENTREGA en vivo de esta campaña aún no llega. NEXO la sigue pidiendo sola; mientras tanto cuenta como activa por el botón. (27sep26 · VIVOS)">🟡 ENTREGA SIN CONFIRMAR</span>`
         if(_estF==='ACTIVE'&&_entF===true)return`<span style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:var(--green-bg);color:var(--green);border:1px solid var(--green)" title="Activa DE VERDAD: botón prendido y con ≥1 anuncio entregando AHORA según Meta.${_bdF}">${_bdMk}🟢 ACTIVA</span>`
         return''
       })()
@@ -29564,7 +29637,8 @@ function _renderProductoCardResumen(data,ranking){
       const _eH=(_wHdr&&_wHdr._nexoLiveEstadoByCampId&&_wHdr._nexoLiveEstadoByCampId[String(F.campId)])||''
       const _nH=(_wHdr&&_wHdr._nexoEntregaByCampId)?_wHdr._nexoEntregaByCampId[String(F.campId)]:undefined
       const _gHoyH=(F.dias['p']&&F.dias['p'].gasto)||0
-      if(_eH==='ACTIVE'&&_nH===true)_actHdrF++
+      // ANTES: if(_eH==='ACTIVE'&&_nH===true)_actHdrF++
+      if(_eH==='ACTIVE'&&(window.NX_VIVOS_V1?_nH===true:_nH!==false))_actHdrF++ // (27sep26 · VIVOS) regla única: entrega desconocida ≠ inactiva
       else if(_gHoyH>0)_inactHdrF++
     }
     const _todasHdrF=_actHdrF+_inactHdrF
@@ -33405,7 +33479,10 @@ window._rpFusionRango=async function(slug,cidF){
       const _alrR=(_eSemR?`<span style="font-size:11px;margin-right:3px" title="Estado ACTUAL de urgencia (la foto de HOY, no del rango): ${_eSemR[0]} ${_eSemR[1]}">${_eSemR[0]}</span>`:'')
         +(_semCodeR==='prender_ya'?`<span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:999px;white-space:nowrap;background:var(--red-bg);color:var(--red);border:1px solid var(--red)" title="Hoy $0 de gasto pero vendía en los días anteriores. La apagaste y estás perdiendo esas ventas.">PRENDER YA</span>`:'')
         +((BE>0&&F.cpa>BE&&F.count>0)?`<span style="margin-left:3px;font-size:9px;font-weight:700;color:var(--red);border:1px solid var(--red);border-radius:999px;padding:1px 6px;white-space:nowrap" title="NI A TRAVÉS DEL TIEMPO REMONTA: el CPA de TODO el rango ($${fmt(F.cpa)}) pasa el break-even ($${fmt(BE)}) — pierde plata incluso sumando todos estos días. Candidata a apagar.">📉 NO REMONTA</span>`:'')
-      const _activaRealR=(_estR||_entR!==undefined)?(_estR==='ACTIVE'&&_entR===true):null
+      // ANTES: const _activaRealR=(_estR||_entR!==undefined)?(_estR==='ACTIVE'&&_entR===true):null
+      // (27sep26 · VIVOS) regla ÚNICA de "activa" (la misma del Resumen por producto y de 💰/▶️/⏸️ varias):
+      // botón ACTIVE y que NO se sepa que NO entrega. Entrega desconocida ≠ inactiva (badge: 🟡 SIN CONFIRMAR).
+      const _activaRealR=window.NX_VIVOS_V1?((_estR||_entR!==undefined)?(_estR==='ACTIVE'&&_entR===true):null):((_estR||_entR!==undefined)?(_estR==='ACTIVE'&&_entR!==false):null)
       const _dotR=_activaRealR===null?'':`<span style="display:inline-block;width:9px;height:9px;border-radius:50%;flex:none;vertical-align:middle;margin-right:4px;background:${_activaRealR?'#22c55e':'#1a1a1a'};border:1.5px solid ${_activaRealR?'#16a34a':'#525252'};${_activaRealR?'box-shadow:0 0 5px rgba(34,197,94,.7);':''}" title="${_activaRealR?'🟢 Activa DE VERDAD: botón prendido y ≥1 anuncio entregando':'⚫ Inactiva: apagada o sin anuncios entregando'}"></span>`
       const _badgeEstR=(()=>{
         if(!_estR&&_entR===undefined)return`<span style="font-size:9px;color:var(--subtle)" title="Sin dato vivo del estado: recarga el portafolio para traerlo desde Meta">— sin dato vivo —</span>`
@@ -33414,6 +33491,7 @@ window._rpFusionRango=async function(slug,cidF){
           if((F.count||0)<=0&&Math.round(F.gasto||0)<=0)return`<span style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.04);color:var(--subtle);border:1px solid var(--border)" title="Botón prendido pero ningún anuncio entregando, y en este rango no registró ventas ni gasto: no participó.">⚪ SIN ACTIVIDAD</span>`
           return`<span style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:rgba(255,255,255,.05);color:var(--text);border:1px solid var(--border)" title="TRAMPA de Meta: el botón está prendido pero NINGÚN anuncio suyo entrega AHORA. En el rango sí registró: ${F.count||0} venta${(F.count||0)===1?'':'s'} · $${fmt(Math.round(F.gasto||0))} de gasto.">🔕 NO ENTREGA</span>`
         }
+        if(_estR==='ACTIVE'&&_entR===undefined&&!window.NX_VIVOS_V1)return`<span style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:var(--amber-bg);color:var(--amber);border:1px solid var(--amber)" title="Botón prendido en Meta, pero la ENTREGA en vivo de esta campaña aún no llega. NEXO la sigue pidiendo sola; mientras tanto cuenta como activa por el botón. (27sep26 · VIVOS)">🟡 ENTREGA SIN CONFIRMAR</span>`
         if(_estR==='ACTIVE'&&_entR===true)return`<span style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:999px;white-space:nowrap;background:var(--green-bg);color:var(--green);border:1px solid var(--green)" title="Activa DE VERDAD: botón prendido y con ≥1 anuncio entregando AHORA según Meta.">🟢 ACTIVA</span>`
         return''
       })()
@@ -34114,9 +34192,11 @@ async function renderMetaPortafolio(el,isAdmin){
   const adsActivosById={}
   let _entregaEsLive=false
   try{window._nexoLiveEstadoByCampId=null;window._nexoEntregaByCampId={};window._nexoEntregaByAdsetId={};window._nexoAdsActivosById=null;window._nexoEntregaFuente='pend';window._metaCargaInfo.entrega='pend';window._nexoVivosListo=null}catch(_){}
-  window._nexoCargaVivos=async function(){
-  if(window._nexoVivosListo==='ok'||window._nexoVivosListo==='cargando')return
-  window._nexoVivosListo='cargando'
+  // (27sep26 · VIVOS) ANTES: window._nexoCargaVivos=async function(){ if(listo==='ok'||listo==='cargando')return; listo='cargando'; ... }
+  // La guarda vieja contestaba DE UNA cuando ya estaba cargando → quien llamaba (precarga, otro producto)
+  // pintaba con el estado YA sabido y la entrega TODAVÍA desconocida → "🟢 Activas: 0" en algunos productos.
+  // Ahora el trabajo vive aquí y TODOS esperan LA MISMA promesa (el envoltorio está al final de la función).
+  const _nexoCargaVivosTrabajo=async function(){
   try{
   if(_hIncluyeVivos){
     try{
@@ -34143,7 +34223,10 @@ async function renderMetaPortafolio(el,isAdmin){
           }
         }
         // Cache global para que el Resumen por producto también use el estado live
-        try{window._nexoLiveEstadoByCampId=liveEstadoByCampId;window._metaCargaInfo.estadosLive=Object.keys(liveEstadoByCampId).length}catch(_){}
+        // ANTES: try{window._nexoLiveEstadoByCampId=liveEstadoByCampId;window._metaCargaInfo.estadosLive=…}catch(_){}
+        // (27sep26 · VIVOS) el estado ya NO se publica aquí solo: se publica JUNTO con la entrega (abajo),
+        // para que nadie vea "botón prendido" sin saber todavía si entrega. NX_VIVOS_V1=true → como antes.
+        try{if(window.NX_VIVOS_V1)window._nexoLiveEstadoByCampId=liveEstadoByCampId;window._metaCargaInfo.estadosLive=Object.keys(liveEstadoByCampId).length}catch(_){}
       }
     }catch(_){}
   }
@@ -34209,10 +34292,12 @@ async function renderMetaPortafolio(el,isAdmin){
           if((a.estado||'')==='ACTIVE'&&_adsActivosPorAdset[asId])entregaByCampId[ck]=true
         }
         for(const ck of _campsConGasto){if(entregaByCampId[ck]===undefined)entregaByCampId[ck]=false}
+        for(const ck in liveEstadoByCampId){if(entregaByCampId[ck]===undefined)entregaByCampId[ck]=false} // (27sep26 · VIVOS) mismo default del camino en vivo
       }
     }
   }catch(e){console.warn('[entrega cascada] no se pudo calcular:',e&&e.message)}
-  try{window._nexoEntregaByCampId=entregaByCampId;window._nexoEntregaByAdsetId=entregaByAdsetId;window._nexoAdsActivosById=_entregaEsLive?adsActivosById:null;window._nexoEntregaFuente=_entregaEsLive?'live':'bd';window._metaCargaInfo.entrega=_entregaEsLive?'live':'bd'}catch(_){}
+  try{if(!window.NX_VIVOS_V1&&Object.keys(liveEstadoByCampId).length)window._nexoLiveEstadoByCampId=liveEstadoByCampId; // (27sep26 · VIVOS) estado+entrega JUNTOS: nunca uno sin el otro
+  window._nexoEntregaByCampId=entregaByCampId;window._nexoEntregaByAdsetId=entregaByAdsetId;window._nexoAdsActivosById=_entregaEsLive?adsActivosById:null;window._nexoEntregaFuente=_entregaEsLive?'live':'bd';window._metaCargaInfo.entrega=_entregaEsLive?'live':'bd'}catch(_){}
   // 💸 Gasto por ANUNCIO en vivo (movido aquí desde _renderResumenProductos · MEJORA LAZY 3jul26):
   // misma pasada liviana de siempre, pero ahora corre junto a estados/entrega en el primer desglose.
   try{
@@ -34246,7 +34331,17 @@ async function renderMetaPortafolio(el,isAdmin){
     }
   }catch(_){}
   window._nexoVivosListo='ok'
+  try{if(!window.NX_VIVOS_V1)window._nxVivosRepintar()}catch(_){} // (27sep26 · VIVOS) las tablas pintadas antes de tiempo se corrigen en sitio
   }catch(_eVivos){console.warn('[carga vivos]',_eVivos&&_eVivos.message);window._nexoVivosListo=null}
+  }
+  window._nexoCargaVivos=function(){ // (27sep26 · VIVOS) TODOS los que llaman comparten LA MISMA promesa
+    if(window._nexoVivosListo==='ok')return Promise.resolve()
+    if(window._nexoVivosListo==='cargando'&&window._nexoVivosPromesa)return window._nexoVivosPromesa
+    window._nexoVivosListo='cargando'
+    window._nexoVivosPromesa=_nexoCargaVivosTrabajo()
+      .then(r=>{try{if(window._nexoVivosListo!=='ok')window._nxVivosReintento()}catch(_){};return r}) // Meta caída → 🟡 reintento sin límite
+      .finally(()=>{window._nexoVivosPromesa=null})
+    return window._nexoVivosPromesa
   }
 
   // ── Conteo "Con actividad" por cuenta (misma lógica del expand de cada cuenta) ──
@@ -52442,6 +52537,471 @@ async function _wchEdGuardar(){
 
 })()
 // ═══ FIN CENTRO DE CHATS ═══
+
+// ═══════════════════════════════════════════════════════════════════════════
+// (27sep26 · E42) DROPI + NEXO — LA FUSIÓN, PARTE 3
+// La extensión "Dropi Semáforo" 1.0.19 tiene un BUZÓN con todo lo que aprende
+// (historiales de clientes, bodegas, Torre logística, fletes). Aquí NEXO:
+//   1. Habla con la extensión (etiqueta dx-nexo-v1, por window.postMessage).
+//   2. Recoge el buzón cada pocos minutos y lo guarda en Supabase (nada se pierde:
+//      la extensión solo borra del buzón lo que NEXO le confirma como guardado).
+//   3. Le devuelve la memoria a una extensión recién instalada (bodegas).
+//   4. 🏭 Bodega por proveedor + la CIUDAD FIJA para pedidos sin cobertura.
+//   5. 🧪 Botón "Probar historial Dropi" en el Asignador (se apaga con
+//      pruebaHistorialDropi = 0).
+// Nada de lo viejo se tocó: este bloque solo AGREGA. Diagnóstico en consola:
+//   nxDropiSync.estado() · nxDropiExt.version()  (los dos viven en window)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── 0 · La ciudad fija (config 'dropi_ciudad_puente' = {"ciudad","departamento"}) ──
+let _dxnCPCache=null
+async function nxCiudadPuente(force){
+  if(_dxnCPCache&&!force)return _dxnCPCache
+  try{const v=await getConfig('dropi_ciudad_puente');_dxnCPCache=v?JSON.parse(v):{}}catch(_e){_dxnCPCache={}}
+  return _dxnCPCache
+}
+function _dxnEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function _dxnNorm(s){return String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/gi,'').toUpperCase()}
+function _dxnTel(v){let t=String(v==null?'':v).replace(/\D/g,'');if(t.length===12&&t.startsWith('57'))t=t.slice(2);return t}
+
+// ── 1 · El Excel masivo: los pedidos PUENTE suben con la ciudad fija y la real va en la dirección ──
+// (envoltura: la función original de la E39 queda intacta y se usa para todo lo demás)
+const _dxnMasivoE39=hbMasivoValor
+hbMasivoValor=function(campo,f,r,emoji){
+  try{
+    if(f&&f.cobertura==='puente'&&_dxnCPCache&&_dxnCPCache.ciudad){
+      if(campo==='ciudad')return _dxnCPCache.ciudad
+      if(campo==='departamento')return _dxnCPCache.departamento||''
+      if(campo==='direccion_emoji'){
+        const ciuR=f.ciudadDropi&&f.ciudadDropi!=='—'?f.ciudadDropi:String(r.ciudad||'')
+        const depR=f.deptoDropi&&f.deptoDropi!=='—'?f.deptoDropi:String(r.dept||'')
+        return emoji+'📍'+ciuR+(depR?' ('+depR+')':'')+' · '+String(r.direccion||'')
+      }
+    }
+  }catch(_e){/* ante cualquier duda, el valor de siempre */}
+  return _dxnMasivoE39(campo,f,r,emoji)
+}
+// Aviso al terminar de procesar: cuántos quedaron como puente y con qué ciudad suben
+const _dxnProcE39=window.procesarAsignador
+window.procesarAsignador=async function(){
+  const out=await _dxnProcE39.apply(this,arguments)
+  try{
+    const pu=(_ultimosResultados||[]).filter(x=>x&&x.cobertura==='puente')
+    if(pu.length){
+      const cp=await nxCiudadPuente()
+      const msg=document.getElementById('asign-msg')
+      const det=pu.map(x=>`→ 📞 ${_dxnEsc(x.raw&&x.raw.tel||'')} · ${_dxnEsc(x.ciudadDropi!=='—'?x.ciudadDropi:(x.raw&&x.raw.ciudad||''))}: ${_dxnEsc(x.motivoPuente||'')}`).join('<br>')
+      const donde=cp&&cp.ciudad
+        ?`suben a Dropi con la ciudad fija <b>${_dxnEsc(cp.ciudad)} (${_dxnEsc(cp.departamento||'')})</b> y la ciudad REAL va al inicio de la dirección (📍)`
+        :`<b>⚠️ FALTA elegir la ciudad fija</b> (Productos → 🏭 Bodegas y ciudad fija): mientras tanto suben con su ciudad real`
+      if(msg)msg.innerHTML+=`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);color:var(--text);margin-top:6px;font-size:12.5px;line-height:1.8">🚫 <b>${pu.length} pedido(s) SIN COBERTURA PRÁCTICA</b> — salen como CANCELAR (solo constancia, no se despachan) y ${donde}:<br>${det}</div>`
+    }
+  }catch(_e){/* el aviso nunca daña el procesamiento */}
+  return out
+}
+
+// ── 2 · El puente con la extensión (protocolo dx-nexo-v1) ──
+window.nxDropiExt=(function(){
+  const NTAG='dx-nexo-v1'
+  let seq=0,version='',pend={}
+  window.addEventListener('message',(e)=>{
+    const m=e.data
+    if(e.source!==window||!m||m.dxNexo!==NTAG||m.dir!=='aNexo')return
+    if(m.tipo==='extensionLista'){version=String(m.version||'?');return}
+    if(m.reqId&&pend[m.reqId]){const fin=pend[m.reqId];delete pend[m.reqId];fin(m)}
+  })
+  function pedir(tipo,extra,esperaMs){
+    return new Promise((res)=>{
+      const reqId='nx'+(++seq)+'_'+Date.now()
+      const t=setTimeout(()=>{delete pend[reqId];res({ok:false,error:'sin-extension'})},esperaMs||45000)
+      pend[reqId]=(r)=>{clearTimeout(t);res(r)}
+      try{window.postMessage(Object.assign({dxNexo:NTAG,dir:'aExt',reqId,tipo},extra||{}),location.origin)}
+      catch(_e){clearTimeout(t);delete pend[reqId];res({ok:false,error:'sin-extension'})}
+    })
+  }
+  function hay(){try{window.postMessage({dxNexo:NTAG,dir:'aExt',tipo:'hay'},location.origin)}catch(_e){/* nada */}}
+  hay();setTimeout(hay,3000);setTimeout(hay,10000)
+  return{pedir,hay,version:()=>version,presente:()=>!!version}
+})()
+
+// ── 3 · El buzón → Supabase (y la memoria de vuelta) ──
+const _dxnSync={corriendo:false,ext:null,ultOk:'',err:'',subidos:0,fotosHoy:null}
+async function _dxnLote(tabla,filas){ // insertar por tandas; repetido no daña (ON CONFLICT DO NOTHING)
+  for(let i=0;i<filas.length;i+=300){
+    const{error}=await sb.from(tabla).upsert(filas.slice(i,i+300),{ignoreDuplicates:true})
+    if(error)throw new Error(tabla+': '+error.message)
+  }
+}
+async function _dxnCabecera(tipo,refAt,extra){ // 1 encabezado por exportación (si ya está, se reusa)
+  const{data:ya,error:e1}=await sb.from('dropi_exportaciones').select('id').eq('tipo',tipo).eq('detalle->>at',String(refAt)).limit(1)
+  if(e1)throw new Error('dropi_exportaciones: '+e1.message)
+  if(ya&&ya.length)return ya[0].id
+  const fila=Object.assign({tipo,detalle:Object.assign({at:refAt},extra&&extra.detalle||{})},extra||{},{detalle:Object.assign({at:refAt},extra&&extra.detalle||{})})
+  delete fila.filasArr
+  const{data,error}=await sb.from('dropi_exportaciones').insert(fila).select('id').single()
+  if(error)throw new Error('dropi_exportaciones: '+error.message)
+  return data.id
+}
+async function _dxnGuardarItem(it){
+  if(it.tipo==='historial'){
+    const d=it.datos||{},tel=_dxnTel(it.tel)
+    if(!tel)return true
+    const cl=(Number(d.d)||0)+(Number(d.r)||0)
+    const ef=cl?Math.round((Number(d.d)||0)/cl*1000)/10:null
+    const ver=(_dxnSync.ext&&_dxnSync.ext.version)||''
+    if(!_dxnSync.fotosHoy){ // 1 lectura por vuelta: qué teléfonos ya tienen foto HOY (para no duplicar)
+      const hoy=new Date();hoy.setHours(0,0,0,0)
+      const{data}=await sb.from('clientes_dropi_fotos').select('telefono').gte('consultado_en',hoy.toISOString()).limit(1000)
+      _dxnSync.fotosHoy=new Set((data||[]).map(x=>x.telefono))
+    }
+    if(!_dxnSync.fotosHoy.has(tel)){
+      const{error}=await sb.from('clientes_dropi_fotos').insert({telefono:tel,fuente:String(it.fuente||''),encontrado:!!d.f,
+        pedidos:d.o??null,entregados:d.d??null,devueltos:d.r??null,en_transito:d.t??null,efectividad:ef,respuesta:d,version_extension:ver})
+      if(error)throw new Error('clientes_dropi_fotos: '+error.message)
+      _dxnSync.fotosHoy.add(tel)
+    }
+    const{error:e2}=await sb.from('clientes_dropi').upsert({telefono:tel,encontrado:!!d.f,riesgo:String(d.lbl||''),tipo_comprador:String(d.bt||''),
+      pedidos:d.o??null,entregados:d.d??null,devueltos:d.r??null,en_transito:d.t??null,efectividad:ef,por_transportadora:d.c||[],
+      ultima_consulta:new Date().toISOString(),updated_at:new Date().toISOString()},{onConflict:'telefono'})
+    if(e2)throw new Error('clientes_dropi: '+e2.message)
+    return true
+  }
+  if(it.tipo==='bodega'){
+    const b=it.datos||{}
+    if(b.id==null)return true
+    const{error}=await sb.from('dropi_bodegas').upsert({dropi_id:Number(b.id),proveedor_dropi_id:String(b.user_id||''),nombre:String(b.nombre||''),
+      dropi_ciudad_id:b.ciudad_id!=null?Number(b.ciudad_id):null,ciudad:String(b.ciudad||''),departamento:String(b.dep||''),
+      visto_en:new Date().toISOString(),updated_at:new Date().toISOString()},{onConflict:'dropi_id'})
+    if(error)throw new Error('dropi_bodegas: '+error.message)
+    return true
+  }
+  if(it.tipo==='efectividad'){
+    const E=it.datos
+    if(!E||it.vencido)return true // la exportación cambió: llegará una entrada nueva con la vigente
+    const filas=[]
+    Object.keys(E.deps||{}).forEach(depId=>{
+      const D=E.deps[depId],dep=String(D.name||depId),kDep=_dxnNorm(dep)
+      Object.keys(D.carriers||{}).forEach(cid=>{
+        const c=D.carriers[cid]||{}
+        filas.push({nivel:'departamento',dropi_departamento_id:Number(depId)||null,departamento:dep,ciudad_key:kDep,ciudad:null,
+          transportadora_dropi_id:Number(cid)||0,transportadora:String(c.n||''),generados_dropi:c.gen??null,entregados_dropi:c.ent??null,
+          devueltos_dropi:c.dev??null,entregados_propios:c.own&&c.own.ent!=null?c.own.ent:null,devueltos_propios:c.own&&c.own.dev!=null?c.own.dev:null,
+          flete_promedio:c.flete??null,dias_promedio:c.dias??null,rango_desde:E.desde||null,rango_hasta:E.hasta||null})
+      })
+      Object.keys(D.cities||{}).forEach(key=>{
+        const x=D.cities[key]||{},kCiu=kDep+'|'+_dxnNorm(x.name||key)
+        filas.push({nivel:'ciudad',dropi_departamento_id:Number(depId)||null,departamento:dep,ciudad_key:kCiu,ciudad:String(x.name||key),
+          transportadora_dropi_id:0,transportadora:'(todas)',entregados_dropi:x.ent??null,devueltos_dropi:x.dev??null,
+          entregados_propios:x.oe??null,devueltos_propios:x.od??null,rango_desde:E.desde||null,rango_hasta:E.hasta||null})
+        Object.keys(x.c||{}).forEach(cid=>{
+          const v=x.c[cid]||[]
+          filas.push({nivel:'ciudad',dropi_departamento_id:Number(depId)||null,departamento:dep,ciudad_key:kCiu,ciudad:String(x.name||key),
+            transportadora_dropi_id:Number(cid)||0,transportadora:String((D.carriers&&D.carriers[cid]&&D.carriers[cid].n)||''),
+            entregados_dropi:v[0]??null,devueltos_dropi:v[1]??null,entregados_propios:v[2]??null,devueltos_propios:v[3]??null,
+            rango_desde:E.desde||null,rango_hasta:E.hasta||null})
+        })
+      })
+    })
+    const expId=await _dxnCabecera('efectividad',it.refAt,{rango_desde:E.desde||null,rango_hasta:E.hasta||null,filas:filas.length,
+      notas:(E.notes||[]).join(' | ')||null,detalle:{filterOk:E.filterOk}})
+    await _dxnLote('dropi_efectividad',filas.map(f=>Object.assign({exportacion_id:expId},f)))
+    return true
+  }
+  if(it.tipo==='fletes'){
+    const F=it.datos
+    if(!F||it.vencido)return true
+    const p0=Number(F.producto&&F.producto.price)||0
+    const filas=[]
+    Object.keys(F.cities||{}).forEach(id=>{
+      const r=F.cities[id]||{}
+      const base={dropi_ciudad_id:Number(id)||0,ciudad:String(r.n||''),departamento:String(r.d||''),acepta_contraentrega:!!r.cod,tipo_trayecto:r.tray||null,precio_referencia:p0||null}
+      const cids=Object.keys(r.c||{})
+      if(!r.cod||!cids.length){
+        filas.push(Object.assign({transportadora_dropi_id:0,transportadora:'(ninguna)',llega:false,
+          motivo_no_llega:!r.cod?'la ciudad no acepta contraentrega':String(r.err||'sin respuesta del cotizador')},base))
+        return
+      }
+      cids.forEach(cid=>{
+        const c=r.c[cid]||{},ok=c.f!=null&&c.p!=null
+        filas.push(Object.assign({transportadora_dropi_id:Number(cid)||0,transportadora:String(c.n||''),llega:!!ok,
+          motivo_no_llega:ok?null:String(c.e||''),flete_fijo:c.f??null,flete_pct:c.p??null,flete_minimo:c.m??null,seguro:c.s??null,
+          formula:String(c.src||''),cantidad:ok?2:null,valor_cobrado:ok&&p0?p0*2:null,
+          flete_cotizado:ok?Math.round((c.f+Math.max(c.m||0,c.p*p0*2))*10)/10:null},base))
+      })
+    })
+    const expId=await _dxnCabecera('fletes',it.refAt,{filas:filas.length,notas:(F.notes||[]).join(' | ')||null,
+      detalle:{bodega:F.bodega||null,producto:F.producto||null,qtyMode:F.qtyMode||null}})
+    await _dxnLote('dropi_fletes',filas.map(f=>Object.assign({exportacion_id:expId},f)))
+    return true
+  }
+  return true // tipo desconocido: se confirma para no atascar el buzón (queda anotado en el log de la extensión)
+}
+async function nxDropiSyncTick(){
+  if(_dxnSync.corriendo)return
+  if(!window.nxDropiExt.presente()){window.nxDropiExt.hay();_dxnPintarEstado();return}
+  _dxnSync.corriendo=true;_dxnSync.fotosHoy=null
+  try{
+    const est=await window.nxDropiExt.pedir('estado',{},20000)
+    _dxnSync.ext=est&&est.ok?est:_dxnSync.ext
+    if(est&&est.ok&&est.buzon>0){
+      const r=await window.nxDropiExt.pedir('buzonLeer',{max:200})
+      if(r&&r.ok&&Array.isArray(r.items)){
+        const listos=[]
+        for(const it of r.items){
+          try{if(await _dxnGuardarItem(it))listos.push(it.id)}
+          catch(e){_dxnSync.err=String((e&&e.message)||e).slice(0,140)} // ese item se queda en el buzón y se reintenta
+        }
+        if(listos.length){
+          const c=await window.nxDropiExt.pedir('buzonConfirmar',{ids:listos})
+          if(c&&c.ok)_dxnSync.subidos+=listos.length
+        }
+      }
+    }
+    if(est&&est.ok&&est.bodegas===0){ // extensión recién instalada: se le devuelve la libreta de bodegas
+      const{data}=await sb.from('dropi_bodegas').select('dropi_id,proveedor_dropi_id,nombre,dropi_ciudad_id,ciudad,departamento').limit(200)
+      if(data&&data.length){
+        const lib={}
+        data.forEach(b=>{lib[b.dropi_id]={id:b.dropi_id,user_id:b.proveedor_dropi_id||'',nombre:b.nombre||'',ciudad_id:b.dropi_ciudad_id,ciudad:b.ciudad||'',dep:b.departamento||'',visto:Date.now()}})
+        await window.nxDropiExt.pedir('memoria',{datos:{dx_bodegas:lib}})
+      }
+    }
+    if(!_dxnSync.err)_dxnSync.ultOk=new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})
+  }catch(e){_dxnSync.err=String((e&&e.message)||e).slice(0,140)}
+  finally{_dxnSync.corriendo=false;_dxnPintarEstado()}
+}
+window.nxDropiSync={tick:nxDropiSyncTick,estado:()=>_dxnSync}
+function _dxnEstadoTxt(){
+  if(!window.nxDropiExt.presente())return'⚪ Extensión Dropi: no se ve en este navegador (instala la 1.0.19 y recarga)'
+  const e=_dxnSync.ext||{}
+  let t='🧩 Extensión '+_dxnEsc(window.nxDropiExt.version())+' · Dropi '+(e.dropiAbierto?'✅ abierto':'⚪ cerrado')+' · buzón '+(e.buzon!=null?e.buzon:'?')+' · subidos '+_dxnSync.subidos
+  if(_dxnSync.ultOk)t+=' · última recogida '+_dxnSync.ultOk
+  if(_dxnSync.err)t+=' · <span style="color:var(--amber)">🟡 reintentando: '+_dxnEsc(_dxnSync.err)+'</span>'
+  return t
+}
+function _dxnPintarEstado(){
+  const el=document.getElementById('dxn-estado');if(el)el.innerHTML=_dxnEstadoTxt()
+  const el2=document.getElementById('dxn-probar-estado');if(el2)el2.innerHTML=_dxnEstadoTxt()
+}
+
+// ── 4 · 🏭 Bodegas por proveedor + la ciudad fija (se dibuja debajo de Proveedores) ──
+async function _dxnBodegasRender(){
+  const ancla=document.getElementById('proveedores-modal-area')
+  if(!ancla||document.getElementById('dxn-bodegas'))return
+  const cont=document.createElement('div');cont.id='dxn-bodegas'
+  ancla.parentNode.insertBefore(cont,ancla)
+  cont.innerHTML='<div class="loading">Cargando bodegas…</div>'
+  let provs=[],bods=[],cp={}
+  try{
+    const[r1,r2,r3]=await Promise.all([
+      sb.from('proveedores').select('*').order('nombre'),
+      sb.from('dropi_bodegas').select('*'),
+      nxCiudadPuente(true)
+    ])
+    if(r1.error)throw new Error(r1.error.message)
+    provs=r1.data||[];bods=r2.data||[];cp=r3||{}
+  }catch(e){cont.innerHTML='<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber)">🟡 Bodegas: '+_dxnEsc((e&&e.message)||e)+' · <button class="btn-sm" onclick="_dxnBodegasReintentar()">Reintentar</button></div>';return}
+  const tarjetas=provs.map(pr=>{
+    const idDropi=String(pr.dropi_id||'')
+    const bod=bods.find(b=>String(b.proveedor_dropi_id)===idDropi&&idDropi)||null
+    const estado=bod
+      ?'✅ La extensión ya conoce esta bodega ('+_dxnEsc(bod.nombre||('#'+bod.dropi_id))+' · '+_dxnEsc(bod.ciudad||'')+'): puede cotizar desde aquí'
+      :'🟡 Falta enseñársela: abre en Dropi este proveedor → Crear Orden → elige cualquier ciudad → cierra sin enviar'
+    return`<div class="card" style="margin-top:10px;padding:12px 14px">
+      <div style="font-weight:700">🏭 ${_dxnEsc(pr.nombre)}</div>
+      <div style="display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:8px;margin-top:8px;align-items:end">
+        <div class="fld"><label style="font-size:11px">🔗 URL del proveedor en Dropi (de ahí sale el ID)</label>
+          <input type="text" id="dxn-url-${_dxnEsc(pr.id)}" value="${_dxnEsc(pr.dropi_url||'')}" placeholder="https://app.dropi.co/dashboard/provider/333643/..."></div>
+        <div class="fld"><label style="font-size:11px">🗺️ Depto de la bodega</label>
+          <input type="text" id="dxn-dep-${_dxnEsc(pr.id)}" value="${_dxnEsc(pr.bodega_departamento||'')}" placeholder="CUNDINAMARCA"></div>
+        <div class="fld"><label style="font-size:11px">🏙️ Ciudad de la bodega</label>
+          <input type="text" id="dxn-ciu-${_dxnEsc(pr.id)}" value="${_dxnEsc(pr.bodega_ciudad||'')}" placeholder="MADRID"></div>
+        <button class="btn-sm btn-primary" onclick="_dxnProvGuardar('${_dxnEsc(pr.id)}')">💾 Guardar</button>
+      </div>
+      <div id="dxn-prov-msg-${_dxnEsc(pr.id)}" style="font-size:11.5px;color:var(--subtle);margin-top:6px">${idDropi?'🔑 ID en Dropi: <b>'+_dxnEsc(idDropi)+'</b> · ':''}${estado}</div>
+    </div>`
+  }).join('')
+  cont.innerHTML=`
+    <div class="divider" style="margin-top:26px"></div>
+    <div class="page-title" style="margin-top:16px">🏭 Bodegas y ciudad fija (Dropi)</div>
+    <div class="page-sub">La BODEGA es de donde salen los pedidos: desde ahí se cotizan TODOS los fletes. La CIUDAD FIJA es otra cosa: la marca para subir los pedidos SIN cobertura (van como CANCELAR, solo constancia; la ciudad real queda en la dirección con 📍).</div>
+    <div id="dxn-estado" style="font-size:12px;color:var(--subtle);margin-bottom:6px">${_dxnEstadoTxt()}</div>
+    ${tarjetas||'<div class="alert alert-blue">Primero crea un proveedor arriba en 🚚 Proveedores.</div>'}
+    <div class="card" style="margin-top:14px;padding:12px 14px;border:1px dashed var(--border)">
+      <div style="font-weight:700">🚫 Ciudad fija para pedidos SIN cobertura</div>
+      <div style="font-size:11.5px;color:var(--subtle);margin-top:4px">Elige un municipio pequeño CON cobertura al que nunca le vendas de verdad. Verla en Dropi = pedido sin cobertura. Va con su departamento.</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin-top:8px;align-items:end">
+        <div class="fld"><label style="font-size:11px">🗺️ Departamento</label><input type="text" id="dxn-cp-dep" value="${_dxnEsc(cp.departamento||'')}" placeholder="CUNDINAMARCA"></div>
+        <div class="fld"><label style="font-size:11px">🏙️ Ciudad</label><input type="text" id="dxn-cp-ciu" value="${_dxnEsc(cp.ciudad||'')}" placeholder="Ej: un municipio pequeño con cobertura"></div>
+        <button class="btn-sm btn-primary" onclick="_dxnCPGuardar()">💾 Guardar y comprobar</button>
+      </div>
+      <div id="dxn-cp-msg" style="font-size:11.5px;margin-top:6px;color:var(--subtle)">${cp.ciudad?'Hoy: <b>'+_dxnEsc(cp.ciudad)+' ('+_dxnEsc(cp.departamento||'')+')</b>':'⚠️ Todavía no hay ciudad fija: los pedidos sin cobertura suben con su ciudad real.'}</div>
+    </div>`
+}
+window._dxnBodegasReintentar=function(){const c=document.getElementById('dxn-bodegas');if(c)c.remove();_dxnBodegasRender()}
+window._dxnProvGuardar=async function(id){
+  const g=k=>{const el=document.getElementById('dxn-'+k+'-'+id);return el?el.value.trim():''}
+  const msg=document.getElementById('dxn-prov-msg-'+id)
+  const url=g('url');const m=url.match(/provider\/(\d+)/)
+  const fila={dropi_url:url||null,dropi_id:m?m[1]:null,bodega_departamento:g('dep').toUpperCase()||null,bodega_ciudad:g('ciu').toUpperCase()||null}
+  if(url&&!m){if(msg)msg.innerHTML='🔴 Esa URL no trae el número del proveedor (…/provider/<b>333643</b>/…). Copia la URL completa desde Dropi.';return}
+  const{error}=await sb.from('proveedores').update(fila).eq('id',id)
+  if(error){if(msg)msg.innerHTML='🔴 No se guardó: '+_dxnEsc(error.message);return}
+  const{data:v}=await sb.from('proveedores').select('dropi_id,bodega_ciudad').eq('id',id).maybeSingle() // verificación de ida y vuelta
+  if(msg)msg.innerHTML=(v&&String(v.dropi_id||'')===String(fila.dropi_id||''))?'✅ Guardado y verificado'+(fila.dropi_id?' · 🔑 ID en Dropi: <b>'+_dxnEsc(fila.dropi_id)+'</b>':''):'🔴 Se guardó distinto a lo escrito: revisa y vuelve a guardar'
+}
+window._dxnCPGuardar=async function(){
+  const dep=(document.getElementById('dxn-cp-dep')||{}).value||'',ciu=(document.getElementById('dxn-cp-ciu')||{}).value||''
+  const msg=document.getElementById('dxn-cp-msg')
+  const val={ciudad:ciu.trim().toUpperCase(),departamento:dep.trim().toUpperCase()}
+  if(!val.ciudad||!val.departamento){if(msg)msg.innerHTML='🔴 Escribe el departamento Y la ciudad.';return}
+  const{error}=await sb.from('config').upsert({clave:'dropi_ciudad_puente',valor:JSON.stringify(val),updated_at:new Date().toISOString()},{onConflict:'clave'})
+  if(error){if(msg)msg.innerHTML='🔴 No se guardó: '+_dxnEsc(error.message);return}
+  _dxnCPCache=null;await nxCiudadPuente(true)
+  if(msg)msg.innerHTML='✅ Guardada: <b>'+_dxnEsc(val.ciudad)+' ('+_dxnEsc(val.departamento)+')</b> · comprobando cobertura…'
+  if(window.nxDropiExt.presente()){
+    const r=await window.nxDropiExt.pedir('cotizar',{pedido:{dep:val.departamento,ciudad:val.ciudad,cantidad:1}},70000)
+    if(msg){
+      if(r&&r.ok&&(r.filas||[]).some(f=>f.llega))msg.innerHTML='✅ Guardada: <b>'+_dxnEsc(val.ciudad)+' ('+_dxnEsc(val.departamento)+')</b> · ✅ sí tiene cobertura: Dropi la acepta'
+      else if(r&&r.ok)msg.innerHTML='🔴 <b>'+_dxnEsc(val.ciudad)+'</b> NO tiene cobertura desde tu bodega: Dropi rechazaría esos pedidos. Elige otra ciudad.'
+      else msg.innerHTML='✅ Guardada · 🟡 no se pudo comprobar la cobertura ahora ('+_dxnEsc((r&&r.error)||'')+'): ábrela con Dropi abierto y vuelve a Guardar'
+    }
+  }else if(msg)msg.innerHTML+='<br>🟡 Sin la extensión a la vista no se pudo comprobar cobertura: vuelve a Guardar con Dropi abierto.'
+}
+
+// ── 5 · 🧪 Botón "Probar historial Dropi" en el Asignador ──
+function _dxnProbarInyectar(){
+  if(Number(nxSysVal('pruebaHistorialDropi'))===0)return
+  if(document.getElementById('dxn-probar-btn'))return
+  const limpiar=document.querySelector('button[onclick*="limpiarAsignador"]')
+  if(!limpiar)return
+  const b=document.createElement('button')
+  b.id='dxn-probar-btn';b.className='btn-sm';b.textContent='🚦 Probar historial Dropi'
+  b.style.cssText='background:var(--card2);border:1px solid var(--border);color:var(--text)'
+  b.onclick=window._dxnProbarAbrir
+  limpiar.parentNode.appendChild(b)
+}
+window._dxnProbarAbrir=async function(){
+  let p=document.getElementById('dxn-probar-panel')
+  if(p){p.remove();return}
+  const msgDiv=document.getElementById('asign-msg')
+  if(!msgDiv)return
+  p=document.createElement('div');p.id='dxn-probar-panel';p.className='card';p.style.cssText='margin-top:10px;padding:12px 14px'
+  msgDiv.parentNode.insertBefore(p,msgDiv)
+  let prods=window.productos||[]
+  if(!prods.length){try{const{data}=await sb.from('productos').select('id,nombre,archivado,precio_1u,precio_2u,costo_1u,costo_2u').eq('archivado',false).order('nombre');prods=data||[]}catch(_e){prods=[]}}
+  window._dxnProbarProds=prods
+  p.innerHTML=`<div style="font-weight:700">🚦 Probar historial Dropi <span style="font-weight:400;font-size:11px;color:var(--subtle)">(solo mira: no guarda ni cambia nada)</span></div>
+    <div id="dxn-probar-estado" style="font-size:11.5px;color:var(--subtle);margin:4px 0 8px">${_dxnEstadoTxt()}</div>
+    <div style="display:grid;grid-template-columns:1.2fr 1.6fr .6fr 1fr 1fr auto;gap:8px;align-items:end">
+      <div class="fld"><label style="font-size:11px">📞 Teléfono</label><input type="text" id="dxn-pr-tel" placeholder="Ej: 3001112233"></div>
+      <div class="fld"><label style="font-size:11px">📦 Producto</label><select id="dxn-pr-prod">${prods.map((x,i)=>`<option value="${i}">${_dxnEsc(x.nombre)}</option>`).join('')||'<option value="">(sin productos)</option>'}</select></div>
+      <div class="fld"><label style="font-size:11px">Cant.</label><select id="dxn-pr-q"><option value="1">1</option><option value="2" selected>2</option></select></div>
+      <div class="fld"><label style="font-size:11px">🗺️ Departamento</label><input type="text" id="dxn-pr-dep" placeholder="CUNDINAMARCA"></div>
+      <div class="fld"><label style="font-size:11px">🏙️ Ciudad</label><input type="text" id="dxn-pr-ciu" placeholder="CHIA"></div>
+      <button class="btn-sm btn-primary" onclick="_dxnProbar()">Buscar</button>
+    </div>
+    <div id="dxn-pr-out" style="margin-top:10px;font-size:12.5px"></div>`
+}
+async function _dxnTorrePct(dep,ciu){ // % de la Torre guardada en Supabase: ciudad (30+ cerrados) o departamento
+  const kDep=_dxnNorm(dep),kCiu=kDep+'|'+_dxnNorm(ciu)
+  const{data:exp}=await sb.from('dropi_exportaciones').select('id,hecha_en').eq('tipo','efectividad').order('hecha_en',{ascending:false}).limit(1)
+  if(!exp||!exp.length)return{fuente:'',por:{}}
+  const id=exp[0].id
+  const{data:rows}=await sb.from('dropi_efectividad').select('nivel,ciudad_key,transportadora_dropi_id,entregados_dropi,devueltos_dropi').eq('exportacion_id',id).in('ciudad_key',[kDep,kCiu])
+  const por={},fecha=String(exp[0].hecha_en||'').slice(0,10)
+  ;(rows||[]).forEach(r=>{
+    const cid=String(r.transportadora_dropi_id)
+    if(cid==='0')return
+    const cl=(r.entregados_dropi||0)+(r.devueltos_dropi||0)
+    if(!cl)return
+    const p={p:(r.entregados_dropi||0)/cl,cerrados:cl,fuente:r.nivel==='ciudad'?'ciudad':'depto'}
+    if(r.ciudad_key===kCiu&&cl>=30)por[cid]=p // la ciudad manda si tiene 30+
+    else if(r.ciudad_key===kDep&&(!por[cid]||por[cid].fuente==='depto'))por[cid]=por[cid]&&por[cid].fuente==='ciudad'?por[cid]:p
+  })
+  return{fuente:fecha,por}
+}
+window._dxnProbar=async function(){
+  const out=document.getElementById('dxn-pr-out')
+  const tel=_dxnTel((document.getElementById('dxn-pr-tel')||{}).value)
+  const dep=((document.getElementById('dxn-pr-dep')||{}).value||'').trim().toUpperCase()
+  const ciu=((document.getElementById('dxn-pr-ciu')||{}).value||'').trim().toUpperCase()
+  const q=Number((document.getElementById('dxn-pr-q')||{}).value)||2
+  const prod=(window._dxnProbarProds||[])[Number((document.getElementById('dxn-pr-prod')||{}).value)]||null
+  if(!out)return
+  if(tel.length<7){out.innerHTML='🔴 Escribe el teléfono (10 dígitos).';return}
+  if(!dep||!ciu){out.innerHTML='🔴 Escribe el departamento y la ciudad del pedido.';return}
+  if(!window.nxDropiExt.presente()){out.innerHTML='⚪ La extensión no se ve en este navegador. Instala la 1.0.19, recarga NEXO y deja Dropi abierto.';return}
+  out.innerHTML='<span style="color:var(--amber)">🟡 1/3 · Preguntando el historial a Dropi…</span>'
+  let hist=await window.nxDropiExt.pedir('historial',{tel},50000)
+  for(let i=0;i<3&&hist&&!hist.ok&&hist.reintenta;i++){await new Promise(r=>setTimeout(r,2500));hist=await window.nxDropiExt.pedir('historial',{tel},50000)}
+  if(!hist||!hist.ok){out.innerHTML='🔴 Historial: '+_dxnEsc((hist&&hist.error)||'sin respuesta')+(hist&&hist.error==='dropi-cerrado'?' · Abre app.dropi.co en otra pestaña y vuelve a Buscar.':'');return}
+  const d=hist.datos||{},cerr=(d.d||0)+(d.r||0)
+  out.innerHTML='<span style="color:var(--amber)">🟡 2/3 · Cotizando '+_dxnEsc(ciu)+' desde tu bodega…</span>'
+  const cot=await window.nxDropiExt.pedir('cotizar',{pedido:{dep,ciudad:ciu,cantidad:q}},80000)
+  out.innerHTML='<span style="color:var(--amber)">🟡 3/3 · Leyendo la Torre guardada…</span>'
+  let torre={fuente:'',por:{}}
+  try{torre=await _dxnTorrePct(dep,ciu)}catch(_e){/* sin Torre igual sirve */}
+  // Ganancia del producto para esa cantidad
+  let G=null,gTxt='—'
+  if(prod){const pv=Number(prod['precio_'+q+'u']),co=Number(prod['costo_'+q+'u']);if(pv>0&&co>=0){G=pv-co;gTxt='$'+G.toLocaleString('es-CO')+' ('+_dxnEsc(prod.nombre)+' × '+q+')'}}
+  const cliMap={};(d.c||[]).forEach(x=>{cliMap[String(x.i)]={d:x.d||0,r:x.r||0}})
+  const clientePct=cerr?Math.round((d.d||0)/cerr*100):null
+  const cliRojo=cerr>=3&&clientePct<50
+  let filas=(cot&&cot.ok&&cot.filas)||[]
+  const tope=Number(nxSysVal('fleteMaxEnvio'))||0
+  const lineas=filas.map(f=>{
+    const cid=String(f.transportadora_id)
+    const cli=cliMap[cid],cliCerr=cli?(cli.d+cli.r):0
+    let p=null,fuente=''
+    if(cliCerr>=3){p=cli.d/cliCerr;fuente='👤 cliente ('+cli.d+'/'+cliCerr+')'}
+    else if(torre.por[cid]){p=torre.por[cid].p;fuente=(torre.por[cid].fuente==='ciudad'?'🏙️ ciudad':'🗺️ depto')+' Torre '+torre.fuente}
+    const flete=f.llega?(f.flete||0)+(f.seguro||0):null
+    let plata=null
+    if(f.llega&&p!=null&&G!=null)plata=Math.round(p*(G-flete)-(1-p)*flete)
+    return{f,cid,p,fuente,flete,plata,pasa:f.llega&&p!=null&&p>=0.5}
+  })
+  const cand=lineas.filter(x=>x.pasa&&x.plata!=null)
+  cand.sort((a,b)=>b.plata-a.plata||(b.p-a.p))
+  const mejor=cand[0]||null
+  const fleteMin=Math.min(...lineas.filter(x=>x.flete!=null).map(x=>x.flete).concat([Infinity]))
+  let veredicto=''
+  if(!cot||!cot.ok)veredicto='🔴 No se pudo cotizar: '+_dxnEsc((cot&&cot.error)||'')+(cot&&cot.error==='falta-bodega'?' · '+_dxnEsc(cot.ayuda||''):'')
+  else if(!lineas.some(x=>x.f.llega))veredicto='🚫 NINGUNA transportadora llega a '+_dxnEsc(ciu)+' desde tu bodega → CANCELAR (sube con la ciudad fija, solo constancia)'
+  else if(tope>0&&Number.isFinite(fleteMin)&&fleteMin>tope)veredicto='🚫 El flete más barato ($'+fleteMin.toLocaleString('es-CO')+') pasa del tope ($'+tope.toLocaleString('es-CO')+') → CANCELAR (constancia con la ciudad fija)'
+  else if(cliRojo)veredicto='⚠️ CLIENTE RIESGOSO: entrega '+clientePct+'% ('+(d.d||0)+' de '+cerr+') → 📋 LLAMAR CONFIRMAR o pedir abono, con la ⭐ si contesta'
+  else if(mejor)veredicto='⭐ Yo elegiría <b>'+_dxnEsc(mejor.f.nombre)+'</b>: deja en promedio <b>$'+mejor.plata.toLocaleString('es-CO')+'</b> por pedido ('+Math.round(mejor.p*100)+'% de entrega · flete $'+Math.round(mejor.flete).toLocaleString('es-CO')+' · '+_dxnEsc(mejor.fuente)+')'
+  else if(G==null)veredicto='🟡 Falta la ganancia del producto (precio_'+q+'u / costo_'+q+'u vacíos): la tabla sale sin la ⭐'
+  else veredicto='🟡 Ninguna transportadora pasa el filtro del 50% con datos: el Asignador decide como hoy (por ciudad y flete)'
+  const tabla=lineas.length?`<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px">
+    <tr style="color:var(--subtle);text-align:left"><th>⭐</th><th>Transportadora</th><th>¿Llega?</th><th>Flete ${q}u</th><th>% que se usa</th><th>De dónde sale el %</th><th>Plata promedio</th></tr>
+    ${lineas.map(x=>`<tr style="border-top:1px solid var(--border);${mejor&&x===mejor?'background:var(--amber-bg);font-weight:700':''};${!x.pasa?'opacity:.55':''}">
+      <td>${mejor&&x===mejor?'⭐':''}</td><td>${_dxnEsc(x.f.nombre)}</td>
+      <td>${x.f.llega?'✅':'🚫 '+_dxnEsc((x.f.motivo||'').slice(0,60))}</td>
+      <td>${x.flete!=null?'$'+Math.round(x.flete).toLocaleString('es-CO'):'—'}</td>
+      <td>${x.p!=null?Math.round(x.p*100)+'%'+(x.pasa?'':' (no pasa el 50%)'):'⚪ sin datos'}</td>
+      <td>${_dxnEsc(x.fuente||'—')}</td>
+      <td>${x.plata!=null?'$'+x.plata.toLocaleString('es-CO'):'—'}</td></tr>`).join('')}
+  </table>`:''
+  // 📍 dónde ha recibido (las ventas de NEXO a ese teléfono)
+  let dondeHtml=''
+  try{
+    const{data:ms}=await sb.from('mapeos').select('fecha,ciudad,departamento,estado_final,estado_inicial,transportadora,cobertura').eq('telefono',tel).order('fecha',{ascending:false}).limit(10)
+    if(ms&&ms.length)dondeHtml='<div style="margin-top:10px;font-weight:700">📍 Dónde ha recibido (tus ventas)</div>'+ms.map(m=>`<div style="font-size:12px;border-top:1px solid var(--border);padding:3px 0">${_dxnEsc(String(m.fecha||'').slice(0,10))} · ${_dxnEsc(m.ciudad||'?')}${m.departamento?' ('+_dxnEsc(m.departamento)+')':''} · ${_dxnEsc(m.transportadora||'—')} · ${_dxnEsc(m.estado_final||m.estado_inicial||'')}${m.cobertura==='puente'?' · 🚫 subió con ciudad fija':''}</div>`).join('')
+    else dondeHtml='<div style="margin-top:10px;font-size:12px;color:var(--subtle)">📍 Este teléfono no tiene ventas guardadas en NEXO.</div>'
+  }catch(_e){/* nada */}
+  const cab=`<div><b>Cliente:</b> ${d.f?(clientePct!=null?(clientePct>=70?'🟢':clientePct>=50?'🟡':'🔴')+' '+clientePct+'% ('+(d.d||0)+' de '+cerr+')':'⚪ sin entregas cerradas'):'⚪ sin registro en Dropi'}${d.lbl?' · Dropi dice: '+_dxnEsc(d.lbl):''} · fuente ${hist.fuente==='cache'?'memoria del día':'Dropi en vivo'}</div>
+    <div style="font-size:11.5px;color:var(--subtle)">Ganancia usada: ${gTxt} · Plata promedio = %×(ganancia − flete) − (100−%)×flete (devolución = flete, hasta confirmar lo que cobra Dropi)</div>`
+  out.innerHTML=cab+'<div style="margin-top:8px">'+veredicto+'</div>'+tabla+dondeHtml
+}
+
+// ── 6 · Arranque: inyecciones + la recogida del buzón ──
+try{
+  nxIntervaloVisible(()=>{try{_dxnBodegasRender()}catch(_e){}try{_dxnProbarInyectar()}catch(_e){}},1500,{clave:'dxn-inyectar'})
+  nxIntervaloVisible(()=>{nxDropiSyncTick()},Math.max(1,Number(nxSysVal('dropiSyncMin'))||3)*60000,{clave:'dxn-sync'})
+  setTimeout(()=>{nxDropiSyncTick()},8000)
+  nxCiudadPuente() // que el caché de la ciudad fija esté listo para el Excel masivo
+}catch(_e){/* nada de esto puede tumbar la app */}
+// ═══ FIN (27sep26 · E42) DROPI + NEXO ═══
 
 </script>
 </body>

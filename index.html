@@ -503,6 +503,9 @@ import{createClient}from'https://esm.sh/@supabase/supabase-js@2'
 
 const SURL='https://adpfxwnsnltpcgudbkhc.supabase.co'
 const SKEY='sb_publishable_Qq0ZdsQokOiJqAAOoOTSmg_TdLkKDFm'
+// (28sep26 · M5 E47) Marca "esta página ES NEXO": la lee la extensión de SellerChat
+// para NO poner su botón 💬 Chats encima del propio de NEXO.
+try{document.documentElement.dataset.nxApp='1'}catch(_){}
 // ═════════════════════════════════════════════════════════════════
 // 💲 PUNTO DE MIL AUTOMÁTICO (24sep26) — un solo motor para TODOS los campos de plata
 // ─────────────────────────────────────────────────────────────────
@@ -1127,6 +1130,11 @@ function showApp(){
   renderImpersonateBar()
   if(rol==='auxiliar')setTimeout(()=>{try{auxRefreshCounts()}catch(e){}},0)
   if(rol==='auxiliar'||rol==='admin')setTimeout(()=>{try{window._wchPillInit&&window._wchPillInit()}catch(e){}},0) // 💬 Centro de Chats (26jul26)
+  // (28sep26 · M5 E47) ENTRADA DIRECTA #chats: abriendo NEXO con .../#chats el
+  // Centro de Chats se abre SOLO apenas entras (la usa la ventana 💬 Chats
+  // incrustada en Dropi — extensión de SellerChat — y sirve igual en una
+  // pestaña normal). Sin #chats en la dirección, todo sigue exactamente igual.
+  if((rol==='auxiliar'||rol==='admin')&&location.hash==='#chats')setTimeout(()=>{try{window._wchAbrir&&window._wchAbrir()}catch(e){}},300)
 }
 
 function syncMobRole(){
@@ -1607,7 +1615,16 @@ window.nxBit=(function(){
   return{registrar,cargar,estadoDe,vaciar,pendientes:()=>leerCola().length,faltaTabla:()=>_faltaTabla}
 })()
 // ═══ FIN BITÁCORA DEL AUXILIAR ═══
-const _normProd=s=>(s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()
+// (28sep26 · M6 E47) NORMALIZADOR ÚNICO de nombres/aliases de producto: ahora
+// también iguala SEPARADORES (espacio = guion = guion bajo = punto), para que
+// "AJO-GLYCO FRASCO", "ajo-glyco-frasco" y "AJO_GLYCO.FRASCO" sean el MISMO
+// nombre. Mayúsculas y tildes ya se igualaban. Todo lo demás sigue EXACTO
+// (Neocell_X3_F2 ≠ Neocell_X3_F1). Lo usan resolveProdName, tableros, Hoja
+// Base, Cruce y el Asignador (su _norm llama aquí). Ambos lados de toda
+// comparación pasan por esta misma función, así que no puede quedar coja.
+// ANTES: const _normProd=s=>(s||'').toString().toLowerCase().normalize('NFD').replace(acentos,'').trim()  — sin igualar separadores
+const _normProd=s=>(s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[\s\-_.]+/g,'-').replace(/^-+|-+$/g,'')
+window._nxNombreNorm=_normProd // (28sep26 · M6) el mismo, visible para consola y pruebas
 // Resuelve un texto crudo (de Dropi/SellerChat) al producto canónico mediante aliases + nombre
 // Devuelve {id, nombre} si encuentra, o {id:null, nombre:raw_original} si no encuentra
 function resolveProdName(raw){
@@ -10523,11 +10540,13 @@ window.procesarAsignador=async()=>{
   parsed.forEach((p,i)=>{
     if(p.tipo!=='nuevo'||p.errores.length>0)return
     // Validar producto SOLO contra aliases visibles (lista controlada por el admin del producto).
-    // MATCH EXACTO normalizado: ignora mayúsculas/minúsculas y tildes.
+    // MATCH EXACTO normalizado: ignora mayúsculas/minúsculas, tildes y
+    // SEPARADORES (espacio = guion = guion bajo = punto) — (28sep26 · M6):
+    // "AJO-GLYCO FRASCO" ✅ casa con "ajo-glyco-frasco". Antes solo mayúsculas y tildes.
     //   "neocell" === "NEOCELL" === "NEÓCELL" === "néocell"  → ✅
     //   "neocell collagen X3" → ❌ (no es la palabra exacta, tiene más texto)
     if(kwList.length){
-      const _norm=s=>String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()
+      const _norm=s=>_normProd(s) // (28sep26 · M6) ANTES: normalizaba aquí mismo SIN igualar separadores (espacio≠guion → "AJO-GLYCO FRASCO" no casaba con "ajo-glyco-frasco")
       const palabra=_norm(p.producto)
       const matchKw=kwList.some(k=>_norm(k)===palabra)
       if(!matchKw){
@@ -41806,7 +41825,7 @@ async function _validarRowsMaestro(rows){
   const ciudadesDB=await fetchAllRows('ciudades_dropi','id,nombre_dropi,departamento,key_norm')
   const ciudadesNorm={}
   for(const c of ciudadesDB){
-    const key=c.key_norm||_normProd(c.nombre_dropi)
+    const key=_normProd(c.key_norm||c.nombre_dropi) // (28sep26 · M6) el key_norm guardado se RE-normaliza también: así casa con el normalizador nuevo venga como venga (mayúsculas, espacios o guiones). ANTES: c.key_norm||_normProd(c.nombre_dropi) — mezclaba formatos
     if(!ciudadesNorm[key])ciudadesNorm[key]=[]
     ciudadesNorm[key].push(c)
   }
@@ -42314,7 +42333,7 @@ window.probarMaestro=async()=>{
   try{
     const ciudades=await fetchAllRows('ciudades_dropi','id,nombre_dropi,departamento,key_norm')
     const norm=_normProd(ciudad)
-    let matches=ciudades.filter(c=>(c.key_norm||_normProd(c.nombre_dropi))===norm)
+    let matches=ciudades.filter(c=>_normProd(c.key_norm||c.nombre_dropi)===norm) // (28sep26 · M6) ambos lados por el MISMO normalizador (antes el key_norm guardado se comparaba crudo)
     if(dept)matches=matches.filter(c=>(c.departamento||'').toUpperCase()===dept)
     if(!matches.length){res.innerHTML='<div class="alert alert-amber">Ciudad no encontrada. Verifica el nombre.</div>';return}
     if(matches.length>1){res.innerHTML='<div class="alert alert-amber">Hay '+matches.length+' coincidencias. Indica dept.</div>';return}
@@ -43410,6 +43429,32 @@ function hbListaRevisionHTML(f,fi){
   return{badge,body}
 }
 // 📋 Copiar (y abrir Seller Chat) → abre el candado de ESA tarjeta
+// ══ (28sep26 · M1 E47) PUENTE NEXO → barrita de la extensión de SellerChat ══
+// PIEZA ÚNICA reutilizable (sirve para Hoja Base hoy y cualquier sección mañana):
+// manda el número por postMessage y la barrita abre su ventana "🔍 Buscar número"
+// AQUÍ MISMO (el auxiliar no cambia de pestaña). La extensión contesta
+// {__sc_ext_ack:'nx_buscar', ok, motivo}. Sin respuesta en 1,5 s (o ok=false):
+// píldora amarilla con el motivo + botón para abrir SellerChat a mano (el número
+// ya quedó copiado). Marcador de consola de E47: typeof _nxScPuenteBuscar → "function".
+// Interruptor de emergencia: window.NX_SC_PUENTE=false en consola = como antes.
+window._nxScPuenteUrlBot=''
+window._nxScPuenteAbrirBot=function(){try{const u=window._nxScPuenteUrlBot;if(u){const w=window.open(u,'nx_sellerchat_manual');if(w)w.focus()}}catch(_){}}
+window._nxScPuenteBuscar=function(texto,urlBot){
+  let resp=null
+  const oye=ev=>{try{if(ev.source===window&&ev.data&&ev.data.__sc_ext_ack==='nx_buscar')resp=ev.data}catch(_){}}
+  try{window.addEventListener('message',oye)}catch(_){}
+  try{window.postMessage({__sc_ext:'nx_buscar',texto:String(texto||'')},location.origin)}catch(_){}
+  setTimeout(()=>{
+    try{window.removeEventListener('message',oye)}catch(_){}
+    if(resp&&resp.ok){try{window._nxPillCarga('sc-puente','','quitar')}catch(_){}
+      return}
+    const motivo=resp?(resp.motivo==='permiso'?'La barrita de SellerChat no tiene permiso de 📋 Pegar en tu rol (Panel de SellerChat → Usuarios y roles).':'La barrita de SellerChat no entendió el número.'):'La barrita de SellerChat no respondió (¿extensión recargada o apagada? Prueba F5).'
+    window._nxScPuenteUrlBot=String(urlBot||'')
+    const btn=urlBot?' <button class="btn-sm" onclick="window._nxScPuenteAbrirBot()">🔗 Abrir SellerChat</button>':''
+    try{window._nxPillCarga('sc-puente',`🟡 ${motivo} El número ya quedó copiado.${btn}`,'reintento')}catch(_){alert('⚠️ '+motivo+' El número ya quedó copiado: pégalo en SellerChat.')}
+    setTimeout(()=>{try{window._nxPillCarga('sc-puente','','quitar')}catch(_){}},15000)
+  },1500)
+}
 window.hbListaCopiar=(fi,gi,ri)=>{
   const f=window._hb?.files[fi];const r=f&&f.rows[ri];if(!r)return
   const v=String(r.tel==null?'':r.tel).trim()
@@ -43418,7 +43463,14 @@ window.hbListaCopiar=(fi,gi,ri)=>{
   try{window.nxCopia&&window.nxCopia.marcar(v,'cliente')}catch(_){}
   if(!r._listaCopiadoTs)r._listaCopiadoTs=new Date().toISOString()
   const url=hbListaUrlBot(f)
-  if(url){try{const w=window.open(url,'nx_sellerchat_'+String(f.agenteId||''));if(w)try{w.opener=null}catch(_){}}catch(_){}}
+  // (28sep26 · M1 E47) Si la barrita de la extensión de SellerChat está en esta
+  // página (deja la marca data-sc-ext-barra), el 📋 le manda el número y ELLA
+  // busca y abre la conversación aquí mismo: ya NO se abre la pestaña de
+  // SellerChat (te quedas en NEXO). Sin extensión, o con
+  // window.NX_SC_PUENTE=false en consola: TODO como antes (el else de abajo).
+  const _scBarra=(window.NX_SC_PUENTE!==false)&&document.documentElement.getAttribute('data-sc-ext-barra')==='1'&&typeof window._nxScPuenteBuscar==='function'
+  if(_scBarra){try{window._nxScPuenteBuscar(v,url)}catch(_){}}
+  else if(url){try{const w=window.open(url,'nx_sellerchat_'+String(f.agenteId||''));if(w)try{w.opener=null}catch(_){}}catch(_){}} // ANTES: esta línea corría siempre que hubiera url
   hbRender()
   if(!ok)setTimeout(()=>alert('⚠️ El navegador no dejó copiar solo. Cópialo a mano: '+v),50)
 }
@@ -49658,6 +49710,10 @@ window._wchPillInit=function(){
 async function _wchPillBadge(){
   try{
     const{count}=await sb.from('conversaciones').select('id',{count:'exact',head:true}).gt('no_leidos',0)
+    // (28sep26 · M5 E47) Si NEXO vive INCRUSTADO (ventana 💬 Chats de la extensión
+    // en Dropi), le manda el conteo al marco de afuera para el numerito rojo del
+    // botón. Solo viaja el número, nada más.
+    try{if(window.parent&&window.parent!==window)window.parent.postMessage({__nx_chats_badge:count||0},'*')}catch(_){}
     const el=document.getElementById('wch-pill-badge');if(!el)return
     if(count>0){el.style.display='inline-block';el.textContent=count>99?'99+':count}else el.style.display='none'
   }catch(_){}

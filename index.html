@@ -506,6 +506,33 @@ const SKEY='sb_publishable_Qq0ZdsQokOiJqAAOoOTSmg_TdLkKDFm'
 // (28sep26 · M5 E47) Marca "esta página ES NEXO": la lee la extensión de SellerChat
 // para NO poner su botón 💬 Chats encima del propio de NEXO.
 try{document.documentElement.dataset.nxApp='1'}catch(_){}
+// ══ (28sep26 · M8 E48) MODO SOLO-CHATS ══════════════════════════════════════
+// Abriendo NEXO con .../#chats (la ventana 💬 Chats incrustada en Dropi, o una
+// pestaña normal) se ve SOLO el Centro de Chats: el Centro se estira a TODA la
+// ventana (tapa el resto de la app), su ✕ roja se esconde (se cierra con la ✕
+// verde de la ventana de afuera) y el botón flotante 💬 sobra. El login de la
+// primera vez sale normal. Si el Centro se llegara a cerrar (Esc, un error),
+// en este modo se reabre solo. Sin #chats en la dirección: NEXO igual que siempre.
+try{
+  if(location.hash==='#chats'){
+    document.documentElement.dataset.nxSoloChats='1'
+    const _scSt=document.createElement('style')
+    _scSt.id='nx-solo-chats-css'
+    _scSt.textContent=`
+      html[data-nx-solo-chats] #wch-modal{left:0!important;top:0!important;transform:none!important;width:100vw!important;height:100vh!important}
+      html[data-nx-solo-chats] #wch-modal>div{border-radius:0!important}
+      html[data-nx-solo-chats] #wch-modal button[onclick="_wchCerrar()"]{display:none!important}
+      html[data-nx-solo-chats] #wch-pill{display:none!important}
+    `
+    document.head.appendChild(_scSt)
+    setInterval(()=>{try{
+      if(document.getElementById('wch-modal'))return
+      if(!window._wchState||typeof window._wchAbrir!=='function')return
+      const _r=typeof currentRol==='function'?currentRol():''
+      if(_r==='auxiliar'||_r==='admin')window._wchAbrir()
+    }catch(_){}},1500)
+  }
+}catch(_){}
 // ═════════════════════════════════════════════════════════════════
 // 💲 PUNTO DE MIL AUTOMÁTICO (24sep26) — un solo motor para TODOS los campos de plata
 // ─────────────────────────────────────────────────────────────────
@@ -11560,6 +11587,8 @@ async function cargarReporteData(){
     ${motivoHtml}${autoHtml}
     ${!permiteVentas?_saveBtnHtml:''}`
   window._repHistGuardadosCargar(fecha) // Mejora C: historial persistente de guardados del día
+  // (28sep26 · M9 E48) apenas se arman las filas, el stock se llena solo desde Dropi
+  if(permiteVentas)setTimeout(()=>{try{window._nxStockDropi&&window._nxStockDropi(false)}catch(_){}},900)
 
   // Cargar ventas existentes o crear primera fila
   if(permiteVentas){
@@ -11587,6 +11616,57 @@ async function cargarReporteData(){
 }
 window.cargarReporteData=cargarReporteData
 
+// ══ (28sep26 · M9 E48) 📦 STOCK AUTOMÁTICO EN EL REPORTE DEL DÍA ═══════════
+// Llena solas las casillas "Stock al cierre" con el stock REAL que Dropi muestra
+// EN ESTE MOMENTO (recado 'stock' del puente con la extensión de Dropi v1.0.24+,
+// window.nxDropiExt). Mandas tú: la casilla sigue editable y lo escrito a mano
+// (dataset.touched) NUNCA se pisa. Necesita la extensión de Dropi y una pestaña
+// de Dropi abierta con tu sesión; sin eso, todo como siempre (a mano) y la
+// pildorita dice por qué. Marcador de consola de E48: typeof _nxStockDropi.
+window._nxStockDropi=async function(manual){
+  const cont=document.getElementById('ventas-rows')
+  if(!cont)return
+  let pill=document.getElementById('nx-stock-dropi')
+  if(!pill){pill=document.createElement('div');pill.id='nx-stock-dropi';pill.style.cssText='font-size:11.5px;color:var(--muted);margin:0 0 8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap';cont.parentNode.insertBefore(pill,cont)}
+  const pinta=(html,btn)=>{pill.innerHTML=`<span>${html}</span>`+(btn?` <button class="btn-sm btn-outline" style="font-size:11px;padding:2px 9px" onclick="window._nxStockDropi(true)">🔄 Stock de Dropi</button>`:'')}
+  const ext=window.nxDropiExt
+  if(!ext){pinta('⚪ 📦 Stock a mano (este NEXO no tiene el puente con Dropi)',false);return}
+  if(!ext.presente()){ext.hay();await new Promise(r=>setTimeout(r,2500))}
+  if(!ext.presente()){pinta('⚪ 📦 Stock a mano — no veo la extensión de Dropi en esta pestaña (¿instalada? prueba F5)',true);return}
+  const filas=[...cont.querySelectorAll('.vrow-item')].map(d=>Number(String(d.id||'').replace('vrow-','')))
+  const porId={},ids=[]
+  filas.forEach(ix=>{
+    const nom=document.getElementById(`vp-${ix}`)?.value||''
+    const p=(typeof productos!=='undefined'&&productos||[]).find(x=>x.nombre===nom)
+    const did=p?String(p.dropi_id||'').replace(/\D/g,''):''
+    if(did){(porId[did]=porId[did]||[]).push(ix);if(!ids.includes(did))ids.push(did)}
+  })
+  if(!ids.length){pinta('📦 Stock de Dropi: elige el producto de cada fila (con su ID de Dropi) y toca 🔄',true);return}
+  pinta('⏳ 📦 Leyendo el stock en Dropi…',false)
+  let r=null
+  try{r=await ext.pedir('stock',{ids},30000)}catch(_){r=null}
+  if(!r||!r.ok){
+    const por=r&&r.error==='dropi-cerrado'?'no hay una pestaña de Dropi abierta con tu sesión':r&&r.error==='sin-ruta'?'Dropi no contestó la ficha del producto (mándame 1 captura de Network de la ficha y la clavo)':r&&r.error==='sin-extension'?'la extensión de Dropi no respondió (¿recargada? prueba F5)':((r&&r.error)||'sin respuesta')
+    pinta('🟡 📦 No pude leer el stock: '+por+' — escríbelo a mano como siempre',true);return
+  }
+  let puestos=0,respetados=0
+  ids.forEach(did=>{
+    const d=r.stocks&&r.stocks[did]
+    if(!d)return
+    ;(porId[did]||[]).forEach(ix=>{
+      const s=document.getElementById(`vs-${ix}`)
+      if(!s)return
+      if(s.dataset.touched==='1'){respetados++;return} // lo que escribiste a mano SIEMPRE manda
+      s.value=d.stock
+      s.dataset.dxstock='1'
+      s.title='📦 Stock leído de Dropi a las '+new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})+' — puedes corregirlo a mano'
+      s.style.borderColor='var(--green,#22c55e)'
+      puestos++
+    })
+  })
+  const falt=(r.faltan||[]).length
+  pinta('✅ 📦 Stock de Dropi · '+new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})+' · '+puestos+' casilla'+(puestos===1?'':'s')+' llenada'+(puestos===1?'':'s')+(respetados?' · '+respetados+' a mano (se respetó)':'')+(falt?' · ⚠️ '+falt+' sin dato en Dropi':''),true)
+}
 window.addVentaRow=(prodNom,adIds,convAp,stockAct)=>{
   const idx=window._ventaIdx++
   const container=document.getElementById('ventas-rows')

@@ -885,6 +885,7 @@ window.login=async()=>{
   await loadProductos()
   reset()
   logAction('login',{metodo:input.includes('@')?'email':'username'}).catch(()=>{})
+  window._nxCarnetLogin=true // (29sep26 · HC2 E62) acaba de iniciar sesión: la ventana del carnet sale aunque antes haya dicho "Más tarde"
   showApp()
 }
 
@@ -1162,6 +1163,7 @@ function showApp(){
   // incrustada en Dropi — extensión de SellerChat — y sirve igual en una
   // pestaña normal). Sin #chats en la dirección, todo sigue exactamente igual.
   if((rol==='auxiliar'||rol==='admin')&&location.hash==='#chats')setTimeout(()=>{try{window._wchAbrir&&window._wchAbrir()}catch(e){}},300)
+  setTimeout(()=>{try{const _l=!!window._nxCarnetLogin;window._nxCarnetLogin=false;window.nxCarnet&&window.nxCarnet.boot({login:_l})}catch(e){}},900) // (29sep26 · HC2 E62) carnet del computador: si no está vinculado, sale la ventana 🔗 Vincular
 }
 
 function syncMobRole(){
@@ -1429,6 +1431,338 @@ const fmt=n=>new Intl.NumberFormat('es-CO').format(Math.round(n||0))
 // Antes: _isoDate(new Date()) devolvía día UTC → después de las 7pm Bogotá
 // marcaba el día siguiente. Ahora siempre devuelve el día real en Colombia.
 const today=()=>new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})
+// ══ (29sep26 · M22 E61) COPIAR QUE SIEMPRE FUNCIONA — PIEZA ÚNICA ════════════
+// Pedido de Altu (captura: "❌ El navegador no dejó copiar … blocked because of a
+// permissions policy" al tocar 📋 en la ventana 💬 Chats · NEXO dentro de Dropi).
+// RAÍZ: NEXO metido dentro de otra página (iframe) no tiene la "llave" del
+// portapapeles si el marco de afuera no se la da → la copia moderna de Chrome
+// falla. Y cada uno de los 38 botones de copiar se defendía a su manera (unos
+// con plan B, otros sin nada).
+// AHORA: TODO navigator.clipboard.writeText de NEXO (los 38 de hoy y los que
+// vengan) pasa por esta pieza, en este orden:
+//   1) la copia moderna de Chrome (igual que siempre);
+//   2) si Chrome no deja → plan B clásico (cajita invisible + execCommand('copy')),
+//      que SÍ funciona con NEXO incrustado sin llave (probado en Chrome real);
+//   3) si tampoco → ventanita AMARILLA con el texto YA MARCADO para Cmd+C
+//      (nunca rojo) y la copia avisa que falló (e.nxManual=true), para que
+//      ningún botón se ponga verde en falso.
+// El 🔴→🟢 y la constancia de quién copió siguen EXACTAMENTE igual.
+// Diagnóstico (F12): nxCopiarTexto.info() → {api, planB, manual, ultimaVia,
+// ultimoError, enMarco, escudo}. Interruptor: window.NX_COPIAR_V1=true = como
+// antes (sin plan B ni ventanita). Nada de lo viejo se borró.
+;(function(){
+  try{
+    if(window.nxCopiarTexto)return
+    const cb=navigator.clipboard||null
+    const orig=(cb&&typeof cb.writeText==='function')?cb.writeText.bind(cb):null
+    const est={api:0,planB:0,manual:0,ultimaVia:'',ultimoError:'',enMarco:(()=>{try{return window.top!==window}catch(_){return true}})()}
+    // Plan B: cajita invisible + execCommand('copy'). Devuelve la foco y la
+    // selección a donde estaban (el auxiliar no pierde lo que estaba escribiendo).
+    function planB(t){
+      let ok=false,ev=false
+      const act=document.activeElement
+      let selR=null,selI=null
+      const esCasilla=!!(act&&(act.tagName==='INPUT'||act.tagName==='TEXTAREA'))
+      try{if(esCasilla&&typeof act.selectionStart==='number')selI=[act.selectionStart,act.selectionEnd,act.selectionDirection]}catch(_){}
+      try{if(!esCasilla){const s=window.getSelection();if(s&&s.rangeCount)selR=s.getRangeAt(0).cloneRange()}}catch(_){}
+      const ta=document.createElement('textarea')
+      try{
+        ta.value=t;ta.setAttribute('readonly','');ta.setAttribute('aria-hidden','true')
+        ta.style.cssText='position:fixed;top:0;left:-9999px;width:2px;height:2px;opacity:0;pointer-events:none'
+        ;(document.body||document.documentElement).appendChild(ta)
+        try{ta.focus({preventScroll:true})}catch(_){try{ta.focus()}catch(__){}}
+        ta.select();try{ta.setSelectionRange(0,t.length)}catch(_){}
+        const h=()=>{ev=true}
+        document.addEventListener('copy',h,true)
+        try{ok=document.execCommand('copy')===true}catch(_){ok=false}
+        document.removeEventListener('copy',h,true)
+      }catch(_){ok=false}
+      try{ta.remove()}catch(_){}
+      try{if(act&&act!==document.body&&act!==ta&&typeof act.focus==='function')act.focus({preventScroll:true})}catch(_){}
+      try{if(selI)act.setSelectionRange(selI[0],selI[1],selI[2]||'none')}catch(_){}
+      try{if(selR){const s=window.getSelection();s.removeAllRanges();s.addRange(selR)}}catch(_){}
+      return ok&&ev
+    }
+    // Último recurso: ventanita AMARILLA con el texto marcado (Cmd+C). Se va sola
+    // al copiar, con ✕ o a los 30 s. Nunca tapa la pantalla ni bloquea.
+    function manual(t){
+      try{
+        const vieja=document.getElementById('nx-copiar-manual');if(vieja)vieja.remove()
+        const box=document.createElement('div');box.id='nx-copiar-manual'
+        box.style.cssText='position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:2147483647;width:min(92vw,480px);box-sizing:border-box;background:#422006;border:2px solid #f59e0b;color:#fde68a;border-radius:12px;padding:10px 12px;box-shadow:0 8px 30px rgba(0,0,0,.55);font:13px/1.35 -apple-system,system-ui,sans-serif'
+        const tit=document.createElement('div');tit.style.cssText='font-weight:800;margin-bottom:6px'
+        tit.textContent='🟡 Chrome no dejó copiar solo. Ya quedó marcado: cópialo con Cmd+C (Ctrl+C en Windows).'
+        const largo=t.length>80||/\n/.test(t)
+        const inp=document.createElement(largo?'textarea':'input')
+        inp.value=t;inp.readOnly=true
+        inp.style.cssText='width:100%;box-sizing:border-box;background:#1c1917;color:#fff;border:1px solid #f59e0b;border-radius:8px;padding:6px 8px;font:14px ui-monospace,Menlo,monospace'+(largo?';height:90px;resize:vertical':'')
+        const x=document.createElement('button');x.type='button';x.textContent='✕ Cerrar'
+        x.style.cssText='margin-top:6px;background:#f59e0b;color:#1c1917;border:none;border-radius:6px;padding:4px 10px;font-weight:800;cursor:pointer'
+        const quitar=()=>{try{box.remove()}catch(_){}}
+        x.onclick=quitar
+        inp.addEventListener('copy',()=>setTimeout(quitar,500)) // copió a mano → se va sola
+        box.appendChild(tit);box.appendChild(inp);box.appendChild(x)
+        ;(document.body||document.documentElement).appendChild(box)
+        const marcar=()=>{try{if(box.isConnected){inp.focus();inp.select()}}catch(_){}}
+        marcar();setTimeout(marcar,0);setTimeout(marcar,250) // si el respaldo propio de un botón se llevó el foco, lo recupera
+        setTimeout(quitar,30000)
+      }catch(_){}
+    }
+    // ¿Este marco NO tiene la llave del portapapeles? (NEXO incrustado sin allow).
+    // Se pregunta en cada copia: la respuesta la da Chrome, no se adivina.
+    function sinLlave(){
+      try{const fp=document.permissionsPolicy||document.featurePolicy;if(fp&&typeof fp.allowsFeature==='function')return fp.allowsFeature('clipboard-write')===false}catch(_){}
+      return false
+    }
+    async function copiar(texto){
+      const t=String(texto==null?'':texto)
+      let err=null,bHecho=false
+      // Sin llave, la copia moderna VA a fallar: el plan B corre YA, en el mismo
+      // instante del clic (antes de que un window.open —p. ej. abrir WhatsApp—
+      // gaste el permiso del clic). Hallazgo de la revisión independiente.
+      if(orig&&sinLlave()){
+        bHecho=true
+        if(planB(t)){est.planB++;est.ultimaVia='planB';return{ok:true,via:'planB'}}
+        est.ultimoError='marco sin llave del portapapeles y el plan B no pudo'
+      }
+      if(orig){
+        try{await orig(t);est.api++;est.ultimaVia='api';return{ok:true,via:'api'}}
+        catch(e){err=e;est.ultimoError=String((e&&e.message)||e).slice(0,200)}
+      }
+      if(planB(t)){est.planB++;est.ultimaVia='planB'+(bHecho?'2':'');return{ok:true,via:'planB'}}
+      est.manual++;est.ultimaVia='manual'
+      manual(t)
+      const e2=new Error('No se pudo copiar solo: quedó marcado para copiarlo a mano'+(err?' ('+String((err&&err.message)||err).slice(0,120)+')':''))
+      e2.nxManual=true;e2.causa=err
+      return{ok:false,via:'manual',error:e2}
+    }
+    window.nxCopiarTexto=copiar
+    window.nxCopiarTexto.info=()=>Object.assign({},est,{escudo:!!(cb&&cb.writeText&&cb.writeText.__nxEscudo),apagado:window.NX_COPIAR_V1===true})
+    // El escudo: navigator.clipboard.writeText de TODA la app pasa por copiar().
+    if(cb&&orig){
+      const escudo=function(texto){
+        if(window.NX_COPIAR_V1===true)return orig(texto) // interruptor: como antes
+        return copiar(texto).then(r=>{if(!r.ok)throw r.error})
+      }
+      escudo.__nxEscudo=true
+      try{cb.writeText=escudo}catch(_){}
+      if(cb.writeText!==escudo){try{Object.defineProperty(cb,'writeText',{value:escudo,configurable:true,writable:true})}catch(_){}}
+    }
+  }catch(_){}
+})()
+// ══ FIN (29sep26 · M22 E61) COPIAR QUE SIEMPRE FUNCIONA ══════════════════════
+// ══ (29sep26 · HC2 E62) HISTORIA DEL CLIENTE · Parte 2 · EL CARNET DEL COMPUTADOR ═══════
+// Decisiones de la dueña (chat SELLERCHAT, 29-sep): 1A carnet POR COMPUTADOR que viaja
+// solo por el puente (nadie escribe nada) · 2A cada persona vincula SU computador; solo
+// la administradora ve la lista y apaga · "Más tarde" = botoncito que avisa que ese
+// computador queda sin vincular e informa a la administradora; vuelve a salir en el
+// siguiente inicio de sesión · SIN tablero de pestañas (no hace falta para vincular).
+// QUÉ ES: la llave ("carnet") con la que la barrita de SellerChat y el Semáforo de Dropi
+// le mandan hechos al buzón `ingesta` (Edge Function) aunque NEXO esté cerrado. Nace
+// aquí al tocar 🔗 Vincular: 32 bytes al azar; en Supabase SOLO va su sha256
+// (dispositivos_vinculados.llave_hash, que no se deja leer); el carnet vive en el
+// localStorage de NEXO de ESTE computador y las extensiones lo piden por el puente
+// (window.postMessage {__nx_carnet:'pedir'}) — eso lo usan las Partes 3 y 4.
+// NUNCA viaja ni se guarda el token/Userid de SellerChat ni la llave de Dropi.
+// Interruptor: window.NX_CARNET_OFF=true → no sale la ventana al entrar (lo demás sigue).
+window.nxCarnet=(function(){
+  const K_CARNET='__nx_carnet',K_DISP='__nx_carnet_disp',K_LUEGO='__nx_carnet_luego'
+  const ls={
+    get(k){try{return localStorage.getItem(k)}catch(_){return null}},
+    set(k,v){try{localStorage.setItem(k,v)}catch(_){}},
+    del(k){try{localStorage.removeItem(k)}catch(_){}}
+  }
+  const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+  const b64url=bytes=>btoa(String.fromCharCode.apply(null,Array.from(bytes))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')
+  async function sha256Hex(t){
+    const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(t))
+    return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('')
+  }
+  function plataforma(){
+    const ua=navigator.userAgent||''
+    const so=/Macintosh|Mac OS/i.test(ua)?'Mac':/Windows/i.test(ua)?'Windows':/Android/i.test(ua)?'Android':/iPhone|iPad/i.test(ua)?'iPhone':/Linux/i.test(ua)?'Linux':'PC'
+    const nav=/Edg\//.test(ua)?'Edge':/OPR\//.test(ua)?'Opera':/Chrome\//.test(ua)?'Chrome':/Safari\//.test(ua)?'Safari':/Firefox\//.test(ua)?'Firefox':'Navegador'
+    return so+' · '+nav
+  }
+  function esMovil(){return /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent||'')}
+  function leer(){
+    let disp=null;try{disp=JSON.parse(ls.get(K_DISP)||'null')}catch(_){disp=null}
+    return{carnet:ls.get(K_CARNET)||'',disp:disp&&disp.id?disp:null}
+  }
+  function local(){const l=leer();return!!(l.carnet&&l.disp)}
+  // ¿este computador está vinculado? 'vinculado' | 'apagado' | 'sin' (si Supabase no contesta y hay carnet local, se confía: nunca frena)
+  async function estado(){
+    const l=leer()
+    if(!l.carnet||!l.disp)return'sin'
+    try{
+      const{data,error}=await sb.from('dispositivos_vinculados').select('id,activo,nombre').eq('id',l.disp.id).maybeSingle()
+      if(error)return'vinculado'
+      if(!data||data.activo===false)return'apagado'
+      return'vinculado'
+    }catch(_){return'vinculado'}
+  }
+  // 🔗 Vincular ESTE computador: carnet al azar → en la base solo su huella
+  async function vincular(){
+    if(!me||!me.id)throw new Error('Sin sesión')
+    const bytes=new Uint8Array(32);crypto.getRandomValues(bytes)
+    const carnet=b64url(bytes)
+    const llave_hash=await sha256Hex(carnet)
+    const id=(crypto.randomUUID?crypto.randomUUID():([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g,c=>(c^crypto.getRandomValues(new Uint8Array(1))[0]&15>>c/4).toString(16)))
+    const nombre=((me.nombre||me.username||'equipo')+' · '+plataforma()).slice(0,80)
+    const{error}=await sb.from('dispositivos_vinculados').insert({id,app:'nexo',nombre,llave_hash}) // sin .select(): return=minimal (la huella no se deja leer)
+    if(error)throw new Error(error.message||'No se pudo vincular')
+    ls.set(K_CARNET,carnet);ls.set(K_DISP,JSON.stringify({id,nombre,creado:new Date().toISOString()}));ls.del(K_LUEGO)
+    logAction('dispositivo_vinculado',{dispositivo_id:id,nombre}).catch(()=>{})
+    return{id,nombre}
+  }
+  // ⏸ Más tarde: queda constancia para la administradora (audit_log) y vuelve a salir en el próximo inicio de sesión
+  async function masTarde(){
+    ls.set(K_LUEGO,JSON.stringify({uid:me&&me.id||null,en:new Date().toISOString()}))
+    await logAction('dispositivo_vincular_pospuesto',{computador:plataforma(),nombre:me&&me.nombre||null}).catch(()=>{})
+  }
+  // 🔌 Apagar un carnet (el propio, o cualquiera si eres administradora). Prender de nuevo NO existe: se vuelve a vincular.
+  async function apagar(id){
+    const{error}=await sb.from('dispositivos_vinculados').update({activo:false,apagado_en:new Date().toISOString()}).eq('id',id)
+    if(error)throw new Error(error.message||'No se pudo apagar')
+    const l=leer();if(l.disp&&l.disp.id===id){ls.del(K_CARNET);ls.del(K_DISP)}
+    logAction('dispositivo_apagado',{dispositivo_id:id}).catch(()=>{})
+  }
+  // 📬 Probar el buzón desde ESTE computador (manda {prueba:true} con el carnet; el buzón contesta quién es)
+  async function probar(){
+    const l=leer();if(!l.carnet)throw new Error('Este computador no está vinculado')
+    const ctl=new AbortController();const t=setTimeout(()=>ctl.abort(),15000)
+    try{
+      const r=await fetch(SURL+'/functions/v1/ingesta',{method:'POST',headers:{'content-type':'application/json','x-nx-carnet':l.carnet},body:JSON.stringify({prueba:true}),signal:ctl.signal})
+      let j=null;try{j=await r.json()}catch(_){j=null}
+      if(!r.ok||!j||j.ok!==true)throw new Error((j&&j.error)||('HTTP '+r.status))
+      return j
+    }finally{clearTimeout(t)}
+  }
+  // ── la ventana al entrar ─────────────────────────────────────────────────
+  function cerrar(){const d=document.getElementById('nx-carnet-modal');if(d)d.remove()}
+  function pintarModal(motivo){
+    cerrar()
+    const div=document.createElement('div');div.id='nx-carnet-modal';div.className='modal-bg';div.style.zIndex='120'
+    const titulo=motivo==='apagado'?'🔌 Este computador fue apagado':'🔗 Este computador no está vinculado'
+    const sub=motivo==='apagado'
+      ?'La administradora apagó el carnet de este computador. Para que lo que pase aquí en SellerChat y en Dropi vuelva a llegar a la historia del cliente, vincúlalo otra vez.'
+      :'Con un clic, este computador recibe su carnet: así la barrita de SellerChat y el Semáforo de Dropi mandan solos lo que pasa (llegadas, etiquetas y estados) a la historia del cliente, aunque NEXO esté cerrado. No hay que escribir nada.'
+    div.innerHTML=`<div class="modal-box" onclick="event.stopPropagation()" style="max-width:520px">
+      <div class="modal-title">${titulo}</div>
+      <div class="modal-sub" style="line-height:1.5">${sub}</div>
+      <div id="nx-carnet-msg" style="margin:10px 0;font-size:13px"></div>
+      <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-top:8px">
+        <button class="btn-sm btn-primary" id="nx-carnet-btn" onclick="window.nxCarnet.clicVincular()">🔗 Vincular ahora</button>
+        <button class="btn-sm" id="nx-carnet-luego" onclick="window.nxCarnet.clicMasTarde()" style="font-size:11px;opacity:.7;background:transparent;border:1px solid var(--border);color:var(--muted)">Más tarde</button>
+      </div>
+    </div>`
+    document.body.appendChild(div)
+  }
+  async function clicVincular(){
+    const b=document.getElementById('nx-carnet-btn'),m=document.getElementById('nx-carnet-msg')
+    if(b){b.disabled=true;b.textContent='Vinculando…'}
+    try{
+      const d=await vincular()
+      if(m)m.innerHTML=`<div class="alert alert-green">✅ Vinculado como <strong>${esc(d.nombre)}</strong>. Ya puedes seguir trabajando.</div>`
+      const l=document.getElementById('nx-carnet-luego');if(l)l.style.display='none'
+      if(b){b.textContent='📬 Probar el buzón';b.disabled=false;b.onclick=()=>window.nxCarnet.clicProbar()}
+      const box=document.querySelector('#nx-carnet-modal .modal-box')
+      if(box&&!document.getElementById('nx-carnet-cerrar')){const c=document.createElement('button');c.id='nx-carnet-cerrar';c.className='btn-sm';c.textContent='Cerrar';c.style.marginTop='10px';c.onclick=cerrar;box.appendChild(c)}
+    }catch(e){
+      if(m)m.innerHTML=`<div class="alert alert-red">❌ No se pudo vincular: ${esc(window.nxErrorClaro?window.nxErrorClaro(e.message):e.message)}</div>`
+      if(b){b.disabled=false;b.textContent='🔗 Vincular ahora'}
+    }
+  }
+  async function clicProbar(){
+    const b=document.getElementById('nx-carnet-btn'),m=document.getElementById('nx-carnet-msg')
+    if(b){b.disabled=true;b.textContent='Probando…'}
+    try{const j=await probar();if(m)m.innerHTML=`<div class="alert alert-green">📬 El buzón contestó: computador <strong>${esc(j.dispositivo&&j.dispositivo.nombre)}</strong> · ${esc(j.hora||'')}</div>`}
+    catch(e){if(m)m.innerHTML=`<div class="alert alert-red">❌ El buzón no contestó bien: ${esc(e.message)}. Si dice "carnet", vincula otra vez; si es un error de red, inténtalo en un momento.</div>`}
+    finally{if(b){b.disabled=false;b.textContent='📬 Probar el buzón'}}
+  }
+  async function clicMasTarde(){
+    const m=document.getElementById('nx-carnet-msg'),b=document.getElementById('nx-carnet-btn'),l=document.getElementById('nx-carnet-luego')
+    if(l)l.disabled=true
+    await masTarde()
+    if(m)m.innerHTML=`<div class="alert alert-yellow" style="line-height:1.5">⚠️ Este computador queda <strong>sin vincular</strong>. Lo que pase aquí en SellerChat y en Dropi <strong>no llegará</strong> a la historia del cliente. Ya le avisamos a la administradora. Esta ventana volverá a salir en tu próximo inicio de sesión.</div>`
+    if(b)b.style.display='none'
+    if(l){l.textContent='Entendido, cerrar';l.disabled=false;l.onclick=cerrar;l.style.opacity='1'}
+  }
+  // arranque: la llama showApp(). {login:true} = acaba de iniciar sesión (login o QR) → sale aunque haya tocado "Más tarde" antes
+  let _bootEnCurso=false
+  async function boot(o){
+    o=o||{}
+    try{
+      if(window.NX_CARNET_OFF)return
+      if(_bootEnCurso)return;_bootEnCurso=true
+      if(!me||!me.id)return
+      if(window.top!==window)return                       // NEXO incrustado (💬 Chats dentro de Dropi): nunca ahí
+      if(location.hash==='#chats')return
+      if(esMovil())return                                 // sin extensiones en el celular: no hay qué vincular
+      const rol=currentRol();if(rol!=='admin'&&rol!=='auxiliar')return
+      const est=await estado()
+      if(est==='vinculado')return
+      if(est==='apagado'){ls.del(K_CARNET);ls.del(K_DISP)}
+      if(!o.login&&ls.get(K_LUEGO))return                 // ya tocó "Más tarde": hasta el próximo inicio de sesión
+      pintarModal(est)
+    }catch(e){console.warn('[nxCarnet] boot:',e&&e.message)}
+    finally{_bootEnCurso=false}
+  }
+  // ── Usuarios y roles (solo administradora): lista de computadores + los que dijeron "Más tarde" ──
+  async function pintarAdmin(idCaja){
+    const c=document.getElementById(idCaja);if(!c)return
+    if(currentRol()!=='admin'){c.innerHTML='';return}
+    c.innerHTML='<div class="loading">Cargando computadores…</div>'
+    try{
+      const l=leer()
+      const[{data:disp,error:e1},{data:pos,error:e2}]=await Promise.all([
+        sb.from('dispositivos_vinculados').select('id,app,nombre,vinculado_por,activo,creado_en,ultimo_uso,apagado_en,usuarios:vinculado_por(nombre)').order('activo',{ascending:false}).order('creado_en',{ascending:false}),
+        sb.from('audit_log').select('created_at,detalles,usuarios(nombre)').eq('accion','dispositivo_vincular_pospuesto').gte('created_at',new Date(Date.now()-30*864e5).toISOString()).order('created_at',{ascending:false}).limit(50)
+      ])
+      const fh=x=>x?new Date(x).toLocaleString('es-CO',{timeZone:'America/Bogota',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):'—'
+      const filas=(disp||[]).map(d=>{
+        const esEste=l.disp&&l.disp.id===d.id
+        return`<tr>
+          <td data-label="Computador">${esc(d.nombre)}${esEste?' <span class="pill pill-blue">este computador</span>':''}</td>
+          <td data-label="Vinculó">${esc(d.usuarios&&d.usuarios.nombre||'—')}</td>
+          <td data-label="Desde">${fh(d.creado_en)}</td>
+          <td data-label="Último envío">${fh(d.ultimo_uso)}</td>
+          <td data-label="Estado">${d.activo?'<span class="pill pill-green">✅ prendido</span>':'<span class="pill pill-red">🔌 apagado '+fh(d.apagado_en)+'</span>'}</td>
+          <td data-label="Acciones">${d.activo?`<button class="btn-sm" onclick="window.nxCarnet.clicApagar('${esc(d.id)}')">🔌 Apagar</button>`:''}${esEste&&d.activo?` <button class="btn-sm" onclick="window.nxCarnet.clicProbarAdmin()">📬 Probar</button>`:''}</td>
+        </tr>`}).join('')
+      const vistos={};const posFilas=(pos||[]).filter(p=>{const k=(p.usuarios&&p.usuarios.nombre||'?')+'|'+(p.detalles&&p.detalles.computador||'');if(vistos[k])return false;vistos[k]=1;return true})
+        .map(p=>`<tr><td data-label="Quién">${esc(p.usuarios&&p.usuarios.nombre||'—')}</td><td data-label="Computador">${esc(p.detalles&&p.detalles.computador||'—')}</td><td data-label="Cuándo">${fh(p.created_at)}</td></tr>`).join('')
+      c.innerHTML=`<div class="page-title" style="font-size:16px;margin-top:22px">🔗 Computadores vinculados (historia del cliente)</div>
+        <div class="page-sub">Cada computador recibe su carnet al tocar 🔗 Vincular en NEXO. Apagar = ese computador deja de poder enviar; para volver, se vincula otra vez.${local()?'':' <strong>Este computador no está vinculado.</strong> <button class="btn-sm btn-primary" onclick="window.nxCarnet.abrir()">🔗 Vincular este computador</button>'}</div>
+        ${e1?`<div class="alert alert-red">${esc(e1.message)}</div>`:(filas?`<div class="table-wrap"><table><tr><th>Computador</th><th>Vinculó</th><th>Desde</th><th>Último envío</th><th>Estado</th><th>Acciones</th></tr>${filas}</table></div>`:'<div class="alert alert-blue">Todavía no hay computadores vinculados.</div>')}
+        <div id="nx-carnet-admin-msg" style="margin-top:8px;font-size:13px"></div>
+        ${e2?'':(posFilas?`<div style="margin-top:14px;font-weight:700">⚠️ Dijeron "Más tarde" (últimos 30 días)</div><div class="table-wrap"><table><tr><th>Quién</th><th>Computador</th><th>Cuándo</th></tr>${posFilas}</table></div>`:'')}`
+    }catch(e){c.innerHTML=`<div class="alert alert-red">${esc(e.message)}</div>`}
+  }
+  async function clicApagar(id){
+    const m=document.getElementById('nx-carnet-admin-msg')
+    try{await apagar(id);if(m)m.innerHTML='<div class="alert alert-green">🔌 Apagado. Ese computador ya no puede enviar.</div>';pintarAdmin('nx-carnet-admin')}
+    catch(e){if(m)m.innerHTML=`<div class="alert alert-red">❌ ${esc(e.message)}</div>`}
+  }
+  async function clicProbarAdmin(){
+    const m=document.getElementById('nx-carnet-admin-msg')
+    if(m)m.innerHTML='<div class="alert alert-blue">📬 Probando el buzón…</div>'
+    try{const j=await probar();if(m)m.innerHTML=`<div class="alert alert-green">📬 El buzón contestó: <strong>${esc(j.dispositivo&&j.dispositivo.nombre)}</strong> · ${esc(j.hora||'')}</div>`;pintarAdmin('nx-carnet-admin')}
+    catch(e){if(m)m.innerHTML=`<div class="alert alert-red">❌ El buzón no contestó bien: ${esc(e.message)}</div>`}
+  }
+  function abrir(){pintarModal('sin')}
+  // ── el puente: las extensiones (Partes 3 y 4) piden el carnet aquí mismo, en la página de NEXO ──
+  window.addEventListener('message',(e)=>{
+    try{
+      const m=e.data
+      if(e.source!==window||!m||m.__nx_carnet!=='pedir')return
+      const l=leer()
+      window.postMessage({__nx_carnet_ack:'pedir',reqId:m.reqId||null,ok:!!(l.carnet&&l.disp),carnet:l.carnet||null,dispositivo:l.disp||null,url:SURL+'/functions/v1/ingesta'},location.origin)
+    }catch(_){}
+  })
+  return{leer,local,estado,vincular,masTarde,apagar,probar,boot,pintarAdmin,abrir,cerrar,clicVincular,clicMasTarde,clicProbar,clicApagar,clicProbarAdmin,plataforma}
+})()
+// ══ FIN (29sep26 · HC2 E62) EL CARNET DEL COMPUTADOR ═══════════════════════════════════
 // ════════════════════════════════════════════════════════════════════════════
 // 📋 COPIADO CON COLOR — REGLA ÚNICA DE TODA LA APP (24sep26 · pedido del owner)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -9452,8 +9786,10 @@ async function pageAdminUsuarios(c){
     <div style="margin-bottom:16px">
       <button class="btn-sm btn-primary" onclick="modalUserCreate()">➕ Agregar usuario</button>
     </div>
-    <div id="us-list"><div class="loading">Cargando...</div></div>`
+    <div id="us-list"><div class="loading">Cargando...</div></div>
+    <div id="nx-carnet-admin"></div>`
   loadUsuarios()
+  setTimeout(()=>{try{window.nxCarnet&&window.nxCarnet.pintarAdmin('nx-carnet-admin')}catch(e){}},0) // (29sep26 · HC2 E62) 🔗 computadores vinculados (solo admin)
 }
 
 async function loadUsuarios(){
@@ -42826,6 +43162,7 @@ async function initApp(){
       if(!ok){await sb.auth.signOut().catch(()=>{});showLogin();return}
       await loadProductos()
       logAction('login',{metodo:'qr'}).catch(()=>{})
+      window._nxCarnetLogin=true // (29sep26 · HC2 E62) idem, entrada por QR
       showApp()
       return
     }
@@ -49344,7 +49681,10 @@ window._ccCopiar=async function(tel,btn){
   const k=_ccCopTel(tel)
   if(!k)return // número vacío o inválido: ni se copia ni se marca (nada en falso)
   try{await navigator.clipboard.writeText(k)}
-  catch(e){try{waToast('❌ El navegador no dejó copiar: '+(e.message||e),'error')}catch(_){alert('No pude copiar el número: '+k)}return}
+  catch(e){
+    if(e&&e.nxManual)return // (29sep26 · M22 E61) ya salió la ventanita AMARILLA con el número marcado para Cmd+C: ni cartel rojo ni verde en falso
+    try{waToast('❌ El navegador no dejó copiar: '+(e.message||e),'error')}catch(_){alert('No pude copiar el número: '+k)}return // (29sep26 · M22 E61) ANTES: esta era la ÚNICA salida (cartel rojo); hoy solo queda si el escudo está apagado (NX_COPIAR_V1=true)
+  }
   const s=window._ccCop
   s.mapa=s.mapa||_ccCopLeerLocal()
   if(!s.mapa[k]){ // gana el PRIMERO que lo copió: no se sobrescribe el registro
@@ -51783,7 +52123,7 @@ window._wchProtoPillCopiar=async function(convId,paso){
     if(out)out.innerHTML='<span style="color:#22c55e">✅ '+rot+' copiado. Pégalo con Ctrl+V.</span>'
     try{waToast('📋 '+rot+' copiado.','ok')}catch(_){}
   }catch(e){
-    if(out)out.innerHTML='<span style="color:#ef4444">No pude copiar: '+_wchEsc(e.message||String(e))+'</span>'
+    if(out)out.innerHTML=(e&&e.nxManual)?'<span style="color:#f59e0b">🟡 Chrome no dejó copiar solo: quedó marcado abajo para copiarlo con Cmd+C.</span>':'<span style="color:#ef4444">No pude copiar: '+_wchEsc(e.message||String(e))+'</span>' // (29sep26 · M22 E61) ANTES: siempre rojo; si salió la ventanita amarilla de copiar a mano, el aviso va en amarillo
   }
 }
 // Lista de tipos (el camino de siempre). Al elegir uno deja SOLO la píldora azul.
@@ -51854,7 +52194,7 @@ window._wchProtoCopiar=async function(convId,tel,idx){
     if(out)out.innerHTML='<span style="color:#22c55e">✅ Copiado con los datos'+(m?'':' (sin pedido en el sistema: quedaron los comodines)')+'. Pégalo en Dropi con Ctrl+V.</span>'
     try{waToast('📋 Protocolo "'+(proto.titulo||idx)+'" copiado para Dropi.','ok')}catch(_){}
   }catch(e){
-    if(out)out.innerHTML='<span style="color:#ef4444">No pude copiar: '+_wchEsc(e.message||String(e))+'</span>'
+    if(out)out.innerHTML=(e&&e.nxManual)?'<span style="color:#f59e0b">🟡 Chrome no dejó copiar solo: quedó marcado abajo para copiarlo con Cmd+C.</span>':'<span style="color:#ef4444">No pude copiar: '+_wchEsc(e.message||String(e))+'</span>' // (29sep26 · M22 E61) ANTES: siempre rojo; si salió la ventanita amarilla de copiar a mano, el aviso va en amarillo
   }
 }
 

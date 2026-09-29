@@ -1229,10 +1229,13 @@ const NAV={
     {id:'admin-textos',icon:'📝',label:'Textos / Mensajes'},
     {id:'admin-mensajeria',icon:'💬',label:'Mensajería'}, // NUEVO (26jul26): números API WhatsApp + apps Meta
     {id:'admin-actividad',icon:'🕒',label:'Actividad'},
+    {id:'aux-historia',icon:'📜',label:'Historia del cliente'}, // (29sep26 · HC5 E63) Historia del cliente · Parte 5
+    {id:'nx-informe',icon:'📣',label:'Anuncios y asistentes'}, // (29sep26 · HC5 E63) informe por anuncio/asistente
   ],
   trafficker:[
     {id:'traff-portafolio',icon:'📊',label:'Portafolio'},
     {id:'admin-ia',icon:'🤖',label:'Historial IA'},
+    {id:'nx-informe',icon:'📣',label:'Anuncios y asistentes'}, // (29sep26 · HC5 E63) el trafficker ve qué anuncio vende
   ],
   auxiliar:[
     {id:'aux-hoy',icon:'🏠',label:'¿Qué hago hoy?'},
@@ -1244,6 +1247,7 @@ const NAV={
     {id:'aux-novedades',icon:'⚠️',label:'Resolver problemas de entrega'},
     {id:'aux-reclame',icon:'📦',label:'Avisar para recoger en oficina'},
     {id:'aux-seguimiento',icon:'🚚',label:'Ver estado de los envíos'},
+    {id:'aux-historia',icon:'📜',label:'Historia del cliente'}, // (29sep26 · HC5 E63) Historia del cliente · Parte 5
     {id:'aux-reporte',icon:'📝',label:'Reporte del día'},
     {id:'aux-cierre',icon:'✅',label:'Cerrar jornada'},
   ]
@@ -1398,6 +1402,8 @@ function render(page){
     'admin-meta':pageAdminMeta,
     'admin-ia':pageHistorialIA,
     'traff-portafolio':pageTraffPortafolio,
+    'aux-historia':(c)=>window.nxHistoria.pageHistoria(c), // (29sep26 · HC5 E63) 📜 Historia del cliente (admin y auxiliar)
+    'nx-informe':(c)=>window.nxHistoria.pageInforme(c), // (29sep26 · HC5 E63) 📣 informe por anuncio y asistente (admin y trafficker)
   }
   // Marca el contenedor como página de auxiliar (para estilos de botones)
   if(c){ if(currentRol()==='auxiliar') c.classList.add('aux-page'); else c.classList.remove('aux-page') }
@@ -1763,6 +1769,357 @@ window.nxCarnet=(function(){
   return{leer,local,estado,vincular,masTarde,apagar,probar,boot,pintarAdmin,abrir,cerrar,clicVincular,clicMasTarde,clicProbar,clicApagar,clicProbarAdmin,plataforma}
 })()
 // ══ FIN (29sep26 · HC2 E62) EL CARNET DEL COMPUTADOR ═══════════════════════════════════
+// ══ (29sep26 · HC5 E63) HISTORIA DEL CLIENTE · Parte 5 · PANTALLA 📜 + INFORME 📣 ═══════════
+// Decisiones de la dueña (chat SELLERCHAT, 29-sep): 1A pestaña "📜 Historia del cliente" en el
+// menú Y botoncito 📜 al lado de cada teléfono de la Hoja Base (abre la historia en una ventana,
+// sin salir de la Hoja Base) · 2A informe por anuncio y por asistente con rango de fechas (por
+// defecto "este mes"), llegaron · ventas · entregadas · devueltas · canceladas · en camino, y
+// botón Excel · 3A la historia la ve todo el equipo MENOS el trafficker (la auxiliar solo lo de
+// entregas y logística); el informe lo ven admin Y trafficker (necesita saber qué anuncio vende).
+// QUÉ ES: todo sale de Supabase por 2 funciones de SOLO lectura (SQL Parte 5 v005):
+//   nx_historia_buscar(texto)  → cliente(s) + ventas + conversaciones + línea de tiempo
+//                                 (busca por teléfono, @usuario, # orden Dropi, ID conversación,
+//                                 cédula NEXO o ID de venta; nunca por nombre)
+//   nx_informe_anuncios(desde, hasta) → por anuncio y por asistente
+// Los IDs son la verdad; los nombres solo se pintan (asistente = agentes; anuncio = meta_campanas;
+// etiqueta = config nx_sc_etiquetas {id: nombre}, que la administradora llena desde aquí con ✏️).
+// Lo dudoso NO se adivina: sale en "⚠️ Por revisar" tal cual está en la base.
+// Interruptor: window.NX_HISTORIA_OFF=true → las páginas avisan y no consultan.
+window.nxHistoria=(function(){
+  const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+  const K_ETQ='nx_sc_etiquetas'          // config: {etiqueta_id: nombre} (solo para mostrar)
+  const TAG_CERO='00000000-0000-0000-0000-000000000000' // = "sin etiqueta" (así lo manda la barrita)
+  let etiquetas=null                      // memoria de la sesión
+  let ultimo=null                         // última respuesta pintada (para Excel / nombrar etiquetas)
+  const rol=()=>{try{return currentRol()||''}catch(_){return ''}}
+  function puedeHistoria(){const r=rol();return !!r&&r!=='trafficker'}
+  function puedeInforme(){const r=rol();return r==='admin'||r==='trafficker'}
+  const corto=id=>{const s=String(id==null?'':id);return s.length>12?s.slice(0,8)+'…':s}
+  const MESES=['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic']
+  // fecha/hora en hora de Colombia (lo que manda la base viene con zona)
+  function fechaCol(iso,conHora){
+    if(!iso)return ''
+    const d=new Date(iso);if(isNaN(d))return esc(iso)
+    const p=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Bogota',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d)
+    const g=t=>(p.find(x=>x.type===t)||{}).value||''
+    const f=`${g('day')}-${MESES[parseInt(g('month'),10)-1]||g('month')}-${g('year')}`
+    return conHora?`${f} ${g('hour')==='24'?'00':g('hour')}:${g('minute')}`:f
+  }
+  const soloFecha=s=>{if(!s)return '';const m=String(s).match(/^(\d{4})-(\d{2})-(\d{2})/);return m?`${m[3]}-${MESES[parseInt(m[2],10)-1]}-${m[1]}`:esc(s)}
+  const n=v=>Number(v||0)
+  const pct=(a,b)=>b>0?Math.round(a*100/b)+'%':'—'
+  const CLASE={entregada:['pill-green','✅ Entregada'],devuelta:['pill-red','↩️ Devuelta'],cancelada:['pill-amber','⛔ Cancelada'],en_camino:['pill-blue','🚚 En camino']}
+  const pillClase=(cl,texto)=>{const c=CLASE[cl]||CLASE.en_camino;return `<span class="pill ${c[0]}" title="${esc(texto||'')}">${c[1]}</span>`}
+  function errorClaro(e){
+    const m=String((e&&e.message)||e||'')
+    if(/sin_permiso/.test(m))return 'No tienes permiso para ver esto.'
+    if(/sin_sesion/.test(m))return 'Tu sesión se venció: vuelve a entrar.'
+    if(/texto_vacio/.test(m))return 'Escribe un teléfono, # de orden o ID para buscar.'
+    if(/texto_muy_largo/.test(m))return 'Ese texto es muy largo.'
+    if(/demasiados_clientes/.test(m))return 'Esa búsqueda trae más de 20 clientes: afina el dato.'
+    if(/fechas_al_reves/.test(m))return '"Desde" debe ser antes de "Hasta".'
+    if(/rango_muy_largo/.test(m))return 'Máximo 400 días por consulta.'
+    if(/Could not find the function|PGRST202|schema cache/.test(m))return 'Falta correr en Supabase el SQL de la Parte 5 (NEXO_SQL_HISTORIA_CLIENTE_PARTE5).'
+    return (window.nxErrorClaro?window.nxErrorClaro(m):m)||'Error desconocido'
+  }
+  // ── consultas ──
+  async function buscar(texto){
+    if(window.NX_HISTORIA_OFF)throw new Error('La Historia del cliente está apagada (NX_HISTORIA_OFF).')
+    const{data,error}=await sb.rpc('nx_historia_buscar',{p_texto:String(texto||'').trim()})
+    if(error)throw new Error(error.message||String(error))
+    return data
+  }
+  async function informe(desde,hasta){
+    if(window.NX_HISTORIA_OFF)throw new Error('El informe está apagado (NX_HISTORIA_OFF).')
+    const{data,error}=await sb.rpc('nx_informe_anuncios',{p_desde:desde||null,p_hasta:hasta||null})
+    if(error)throw new Error(error.message||String(error))
+    return data
+  }
+  async function cargarEtiquetas(){
+    if(etiquetas)return etiquetas
+    try{const v=await getConfig(K_ETQ);const o=v?JSON.parse(v):{};etiquetas=(o&&typeof o==='object')?o:{}}catch(_){etiquetas={}}
+    return etiquetas
+  }
+  function etiquetaNombre(id){
+    if(!id||id===TAG_CERO)return {nombre:'sin etiqueta',conocida:true}
+    const nom=etiquetas&&etiquetas[id]
+    return nom?{nombre:nom,conocida:true}:{nombre:'etiqueta '+corto(id),conocida:false}
+  }
+  // ── textos de la línea de tiempo (el ID es la verdad; el nombre se pinta si se conoce) ──
+  const NOMBRE_EVENTO={
+    creado:'Venta creada en NEXO',confirmacion_enviada:'Se envió la confirmación por WhatsApp',confirmacion_reenviada:'Se reenvió la confirmación',
+    envio_programado:'Se programó un mensaje',novedad_detectada:'Novedad de entrega detectada',reclame_enviado:'Aviso para recoger en oficina',
+    reclame_resuelta:'Reclame resuelto',orden_dropi_cambiada:'Dropi cambió el # de orden',reactivado:'Venta reactivada',re_cancelado:'Venta cancelada otra vez',
+    reactivado_deshecho:'Se deshizo la reactivación',resolucion_deshecha:'Se deshizo la resolución',ad_id_corregido:'Se corrigió el anuncio de la venta',
+    psf_mensaje_enviado:'Mensaje de "pendiente sin fecha" enviado',canc_mensaje_enviado:'Mensaje de cancelación enviado'
+  }
+  const NOMBRE_MOTIVO={
+    venta_telefono_invalido:'La venta quedó con un teléfono inventado: se ata sola cuando Dropi traiga el real',
+    orden_pasada_a_otra_venta:'La misma orden de Dropi aparece en dos ventas',orden_dropi_ilegible:'El # de orden de Dropi no se pudo leer',
+    dropi_order_id_invalido:'El # de orden de Dropi no es válido',ad_id_ilegible:'El ID del anuncio no se pudo leer',
+    conversacion_sin_cliente:'Llegó una conversación sin teléfono ni usuario',etiqueta_sin_conversacion:'Cambió una etiqueta de una conversación que no conozco',
+    cliente_con_dos_cedulas:'El mismo teléfono/usuario apunta a dos clientes (hay que fusionar)',conversacion_con_otro_cliente:'La conversación ya era de otro cliente',
+    orden_con_dos_clientes:'Dropi trajo otro teléfono para esta orden (NEXO tenía otro)',agente_id_sellerchat_repetido:'Dos agentes con el mismo ID de SellerChat'
+  }
+  function evTexto(e,d){
+    const det=e.detalle||{}
+    const asis=e.asistente_id?((d.asistentes||{})[e.asistente_id]||('asistente '+corto(e.asistente_id))):''
+    const anun=e.ad_id?((d.anuncios||{})[e.ad_id]||('anuncio '+e.ad_id)):''
+    const aprox=det.hora_aproximada?'⏱ hora aproximada':''
+    const j=a=>a.filter(Boolean).map(esc).join(' · ')
+    switch(e.evento){
+      case 'sc_llegada':return{i:'💬',t:det.reentrada?'Volvió a escribir por WhatsApp':'Llegó por WhatsApp (SellerChat)',s:j([anun&&('📣 '+anun),asis&&('👩‍💻 '+asis),aprox,det.carga_inicial?'ya existía cuando arrancó la barrita':''])}
+      case 'sc_etiqueta_cambiada':{const nm=etiquetaNombre(e.etiqueta_id);const ant=det.etiqueta_anterior_id?etiquetaNombre(det.etiqueta_anterior_id).nombre:''
+        return{i:'🏷️',t:'Etiqueta: '+esc(nm.nombre)+(nm.conocida||rol()!=='admin'?'':` <button class="btn-sm btn-outline" style="padding:1px 6px;font-size:10px" onclick="window.nxHistoria.etiquetaNombrar('${esc(e.etiqueta_id)}',this)" title="Ponerle nombre a esta etiqueta (solo se muestra; el ID sigue siendo la llave)">✏️ nombrar</button>`),s:j([ant&&('antes: '+ant),asis&&('👩‍💻 '+asis),det.fuente==='barrido'?'la vio el barrido':'',aprox])}}
+      case 'venta_creada':return{i:'🛒',t:'Venta en NEXO: '+esc(det.producto||'')+(det.cantidad?' ×'+esc(det.cantidad):''),s:j([det.ciudad,det.fecha&&('fecha de venta '+soloFecha(det.fecha)),e.dropi_order_id&&('orden Dropi #'+e.dropi_order_id),anun&&('📣 '+anun)])}
+      case 'dropi_estado':return{i:'🚚',t:'Dropi: '+esc(det.estado||'?'),s:j([e.guia&&('guía '+e.guia),det.transportadora,det.ciudad,e.dropi_order_id&&('#'+e.dropi_order_id),det.estado_anterior&&('antes: '+det.estado_anterior),aprox])}
+      default:{
+        const nombre=NOMBRE_EVENTO[e.evento]||String(e.evento||'').replace(/_/g,' ')
+        const extra=[]
+        if(det.orden_anterior||det.orden_nueva)extra.push(`${det.orden_anterior||'?'} → ${det.orden_nueva||'?'}`)
+        if(det.estado)extra.push('estado: '+det.estado)
+        if(det.motivo)extra.push(String(det.motivo))
+        if(det.plantilla)extra.push('plantilla: '+det.plantilla)
+        return{i:e.fuente==='dropi'?'🚚':e.fuente==='sellerchat'?'💬':'🟢',t:esc(nombre),s:j(extra)}
+      }
+    }
+  }
+  // ── pintar ──
+  function pintarHistoria(lista,d){
+    if(!lista||!lista.length)return '<div class="alert alert-blue">Todavía no hay hechos guardados de este cliente (llegan desde que la barrita y el Semáforo empezaron a mandar).</div>'
+    return `<div style="display:flex;flex-direction:column;gap:0">${lista.map((e,i)=>{const x=evTexto(e,d);const ult=i===lista.length-1
+      return `<div style="display:flex;gap:10px;padding:7px 4px;border-left:3px solid ${e.fuente==='dropi'?'var(--blue)':e.fuente==='sellerchat'?'var(--amber)':'var(--green)'};${ult?'background:var(--card2);border-radius:0 8px 8px 0':''}">
+        <div style="min-width:118px;font-family:monospace;font-size:11px;color:var(--muted);padding-top:2px">${esc(fechaCol(e.momento,true))}</div>
+        <div style="font-size:18px;line-height:1">${x.i}</div>
+        <div style="flex:1;font-size:13px;line-height:1.45"><div style="font-weight:600">${x.t}</div>${x.s?`<div style="color:var(--muted);font-size:12px">${x.s}</div>`:''}</div>
+      </div>`}).join('')}</div>`
+  }
+  function pintarVentas(vs,d){
+    if(!vs||!vs.length)return '<div class="alert alert-blue">Este cliente no tiene ventas en NEXO.</div>'
+    return `<div class="table-wrap"><table><tr><th>Fecha</th><th>Producto</th><th>Cant.</th><th>Ciudad</th><th>Orden Dropi</th><th>Guía / transportadora</th><th>Estado</th><th>Anuncio</th><th>Asistente</th></tr>${vs.map(v=>{
+      const asis=v.agente_id?((d.agentes||{})[v.agente_id]||corto(v.agente_id)):''
+      const anun=v.ad_id?((d.anuncios||{})[v.ad_id]||v.ad_id):''
+      const viejas=(v.ordenes_viejas||[]).length?`<div style="font-size:10px;color:var(--muted)">antes: ${esc(v.ordenes_viejas.join(', '))}</div>`:''
+      const est=v.estado_dropi?`Dropi: ${esc(v.estado_dropi)}${v.estado_dropi_en?' ('+fechaCol(v.estado_dropi_en,true)+')':''} · NEXO: ${esc(v.estado_nexo||'—')}`:`NEXO: ${esc(v.estado_nexo||'—')}`
+      return `<tr><td>${esc(soloFecha(v.fecha))}</td><td>${esc(v.producto||'')}</td><td>${esc(v.cantidad==null?'':v.cantidad)}</td><td>${esc(v.ciudad||'')}</td><td style="font-family:monospace">${esc(v.dropi_order_id||'—')}${viejas}</td><td>${esc(v.guia||'—')}${v.transportadora?`<div style="font-size:10px;color:var(--muted)">${esc(v.transportadora)}</div>`:''}</td><td>${pillClase(v.clase,est)}<div style="font-size:10px;color:var(--muted);margin-top:3px">${est}</div></td><td style="font-size:11px">${esc(anun)}</td><td style="font-size:11px">${esc(asis)}</td></tr>`}).join('')}</table></div>`
+  }
+  function pintarConversaciones(cs,d){
+    if(!cs||!cs.length)return '<div style="font-size:12px;color:var(--muted)">Sin conversaciones de SellerChat registradas (llegan desde la Parte 3).</div>'
+    return `<div class="table-wrap"><table><tr><th>Llegó</th><th>Asistente</th><th>Anuncio</th><th>ID de la conversación</th></tr>${cs.map(c=>`<tr><td>${esc(fechaCol(c.llegada_en,true)||'—')}</td><td>${esc((d.asistentes||{})[c.asistente_id]||('asistente '+corto(c.asistente_id)))}</td><td style="font-size:11px">${esc(c.ad_id?((d.anuncios||{})[c.ad_id]||c.ad_id):'—')}</td><td style="font-family:monospace;font-size:11px">${esc(c.conversacion_id)} <button class="btn-sm btn-outline" style="padding:1px 6px;font-size:10px" onclick="window.nxHistoria.copiar('${esc(c.conversacion_id)}',this)" title="Copiar el ID">📋</button></td></tr>`).join('')}</table></div>`
+  }
+  function pintarCliente(c,d){
+    const vs=c.ventas||[],ent=vs.filter(v=>v.clase==='entregada').length,dev=vs.filter(v=>v.clase==='devuelta').length,can=vs.filter(v=>v.clase==='cancelada').length
+    const ultima=vs[0]
+    return `<div class="card" style="margin-top:12px;border:2px solid var(--accent)">
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px">
+        <div style="font-size:18px;font-weight:700">👤 ${esc(c.nombre||'(sin nombre)')}</div>
+        ${(c.telefonos||[]).map(t=>`<span class="pill pill-blue">📞 ${esc(t)}</span>`).join('')}
+        ${(c.wa_usuarios||[]).map(u=>`<span class="pill pill-blue">@${esc(u)}</span>`).join('')}
+        <span style="font-size:11px;color:var(--muted);font-family:monospace" title="Cédula NEXO (el ID de este cliente)">🪪 ${esc(c.cliente_id)}</span>
+        ${c.fusionado_en?`<span class="pill pill-amber" title="Esta cédula se fusionó con ${esc(c.fusionado_en)}">fusionada</span>`:''}
+      </div>
+      <div class="cards-row c4" style="margin-bottom:12px">
+        <div class="card"><div class="card-label">Conversaciones</div><div class="card-val">${(c.conversaciones||[]).length}</div></div>
+        <div class="card"><div class="card-label">Ventas</div><div class="card-val">${vs.length}</div><div class="card-sub">${ent} entregadas · ${dev} devueltas · ${can} canceladas</div></div>
+        <div class="card"><div class="card-label">Última venta</div><div class="card-val" style="font-size:16px">${ultima?esc(soloFecha(ultima.fecha)):'—'}</div><div class="card-sub">${ultima?pillClase(ultima.clase,ultima.estado_dropi||ultima.estado_nexo):''}</div></div>
+        <div class="card"><div class="card-label">Hechos guardados</div><div class="card-val">${(c.historia||[]).length}</div></div>
+      </div>
+      <div class="section-title">🛒 Ventas</div>${pintarVentas(vs,d)}
+      <div class="section-title" style="margin-top:14px">💬 Conversaciones de SellerChat</div>${pintarConversaciones(c.conversaciones,d)}
+      <div class="section-title" style="margin-top:14px">📜 Línea de tiempo (de la llegada al ENTREGADO)</div>${pintarHistoria(c.historia,d)}
+    </div>`
+  }
+  function pintarSueltas(vs,d){
+    if(!vs||!vs.length)return ''
+    return `<div class="card" style="margin-top:12px;border:1px solid var(--amber)"><div class="section-title">🧩 Ventas con ese dato pero SIN cédula (todavía no se atan a nadie)</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Casi siempre es una venta con teléfono inventado (ej. 1234567888). Se ata sola cuando el Semáforo de Dropi traiga la orden con el teléfono real.</div>
+      <div class="table-wrap"><table><tr><th>Fecha</th><th>Nombre (foto)</th><th>Teléfono</th><th>Producto</th><th>Orden Dropi</th><th>Estado</th><th>Asistente</th></tr>${vs.map(v=>`<tr><td>${esc(soloFecha(v.fecha))}</td><td>${esc(v.nombre||'')}</td><td style="font-family:monospace">${esc(v.telefono||'')}</td><td>${esc(v.producto||'')}${v.cantidad?' ×'+esc(v.cantidad):''}</td><td style="font-family:monospace">${esc(v.dropi_order_id||'—')}</td><td>${pillClase(v.clase,v.estado_nexo)} <span style="font-size:10px;color:var(--muted)">${esc(v.estado_nexo||'')}</span></td><td style="font-size:11px">${esc(v.agente_id?((d.agentes||{})[v.agente_id]||corto(v.agente_id)):'')}</td></tr>`).join('')}</table></div></div>`
+  }
+  function pintarRevisar(rs){
+    if(!rs||!rs.length)return ''
+    return `<div class="card" style="margin-top:12px"><div class="section-title">⚠️ Por revisar (lo que la base no ató por su cuenta)</div>
+      <div class="table-wrap"><table><tr><th>Cuándo</th><th>Qué pasó</th><th>Datos</th><th>Estado</th></tr>${rs.map(r=>`<tr><td>${esc(fechaCol(r.creado_en,true))}</td><td>${esc(NOMBRE_MOTIVO[r.motivo]||r.motivo)}<div style="font-size:10px;color:var(--muted)">${esc(r.motivo)} · ${esc(r.fuente)}</div></td><td style="font-family:monospace;font-size:10px;max-width:320px;word-break:break-all">${esc(JSON.stringify(r.datos||{}))}</td><td>${r.resuelto_en?`<span class="pill pill-green">resuelto</span><div style="font-size:10px;color:var(--muted)">${esc(r.resolucion||'')} · ${esc(fechaCol(r.resuelto_en,true))}</div>`:'<span class="pill pill-amber">pendiente</span>'}</td></tr>`).join('')}</table></div></div>`
+  }
+  function pintarResultado(cont,d){
+    if(!cont)return
+    ultimo=d
+    const b=d.buscado||{}
+    const TIPO={telefono:'teléfono',wa_usuario:'usuario de WhatsApp',orden:'# de orden de Dropi',conversacion:'ID de conversación',cliente:'cédula NEXO',venta:'ID de venta',conversacion_sin_cliente:'conversación sin cliente',nada:'nada'}
+    const cls=d.clientes||[]
+    let html=`<div style="font-size:12px;color:var(--muted);margin-bottom:6px">Busqué «<b>${esc(b.texto)}</b>» como <b>${esc(TIPO[b.tipo]||b.tipo)}</b> · ${cls.length} cliente(s) · ${(d.ventas_sueltas||[]).length} venta(s) suelta(s) · ${(d.por_revisar||[]).length} por revisar</div>`
+    if(!cls.length&&!(d.ventas_sueltas||[]).length&&!(d.por_revisar||[]).length)html+=`<div class="alert alert-blue">No encontré nada con «${esc(b.texto)}». Prueba con el teléfono completo (10 dígitos), el # de orden de Dropi o el ID de la conversación.</div>`
+    if(b.tipo==='conversacion_sin_cliente')html+=`<div class="alert alert-amber">Esa conversación existe pero llegó sin teléfono ni usuario: no está atada a ningún cliente (mira "Por revisar").</div>`
+    html+=cls.map(c=>pintarCliente(c,d)).join('')
+    html+=pintarSueltas(d.ventas_sueltas,d)
+    html+=pintarRevisar(d.por_revisar)
+    cont.innerHTML=html
+  }
+  // ── el buscador (sirve en la página y en la ventana) ──
+  function buscadorHTML(pref){
+    return `<div class="card" style="border:2px solid var(--accent)">
+      <div class="section-title">🔍 Buscar un cliente</div>
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:9px">Pega el <b>teléfono</b> (10 dígitos o con +57), el <b>@usuario</b> de WhatsApp, el <b># de orden de Dropi</b>, el <b>ID de la conversación</b> de SellerChat o la <b>cédula NEXO</b>. Nunca por nombre: los nombres cambian, los IDs no.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input id="${pref}-q" placeholder="3001234567 · #1234567 · 6bac3b00-…" style="flex:1;min-width:240px;font-size:14px;padding:9px 11px;background:var(--card2);border:1px solid var(--border);border-radius:8px;color:var(--text);outline:none" onkeydown="if(event.key==='Enter'){event.preventDefault();window.nxHistoria.buscarClic('${pref}')}">
+        <button class="btn-sm btn-primary" onclick="window.nxHistoria.buscarClic('${pref}')" id="${pref}-btn">🔍 Buscar</button>
+      </div>
+      <div id="${pref}-msg" style="margin-top:8px"></div>
+    </div>
+    <div id="${pref}-res"></div>`
+  }
+  async function buscarClic(pref){
+    const inp=document.getElementById(pref+'-q'),msg=document.getElementById(pref+'-msg'),res=document.getElementById(pref+'-res'),btn=document.getElementById(pref+'-btn')
+    if(!inp||!res)return
+    const q=inp.value.trim()
+    if(!q){if(msg)msg.innerHTML='<div class="alert alert-amber">Escribe un teléfono, # de orden o ID.</div>';return}
+    if(msg)msg.innerHTML='';res.innerHTML='<div class="loading">Buscando en Supabase…</div>'
+    if(btn)btn.disabled=true
+    try{
+      await cargarEtiquetas()
+      const d=await buscar(q)
+      pintarResultado(res,d)
+      try{logAction('historia_cliente_buscada',{tipo:(d.buscado||{}).tipo,clientes:(d.clientes||[]).length,sueltas:(d.ventas_sueltas||[]).length})}catch(_){}
+    }catch(e){res.innerHTML='';if(msg)msg.innerHTML=`<div class="alert alert-red">❌ ${esc(errorClaro(e))}</div>`}
+    finally{if(btn)btn.disabled=false}
+  }
+  // ── página 📜 (admin y auxiliar) ──
+  async function pageHistoria(c){
+    if(!puedeHistoria()){c.innerHTML='<div class="alert alert-red">La historia del cliente la ve el equipo de ventas y logística. El trafficker tiene el informe 📣 Anuncios y asistentes.</div>';return}
+    c.innerHTML=`<div class="page-title">📜 Historia del cliente</div>
+      <div class="page-sub">Todo lo de una clienta en un solo lugar: por qué anuncio llegó, quién la atendió, qué compró y cómo va su pedido en Dropi hasta ENTREGADO. SellerChat, NEXO y Dropi atados solo por IDs.</div>
+      ${buscadorHTML('nxh')}`
+    const pend=window._nxHistoriaPendiente;window._nxHistoriaPendiente=null
+    if(pend){const i=document.getElementById('nxh-q');if(i){i.value=pend;buscarClic('nxh')}}
+    else setTimeout(()=>{try{document.getElementById('nxh-q').focus()}catch(_){}},50)
+  }
+  // ── ventana desde la Hoja Base (no se sale de la Hoja Base: lo cargado no se pierde) ──
+  function botonTel(tel){
+    if(!tel||!puedeHistoria())return ''
+    const t=String(tel).replace(/"/g,'&quot;').replace(/'/g,'&#39;')
+    return `<button class="btn-sm" style="padding:1px 7px;font-size:11px" onclick="window.nxHistoria.abrirTel('${t}')" title="Ver la historia de esta clienta (SellerChat → NEXO → Dropi)">📜</button>`
+  }
+  function cerrarModal(){const m=document.getElementById('nxh-modal');if(m)m.remove()}
+  function abrirTel(tel){
+    cerrarModal()
+    const div=document.createElement('div');div.id='nxh-modal';div.className='modal-bg'
+    div.innerHTML=`<div class="modal-box" style="max-width:1100px" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px"><div class="modal-title">📜 Historia del cliente</div><button class="btn-sm btn-outline" onclick="window.nxHistoria.cerrarModal()">✖ Cerrar</button></div>
+      ${buscadorHTML('nxhm')}</div>`
+    div.onclick=cerrarModal
+    document.body.appendChild(div)
+    const i=document.getElementById('nxhm-q');if(i){i.value=String(tel||'');buscarClic('nxhm')}
+  }
+  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.getElementById('nxh-modal'))cerrarModal()})
+  // ── etiquetas: ponerle nombre (solo admin; solo para mostrar) ──
+  function etiquetaNombrar(id,btn){
+    if(rol()!=='admin')return
+    const w=document.createElement('span');w.style.cssText='display:inline-flex;gap:4px;align-items:center;margin-left:4px'
+    w.innerHTML=`<input placeholder="nombre de la etiqueta" style="font-size:11px;padding:2px 6px;background:var(--card2);border:1px solid var(--border);border-radius:6px;color:var(--text);width:160px"><button class="btn-sm btn-green" style="padding:2px 7px;font-size:10px">Guardar</button>`
+    const inp=w.querySelector('input'),ok=w.querySelector('button')
+    ok.onclick=async()=>{const nom=inp.value.trim();if(!nom)return;ok.disabled=true
+      try{await etiquetaGuardar(id,nom);w.innerHTML=`<span class="pill pill-green">${esc(nom)}</span>`;if(btn)btn.remove()}
+      catch(e){ok.disabled=false;ok.textContent='❌ '+errorClaro(e).slice(0,60)}}
+    inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();ok.click()}}
+    if(btn&&btn.parentNode){btn.parentNode.insertBefore(w,btn.nextSibling);btn.style.display='none'}
+    inp.focus()
+  }
+  async function etiquetaGuardar(id,nombre){
+    await cargarEtiquetas()
+    const nuevo=Object.assign({},etiquetas,{[id]:String(nombre).slice(0,80)})
+    const{error}=await sb.from('config').upsert({clave:K_ETQ,valor:JSON.stringify(nuevo),updated_at:new Date().toISOString()},{onConflict:'clave'})
+    if(error)throw new Error(error.message)
+    etiquetas=nuevo
+    try{logAction('sc_etiqueta_nombrada',{etiqueta_id:id,nombre:String(nombre).slice(0,80)})}catch(_){}
+  }
+  function copiar(t,btn){
+    const done=()=>{if(btn){const x=btn.textContent;btn.textContent='✅';setTimeout(()=>{btn.textContent=x},1200)}}
+    try{navigator.clipboard.writeText(String(t)).then(done).catch(()=>{})}catch(_){}
+  }
+  // ── página 📣 informe (admin y trafficker) ──
+  const hoyCol=()=>{try{return today()}catch(_){return new Date().toISOString().slice(0,10)}}
+  function rangoMes(desfase){ // 0 = este mes, -1 = mes pasado
+    const h=hoyCol();let y=parseInt(h.slice(0,4),10),m=parseInt(h.slice(5,7),10)+desfase
+    while(m<1){m+=12;y--}while(m>12){m-=12;y++}
+    const d1=`${y}-${String(m).padStart(2,'0')}-01`
+    const fin=new Date(Date.UTC(y,m,0)).getUTCDate()
+    const d2=desfase===0?h:`${y}-${String(m).padStart(2,'0')}-${String(fin).padStart(2,'0')}`
+    return[d1,d2]
+  }
+  function rangoDias(nd){const h=hoyCol();const d=new Date(h+'T12:00:00Z');d.setUTCDate(d.getUTCDate()-(nd-1));return[d.toISOString().slice(0,10),h]}
+  async function pageInforme(c){
+    if(!puedeInforme()){c.innerHTML='<div class="alert alert-red">El informe por anuncio lo ven la administradora y el trafficker.</div>';return}
+    const[d1,d2]=rangoMes(0)
+    c.innerHTML=`<div class="page-title">📣 Anuncios y asistentes</div>
+      <div class="page-sub">De cada anuncio y de cada asistente: cuántas llegaron a SellerChat, cuántas compraron y cómo terminó el pedido en Dropi (entregado, devuelto, cancelado o en camino).</div>
+      <div class="card">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+          <div class="fld"><label>Desde</label><input type="date" id="nxi-d1" value="${d1}"></div>
+          <div class="fld"><label>Hasta</label><input type="date" id="nxi-d2" value="${d2}"></div>
+          <button class="btn-sm btn-outline" onclick="window.nxHistoria.rango('mes')">Este mes</button>
+          <button class="btn-sm btn-outline" onclick="window.nxHistoria.rango('mes-1')">Mes pasado</button>
+          <button class="btn-sm btn-outline" onclick="window.nxHistoria.rango('7')">Últimos 7 días</button>
+          <button class="btn-sm btn-outline" onclick="window.nxHistoria.rango('30')">Últimos 30 días</button>
+          <button class="btn-sm btn-primary" id="nxi-ver" onclick="window.nxHistoria.verInforme()">🔄 Ver</button>
+          <button class="btn-sm btn-green" id="nxi-xls" onclick="window.nxHistoria.excel()" disabled>⬇️ Excel</button>
+        </div>
+        <div id="nxi-msg" style="margin-top:8px"></div>
+      </div>
+      <div id="nxi-res" style="margin-top:12px"></div>`
+    verInforme()
+  }
+  function rango(cual){
+    let r
+    if(cual==='mes')r=rangoMes(0);else if(cual==='mes-1')r=rangoMes(-1);else r=rangoDias(parseInt(cual,10)||7)
+    const a=document.getElementById('nxi-d1'),b=document.getElementById('nxi-d2');if(a)a.value=r[0];if(b)b.value=r[1]
+    verInforme()
+  }
+  function filaInf(x,nombreCol){
+    return `<tr><td>${nombreCol}</td><td style="text-align:right">${n(x.llegaron)}</td><td style="text-align:right;font-weight:700">${n(x.ventas)}</td><td style="text-align:right;color:var(--muted)">${pct(n(x.ventas),n(x.llegaron))}</td><td style="text-align:right;color:var(--green)">${n(x.entregadas)}</td><td style="text-align:right;color:var(--muted)">${pct(n(x.entregadas),n(x.ventas))}</td><td style="text-align:right;color:var(--red)">${n(x.devueltas)}</td><td style="text-align:right;color:var(--amber)">${n(x.canceladas)}</td><td style="text-align:right;color:var(--blue)">${n(x.en_camino)}</td></tr>`
+  }
+  const CAB='<tr><th>%s</th><th style="text-align:right">Llegaron</th><th style="text-align:right">Ventas</th><th style="text-align:right">% compra</th><th style="text-align:right">Entregadas</th><th style="text-align:right">% entrega</th><th style="text-align:right">Devueltas</th><th style="text-align:right">Canceladas</th><th style="text-align:right">En camino</th></tr>'
+  async function verInforme(){
+    const res=document.getElementById('nxi-res'),msg=document.getElementById('nxi-msg'),btn=document.getElementById('nxi-ver'),xls=document.getElementById('nxi-xls')
+    if(!res)return
+    const d1=(document.getElementById('nxi-d1')||{}).value||'',d2=(document.getElementById('nxi-d2')||{}).value||''
+    if(msg)msg.innerHTML='';res.innerHTML='<div class="loading">Calculando en Supabase…</div>';if(btn)btn.disabled=true;if(xls)xls.disabled=true
+    try{
+      const d=await informe(d1,d2)
+      ultimo=d
+      const t=d.totales||{}
+      const desde=d.llegadas_desde?fechaCol(d.llegadas_desde,false):null
+      res.innerHTML=`<div class="cards-row c6">
+          <div class="card"><div class="card-label">Llegaron</div><div class="card-val">${n(t.llegaron)}</div><div class="card-sub">conversaciones nuevas</div></div>
+          <div class="card"><div class="card-label">Ventas</div><div class="card-val">${n(t.ventas)}</div><div class="card-sub">${pct(n(t.ventas),n(t.llegaron))} de las que llegaron</div></div>
+          <div class="card c-green"><div class="card-label">Entregadas</div><div class="card-val">${n(t.entregadas)}</div><div class="card-sub">${pct(n(t.entregadas),n(t.ventas))} de las ventas</div></div>
+          <div class="card c-red"><div class="card-label">Devueltas</div><div class="card-val">${n(t.devueltas)}</div></div>
+          <div class="card c-amber"><div class="card-label">Canceladas</div><div class="card-val">${n(t.canceladas)}</div></div>
+          <div class="card c-blue"><div class="card-label">En camino</div><div class="card-val">${n(t.en_camino)}</div></div>
+        </div>
+        <div class="alert alert-blue">📅 ${esc(soloFecha(d.desde))} → ${esc(soloFecha(d.hasta))}. ${desde?`"Llegaron" se cuenta desde que la barrita de SellerChat empezó a mandar (${esc(desde)});`:'"Llegaron" empezará a contar cuando la barrita de SellerChat mande las primeras llegadas;'} las ventas y sus estados sí están completos. Entregadas/devueltas/canceladas = último estado de Dropi (Semáforo) o de NEXO.</div>
+        <div class="card"><div class="section-title">📣 Por anuncio</div>${(d.anuncios||[]).length?`<div class="table-wrap"><table>${CAB.replace('%s','Anuncio')}${(d.anuncios||[]).map(x=>filaInf(x,`<div style="font-weight:600">${esc(x.anuncio||(x.ad_id?'Anuncio '+x.ad_id:'Sin anuncio'))}</div><div style="font-size:10px;color:var(--muted)">${esc(x.campana||'')}${x.ad_id?' · ID '+esc(x.ad_id):''}</div>`)).join('')}</table></div>`:'<div class="alert alert-blue">Nada en ese rango.</div>'}</div>
+        <div class="card" style="margin-top:12px"><div class="section-title">👩‍💻 Por asistente</div>${(d.asistentes||[]).length?`<div class="table-wrap"><table>${CAB.replace('%s','Asistente')}${(d.asistentes||[]).map(x=>filaInf(x,`<div style="font-weight:600">${esc(x.asistente||'Sin asistente')}</div>`)).join('')}</table></div>`:'<div class="alert alert-blue">Nada en ese rango.</div>'}</div>`
+      if(xls)xls.disabled=false
+    }catch(e){res.innerHTML='';if(msg)msg.innerHTML=`<div class="alert alert-red">❌ ${esc(errorClaro(e))}</div>`}
+    finally{if(btn)btn.disabled=false}
+  }
+  function excel(){
+    const d=ultimo,msg=document.getElementById('nxi-msg')
+    if(!d||!d.totales){if(msg)msg.innerHTML='<div class="alert alert-amber">Primero dale a 🔄 Ver.</div>';return}
+    if(typeof XLSX==='undefined'){if(msg)msg.innerHTML='<div class="alert alert-red">La librería de Excel no cargó. Recarga la página.</div>';return}
+    const fila=(x,k,v)=>({[k]:v,'Llegaron':n(x.llegaron),'Ventas':n(x.ventas),'% compra':pct(n(x.ventas),n(x.llegaron)),'Entregadas':n(x.entregadas),'% entrega':pct(n(x.entregadas),n(x.ventas)),'Devueltas':n(x.devueltas),'Canceladas':n(x.canceladas),'En camino':n(x.en_camino)})
+    const an=(d.anuncios||[]).map(x=>Object.assign({'Anuncio':x.anuncio||(x.ad_id?'Anuncio '+x.ad_id:'Sin anuncio'),'Campaña':x.campana||'','ID anuncio':x.ad_id||''},fila(x,'Anuncio',x.anuncio||(x.ad_id?'Anuncio '+x.ad_id:'Sin anuncio'))))
+    const as=(d.asistentes||[]).map(x=>fila(x,'Asistente',x.asistente||'Sin asistente'))
+    const tot=[Object.assign({'Rango':`${d.desde} → ${d.hasta}`},fila(d.totales,'Rango',`${d.desde} → ${d.hasta}`))]
+    const wb=XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(an),'Anuncios')
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(as),'Asistentes')
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(tot),'Totales')
+    XLSX.writeFile(wb,`NEXO_anuncios_${d.desde}_${d.hasta}.xlsx`)
+    try{logAction('informe_anuncios_excel',{desde:d.desde,hasta:d.hasta})}catch(_){}
+  }
+  return{pageHistoria,pageInforme,botonTel,abrirTel,cerrarModal,buscarClic,verInforme,rango,excel,etiquetaNombrar,copiar,buscar,informe,fechaCol,evTexto,puedeHistoria,puedeInforme}
+})()
+// ══ FIN (29sep26 · HC5 E63) HISTORIA DEL CLIENTE · PANTALLA 📜 + INFORME 📣 ═══════════════════
 // ════════════════════════════════════════════════════════════════════════════
 // 📋 COPIADO CON COLOR — REGLA ÚNICA DE TODA LA APP (24sep26 · pedido del owner)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -44995,7 +45352,7 @@ window.hbCopyTel=(tel,btn)=>{
   }catch(_){}
 }
 // Botoncito 📋 reutilizable junto a cualquier teléfono del Constructor
-const hbTelBtn=tel=>tel?`<button class="btn-sm" data-nxcopia="${hbEscA(String(tel))}" data-nxtipo="cliente" style="padding:1px 7px;font-size:11px" onclick="hbCopyTel('${hbEscA(String(tel))}',this)" title="Copiar teléfono">📋</button>`:''
+const hbTelBtn=tel=>(tel?`<button class="btn-sm" data-nxcopia="${hbEscA(String(tel))}" data-nxtipo="cliente" style="padding:1px 7px;font-size:11px" onclick="hbCopyTel('${hbEscA(String(tel))}',this)" title="Copiar teléfono">📋</button>`:'')+((window.nxHistoria&&window.nxHistoria.botonTel)?window.nxHistoria.botonTel(tel):'') // (29sep26 · HC5 E63) + 📜 la historia de esta clienta, al lado del 📋 (los 10 sitios de una vez; el 📋 queda igual)
 // ══ MEJORA (19jul26): AVISO ROJO PERSISTENTE al bloquear GENERAR ═══════════════════════════════
 // Reemplaza los alert() del navegador. Reglas del panel #hb-aviso-rojo:
 //  · SIN botón de cerrar — se queda en pantalla mientras el auxiliar corrige (teléfonos con 📋).

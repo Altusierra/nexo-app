@@ -11319,13 +11319,15 @@ window._repCargarFaltantes=async()=>{
   const _fltVenN=_fltCandado?3:7
   try{
     const desde=_daysAgo(Math.min(7,_fltVenN)),hasta=_daysAgo(1)
-    const{data}=await sb.from('reportes_diarios').select('fecha,producto_nombre,ad_ids,conversaciones,conversaciones_aprox')
-      .gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','')
+    const{data}=await sb.from('reportes_diarios').select('fecha,producto_id,producto_nombre,ad_ids,conversaciones,conversaciones_aprox')
+      .gte('fecha',desde).lte('fecha',hasta).not('ad_ids','is',null).neq('ad_ids','') // (28sep26 · M12 E52) trae también el ID interno · ANTES: .select('fecha,producto_nombre,ad_ids,conversaciones,conversaciones_aprox')
     const porDia={}
+    // (28sep26 · M12 E52) el aviso muestra el nombre VIGENTE: 1º por ID interno, 2º resolvedor, 3º el guardado
+    const _nomVig=(r)=>{const _n=(r&&r.producto_nombre)||'';const _pI=r&&r.producto_id!=null?(productos||[]).find(x=>String(x.id)===String(r.producto_id)):null;return (_pI&&_pI.nombre)||(_n?resolveProdName(_n).nombre:'')||_n||'?'}
     for(const r of (data||[])){
       const c=Math.max(parseInt(r.conversaciones)||0,parseInt(r.conversaciones_aprox)||0)
       if(c>0)continue
-      (porDia[r.fecha]=porDia[r.fecha]||new Set()).add(r.producto_nombre||'?')
+      (porDia[r.fecha]=porDia[r.fecha]||new Set()).add(_nomVig(r)) // (28sep26 · M12 E52) ANTES: .add(r.producto_nombre||'?')
     }
     const dias=Object.keys(porDia).sort()
     if(!dias.length){box.innerHTML='';return}
@@ -11404,14 +11406,20 @@ async function cargarReporteData(){
   // 2. Manual: reportes_diarios existentes (indexados por nombre normalizado)
   // BIDIRECCIONAL: cargar lo guardado del día por CUALQUIER usuario (admin ↔ aux), último gana
   const{data:reportes}=await sb.from('reportes_diarios').select('*').eq('fecha',fecha).order('updated_at',{ascending:false})
+  // (28sep26 · M12 E52) LA CÉDULA MANDA: cada fila guardada se cruza 1º por su ID interno
+  // (producto_id → nombre VIGENTE del catálogo, aguanta cualquier renombre), 2º por el
+  // resolvedor de nombres (regla M6 + aliases) y solo al final por el nombre crudo — ese
+  // respaldo es únicamente para filas viejas guardadas sin ID (para esas existe el botón
+  // "Re-matchear NULLs" en Productos).
+  const _kIdRep=(r)=>{const _n=(r&&r.producto_nombre)||'';const _pI=r&&r.producto_id!=null?(productos||[]).find(x=>String(x.id)===String(r.producto_id)):null;return _normProd((_pI&&_pI.nombre)||(_n?resolveProdName(_n).nombre:'')||_n)||''}
   const repByProd={}
-  if(reportes)for(const r of reportes){const _kR=_normProd(r.producto_nombre)||'';if(repByProd[_kR]===undefined)repByProd[_kR]=r}
+  if(reportes)for(const r of reportes){const _kR=_kIdRep(r);if(repByProd[_kR]===undefined)repByProd[_kR]=r} // (28sep26 · M12 E52) ANTES: const _kR=_normProd(r.producto_nombre)||''
 
   // 2b. Último valor de conversaciones por fecha+producto (de cualquier usuario, gana el más reciente)
-  const{data:convLatest}=await sb.from('reportes_diarios').select('producto_nombre,conversaciones,updated_at').eq('fecha',fecha).order('updated_at',{ascending:false})
+  const{data:convLatest}=await sb.from('reportes_diarios').select('producto_id,producto_nombre,conversaciones,updated_at').eq('fecha',fecha).order('updated_at',{ascending:false}) // (28sep26 · M12 E52) trae también el ID interno · ANTES: .select('producto_nombre,conversaciones,updated_at')
   const convByProdLatest={}
   if(convLatest)for(const r of convLatest){
-    const k=_normProd(r.producto_nombre)||''
+    const k=_kIdRep(r) // (28sep26 · M12 E52) cruza por ID interno · ANTES: const k=_normProd(r.producto_nombre)||''
     if(convByProdLatest[k]===undefined)convByProdLatest[k]=r.conversaciones||0
   }
 
@@ -11589,6 +11597,10 @@ async function cargarReporteData(){
   window._repHistGuardadosCargar(fecha) // Mejora C: historial persistente de guardados del día
   // (28sep26 · M9 E48) apenas se arman las filas, el stock se llena solo desde Dropi
   if(permiteVentas)setTimeout(()=>{try{window._nxStockDropi&&window._nxStockDropi(false)}catch(_){}},900)
+  // (28sep26 · M13 E53) y las 💬 conversaciones del DÍA seleccionado se llenan solas desde SellerChat
+  if(permiteVentas)setTimeout(()=>{try{window._nxConvSC&&window._nxConvSC(false)}catch(_){}},1500)
+  // (28sep26 · M15 E54) el botón 🔑 IDs asistentes solo se PINTA (por ser reemplazo, corre únicamente al tocarlo)
+  if(permiteVentas)setTimeout(()=>{try{window._nxIdsSC&&window._nxIdsSC('init')}catch(_){}},1600)
 
   // Cargar ventas existentes o crear primera fila
   if(permiteVentas){
@@ -11667,6 +11679,155 @@ window._nxStockDropi=async function(manual){
   const falt=(r.faltan||[]).length
   pinta('✅ 📦 Stock de Dropi · '+new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})+' · '+puestos+' casilla'+(puestos===1?'':'s')+' llenada'+(puestos===1?'':'s')+(respetados?' · '+respetados+' a mano (se respetó)':'')+(falt?' · ⚠️ '+falt+' sin dato en Dropi':''),true)
 }
+
+// ══ (28sep26 · M13 E53) 💬 CONVERSACIONES AUTOMÁTICAS DESDE SELLERCHAT ═══════
+// Llena solas las casillas "Conv. aprox." con las conversaciones NUEVAS del DÍA
+// SELECCIONADO del reporte (hoy/ayer/3 días, hora Colombia) — recado 'nx_conv' del
+// puente con la extensión de SellerChat (v1.77.0+). El amarre es por ID, regla de la
+// dueña: asistente 🔑 ID SellerChat → agente → producto por ID interno; si un producto
+// tiene varios agentes vigentes, se SUMAN. Un día que SellerChat no trae = dato ausente
+// (NUNCA se escribe un 0 falso) y lo escrito a mano (dataset.touched) NUNCA se pisa.
+// SellerChat solo entrega los últimos 7 días. Marcador de consola de E53: typeof _nxConvSC.
+window._nxConvSC=async function(manual){
+  const cont=document.getElementById('ventas-rows')
+  if(!cont)return
+  let pill=document.getElementById('nx-conv-sc')
+  if(!pill){pill=document.createElement('div');pill.id='nx-conv-sc';pill.style.cssText='font-size:11.5px;color:var(--muted);margin:0 0 8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap';const st=document.getElementById('nx-stock-dropi');if(st&&st.parentNode)st.parentNode.insertBefore(pill,st.nextSibling);else cont.parentNode.insertBefore(pill,cont)}
+  const pinta=(html,btn)=>{pill.innerHTML=`<span>${html}</span>`+(btn?` <button class="btn-sm btn-outline" style="font-size:11px;padding:2px 9px" onclick="window._nxConvSC(true)">🔄 Conv. de SellerChat</button>`:'')}
+  const _seqIni=window._repLoadSeq // 🎟️ portero: si cambian de día mientras leo, me callo
+  const fecha=document.getElementById('rep-fecha')?.value||today()
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(fecha)){pinta('⚪ 💬 Conversaciones a mano (no leo la fecha del reporte)',true);return}
+  if(fecha<_daysAgo(6)){pinta('🟡 💬 SellerChat solo entrega los últimos 7 días — las conversaciones del '+fecha+' se escriben a mano',false);return}
+  let ag=null
+  try{ag=await window._nxCargarAgentesUrl()}catch(_){ag=null}
+  if(!ag||!ag.byProd){pinta('⚪ 💬 Conversaciones a mano (no pude leer los agentes de los productos)',true);return}
+  const filas=[...cont.querySelectorAll('.vrow-item')].map(d=>Number(String(d.id||'').replace('vrow-','')))
+  const porFila={},ids=[],sinAg=[]
+  filas.forEach(ix=>{
+    const nom=document.getElementById(`vp-${ix}`)?.value||''
+    if(!nom)return
+    const p=(typeof productos!=='undefined'&&productos||[]).find(x=>x.nombre===nom)
+    if(!p)return
+    const ags=(ag.byProd[String(p.id)]||[]).filter(a=>a.vigente&&a.scId).map(a=>String(a.scId).toLowerCase())
+    if(!ags.length){sinAg.push(nom);return}
+    porFila[ix]=ags
+    ags.forEach(s=>{if(!ids.includes(s))ids.push(s)})
+  })
+  if(!ids.length){pinta(sinAg.length?('💬 Conv. de SellerChat: los agentes de '+sinAg.join(', ')+' no tienen su 🔑 ID de SellerChat (Productos → tarjeta del producto → 🤖 Agentes autorizados)'):'💬 Conv. de SellerChat: elige el producto de cada fila y toca 🔄',true);return}
+  pinta('⏳ 💬 Leyendo las conversaciones del '+fecha+' en SellerChat…',false)
+  const reqId='nc'+Date.now()+Math.floor(Math.random()*1e6)
+  const r=await new Promise(res=>{
+    let fin=false
+    const oye=ev=>{const m=ev&&ev.data;if(!m||m.__sc_ext_ack!=='nx_conv'||m.reqId!==reqId)return;fin=true;window.removeEventListener('message',oye);res(m)}
+    window.addEventListener('message',oye)
+    try{window.postMessage({__sc_ext:'nx_conv',reqId,fecha,ids},'*')}catch(_){}
+    setTimeout(()=>{if(!fin){window.removeEventListener('message',oye);res(null)}},60000)
+  })
+  if(_seqIni!==window._repLoadSeq||fecha!==(document.getElementById('rep-fecha')?.value||today()))return // 🎟️ cambió el día: esta respuesta ya es vieja, ni pinto
+  if(!r){pinta('🟡 💬 La extensión de SellerChat no respondió — recárgala en chrome://extensions (debe decir 1.77.0 o más) y haz F5 aquí',true);return}
+  if(!r.ok){
+    const por=r.error==='permiso'?'enciende el permiso 💬 Conversaciones de la barrita (engranaje de la extensión)':r.error==='sin-sesion'?'abre una pestaña de SellerChat con tu sesión iniciada y vuelve a tocar 🔄':r.error==='fecha'||r.error==='ids'?'el recado no llegó completo (F5 y reintenta)':'no pude ('+(r.error||'sin respuesta')+')'
+    pinta('🟡 💬 No pude leer las conversaciones: '+por+' — escríbelas a mano como siempre',true);return
+  }
+  let puestos=0,respetados=0
+  const sinDato=[]
+  Object.keys(porFila).forEach(ixs=>{
+    const ix=Number(ixs)
+    const c=document.getElementById(`vc-${ix}`)
+    if(!c)return
+    let suma=0,completo=true
+    porFila[ix].forEach(s=>{const d=r.porId&&r.porId[s];if(d&&typeof d.n==='number')suma+=d.n;else completo=false})
+    if(!completo){sinDato.push(document.getElementById(`vp-${ix}`)?.value||('fila '+ix));return} // dato ausente ≠ 0: esa casilla no se toca
+    if(c.dataset.touched==='1'){respetados++;return} // lo que escribiste a mano SIEMPRE manda
+    c.value=suma
+    c.dataset.scconv='1'
+    c.title='💬 Conversaciones del '+fecha+' leídas de SellerChat a las '+new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})+' — puedes corregirlas a mano'
+    c.style.borderColor='var(--green,#22c55e)'
+    puestos++
+  })
+  pinta('✅ 💬 Conv. de SellerChat ('+fecha+') · '+new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})+' · '+puestos+' casilla'+(puestos===1?'':'s')+' llenada'+(puestos===1?'':'s')+(respetados?' · '+respetados+' a mano (se respetó)':'')+(sinDato.length?' · ⚠️ sin dato en SellerChat: '+sinDato.join(', '):'')+(sinAg.length?' · ⚠️ sin 🔑 ID: '+sinAg.join(', '):''),true)
+}
+
+// ══ (28sep26 · M15 E54) 🔑 IDs DE ASISTENTES: LA COLUMNA "IDs anuncio" SE LLENA SOLA ═══
+// Botón 🔑 IDs asistentes: trae de SellerChat LOS IDs DE ANUNCIO de las ventas del DÍA
+// SELECCIONADO, sacados de la MISMA manera que el botón 📅 VER IDs DEL DÍA de la barrita
+// (Reglas de etiquetas por día + primer mensaje de ese día + re-entradas verificadas
+// solas; recado 'nx_ids' de la extensión SellerChat v1.78.0+). Amarre por ID, regla de
+// la dueña: asistente 🔑 → agente → producto por ID interno; 2+ asistentes se FUSIONAN
+// en la misma casilla. REGLA DE LA DUEÑA (28sep26): cada sincronizada QUITA lo anterior
+// y pone los nuevos — la foto completa del día, igual que lo hacen a mano. Por ser
+// reemplazo corre SOLO al tocar el botón (nunca en automático). Producto sin agente con
+// 🔑 → fila en AMARILLO para que el admin lo agregue en Productos. Lo que SellerChat no
+// pudo verificar queda contado como "por revisar" (se mira en 📅 Ver IDs, como siempre).
+// Marcador de consola de E54: typeof _nxIdsSC.
+window._nxIdsSC=async function(modo){
+  const cont=document.getElementById('ventas-rows')
+  if(!cont)return
+  let pill=document.getElementById('nx-ids-sc')
+  if(!pill){pill=document.createElement('div');pill.id='nx-ids-sc';pill.style.cssText='font-size:11.5px;color:var(--muted);margin:0 0 8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap';const cv=document.getElementById('nx-conv-sc');if(cv&&cv.parentNode)cv.parentNode.insertBefore(pill,cv.nextSibling);else cont.parentNode.insertBefore(pill,cont)}
+  const pinta=(html,btn)=>{pill.innerHTML=`<span>${html}</span>`+(btn?` <button class="btn-sm btn-outline" style="font-size:11px;padding:2px 9px" onclick="window._nxIdsSC(true)">🔑 IDs asistentes</button>`:'')}
+  if(modo==='init'){pinta('🔑 IDs de anuncio del día desde SellerChat — toca el botón (QUITA lo que haya y pone los nuevos)',true);return}
+  const _seqIni=window._repLoadSeq // 🎟️ portero: si cambian de día mientras leo, me callo
+  const fecha=document.getElementById('rep-fecha')?.value||today()
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(fecha)){pinta('⚪ 🔑 IDs a mano (no leo la fecha del reporte)',true);return}
+  let ag=null
+  try{ag=await window._nxCargarAgentesUrl()}catch(_){ag=null}
+  if(!ag||!ag.byProd){pinta('⚪ 🔑 IDs a mano (no pude leer los agentes de los productos)',true);return}
+  const filas=[...cont.querySelectorAll('.vrow-item')].map(d=>Number(String(d.id||'').replace('vrow-','')))
+  const porFila={},ids=[],sinAg=[]
+  filas.forEach(ix=>{
+    const nom=document.getElementById(`vp-${ix}`)?.value||''
+    const div=document.getElementById(`vrow-${ix}`)
+    const notaVieja=document.getElementById(`nx-ids-nota-${ix}`);if(notaVieja)notaVieja.remove()
+    if(!nom)return
+    const p=(typeof productos!=='undefined'&&productos||[]).find(x=>x.nombre===nom)
+    if(!p)return
+    const ags=(ag.byProd[String(p.id)]||[]).filter(a=>a.vigente&&a.scId).map(a=>String(a.scId).toLowerCase())
+    if(!ags.length){
+      sinAg.push(nom)
+      if(div){div.style.border='2px solid var(--amber)' // 🟡 regla de la dueña: sin agente = AMARILLO
+        const _n=document.createElement('div');_n.id=`nx-ids-nota-${ix}`
+        _n.style.cssText='grid-column:1/-1;margin-top:8px;font-size:12px;font-weight:700;color:var(--amber)'
+        _n.textContent='🟡 Este producto no tiene agente con 🔑 ID de SellerChat — pídele al administrador que lo agregue en Productos → 🤖 Agentes autorizados.'
+        div.appendChild(_n)}
+      return
+    }
+    porFila[ix]=ags
+    ags.forEach(s=>{if(!ids.includes(s))ids.push(s)})
+  })
+  if(!ids.length){pinta(sinAg.length?('🔑 IDs asistentes: ningún producto de la lista tiene agente con 🔑 ID ('+sinAg.join(', ')+')'):'🔑 IDs asistentes: elige el producto de cada fila y toca el botón',true);return}
+  pinta('⏳ 🔑 Trayendo los IDs del '+fecha+' desde SellerChat… (puede tardar unos minutos: baja el Excel de cada asistente)',false)
+  const reqId='ni'+Date.now()+Math.floor(Math.random()*1e6)
+  const r=await new Promise(res=>{
+    let fin=false
+    const oye=ev=>{const m=ev&&ev.data;if(!m||m.__sc_ext_ack!=='nx_ids'||m.reqId!==reqId)return;fin=true;window.removeEventListener('message',oye);res(m)}
+    window.addEventListener('message',oye)
+    try{window.postMessage({__sc_ext:'nx_ids',reqId,fecha,ids},'*')}catch(_){}
+    setTimeout(()=>{if(!fin){window.removeEventListener('message',oye);res(null)}},300000)
+  })
+  if(_seqIni!==window._repLoadSeq||fecha!==(document.getElementById('rep-fecha')?.value||today()))return // 🎟️ cambió el día: respuesta vieja, ni pinto
+  if(!r){pinta('🟡 🔑 La extensión de SellerChat no respondió — recárgala en chrome://extensions (debe decir 1.78.0 o más) y haz F5 aquí',true);return}
+  if(!r.ok){
+    const por=r.error==='permiso'?'enciende el permiso 📅 IDs de ventas por fecha de la barrita (engranaje de la extensión)':r.error==='sin-reglas'?'configura las ⚙️ Reglas de etiquetas por día en el Panel de SellerChat':r.error==='sin-etiqueta-dia'?'ese día no tiene etiqueta en las Reglas de etiquetas por día':r.error==='sin-sesion'?'abre una pestaña de SellerChat con tu sesión iniciada y vuelve a tocar':r.error==='fecha'||r.error==='ids'?'el recado no llegó completo (F5 y reintenta)':'no pude ('+(r.error||'sin respuesta')+')'
+    pinta('🟡 🔑 No pude traer los IDs: '+por+' — pégalos a mano como siempre',true);return
+  }
+  let puestas=0,totalIds=0,porRevisar=0
+  const sinDato=[]
+  Object.keys(porFila).forEach(ixs=>{
+    const ix=Number(ixs)
+    const t=document.getElementById(`vi-${ix}`)
+    if(!t)return
+    let lista=[],completo=true
+    porFila[ix].forEach(s=>{const d=r.porId&&r.porId[s];if(d&&Array.isArray(d.ids)){lista=lista.concat(d.ids);porRevisar+=(d.porRevisar||0)}else completo=false})
+    if(!completo){sinDato.push(document.getElementById(`vp-${ix}`)?.value||('fila '+ix));return} // un asistente falló: esa casilla NO se toca
+    t.value=lista.join('\n') // REGLA DE LA DUEÑA: se QUITA lo anterior y se ponen los nuevos (la foto completa del día)
+    t.dataset.scids='1'
+    t.title='🔑 IDs del '+fecha+' traídos de SellerChat a las '+new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})+' — reemplazó lo que había'
+    t.style.borderColor='var(--green,#22c55e)'
+    puestas++;totalIds+=lista.length
+  })
+  pinta('✅ 🔑 IDs asistentes ('+fecha+') · '+new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})+' · '+puestas+' casilla'+(puestas===1?'':'s')+' con '+totalIds+' ID'+(totalIds===1?'':'s')+' (reemplazó lo anterior)'+(porRevisar?' · ⚠️ '+porRevisar+' por revisar en 📅 Ver IDs (reentradas sin verificar)':'')+(sinDato.length?' · ⚠️ sin traer (falló el Excel): '+sinDato.join(', '):'')+(sinAg.length?' · 🟡 sin agente: '+sinAg.join(', '):''),true)
+}
 window.addVentaRow=(prodNom,adIds,convAp,stockAct,prodId)=>{ // (28sep26 · M11 E51) ANTES: window.addVentaRow=(prodNom,adIds,convAp,stockAct)=>{
   // (28sep26 · M11 E51) el producto GUARDADO se resuelve contra el catálogo ACTIVO antes de pintar:
   // 1º por su ID (verdad de máquina: aguanta renombres para siempre), 2º por nombre con la regla M6
@@ -11689,7 +11850,7 @@ window.addVentaRow=(prodNom,adIds,convAp,stockAct,prodId)=>{ // (28sep26 · M11 
   // y 📦 stock → única fuente de verdad, y es exactamente lo que Meta Ads muestra.
   // Vacío se pinta VACÍO (no un 0 falso): el candado de saveReporteV2 exige un número (0 sí vale).
   const _fldConvStock=`<div class="fld"><label>Conv. aprox.</label>
-        <input type="number" id="vc-${idx}" value="${convAp!=null&&convAp!==''?convAp:''}" min="0" placeholder="0 si no hubo"></div>
+        <input type="number" id="vc-${idx}" value="${convAp!=null&&convAp!==''?convAp:''}" min="0" placeholder="0 si no hubo" oninput="this.dataset.touched='1'"></div><!-- (28sep26 · M13 E53) touched: lo escrito a mano NUNCA lo pisa el 🔄 de SellerChat · ANTES: sin oninput -->
       <div class="fld"><label>📦 Stock al cierre (unidades)</label>
         <input type="number" id="vs-${idx}" value="${stockInicial}" min="0" placeholder="0 si se agotó" oninput="this.dataset.touched='1'" title="Stock disponible al cierre del día. Al guardar se sincroniza con la ficha del producto y es lo que Meta Ads muestra."></div>`
   div.innerHTML=`<div class="fld"><label>Producto</label>

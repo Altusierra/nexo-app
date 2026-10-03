@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="nx-build" content="E79"><!-- (30sep26 · M24 E66 · E67 · E68 · E69 · 01oct26 E70 · E71 · E72 · E73 · E74 · 02oct26 E75 · E76 · E77 · E78 · E79) marca de versión: NEXO la compara con la publicada en GitHub y avisa "🆕 Hay una versión nueva". CADA entrega sube este número (E67, E68…). -->
+<meta name="nx-build" content="E80"><!-- (30sep26 · M24 E66 · E67 · E68 · E69 · 01oct26 E70 · E71 · E72 · E73 · E74 · 02oct26 E75 · E76 · E77 · E78 · E79 · E80) marca de versión: NEXO la compara con la publicada en GitHub y avisa "🆕 Hay una versión nueva". CADA entrega sube este número (E67, E68…). -->
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Nexo</title>
 <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
@@ -20568,14 +20568,17 @@ window._nxE=()=>(window.nxEcon&&window.nxEcon.on())?window.nxEcon:null
           actualizado_por:quien
         }
         if(cuenta)por[oid].cuenta_id=cuenta
+        if(window.nx80OrdenExtra)window.nx80OrdenExtra(por[oid],r) // (02oct26 · E80) nota y motivo (sin datos de la clienta) y fecha de cancelación (SQL v015)
       }
       const lista=Object.values(por)
       res.filas=lista.length
+      if(window.nx80OrdenHuellas){try{await window.nx80OrdenHuellas(lista)}catch(_){}} // (02oct26 · E80) el CÓDIGO del teléfono (sha256) para su huella: NUNCA el teléfono
       for(let i=0;i<lista.length;i+=400){
         const lote=lista.slice(i,i+400)
         const{error}=await sb.from('dropi_ordenes').upsert(lote,{onConflict:'orden_id'})
         if(error){
           const t=String(error.message||'')+' '+String(error.code||'')
+          if(window.nx80SinColsOrden&&window.nx80SinColsOrden(error,lista)){i-=400;continue} // (02oct26 · E80) falta el SQL v015: se quitan los datos nuevos y se reintenta el MISMO lote
           if(/PGRST205|42P01|does not exist|Could not find the table|schema cache/i.test(t)){res.error='sin_sql';break}
           if(/permission|row-level security|42501|JWT/i.test(t)){res.error='sin_permiso: '+String(error.message||'').slice(0,80);break}
           res.error=String(error.message||error).slice(0,160);res.fallidas+=lote.length // ese lote no entró: se sigue con los demás
@@ -62504,6 +62507,1223 @@ window._nxRepIdsReparar=async(i,btn)=>{
   }
 }
 // ═══ FIN (27sep26 · E43) BOLITA + SUGERENCIAS ═══ · (27sep26 · E44) barra de subida + recogida sin dormir · (28sep26 · E45) IDs sin inflar (solo OFERTA suma + candado + llave suave + 🩺 reparador)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// 🧰 (02oct26 · E80) PIEZAS COMUNES de las mejoras de Productos (chat "devoluciones y cartera de Dropi")
+//   window.nx80.cancelTipo(motivo)  → re_subida · pre_carga · historial · sin_cobertura · cliente · stock · excede_recaudo ·
+//                                     gerencia · contingencia · otro  (= public.nx_cancel_tipo del SQL v015)
+//   window.nx80.textoSeguro(t,n)    → texto libre SIN teléfonos, cédulas, correos ni direcciones (= public.nx_texto_seguro)
+//   window.nx80.telNormal(tel)      → '+57XXXXXXXXXX' (= public.nx_tel_normal de la Historia del cliente) o null
+//   window.nx80.preHuella(tel)      → sha256 del teléfono (= public.nx_tel_prehuella). Supabase la vuelve a sellar con su
+//                                     llave secreta (HMAC) y guarda SOLO ese sello: el teléfono nunca se guarda.
+//   window.nx80.esOrden(texto)      → los dígitos si el texto es un # de orden de Dropi ("#12345678", "12.345.678"), si no null
+// Interruptor: window.NX_E80_OFF=true = la E79 exacta.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+;(function(){
+  if(window.NX_E80_OFF)return
+  const norm=(s)=>String(s==null?'':s).normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase().replace(/\s+/g,' ').trim()
+  // Motivo de cancelación de Dropi → tipo. Las PRE-CARGAS y los ERRORES solo con su texto EXACTO de Dropi ("Otros: ENVIOS",
+  // "Otros: ERROR", "Otros: SUBIDOS ERROR", "Otros: NO DESCRAGO ERROR"): así "Cliente final cancela: NO CONFIRMO ENVIO" es de
+  // la clienta y no una pre-carga. Mismas reglas y mismo orden que nx_cancel_tipo (SQL v015).
+  function cancelTipo(obs){
+    const s=norm(obs);if(!s)return null
+    if(s.includes('DUPLICAD'))return 're_subida'
+    if(/^OTROS:? ?(NO DESCRAGO |NO DESCARGO |SUBIDOS? |SUBIDA )?(CON )?ERROR(ES)?$/.test(s))return 're_subida'
+    if(s.includes('CAMBIO DE TRANSPORTADORA')||s.includes('CAMBIO DE PROVEEDOR'))return 're_subida'
+    if(s.includes('HISTORIAL'))return 'historial'
+    if(s.includes('COBERTURA'))return 'sin_cobertura'
+    if(/^OTROS:? ?ENVIOS?$/.test(s))return 'pre_carga'
+    if(s.includes('CLIENTE FINAL CANCELA')||s.includes('NO CONFIRMO')||s.includes('CANCELADO CLIENTE'))return 'cliente'
+    if(s.includes('STOCK'))return 'stock'
+    if(s.includes('EXCEDE'))return 'excede_recaudo'
+    if(s.includes('GERENCIA'))return 'gerencia'
+    if(s.includes('CONTINGENCIA'))return 'contingencia'
+    return 'otro'
+  }
+  const noCuenta=(t)=>t==='re_subida'||t==='pre_carga'
+  const CANCEL_TXT={re_subida:'🔁 Re-subida (error al subir · duplicado · cambio de transportadora)',pre_carga:'📦 Pre-carga ("Otros: ENVIOS")',
+    historial:'📜 Por historial de compras',sin_cobertura:'🚫 Sin cobertura',cliente:'🙅 La clienta canceló',stock:'📦 Stock',
+    excede_recaudo:'💵 Excede el valor a recaudar',gerencia:'Gerencia',contingencia:'Contingencia',otro:'Otro motivo'}
+  // Texto libre (nota, motivo) SIN datos de la clienta: correos → •••, 5+ cifras seguidas (con o sin espacios, puntos o
+  // guiones: teléfonos, cédulas, números de orden) → #, y desde "calle/carrera/barrio/apto/torre/conjunto/vereda/…" hasta la
+  // coma → [dirección]. "15 oct" queda.
+  const R_DIR=/(^|[^A-Za-z0-9_áéíóúñÁÉÍÓÚÑ])(calle|cll|cl|carrera|cra|kra|kr|cr|diagonal|dg|transversal|tv|avenida|av|manzana|mz|barrio|br|apto|apartamento|torre|interior|int|bloque|conjunto|edificio|urbanizacion|urbanización|casa|lote|sector|vereda|finca|km|kilometro|kilómetro)(?![A-Za-z0-9_áéíóúñÁÉÍÓÚÑ])[^,;]*/gi
+  function textoSeguro(t,n){
+    let s=String(t==null?'':t)
+    s=s.replace(/\S+@\S+/g,'•••')
+    s=s.replace(R_DIR,(m,pre)=>pre+'[dirección]')
+    s=s.replace(/\+?\d(?:[ .()\-]*\d){4,}/g,'#')
+    s=s.replace(/\s+/g,' ').trim()
+    return s.slice(0,n||300)
+  }
+  // = public.nx_tel_normal (Historia del cliente, Parte 1): Colombia 3XXXXXXXXX / 60XXXXXXXX (+57) · otro país solo con + o 00
+  function telNormal(t){
+    let x=String(t==null?'':t).trim();if(!x)return null
+    if(/^[0-9]+\.0+$/.test(x))x=x.split('.')[0]
+    if(!/^(\+|00)?[0-9\s().-]+$/.test(x))return null
+    const intl=/^(\+|00)/.test(x)
+    const d=x.replace(/^(\+|00)/,'').replace(/[^0-9]/g,'')
+    let nac=null
+    if(d.length===12&&d.slice(0,2)==='57')nac=d.slice(2)
+    else if(!intl&&d.length===10)nac=d
+    if(nac!=null){
+      if(/^(3[0-9]{9}|60[0-9]{8})$/.test(nac)&&!/^([0-9])\1+$/.test(nac)&&!/^[36]0+$/.test(nac))return '+57'+nac
+      return null
+    }
+    if(intl&&d.slice(0,2)!=='57'&&d[0]!=='0'&&d.length>=8&&d.length<=15&&!/^([0-9])\1+$/.test(d))return '+'+d
+    return null
+  }
+  async function sha256Hex(txt){
+    const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(txt))
+    return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('')
+  }
+  async function preHuella(t){const n=telNormal(t);if(!n)return null;try{return await sha256Hex('nx-tel|'+n)}catch(_){return null}}
+  // # de orden de Dropi: con "#" (5 a 12 cifras) o sin "#" con 8 o 9 cifras (un celular tiene 10: no se confunde)
+  function esOrden(q){
+    const s=String(q==null?'':q).trim();if(!s)return null
+    const m=s.match(/^#\s*([\d\s.,-]+)$/)
+    if(!m&&!/^[\d\s.,-]+$/.test(s))return null
+    const d=(m?m[1]:s).replace(/[\s.,-]/g,'')
+    if(!/^\d+$/.test(d))return null
+    if(m)return (d.length>=5&&d.length<=12)?d:null
+    return (d.length===8||d.length===9)?d:null
+  }
+  // para meter un ID dentro de un onclick="…('ID')": solo letras, números, - y _ (nunca comillas ni barras)
+  const idJS=(s)=>String(s==null?'':s).replace(/[^A-Za-z0-9_\-]/g,'')
+  window.nx80={v:'E80',cancelTipo,noCuenta,CANCEL_TXT,textoSeguro,telNormal,preHuella,esOrden,idJS,norm}
+})()
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// 📈 (02oct26 · E80) PRODUCTOS · mejoras 1, 2, 3 y 7 de la lista oficial (chat "devoluciones y cartera de Dropi")
+//   🚚 ¿Cómo va la entrega?   ·   ↩️ % de devolución confiable   ·   🧩 desglose   ·   📅 por quincenas
+// Va ARRIBA de la pestaña 📊 Resultados de cada producto. Solo AGREGA: no cambia ningún número de antes.
+// Base = la misma del 🤖 robot de la E74: las ventas del producto (mapeos) + el estado de Dropi (dropi_ordenes).
+// Reglas de la dueña (02oct26): % devolución = devueltos ÷ (entregados + devueltos) · se compara a la MISMA EDAD
+// (días hábiles: lunes a sábado sin festivos) · "lo normal" = últimos 3 meses terminados con 30+ pedidos ·
+// semáforo 🟢 / 🟡 5-10 menos / 🔴 más de 10 menos (devueltos: 🟡 3-5 más / 🔴 más de 5) · ⚪ menos de 30 pedidos ·
+// devolución: nada antes de 8 días, PROYECTADA de 8 a 29, REAL desde 30 · confianza 300+ ✅ · 100-299 🟡 · <100 ⚪.
+// La plata (cobro por devolución y plata por despachado) SOLO la ve la dueña (admin).
+// Interruptor: window.NX_E80_OFF=true = la E79 exacta.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+;(function(){
+  if(window.NX_E80_OFF)return
+  const esc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
+  const pct0=(v)=>v==null?'—':String(Math.round(v*100))
+  const pct1=(v)=>v==null?'—':(v*100).toFixed(1).replace('.',',')+' %'
+  const pesos=(v)=>v==null?'—':(v<0?'−':'')+'$'+fmt(Math.abs(Math.round(Number(v)||0)))
+  const esAdmin=()=>{try{return currentRol()==='admin'}catch(_){return false}}
+  const MESES=['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic']
+  const MESES_L=['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre']
+
+  // ───────────── fechas ('AAAA-MM-DD') ─────────────
+  const ymd=(v)=>{
+    if(v==null||v==='')return null
+    try{const E=window.nxEcon;if(E&&E.ymd){const r=E.ymd(v);if(r)return r}}catch(_){}
+    const s=String(v).trim()
+    let m=s.match(/^(\d{4})-(\d{2})-(\d{2})/);if(m)return m[1]+'-'+m[2]+'-'+m[3]
+    m=s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);if(m)return m[3]+'-'+String(m[2]).padStart(2,'0')+'-'+String(m[1]).padStart(2,'0')
+    return null
+  }
+  const dt=(s)=>new Date(s+'T12:00:00Z')
+  const iso=(d)=>d.toISOString().slice(0,10)
+  const sumar=(s,n)=>{const d=dt(s);d.setUTCDate(d.getUTCDate()+n);return iso(d)}
+  const hoyCO=()=>{try{return new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})}catch(_){return iso(new Date())}}
+  const diaTxt=(s)=>{if(!s)return '—';const p=s.split('-');return Number(p[2])+' '+MESES[Number(p[1])-1]}
+  const finMes=(y,m)=>new Date(Date.UTC(y,m,0)).getUTCDate() // m = 1..12
+
+  // ───────────── festivos de Colombia (cualquier año): fijos + ley Emiliani (al lunes) + Pascua ─────────────
+  const _FEST={}
+  function pascua(y){ // algoritmo de Meeus/Jones/Butcher (domingo de Pascua)
+    const a=y%19,b=Math.floor(y/100),c=y%100,d=Math.floor(b/4),e=b%4,f=Math.floor((b+8)/25),g=Math.floor((b-f+1)/3)
+    const h=(19*a+b-d-g+15)%30,i=Math.floor(c/4),k=c%4,l=(32+2*e+2*i-h-k)%7,m=Math.floor((a+11*h+22*l)/451)
+    const mes=Math.floor((h+l-7*m+114)/31),dia=((h+l-7*m+114)%31)+1
+    return y+'-'+String(mes).padStart(2,'0')+'-'+String(dia).padStart(2,'0')
+  }
+  const alLunes=(s)=>{const d=dt(s);const w=d.getUTCDay();return w===1?s:sumar(s,(8-w)%7)}
+  function festivos(y){
+    if(_FEST[y])return _FEST[y]
+    const f=new Set(),p=(m,d)=>y+'-'+String(m).padStart(2,'0')+'-'+String(d).padStart(2,'0')
+    ;[[1,1],[5,1],[7,20],[8,7],[12,8],[12,25]].forEach(([m,d])=>f.add(p(m,d)))                        // fijos
+    ;[[1,6],[3,19],[6,29],[8,15],[10,12],[11,1],[11,11]].forEach(([m,d])=>f.add(alLunes(p(m,d))))    // Emiliani
+    const P=pascua(y)
+    f.add(sumar(P,-3));f.add(sumar(P,-2))                                                             // Jueves y Viernes Santo
+    f.add(alLunes(sumar(P,39)));f.add(alLunes(sumar(P,60)));f.add(alLunes(sumar(P,68)))               // Ascensión, Corpus, S. Corazón
+    _FEST[y]=f;return f
+  }
+  const habil=(s)=>{const d=dt(s);return d.getUTCDay()!==0&&!festivos(d.getUTCFullYear()).has(s)}
+  // días hábiles en (a, b]  (lunes a sábado sin festivos) con un índice acumulado para que sea rápido
+  const _IDX={base:'2019-12-31',v:null}
+  function idx(s){
+    if(!_IDX.v){
+      const v=new Map();let n=0,c=_IDX.base
+      for(let i=0;i<5000;i++){c=sumar(c,1);if(habil(c))n++;v.set(c,n)}
+      _IDX.v=v
+    }
+    const r=_IDX.v.get(s)
+    if(r!=null)return r
+    // fuera del índice (antes de 2020 o después de 2033): contar a mano desde la base
+    let n=0,c=_IDX.base
+    if(s<c){let x=s;while(x<c){x=sumar(x,1);if(habil(x))n--}return n}
+    while(c<s){c=sumar(c,1);if(habil(c))n++}
+    return n
+  }
+  const nh=(a,b)=>(a&&b)?Math.max(0,idx(b)-idx(a)):null
+
+  // ───────────── clase de una venta (igual que el robot: nx_econ_clase + Dropi manda si ya es final) ─────────────
+  function claseTxt(est){
+    const u=String(est||'').trim().toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'')
+    if(!u||u.startsWith('PENDIENTE CONFIRMACION'))return 'pendiente'
+    if(u==='PENDIENTE'||u==='CONFIRMADO')return 'sin_despacho'
+    if(/CANCELAD|RECHAZAD|ANULAD/.test(u))return 'cancelado'
+    if(/DESTRUC|SALVAMENTO|DONACION|PERDID|SINIESTR|INDEMNIZ/.test(u)||u==='LOST')return 'perdido'
+    if(/DEVOL|DEVUELT/.test(u)||u==='RECOGIDO POR DROPI'||u==='EN BODEGA DROPI')return 'devuelto'
+    if(/ENTREGAD/.test(u)&&!/TRANSPORTADORA|CONEXION/.test(u))return 'entregado'
+    return 'abierto'
+  }
+  function clase(m,o){
+    const cm=claseTxt(m&&m.estado_final),co=(o&&String(o.estatus||'').trim())?claseTxt(o.estatus):null
+    if(co&&(co==='entregado'||co==='devuelto'||co==='perdido'))return co
+    if((cm==='pendiente'||cm==='sin_despacho')&&co&&co!=='pendiente'&&co!=='sin_despacho')return co
+    return cm
+  }
+
+  // ───────────── novedades (mismos grupos del análisis v003) ─────────────
+  function novedadGrupo(t){
+    const s=String(t||'').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'')
+    if(!s.trim())return ''
+    if(/REHUSA/.test(s))return 'Se rehúsa a recibir'
+    if(/NO PAGARA|NO CANCELA|RECAUDO/.test(s))return 'No paga / sin plata'
+    if(/COORDINAR/.test(s))return 'Coordinar entrega'
+    if(/DIRECCION|LOCALIZA|INCOMPLETA/.test(s))return 'Problema de dirección'
+    if(/FECHA|HORARIO|POSTERIOR/.test(s))return 'Pide otra fecha'
+    if(/CONOCEN|TRASLADO/.test(s))return 'No la conocen / se mudó'
+    if(/VISITA/.test(s))return 'Se visita, no se entrega'
+    if(/CANCELADO/.test(s))return 'Pedido cancelado'
+    return 'Otra novedad'
+  }
+
+  // ───────────── tipo de dirección (mismas reglas del análisis v003 + "reclama en oficina" aparte). NUNCA se muestra la dirección ─────────────
+  const _N=(s)=>String(s==null?'':s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/\s+/g,' ').trim()
+  const R_OFI=/\bRECLAM\w*\b.*\bOFICINA\b|\bOFICINA DE (INTER|ENVIA|COORDINADORA|SERVIENTREGA|TCC)/
+  const R_RUR=/\b(VEREDA|VDA|FINCA|CORREGIMIENTO|CORREG|KILOMETRO|KM|PARCELA|HACIENDA|CASERIO|ZONA RURAL|RURAL|INSPECCION|LOTE|VIA)\b/
+  const R_EDI=/\b(APTO|APARTAMENTO|TORRE|INTERIOR|INT|BLOQUE|CONJUNTO|EDIFICIO|PISO|UNIDAD|URBANIZACION|URB)\b/
+  const R_COM=/\b(LOCAL|OFICINA|ALMACEN|TIENDA|DROGUERIA|NEGOCIO|EMPRESA|BODEGA|MALL|CENTRO COMERCIAL|C\.?C)\b/
+  const R_VIA=/\b(CALLE|CLL|CL|CARRERA|CRA|KRA|KR|CR|DIAGONAL|DG|TRANSVERSAL|TV|TR|AVENIDA|AV|AK|AC|MANZANA|MZ|CIRCULAR)\b/
+  function tipoDir(a){
+    const s=_N(a);if(!s)return ''
+    if(R_OFI.test(s))return 'Reclama en oficina'
+    if(R_RUR.test(s))return 'Rural (vereda · finca · km)'
+    if(R_COM.test(s))return 'Negocio o local'
+    if(R_EDI.test(s))return 'Edificio o conjunto'
+    if(R_VIA.test(s)&&/\d/.test(s))return 'Casa con nomenclatura'
+    return 'Sin nomenclatura clara'
+  }
+  const cTipo=(o)=>{try{return (o&&window.nx80)?window.nx80.cancelTipo(o.obs_cancelacion):null}catch(_){return null}}
+  const noCuenta=(t)=>{try{return !!(window.nx80&&window.nx80.noCuenta(t))}catch(_){return false}}
+
+  // ───────────── filas listas para medir ─────────────
+  function trNorm(t){try{const E=window.nxEcon;if(E&&E.transp){const r=E.transp(t);if(r)return r}}catch(_){}return String(t||'').trim().toUpperCase()||'SIN TRANSPORTADORA'}
+  const SALIO=new Set(['entregado','devuelto','abierto','perdido'])
+  function filasDe(mapeos,ordPorId){
+    const out=[]
+    for(const m of (mapeos||[])){
+      const oid=String(m.dropi_order_id||'').replace(/\D/g,'')
+      const o=oid&&ordPorId?(ordPorId[oid]||null):null
+      const cl=clase(m,o)
+      const fv=ymd(m.fecha)||ymd(m.created_at)
+      const rep=ymd(o&&o.fecha_reporte)||ymd(m.fecha_reporte)
+      // fecha de la guía: Dropi > la venta > fecha de Dropi · si no hay ninguna y el pedido SÍ salió, la del pedido (se avisa)
+      let fg=ymd(o&&o.fecha_guia)||ymd(m.fecha_guia)||(SALIO.has(cl)?ymd(m.fecha_dropi):null),fgAprox=false
+      if(!fg&&SALIO.has(cl)&&fv){fg=fv;fgAprox=true}
+      // día en que se cerró (entregado / devuelto): último movimiento · si no hay, el día del reporte que ya lo traía cerrado
+      let fe=null,feAprox=false
+      if(cl==='entregado'||cl==='devuelto'){fe=ymd(o&&o.fecha_ult_mov)||ymd(m.ultimo_mov_fecha)||null;if(!fe&&rep){fe=rep;feAprox=true}}
+      if(fe&&fg&&fe<fg)fe=fg
+      const q=Math.max(1,Math.min(99,parseInt((m.cantidad!=null&&m.cantidad!=='')?m.cantidad:(o&&o.cantidad))||1))
+      // transportadora, flete y total: Dropi primero y si no, lo de NEXO (igual que el 🤖 nx_econ_recalcular)
+      const trRaw=(o&&o.transportadora&&String(o.transportadora).trim())?o.transportadora:m.transportadora
+      const pos=(v)=>{const n=Number(v);return (v!=null&&v!==''&&isFinite(n)&&n>0)?n:null}
+      const mm=Object.assign({},m,{transportadora:trRaw||null,flete_snapshot:pos(o&&o.flete)||pos(m.flete_snapshot),
+        precio_dropi:pos(o&&o.total)||pos(m.precio_dropi),fecha_guia:fg,cantidad:q})
+      out.push({id:m.id,oid,m,mm,o,cl,fv,fg,fgAprox,fe,feAprox,ae:(fg&&fe)?nh(fg,fe):null,q,
+        tr:trNorm(trRaw),
+        dep:String((o&&o.departamento)||m.departamento||'').trim().toUpperCase()||'(sin departamento)',
+        ciu:String((o&&o.ciudad)||m.ciudad||'').trim().toUpperCase()||'(sin ciudad)',
+        nov:novedadGrupo((o&&o.novedad)||m.novedad_texto||''),rep,
+        dir:tipoDir(m.direccion),ct:cl==='cancelado'?cTipo(o):null})
+    }
+    return out
+  }
+  const despachada=(f)=>!!f.fg&&SALIO.has(f.cl)
+  // Cómo se veía la venta el día T (con lo que había pasado hasta AYER = T-1): 'E' · 'D' · 'C' (en camino)
+  const visto=(f,T)=>{const ay=sumar(T,-1);if(f.fe&&f.fe<=ay){if(f.cl==='entregado')return 'E';if(f.cl==='devuelto')return 'D'}return 'C'}
+
+  // ───────────── 🚚 ¿Cómo va la entrega? ─────────────
+  // Curva de un grupo de ventas: de las que llegaron a tener "a" días hábiles, cuántas ya estaban entregadas / devueltas
+  function curva(base,T,maxA){
+    const ay=sumar(T,-1),pE=[],pD=[]
+    const edadObs=base.map(f=>nh(f.fg,ay))
+    for(let a=0;a<=maxA;a++){
+      let n=0,e=0,d=0
+      for(let i=0;i<base.length;i++){
+        if(edadObs[i]<a)continue
+        n++
+        const f=base[i]
+        if(f.fe&&f.fe<=ay&&f.ae!=null&&f.ae<=a){if(f.cl==='entregado')e++;else if(f.cl==='devuelto')d++}
+      }
+      pE.push(n?e/n:null);pD.push(n?d/n:null)
+    }
+    return {pE,pD}
+  }
+  const minF=(l,k)=>l.length?l.reduce((a,f)=>f[k]<a?f[k]:a,'9999'):null
+  const maxF=(l,k)=>l.length?l.reduce((a,f)=>f[k]>a?f[k]:a,'0000'):null
+  function comoVa(filas,T,N,opts){
+    opts=opts||{}
+    const ay=sumar(T,-1),desde=sumar(T,-N)
+    // (las cerradas SIN fecha de último movimiento no entran: no se sabe a qué edad cerraron · se avisa arriba cuántas son)
+    const desp=filas.filter(f=>despachada(f)&&!f.feAprox&&(!opts.tr||f.tr===opts.tr))
+    const win=desp.filter(f=>f.fg>=desde&&f.fg<=ay)
+    const edades=win.map(f=>nh(f.fg,ay))
+    const maxA=edades.length?Math.max(...edades):0
+    let E=0,Dv=0
+    for(const f of win){const v=visto(f,T);if(v==='E')E++;else if(v==='D')Dv++}
+    const n=win.length
+    const ahora={n,nE:E,nD:Dv,nC:n-E-Dv,E:n?E/n:null,D:n?Dv/n:null,C:n?(n-E-Dv)/n:null,desde,hasta:ay,gDesde:minF(win,'fg'),gHasta:maxF(win,'fg')}
+    // meses con ventas despachadas ANTES de la ventana (cada uno medido a la MISMA edad que las de "Ahora")
+    const antes=desp.filter(f=>f.fg<desde)
+    const porMes={}
+    for(const f of antes){const k=f.fg.slice(0,7);(porMes[k]=porMes[k]||[]).push(f)}
+    const mesAy=ay.slice(0,7)
+    const meses=Object.keys(porMes).sort().map(k=>{
+      const base=porMes[k]
+      const c=curva(base,T,maxA)
+      let e=0,d=0,ok=n>0
+      for(const a of edades){const x=c.pE[a],y=c.pD[a];if(x==null||y==null){ok=false;break}e+=x;d+=y}
+      const y=Number(k.slice(0,4)),m=Number(k.slice(5,7))
+      return {mes:k,nombre:MESES_L[m-1]+' '+y,enCurso:k>=mesAy,n:base.length,gDesde:minF(base,'fg'),gHasta:maxF(base,'fg'),
+        E:ok?e/n:null,D:ok?d/n:null,C:ok?1-(e+d)/n:null,cuenta:base.length>=30&&ok&&k<mesAy}
+    })
+    // lo normal = promedio de los últimos 3 meses TERMINADOS con 30+ ventas
+    const usados=meses.filter(x=>x.cuenta).slice(-3)
+    const normal=usados.length?{E:usados.reduce((a,x)=>a+x.E,0)/usados.length,D:usados.reduce((a,x)=>a+x.D,0)/usados.length,meses:usados.map(x=>x.nombre)}:null
+    if(normal)normal.C=1-normal.E-normal.D
+    // hace un año (mismo mes del año pasado) si hay 30+ ventas
+    const ky=(Number(ay.slice(0,4))-1)+ay.slice(4,7)
+    const anio=meses.find(x=>x.mes===ky&&x.n>=30&&x.E!=null)||null
+    // semáforo
+    let sem='⚪',txt=''
+    if(n<30){txt=`Solo ${n} pedido${n===1?'':'s'} despachado${n===1?'':'s'} en estos días: muy pocos para comparar (se necesitan 30).`}
+    else if(!normal){txt='Todavía no hay meses terminados con 30 o más pedidos para saber qué es lo normal.'}
+    else{
+      const dE=(ahora.E-normal.E)*100,dD=(ahora.D-normal.D)*100
+      if(dE<-10||dD>5)sem='🔴';else if(dE<-5||dD>3)sem='🟡';else sem='🟢'
+      const rE=Math.round(Math.abs(dE)),rD=Math.round(Math.abs(dD))
+      txt=(rE===0?'Van igual de entregados que lo normal':`Van ${rE} entregado${rE===1?'':'s'} ${dE>=0?'más':'menos'} que lo normal`)+
+          ' (de cada 100)'+(rD>=1?` · ${rD} devuelto${rD===1?'':'s'} ${dD>0?'más':'menos'}`:'')+'.'
+    }
+    return {T,N,ahora,meses,normal,anio,sem,txt,maxA}
+  }
+
+  // ───────────── ↩️ % de devolución confiable (real desde 30 días · proyectada de 8 a 29) ─────────────
+  function pAbiertaDe(f,T){
+    const ay=sumar(T,-1),edad=Math.max(0,Math.round((dt(ay)-dt(f.fg))/86400000))
+    try{const E=window.nxEcon;if(E&&E.curvaP){const v=Number(E.curvaP(f.tr,edad));if(isFinite(v))return Math.max(0,Math.min(1,v))}}catch(_){}
+    return 0.5
+  }
+  const confianza=(n)=>n>=300?'✅':(n>=100?'🟡':'⚪')
+  const confTxt=(n)=>n>=300?'✅ confiable':(n>=100?'🟡 orientativo':'⚪ pocos datos')
+  function devolucion(filas,T,opts){
+    opts=opts||{}
+    const ay=sumar(T,-1),d90=sumar(T,-90),d30=sumar(T,-30),d8=sumar(T,-8)
+    const desp=filas.filter(f=>despachada(f)&&f.cl!=='perdido'&&f.fg>=d90&&f.fg<=ay&&(!opts.filtro||opts.filtro(f)))
+    const mad=desp.filter(f=>f.fg<=d30),rec=desp.filter(f=>f.fg>d30&&f.fg<=d8),muy=desp.filter(f=>f.fg>d8)
+    let mE=0,mD=0;for(const f of mad){const v=visto(f,T);if(v==='E')mE++;else if(v==='D')mD++}
+    let rE=0,rDr=0,rD=0,rN=0;for(const f of rec){rN++;const v=visto(f,T);if(v==='D'){rD+=1;rDr++}else if(v==='C')rD+=pAbiertaDe(f,T);else rE++}
+    const real=(mE+mD)?mD/(mE+mD):null
+    const proy=rN?rD/rN:null
+    const nMad=mad.length,nRec=rec.length
+    const tot=(nMad+nRec)?((real!=null?real*nMad:0)+(proy!=null?proy*nRec:0))/(nMad+nRec):null
+    return {real,nMad,cerrMad:mE+mD,mE,mD,proy,nRec,rE,rD:rDr,rC:rN-rE-rDr,ingenuo:(rE+rDr)?rDr/(rE+rDr):null,muyRecientes:muy.length,total:tot,conf:confianza(mE+mD+nRec),desde:d90,hasta:ay}
+  }
+
+  // ───────────── 🧩 desglose (pedidos ya cerrados con guía de hace 30 a 120 días) ─────────────
+  function netoDe(f,prod){
+    try{const E=window.nxEcon;if(!E||!E.orden)return null;const o=E.orden(f.mm,prod,f.cl);return o&&isFinite(o.neto)?o.neto:null}catch(_){return null}
+  }
+  function cobroDe(f,prod){
+    try{const E=window.nxEcon;if(!E||!E.devOrden)return null;const v=Number(E.devOrden(f.mm,prod));return isFinite(v)?v:null}catch(_){return null}
+  }
+  function grupos(lista,clave,orden,prod,top){
+    const g={}
+    for(const f of lista){const k=clave(f);if(k==null||k==='')continue;(g[k]=g[k]||[]).push(f)}
+    let filas=Object.entries(g).map(([k,v])=>{
+      const E=v.filter(f=>f.cl==='entregado').length,D=v.filter(f=>f.cl==='devuelto').length
+      const netos=v.map(f=>netoDe(f,prod)).filter(x=>x!=null)
+      const cob=v.filter(f=>f.cl==='devuelto').map(f=>cobroDe(f,prod)).filter(x=>x!=null)
+      return {k,n:E+D,E,D,pct:(E+D)?D/(E+D):null,neto:netos.length?netos.reduce((a,b)=>a+b,0)/netos.length:null,cobro:cob.length?cob.reduce((a,b)=>a+b,0)/cob.length:null}
+    })
+    if(orden)filas.sort(orden);else filas.sort((a,b)=>b.n-a.n||String(a.k).localeCompare(String(b.k)))
+    if(top&&filas.length>top){
+      const resto=filas.slice(top),s=resto.reduce((a,x)=>({n:a.n+x.n,E:a.E+x.E,D:a.D+x.D}),{n:0,E:0,D:0})
+      filas=filas.slice(0,top).concat([{k:'Otros ('+resto.length+')',n:s.n,E:s.E,D:s.D,pct:s.n?s.D/s.n:null,neto:null,cobro:null,otros:true}])
+    }
+    return filas
+  }
+  function desglose(filas,T,prod){
+    const d120=sumar(T,-120),d30=sumar(T,-30)
+    const base=filas.filter(f=>despachada(f)&&(f.cl==='entregado'||f.cl==='devuelto')&&f.fg>=d120&&f.fg<=d30)
+    const qk=(f)=>f.q>=4?'4+ unidades':(f.q+(f.q===1?' unidad':' unidades'))
+    return {desde:d120,hasta:d30,n:base.length,
+      cantidad:grupos(base,qk,(a,b)=>a.k.localeCompare(b.k),prod),
+      transp:grupos(base,f=>f.tr,null,prod),
+      dep:grupos(base,f=>f.dep,null,prod,8),
+      ciu:grupos(base,f=>f.ciu,null,prod,8),
+      nov:grupos(base,f=>f.nov||'Sin novedad',null,prod),
+      dir:grupos(base,f=>f.dir||null,null,prod)}
+  }
+
+  // ───────────── 📅 por quincenas (por fecha del pedido) ─────────────
+  function quincenas(filas,T){
+    const ay=sumar(T,-1),g={}
+    for(const f of filas){
+      if(!f.fv||f.fv>ay)continue
+      const d=Number(f.fv.slice(8,10))
+      const k=f.fv.slice(0,7)+'-'+(d<=15?'1':'2');(g[k]=g[k]||[]).push(f)
+    }
+    const filasQ=Object.keys(g).sort().map(k=>{
+      const v=g[k],y=Number(k.slice(0,4)),m=Number(k.slice(5,7)),q=k.slice(8)
+      const ini=k.slice(0,8)+(q==='1'?'01':'16'),fin0=k.slice(0,8)+(q==='1'?'15':String(finMes(y,m)).padStart(2,'0'))
+      const fin=fin0>ay?ay:fin0
+      let E=0,D=0,C=0,canc=0,des=0,proyD=0,otros=0,resub=0
+      for(const f of v){
+        if(f.cl==='cancelado'){if(noCuenta(f.ct))resub++;else canc++;continue}
+        if(!despachada(f)){otros++;continue}
+        des++
+        const s=visto(f,T)
+        if(s==='E')E++;else if(s==='D'){D++;proyD+=1}else{C++;proyD+=f.cl==='perdido'?0:pAbiertaDe(f,T)}
+      }
+      const edadFin=Math.round((dt(ay)-dt(fin))/86400000)
+      const madura=fin0<=sumar(T,-31)
+      const pct=madura?((E+D)?D/(E+D):null):(edadFin>=8&&des?proyD/des:null)
+      return {k,ini,fin,txt:(q==='1'?'1 al 15':'16 al '+finMes(y,m))+' '+MESES[m-1]+' '+y,enCurso:fin0>=ay,
+        pedidos:v.length,canc,resub,des,otros,E,D,C,pct,madura,proyectada:!madura&&pct!=null}
+    })
+    const t=filasQ.reduce((a,x)=>({pedidos:a.pedidos+x.pedidos,canc:a.canc+x.canc,resub:a.resub+x.resub,des:a.des+x.des,otros:a.otros+x.otros,E:a.E+x.E,D:a.D+x.D,C:a.C+x.C}),{pedidos:0,canc:0,resub:0,des:0,otros:0,E:0,D:0,C:0})
+    // el % del TOTAL solo con las quincenas ya maduras (las recientes todavía no tienen todas sus devoluciones)
+    const mad=filasQ.filter(x=>x.madura).reduce((a,x)=>({E:a.E+x.E,D:a.D+x.D}),{E:0,D:0})
+    t.pct=(mad.E+mad.D)?mad.D/(mad.E+mad.D):null
+    return {filas:filasQ,total:t}
+  }
+
+  // ───────────── carga (por producto, con memoria de 10 minutos) ─────────────
+  const CACHE={},CONF={sinObs:false}
+  const COLS_O='orden_id,estatus,transportadora,cantidad,total,flete,fecha_guia,fecha_ult_mov,fecha_reporte,novedad,departamento,ciudad'
+  async function cargar(prodId,forzar){
+    const k=String(prodId),c=CACHE[k]
+    if(c&&!forzar&&(Date.now()-c.en)<600000)return c
+    const hoy=hoyCO(),desde=sumar(hoy,-400)
+    // la regla de los días y los costos del 🤖 (si ya están, no se vuelven a pedir)
+    try{const E=window.nxEcon;if(E&&E.cargar)await E.cargar()}catch(_){}
+    const r=await _sbFetchAll((a,b)=>sb.from('mapeos').select('*').eq('producto_id',prodId).gte('fecha',desde).order('id',{ascending:true}).range(a,b))
+    if(r.error)throw new Error(r.error.message||String(r.error))
+    const mapeos=r.data||[]
+    const ids=[...new Set(mapeos.map(m=>String(m.dropi_order_id||'').replace(/\D/g,'')).filter(Boolean))]
+    const ord={}
+    let errOrd=''
+    let conObs=!CONF.sinObs
+    for(let i=0;i<ids.length;i+=200){
+      let q=await sb.from('dropi_ordenes').select(conObs?COLS_O+',obs_cancelacion':COLS_O).in('orden_id',ids.slice(i,i+200))
+      if(q.error&&conObs&&/obs_cancelacion|PGRST204|42703/.test(String(q.error.message||'')+' '+String(q.error.code||''))){
+        conObs=false;CONF.sinObs=true // todavía no se corre el SQL v015: sin el motivo de cancelación
+        q=await sb.from('dropi_ordenes').select(COLS_O).in('orden_id',ids.slice(i,i+200))
+      }
+      if(q.error){errOrd=q.error.message||String(q.error);console.warn('[nxProd] dropi_ordenes',errOrd);break}
+      for(const o of (q.data||[])){if(!conObs)delete o.obs_cancelacion;ord[String(o.orden_id).replace(/\D/g,'')]=o}
+    }
+    const filas=filasDe(mapeos,ord)
+    let asof=filas.reduce((a,f)=>(f.rep&&f.rep>a)?f.rep:a,'')
+    const asofReal=!!asof&&asof<=hoy
+    if(!asofReal)asof=sumar(hoy,-1)
+    const T0=sumar(asof,1)
+    const T=(window.NX80_HOY&&/^\d{4}-\d{2}-\d{2}$/.test(window.NX80_HOY))?window.NX80_HOY:(T0>hoy?hoy:T0)
+    const out={en:Date.now(),filas,T,asof:sumar(T,-1),asofReal,nMapeos:mapeos.length,nOrd:Object.keys(ord).length,errOrd,conObs:conObs&&!errOrd,
+      sinGuia:filas.filter(f=>f.fgAprox).length,sinCierre:filas.filter(f=>f.feAprox).length}
+    CACHE[k]=out
+    return out
+  }
+
+  // ───────────── pintar ─────────────
+  const LS='nx80_dias'
+  const diasGuardados=()=>{try{const v=parseInt(localStorage.getItem(LS));return (v>=3&&v<=60)?v:8}catch(_){return 8}}
+  const flecha=(a,b)=>{if(a==null||b==null)return '';const d=(a-b)*100;return d>=5?' ⬆️':(d<=-5?' ⬇️':' ➡️')}
+  const th=(t,izq)=>`<th style="padding:4px 6px;font-size:10.5px;color:var(--muted);font-weight:600;text-align:${izq?'left':'center'};white-space:nowrap">${t}</th>`
+  const td=(t,st)=>`<td style="padding:4px 6px;${st||''}">${t}</td>`
+  const tdC=(t,st,tit)=>`<td style="padding:4px 6px;text-align:center;${st||''}"${tit?` title="${esc(tit)}"`:''}>${t}</td>`
+  const H=(t,sub)=>`<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:15px;font-weight:600">${t}</span>${sub?`<span style="font-size:12px;color:var(--muted)">${sub}</span>`:''}</div>`
+  const NOTA='font-size:10.5px;color:var(--muted);margin-top:6px;line-height:1.5'
+  function tablaComoVa(r){
+    const prevE={};let prev=null
+    for(const x of r.meses){if(x.E!=null&&x.n>=30){prevE[x.mes]=prev?flecha(x.E,prev.E):'';prev=x}}
+    const fila=(nombre,rango,n,x,extra,estilo,tits)=>`<tr style="border-top:1px solid var(--border);${estilo||''}">${td(nombre,'white-space:nowrap')}${td(rango+(n!=null?' · '+fmt(n)+' ped.':''),'color:var(--muted);font-size:11px;white-space:nowrap')}
+      ${tdC(pct0(x&&x.E),'font-weight:700',tits&&tits[0])}${tdC(pct0(x&&x.D),'',tits&&tits[1])}${tdC(pct0(x&&x.C),'color:var(--muted)',tits&&tits[2])}${td(extra||'','font-size:11px;white-space:nowrap')}</tr>`
+    const a=r.ahora
+    return `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+      <tr>${th('De cada 100 pedidos',true)}${th('Guías del…',true)}${th('✅ Entregados')}${th('↩️ Devueltos')}${th('🚚 En camino')}${th('')}</tr>
+      ${fila('<b>Ahora</b>',`<b>${diaTxt(a.desde)} al ${diaTxt(a.hasta)}</b>`,a.n,a,r.sem,'background:rgba(99,102,241,.08)',[a.nE+' entregados de '+a.n,a.nD+' devueltos de '+a.n,a.nC+' en camino de '+a.n])}
+      ${fila('<b>Lo normal</b>',r.normal?'promedio de '+esc(r.normal.meses.join(', ')):'— (falta un mes terminado con 30+ pedidos)',null,r.normal,'')}
+      ${r.anio?fila('Hace un año',esc(r.anio.nombre),r.anio.n,r.anio,''):''}
+      <tr><td colspan="6" style="padding:8px 6px 2px;font-size:10.5px;color:var(--muted);font-weight:600">📈 Trayectoria — cada mes a la misma edad (del más nuevo al más viejo)</td></tr>
+      ${r.meses.slice().reverse().map(x=>fila(esc(x.nombre)+(x.enCurso?' <span style="color:var(--muted)">(en curso)</span>':''),`${diaTxt(x.gDesde)} al ${diaTxt(x.gHasta)}`,x.n,x,(x.n<30?'⚪ pocos':'')+(prevE[x.mes]||''),x.cuenta?'':'color:var(--muted)')).join('')}
+    </table></div>`
+  }
+  function htmlComoVa(prodId,F,N){
+    const r=comoVa(F.filas,F.T,N)
+    const id=String(prodId).replace(/[^A-Za-z0-9_\-]/g,'')
+    const btn=(d)=>`<button type="button" class="btn-sm ${d===N?'btn-primary':'btn-outline'}" style="padding:2px 9px;font-size:11px" onclick="nxProd.dias('${id}',${d})">${d}</button>`
+    const trs=[...new Set(F.filas.filter(despachada).map(f=>f.tr))]
+    const porTr=trs.map(t=>({t,r:comoVa(F.filas,F.T,N,{tr:t})})).filter(x=>x.r.ahora.n>=10).sort((a,b)=>b.r.ahora.n-a.r.ahora.n)
+    const trHtml=porTr.length?`<details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:var(--muted)">🚚 Ver por transportadora (${porTr.length})</summary>
+      <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:4px">
+      <tr>${th('Transportadora',true)}${th('Pedidos')}${th('✅ Ahora')}${th('✅ Lo normal')}${th('↩️ Ahora')}${th('↩️ Lo normal')}${th('')}</tr>
+      ${porTr.map(x=>`<tr style="border-top:1px solid var(--border)">${td(esc(x.t))}${tdC(fmt(x.r.ahora.n))}${tdC(pct0(x.r.ahora.E),'font-weight:700')}${tdC(pct0(x.r.normal&&x.r.normal.E))}${tdC(pct0(x.r.ahora.D))}${tdC(pct0(x.r.normal&&x.r.normal.D))}${tdC(x.r.sem)}</tr>`).join('')}
+      </table></div><div style="${NOTA}">Solo transportadoras con 10 o más pedidos en estos días · ⚪ = menos de 30 (muy pocos para el semáforo).</div></details>`:''
+    return `<div class="card" style="padding:14px;margin-bottom:10px">
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between">
+        ${H('🚚 ¿Cómo va la entrega?')}
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px">Últimos
+          <input type="number" min="3" max="60" value="${N}" style="width:58px;padding:3px 6px" onchange="nxProd.dias('${id}',this.value)" aria-label="Días">
+          días ${btn(8)}${btn(15)}${btn(30)}</div>
+      </div>
+      <div style="font-size:13px;margin:8px 0">${r.sem} ${esc(r.txt)}</div>
+      ${tablaComoVa(r)}
+      <div style="${NOTA}">Cada mes se mide <b>a la misma edad</b> que los pedidos de "Ahora" (días hábiles: lunes a sábado, sin festivos), así la comparación es justa. Lo normal = los últimos 3 meses terminados con 30 o más pedidos. 🟢 normal · 🟡 5 a 10 entregados menos · 🔴 más de 10 menos (o devueltos: 🟡 3 a 5 más · 🔴 más de 5). Pasa el mouse por los números de "Ahora" para ver la cuenta.</div>
+      ${trHtml}
+    </div>`
+  }
+  function htmlDevolucion(F){
+    const r=devolucion(F.filas,F.T)
+    if(r.total==null)return `<div class="card" style="padding:14px;margin-bottom:10px">${H('↩️ % de devolución confiable')}<div style="font-size:12px;color:var(--muted);margin-top:4px">Todavía no hay pedidos despachados de hace 8 a 90 días.</div></div>`
+    const caja=(tit,val,sub,grande)=>`<div style="padding:8px 10px;border:1px solid var(--border);border-radius:8px"><div style="font-size:10px;color:var(--muted);font-weight:600">${tit}</div><div style="font-size:${grande?22:18}px;font-weight:800">${val}</div><div style="font-size:10.5px;color:var(--muted);line-height:1.4">${sub}</div></div>`
+    return `<div class="card" style="padding:14px;margin-bottom:10px">
+      ${H('↩️ % de devolución confiable','— guías del '+diaTxt(r.desde)+' al '+diaTxt(r.hasta))}
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;margin-top:8px">
+        ${caja('LOS 90 DÍAS',pct1(r.total),confTxt(r.cerrMad+r.nRec)+' · '+fmt(r.nMad+r.nRec)+' pedidos',true)}
+        ${caja('REAL (guías de 30 días o más)',pct1(r.real),fmt(r.mD)+' devueltos de '+fmt(r.cerrMad)+' cerrados '+confianza(r.cerrMad))}
+        ${caja('PROYECTADA (guías de 8 a 29 días)',pct1(r.proy),fmt(r.nRec)+' pedidos: '+fmt(r.rE)+' entregados · '+fmt(r.rD)+' devueltos · '+fmt(r.rC)+' en camino (estos se estiman con la regla de los días del 🤖)')}
+      </div>
+      <div style="${NOTA}">% devolución = devueltos ÷ (entregados + devueltos). Las guías de menos de 8 días (${fmt(r.muyRecientes)} pedidos) todavía no cuentan: casi nada ha vuelto. ⚠️ Mirar solo lo ya cerrado de pedidos recientes engaña${r.ingenuo!=null?` (aquí daría ${pct1(r.ingenuo)} en vez de ${pct1(r.proy)})`:''}. ✅ 300+ pedidos · 🟡 100-299 · ⚪ menos de 100.</div>
+    </div>`
+  }
+  function tablaGrupo(titulo,filas,adm,conCobro){
+    if(!filas.length)return ''
+    return `<div style="margin-top:10px"><div style="font-size:12.5px;font-weight:700;margin-bottom:2px">${titulo}</div><div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+      <tr>${th('',true)}${th('Pedidos')}${th('↩️ Devolución')}${conCobro&&adm?th('Cobro por devolución'):''}${adm?th('Plata por despachado'):''}</tr>
+      ${filas.map(x=>`<tr style="border-top:1px solid var(--border)${x.otros?';color:var(--muted)':''}">${td(esc(x.k))}${tdC(fmt(x.n)+(x.otros?'':' '+confianza(x.n)),'white-space:nowrap')}${tdC(pct1(x.pct),'font-weight:700;white-space:nowrap',x.D+' devueltos de '+x.n)}${conCobro&&adm?tdC(pesos(x.cobro),'white-space:nowrap'):''}${adm?tdC(x.neto==null?'—':pesos(x.neto),'white-space:nowrap;'+(x.neto!=null&&x.neto<0?'color:var(--red)':'')):''}</tr>`).join('')}
+    </table></div></div>`
+  }
+  function htmlDesglose(F,prod){
+    const r=desglose(F.filas,F.T,prod),adm=esAdmin()
+    if(!r.n)return `<div class="card" style="padding:14px;margin-bottom:10px">${H('🧩 Desglose')}<div style="font-size:12px;color:var(--muted);margin-top:4px">Todavía no hay pedidos cerrados con guía de hace 30 a 120 días.</div></div>`
+    return `<div class="card" style="padding:14px;margin-bottom:10px">
+      ${H('🧩 Desglose','— pedidos ya cerrados (entregados o devueltos) con guía del '+diaTxt(r.desde)+' al '+diaTxt(r.hasta)+' · '+fmt(r.n))}
+      <div style="${NOTA}">${adm?'<b>Plata por despachado</b> = lo que deja en promedio cada pedido despachado (entregados − devoluciones), con el costo del producto, el flete y el almacenamiento de NEXO, ANTES de la publicidad. ':''}✅ 300+ pedidos · 🟡 100-299 · ⚪ menos de 100 (un % con ⚪ puede cambiar mucho).</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:4px 16px">
+        ${tablaGrupo('📦 Por cantidad',r.cantidad,adm)}
+        ${tablaGrupo('🚚 Por transportadora',r.transp,adm,true)}
+        ${tablaGrupo('🗺️ Por departamento',r.dep,adm)}
+        ${tablaGrupo('🏙️ Por ciudad',r.ciu,adm)}
+        ${tablaGrupo('⚠️ Por novedad',r.nov,adm)}
+        ${tablaGrupo('🏠 Por tipo de dirección',r.dir,adm)}
+      </div>
+    </div>`
+  }
+  function htmlQuincenas(F){
+    const r=quincenas(F.filas,F.T)
+    if(!r.filas.length)return ''
+    const conR=!!F.conObs
+    const fila=(x,b)=>`<tr style="border-top:1px solid var(--border)${b?';font-weight:700;background:rgba(99,102,241,.08)':''}">${td(esc(x.txt||'TOTAL')+(x.enCurso?' <span style="color:var(--muted);font-weight:400">(en curso)</span>':''),'white-space:nowrap')}${tdC(fmt(x.pedidos))}${tdC(fmt(x.canc),'color:var(--muted)')}${conR?tdC(fmt(x.resub),'color:var(--muted)'):''}${tdC(fmt(x.des))}${tdC(fmt(x.E))}${tdC(fmt(x.D))}${tdC(fmt(x.C),'color:var(--muted)')}${tdC(x.pct==null?(b?'—':'⏳'):pct1(x.pct)+(x.proyectada?' ~':''),'font-weight:700;white-space:nowrap',x.proyectada?'proyectada: todavía faltan devoluciones por llegar':'')}</tr>`
+    return `<details class="card" style="padding:14px;margin-bottom:10px">
+      <summary style="cursor:pointer">${H('📅 Por quincenas','— del 1 al 15 y del 16 a fin de mes, por fecha del pedido')}</summary>
+      <div style="overflow-x:auto;margin-top:6px"><table style="width:100%;border-collapse:collapse;font-size:12px">
+        <tr>${th('Quincena',true)}${th('Pedidos')}${th('❌ Cancelados')}${conR?th('🔁 Re-subidas y pre-cargas'):''}${th('📦 Despachados')}${th('✅ Entregados')}${th('↩️ Devueltos')}${th('🚚 En camino')}${th('% devolución')}</tr>
+        ${r.filas.slice().reverse().map(x=>fila(x)).join('')}
+        ${fila(Object.assign({txt:'TOTAL (el % solo con las quincenas de hace 30+ días)'},r.total),true)}
+      </table></div>
+      <div style="${NOTA}">Pedidos = todas las ventas de esa quincena (también las que no han salido o esperan confirmación). ~ = proyectada (la quincena tiene menos de 30 días y todavía faltan devoluciones) · ⏳ = muy reciente para medir. ${conR?'🔁 Re-subidas (se subió con error, duplicado o cambio de transportadora) y pre-cargas ("Otros: ENVIOS") van aparte: NO cuentan como canceladas. Se reconocen por el motivo de cancelación del Excel de Dropi (las órdenes subidas antes de la E80 todavía no lo tienen: vuelve a subir el Excel de órdenes).':'Los cancelados todavía incluyen las re-subidas y pre-cargas: se separan cuando se corra el SQL v015 y se suba el Excel de órdenes con la E80.'}</div>
+    </details>`
+  }
+  async function montar(prodId,forzar){
+    const k=String(prodId)
+    const cont=document.getElementById('prod-tab-results-'+k);if(!cont)return
+    let box=document.getElementById('nx80-'+k)
+    if(!box){box=document.createElement('div');box.id='nx80-'+k;cont.insertBefore(box,cont.firstChild)}
+    box.innerHTML='<div class="loading" style="padding:16px">⏳ Cargando ¿cómo va la entrega? …</div>'
+    try{
+      const F=await cargar(prodId,forzar)
+      const prod=(typeof productos!=='undefined'&&productos||[]).find(p=>String(p.id)===k)||{id:prodId}
+      const N=diasGuardados()
+      const b2=document.getElementById('nx80-'+k);if(!b2)return
+      const id=k.replace(/[^A-Za-z0-9_\-]/g,'')
+      const avisos=[F.errOrd?'⚠️ No se pudo leer el estado de Dropi ('+esc(F.errOrd)+'): se usa solo lo de NEXO.':'',
+        F.sinGuia?fmt(F.sinGuia)+' pedido'+(F.sinGuia===1?'':'s')+' sin fecha de guía: se usó la fecha del pedido.':'',
+        F.sinCierre?fmt(F.sinCierre)+' cerrado'+(F.sinCierre===1?'':'s')+' sin fecha de último movimiento: no entra'+(F.sinCierre===1?'':'n')+' en "¿Cómo va la entrega?" (en la devolución se usó el día del reporte).':''].filter(Boolean).join(' · ')
+      b2.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:8px">
+          <div style="font-size:11px;color:var(--muted)">📅 ${F.asofReal?'Datos de Dropi al':'Medido al'} ${diaTxt(F.asof)} · ${fmt(F.nMapeos)} ventas del producto (último año)${avisos?'<br>'+avisos:''}</div>
+          <button type="button" class="btn-sm btn-outline" style="font-size:11px;padding:3px 9px" onclick="nxProd.montar('${id}',true)">🔄 Volver a leer</button></div>
+        <div id="nx80-comova-${esc(k)}">${htmlComoVa(prodId,F,N)}</div>
+        ${htmlDevolucion(F)}
+        ${htmlDesglose(F,prod)}
+        ${htmlQuincenas(F)}
+        <div style="display:flex;align-items:baseline;gap:8px;margin:16px 0 8px;padding-top:10px;border-top:1px dashed var(--border)"><span style="font-size:12px;color:var(--muted)">⬇️ Lo de siempre: resultados por anuncio y por ciudad (con su propio rango de fechas)</span></div>`
+    }catch(e){
+      const b3=document.getElementById('nx80-'+k)
+      if(b3)b3.innerHTML=`<div class="alert" style="background:var(--amber-bg);border:1px solid var(--amber);border-radius:8px;padding:10px;font-size:12px;margin-bottom:10px">🟡 No se pudo leer ¿cómo va la entrega? (${esc((e&&e.message)||e)}). <button type="button" class="btn-sm btn-outline" style="font-size:11px;padding:3px 9px" onclick="nxProd.montar('${k.replace(/[^A-Za-z0-9_\-]/g,'')}',true)">Reintentar</button></div>`
+    }
+  }
+  function dias(prodId,v){
+    let n=parseInt(v);if(!(n>=3))n=3;if(n>60)n=60
+    try{localStorage.setItem(LS,String(n))}catch(_){}
+    const k=String(prodId),F=CACHE[k],el=document.getElementById('nx80-comova-'+k)
+    if(F&&el)el.innerHTML=htmlComoVa(prodId,F,n)
+    else montar(prodId)
+  }
+
+  window.nxProd={v:'E80',festivos,pascua,nh,habil,clase,claseTxt,filasDe,comoVa,devolucion,desglose,quincenas,novedadGrupo,tipoDir,cargar,montar,dias,_cache:CACHE,_conf:CONF,_sumar:sumar}
+
+  // Enganche: cada vez que se pinta 📊 Resultados de un producto, se pone el bloque nuevo ARRIBA (lo de antes queda igual).
+  const _renderProdResultadosE79=renderProdResultados
+  renderProdResultados=async function(prodId,diasR,opts){
+    const r=await _renderProdResultadosE79(prodId,diasR,opts)
+    try{await window.nxProd.montar(prodId)}catch(e){console.warn('[nxProd]',e)}
+    return r
+  }
+})()
+// ═══ FIN (02oct26 · E80) PRODUCTOS · ¿cómo va la entrega? · devolución confiable · desglose · quincenas ═══
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// 🧾 (02oct26 · E80) BUSCAR POR NÚMERO DE ORDEN (mejora 11) + los 4 datos nuevos de cada orden (mejoras 9 y 11)
+//  · Al subir el Excel de órdenes (Cruce, Seguimiento o 💰 Cartera): la NOTA, el MOTIVO y la FECHA de la cancelación (sin
+//    teléfonos, cédulas, correos ni direcciones) y la HUELLA del teléfono: el navegador manda solo un sha256 (tel_entrada) y
+//    Supabase lo sella con su llave secreta (HMAC), guarda el sello y borra lo que llegó. El teléfono NUNCA se guarda.
+//    Si falta el SQL v015, NEXO lo nota solo y guarda como siempre.
+//  · 📜 Historia del cliente: al buscar un # de orden sale arriba la ficha 🧾 de ESA orden (estado, guía, fechas, novedad,
+//    nota, motivo de cancelación) + la venta de NEXO + las OTRAS órdenes de la clienta en Dropi. Si la orden no está atada
+//    a una venta, NEXO busca a la clienta por la huella y ofrece abrir su historia. "12.345.678" también sirve.
+//  · El buscador morado de la auxiliar: un # de orden (8-9 cifras o con #) abre la Historia del cliente con esa orden.
+//  · La plata (total, flete) SOLO la ve la admin. El trafficker no entra (igual que la Historia).
+// Interruptor: window.NX_E80_OFF=true = la E79 exacta.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+;(function(){
+  if(window.NX_E80_OFF||!window.nx80)return
+  const X=window.nx80
+  const esc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
+  const esAdmin=()=>{try{return currentRol()==='admin'}catch(_){return false}}
+  const MESES=['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic']
+  const dia=(s)=>{const m=String(s||'').match(/^(\d{4})-(\d{2})-(\d{2})/);return m?`${m[3]}-${MESES[Number(m[2])-1]}-${m[1]}`:(s?esc(s):'—')}
+  const pesos=(v)=>(v==null||v==='')?'—':'$'+fmt(Number(v)||0)
+
+  // ───────────── 1) los 4 datos nuevos al subir el Excel de órdenes (los llama nxDropiOrdenesGuardar) ─────────────
+  const TEL=new WeakMap()          // fila → teléfono normalizado (vive solo en memoria; nunca va a la base)
+  let sinV015=false                // falta el SQL v015 → ya no se mandan (en esta sesión)
+  const NUEVAS=['tel_entrada','notas','obs_cancelacion','fecha_cancelacion']
+  window.nx80OrdenExtra=function(o,r){
+    try{
+      if(sinV015||!o||!r)return
+      const g=(...ks)=>{for(const k of ks){const v=r[k];if(v!=null&&String(v).trim()!=='')return v}return null}
+      const nota=g('NOTAS','NOTA');if(nota){const t=X.textoSeguro(nota,300);if(t)o.notas=t}
+      const obs=g('OBSERVACIÓN DE CANCELACIÓN','OBSERVACION DE CANCELACION');if(obs){const t=X.textoSeguro(obs,200);if(t)o.obs_cancelacion=t}
+      const fc=g('FECHA DE CANCELACIÓN','FECHA DE CANCELACION')
+      if(fc){const f=(window.nxEcon&&window.nxEcon.ymd)?window.nxEcon.ymd(fc):null;if(f)o.fecha_cancelacion=f}
+      const tel=g('TELÉFONO','TELEFONO');if(tel){const n=X.telNormal(tel);if(n)TEL.set(o,n)}
+    }catch(_){}
+  }
+  window.nx80OrdenHuellas=async function(lista){
+    if(sinV015||!Array.isArray(lista))return
+    if(!(window.crypto&&crypto.subtle))return
+    await Promise.all(lista.map(async(o)=>{const n=TEL.get(o);if(!n)return;const h=await X.preHuella(n);if(h)o.tel_entrada=h}))
+  }
+  // falta el SQL v015 (la base no conoce las casillas nuevas): se quitan de TODAS las filas y se reintenta el mismo lote
+  window.nx80SinColsOrden=function(error,lista){
+    try{
+      if(!Array.isArray(lista)||!lista.some(o=>o&&NUEVAS.some(k=>k in o)))return false
+      // SOLO si Supabase dice que le falta una de las casillas nuevas (o que su guardián del SQL v015 no está)
+      const cod=String((error&&error.code)||''),msg=String((error&&error.message)||'')
+      if(!(/^(PGRST204|42703|23514)$/.test(cod)&&NUEVAS.some(k=>msg.includes(k))))return false
+      sinV015=true
+      for(const o of lista)for(const k of NUEVAS)delete o[k]
+      console.warn('[E80] dropi_ordenes todavía sin las casillas del SQL v015: se guarda como siempre (sin nota, motivo ni huella)')
+      return true
+    }catch(_){return false}
+  }
+
+  // ───────────── 2) 📜 Historia del cliente: la ficha 🧾 de la orden buscada ─────────────
+  const CL={entregado:['pill-green','✅ Entregada'],devuelto:['pill-red','↩️ Devuelta'],cancelado:['pill-amber','⛔ Cancelada'],
+    abierto:['pill-blue','🚚 En camino'],pendiente:['pill-blue','⏳ Sin confirmar'],sin_despacho:['pill-blue','⏳ Sin despachar'],perdido:['pill-red','❌ Perdida']}
+  function pill(clase,tipo,estatus){
+    if(clase==='cancelado'&&X.noCuenta(tipo))return `<span class="pill pill-blue" title="${esc(estatus||'')}">${tipo==='re_subida'?'🔁 Re-subida':'📦 Pre-carga'} (no cuenta como cancelada)</span>`
+    const c=CL[clase]||['pill-blue',esc(estatus||'—')]
+    return `<span class="pill ${c[0]}" title="${esc(estatus||'')}">${c[1]}</span>`
+  }
+  const claseDe=(est)=>{try{return window.nxProd?window.nxProd.claseTxt(est):''}catch(_){return ''}}
+  async function verOrden(dig){
+    // con el SQL v015: todo en 1 consulta (venta, teléfono por la huella, otras órdenes)
+    const r=await sb.rpc('nx_orden_ver',{p_orden:dig})
+    if(!r.error&&r.data&&r.data.ok)return Object.assign({v015:true},r.data)
+    const m=String((r.error&&(r.error.message+' '+(r.error.code||'')))||'')
+    if(r.error&&/sin_permiso|sin_sesion/.test(m))return null
+    // sin el SQL v015 (o si la búsqueda completa falló): solo la ficha de dropi_ordenes (sin plata para la auxiliar)
+    const motivo=(r.error&&/PGRST202|Could not find the function|nx_orden_ver/.test(m))?'sin_v015':'fallo'
+    const cols='orden_id,estatus,transportadora,tipo_envio,guia,fecha_orden,fecha_guia,fecha_ult_mov,ult_mov,novedad,novedad_fecha,novedad_solucionada,fecha_reporte,cantidad,producto_dropi,producto_id_dropi,departamento,ciudad'+(esAdmin()?',total,flete':'')
+    const q=await sb.from('dropi_ordenes').select(cols).eq('orden_id',dig).maybeSingle()
+    if(q.error||!q.data)return {v015:false,motivo,err:m.slice(0,120),orden:null,otras:[],venta:null,telefono:null}
+    const o=Object.assign({},q.data,{producto:q.data.producto_dropi,clase:claseDe(q.data.estatus)})
+    return {v015:false,motivo,err:m.slice(0,120),orden:o,otras:[],venta:null,telefono:null}
+  }
+  function fichaHTML(dig,R,d,pref){
+    const o=R&&R.orden,adm=esAdmin()
+    const filas=[]
+    const f=(k,v)=>{if(v!=null&&v!=='')filas.push(`<div><div style="font-size:10.5px;color:var(--muted);font-weight:600">${k}</div><div style="font-size:13px">${v}</div></div>`)}
+    let cab=`<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <div style="font-size:15px;font-weight:700">🧾 Orden <span style="font-family:monospace">#${esc(dig)}</span> de Dropi</div>
+      ${o?pill(o.clase||claseDe(o.estatus),o.cancel_tipo||X.cancelTipo(o.obs_cancelacion),o.estatus):''}</div>`
+    if(!o){
+      cab+=`<div style="font-size:12.5px;color:var(--muted);margin-top:6px">Esta orden no está en las órdenes de Dropi que NEXO tiene guardadas (se guardan al subir el Excel de órdenes en el Cruce Dropi, el Seguimiento o 💰 Cartera).</div>`
+    }else{
+      f('Producto',esc(o.producto||'—')+(o.cantidad?` · ${esc(o.cantidad)} u.`:''))
+      f('Transportadora',esc(o.transportadora||'—')+(o.guia?`<div style="font-size:11px;color:var(--muted);font-family:monospace">guía ${esc(o.guia)}</div>`:''))
+      f('Fecha de la orden',dia(o.fecha_orden))
+      f('Guía generada',o.fecha_guia?dia(o.fecha_guia):'—')
+      f('Último movimiento',(o.fecha_ult_mov?dia(o.fecha_ult_mov):'—')+(o.ult_mov?`<div style="font-size:11px;color:var(--muted)">${esc(o.ult_mov)}</div>`:''))
+      f('Destino',esc([o.ciudad,o.departamento].filter(Boolean).join(' · ')||'—'))
+      if(o.novedad)f('Novedad',esc(o.novedad)+`<div style="font-size:11px;color:var(--muted)">${o.novedad_fecha?dia(o.novedad_fecha):''}${o.novedad_solucionada?' · solucionada: '+esc(o.novedad_solucionada):''}</div>`)
+      if(o.notas)f('Nota de la orden',esc(o.notas))
+      if(o.obs_cancelacion||o.fecha_cancelacion){
+        const t=o.cancel_tipo||X.cancelTipo(o.obs_cancelacion)
+        f('Cancelación',esc(o.obs_cancelacion||'—')+`<div style="font-size:11px;color:var(--muted)">${t?esc(X.CANCEL_TXT[t]||t):''}${o.fecha_cancelacion?' · '+dia(o.fecha_cancelacion):''}${X.noCuenta(t)?' · NO cuenta como cancelada':''}</div>`)
+      }
+      if(adm&&(o.total!=null||o.flete!=null))f('Plata (solo la ves tú)',`total ${pesos(o.total)} · flete ${pesos(o.flete)}`)
+      f('Datos de Dropi al',o.fecha_reporte?dia(o.fecha_reporte):'—')
+    }
+    let ven=''
+    const v=R&&R.venta
+    if(v){
+      ven=`<div style="font-size:12.5px;margin-top:8px">🔗 Venta de NEXO del <b>${dia(v.fecha)}</b> · ${esc(v.producto||'')} · NEXO: ${esc(v.estado_final||'—')}${v.vieja?` · <span style="color:var(--amber)">era una orden VIEJA de esa venta (la actual es #${esc(v.orden_actual||'—')})</span>`:''}</div>`
+    }else if(R&&R.v015&&o){
+      ven=`<div style="font-size:12.5px;margin-top:8px;color:var(--amber)">⚠️ Esta orden no está atada a ninguna venta de NEXO.${R.telefono?' NEXO encontró a la clienta por su teléfono (huella).':(o.con_huella?' Tampoco hay ventas de NEXO con ese teléfono.':' (Para buscar a la clienta por su teléfono, sube de nuevo el Excel de órdenes con la E80.)')}</div>`
+    }
+    // la historia de la clienta (si la búsqueda por orden no la trajo y sabemos su teléfono)
+    const nCli=(d&&d.clientes||[]).length
+    let ir=''
+    if(R&&R.telefono&&!nCli){
+      const tel=String(R.telefono).replace(/\D/g,'').slice(-10)
+      if(tel.length===10)ir=`<div style="margin-top:8px"><button class="btn-sm btn-primary" onclick="window.nx80HistoriaTel('${X.idJS(pref)}','${X.idJS(tel)}')">📜 Ver la historia completa de esta clienta</button></div>`
+    }
+    // otras órdenes de la clienta en Dropi
+    let otras=''
+    const L=(R&&R.otras)||[]
+    if(L.length){
+      otras=`<details style="margin-top:10px" ${L.length<=8?'open':''}><summary style="cursor:pointer;font-size:12.5px;font-weight:600">🗂️ Otras órdenes de esta clienta en Dropi (${fmt(R.n_otras||L.length)}${(R.n_otras||0)>L.length?' · se muestran '+L.length:''})</summary>
+        <div class="table-wrap" style="margin-top:6px"><table><tr><th>Fecha</th><th>Orden</th><th>Producto</th><th>Cant.</th><th>Transportadora</th><th>Estado</th>${adm?'<th>Total</th>':''}</tr>
+        ${L.map(x=>`<tr><td>${dia(x.fecha_orden)}</td><td style="font-family:monospace">${esc(x.orden_id)}</td><td>${esc(x.producto||'')}</td><td>${esc(x.cantidad==null?'':x.cantidad)}</td><td>${esc(x.transportadora||'')}</td><td>${pill(x.clase||claseDe(x.estatus),x.cancel_tipo,x.estatus)}</td>${adm?`<td>${pesos(x.total)}</td>`:''}</tr>`).join('')}
+        </table></div></details>`
+    }else if(R&&!R.v015&&o){
+      otras=R.motivo==='fallo'?`<div style="font-size:11px;color:var(--amber);margin-top:8px">⚠️ La búsqueda completa no respondió (${esc(R.err||'sin detalle')}): se muestra solo la ficha. Vuelve a buscar en un momento.</div>`
+        :`<div style="font-size:11px;color:var(--muted);margin-top:8px">Cuando se corra el SQL v015 aquí salen también las otras órdenes de esta clienta en Dropi.</div>`
+    }
+    return `<div class="card" id="nx80-orden" style="border:2px solid var(--accent);margin-bottom:12px">${cab}
+      ${filas.length?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px 14px;margin-top:10px">${filas.join('')}</div>`:''}
+      ${ven}${ir}${otras}</div>`
+  }
+  // marca la venta de esa orden en la tabla de ventas de la clienta
+  function marcarVenta(res,dig){
+    try{
+      res.querySelectorAll('td').forEach(td=>{
+        if(!/monospace/.test(td.getAttribute('style')||''))return
+        const nums=(td.textContent||'').replace(/\D+/g,' ').trim().split(' ')
+        if(!nums.includes(dig))return
+        const tr=td.closest('tr');if(!tr||tr.dataset.nx80)return
+        tr.dataset.nx80='1';tr.style.outline='2px solid var(--accent)';tr.style.background='rgba(99,102,241,.10)'
+        td.insertAdjacentHTML('beforeend',' <span style="font-size:10px;color:var(--accent);font-weight:700">⬅️ esta orden</span>')
+      })
+    }catch(_){}
+  }
+  window.nx80HistoriaTel=function(pref,tel){
+    try{
+      const card=document.getElementById('nx80-orden')
+      window._nx80Pin={html:card?card.outerHTML:'',tel:String(tel),en:Date.now()}
+      const i=document.getElementById(pref+'-q');if(!i)return
+      i.value=tel
+      window.nxHistoria.buscarClic(pref)
+    }catch(e){console.warn('[E80 orden]',e)}
+  }
+  async function trasBuscar(res,d,q){
+    if(!res)return
+    const pref=String(res.id||'').replace(/-res$/,'')
+    // a) la historia que se abrió desde la ficha: la ficha queda arriba
+    const pin=window._nx80Pin
+    if(pin&&Date.now()-pin.en<120000&&String(q).replace(/\D/g,'').endsWith(pin.tel)){
+      window._nx80Pin=null
+      if(pin.html&&!res.querySelector('#nx80-orden'))res.insertAdjacentHTML('afterbegin',pin.html)
+      return
+    }
+    const dig=X.esOrden(q)||(((d&&d.buscado&&d.buscado.tipo)==='orden')?String(q).replace(/\D/g,''):null)
+    if(!dig)return
+    // b) "12.345.678" o "# 12 345 678": la base solo entiende las cifras → se busca otra vez con las cifras (1 sola vez)
+    const nada=!((d&&d.clientes)||[]).length&&!((d&&d.ventas_sueltas)||[]).length
+    if(nada&&String(q).trim()!==dig&&String(q).trim()!=='#'+dig&&window._nx80Rebusca!==dig){
+      const i=document.getElementById(pref+'-q')
+      if(i){window._nx80Rebusca=dig;i.value=dig;setTimeout(()=>{try{window.nxHistoria.buscarClic(pref)}catch(_){}},0);return}
+    }
+    window._nx80Rebusca=null
+    const caja=document.createElement('div');caja.innerHTML='<div class="loading" style="padding:14px">🧾 Buscando la orden en Dropi…</div>'
+    res.insertBefore(caja,res.firstChild)
+    let R=null
+    try{R=await verOrden(dig)}catch(e){console.warn('[E80 orden]',e)}
+    if(!R){caja.remove();return}
+    caja.outerHTML=fichaHTML(dig,R,d,pref)
+    marcarVenta(res,dig)
+    try{logAction('orden_buscada',{v015:!!R.v015,encontrada:!!R.orden,via:R.via||null,otras:R.n_otras||0})}catch(_){}
+  }
+  // se engancha DESPUÉS del gancho de la E78 (el que pinta los teléfonos de un @usuario): ambos corren
+  const _e78=window._e78HistUsuario
+  window._e78HistUsuario=function(res,d,q){
+    let r
+    try{if(typeof _e78==='function')r=_e78.apply(this,arguments)}
+    finally{trasBuscar(res,d,q).catch(e=>console.warn('[E80 orden]',e))}
+    return r
+  }
+
+  // ───────────── 3) el buscador morado de la auxiliar: un # de orden abre la Historia del cliente ─────────────
+  const _abp=window.auxBuscarPedido
+  if(typeof _abp==='function'){
+    window.auxBuscarPedido=async function(){
+      try{
+        const inp=document.getElementById('aux-buscar-tel')
+        const v=inp?String(inp.value||''):'',dig=X.esOrden(v)
+        // con 🏠 Modo Centro el buscador abre el Centro de Chats: ahí solo se desvía lo que empieza con # (sin #, como siempre)
+        let centro=false;try{centro=!!(_modoCentroOn()&&typeof window._wchAbrir==='function')}catch(_){}
+        if(dig&&(!centro||/^\s*#/.test(v))&&window.nxHistoria&&window.nxHistoria.puedeHistoria()){
+          const res=document.getElementById('aux-buscar-res');if(res)res.innerHTML=''
+          if(currentPage==='aux-historia'){const i=document.getElementById('nxh-q');if(i){i.value='#'+dig;window.nxHistoria.buscarClic('nxh');return}}
+          window._nxHistoriaPendiente='#'+dig
+          navigate('aux-historia');return
+        }
+      }catch(e){console.warn('[E80 buscador]',e)}
+      return _abp.apply(this,arguments)
+    }
+  }
+  const _inj=window.auxInjectSearchBar
+  if(typeof _inj==='function'){
+    window.auxInjectSearchBar=function(){
+      const r=_inj.apply(this,arguments)
+      try{const i=document.getElementById('aux-buscar-tel');if(i&&!i.dataset.nx80){i.dataset.nx80='1';i.placeholder='🔍 Teléfono del pedido o # de orden de Dropi…'}}catch(_){}
+      return r
+    }
+  }
+})()
+// ═══ FIN (02oct26 · E80) BUSCAR POR NÚMERO DE ORDEN + datos nuevos de cada orden ═══
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// 🏭 (02oct26 · E80) ID DE DROPI + BODEGA (mejora 8)
+//  · 📜 Historial de IDs de Dropi: cada ID con su BODEGA (lista de bodegas conocidas · 💡 la sugerida = la de su proveedor ·
+//    ➕ Nueva bodega). Se guarda en producto_dropi_ids.bodega_dropi_id (SQL v015; sin él lo avisa y no guarda nada).
+//  · ⚙️ Configuración: debajo del ID de Dropi dice de qué bodega sale (o "sin definir").
+//  · 📊 Cruce Dropi: aviso de ID de producto NUEVO (un PRODUCTO ID del Excel que ningún producto de NEXO tiene),
+//    con cuántas órdenes trae y qué hacer. Se puede callar por ID ("ya sé, no es mío").
+// Interruptor: window.NX_E80_OFF=true = la E79 exacta.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+;(function(){
+  if(window.NX_E80_OFF)return
+  const esc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
+  const idJS=(s)=>String(s==null?'':s).replace(/[^A-Za-z0-9_\-]/g,'') // dentro de onclick="…('ID')": nunca comillas ni barras
+  const esAdmin=()=>{try{return currentRol()==='admin'}catch(_){return false}}
+  const sinCol=(e)=>{const t=String((e&&e.message)||'')+' '+String((e&&e.code)||'');return /PGRST204|42703|bodega_dropi_id|schema cache/i.test(t)}
+  const B={bods:null,en:0,cfg:null,provs:null,sinV015:false}
+  async function bodegas(forzar){
+    if(B.bods&&!forzar&&Date.now()-B.en<5*60000)return B.bods
+    const{data,error}=await sb.from('dropi_bodegas').select('dropi_id,nombre,ciudad,departamento').order('nombre')
+    B.bods=error?[]:(data||[]);B.en=Date.now()
+    return B.bods
+  }
+  const bodTxt=(b)=>b?`${b.nombre||('Bodega '+b.dropi_id)}${b.ciudad?' · '+b.ciudad:''}`:''
+  const bodDe=(id)=>(B.bods||[]).find(b=>String(b.dropi_id)===String(id))||null
+  // la bodega sugerida para un producto: la que se eligió para SU proveedor en "🚚 Cotizar desde" → la vinculada a su
+  // proveedor → la "Por defecto" (las mismas 3 de la Hoja Base al cotizar)
+  async function sugerida(prodId){
+    let cfg={},provs=[]
+    try{const{data}=await sb.from('config').select('valor').eq('clave','dropi_bodega_cotizar').maybeSingle();if(data&&data.valor)cfg=typeof data.valor==='string'?JSON.parse(data.valor):data.valor}catch(_){}
+    try{const{data}=await sb.from('proveedores').select('id,nombre,product_ids,bodega_dropi_id');provs=data||[]}catch(_){}
+    const pv=provs.find(p=>(Array.isArray(p.product_ids)?p.product_ids:[]).map(String).includes(String(prodId)))
+    if(pv){
+      const el=cfg&&cfg.porProveedor&&cfg.porProveedor[String(pv.id)]
+      if(el&&el.id)return {id:String(el.id),nombre:el.nombre||'',porque:'la que elegiste para su proveedor ('+(pv.nombre||'')+') en 🚚 Cotizar desde'}
+      if(pv.bodega_dropi_id!=null&&String(pv.bodega_dropi_id).trim()!=='')return {id:String(pv.bodega_dropi_id),nombre:'',porque:'la vinculada a su proveedor ('+(pv.nombre||'')+')'}
+    }
+    if(cfg&&cfg.defecto&&cfg.defecto.id)return {id:String(cfg.defecto.id),nombre:cfg.defecto.nombre||'',porque:'la "Por defecto" de 🏭 Bodegas'}
+    return null
+  }
+  function opciones(sel){
+    const L=(B.bods||[]).slice()
+    if(sel&&!L.some(b=>String(b.dropi_id)===String(sel)))L.unshift({dropi_id:sel,nombre:'Bodega '+sel})
+    return `<option value="">— sin definir —</option>`+L.map(b=>`<option value="${esc(b.dropi_id)}" ${String(b.dropi_id)===String(sel||'')?'selected':''}>${esc(bodTxt(b))} (#${esc(b.dropi_id)})</option>`).join('')+`<option value="__nueva">➕ Nueva bodega…</option>`
+  }
+  async function enHistorial(prodId){
+    const cont=document.getElementById('hist-dropi-body');if(!cont)return
+    const q=await sb.from('producto_dropi_ids').select('id,dropi_id,bodega_dropi_id').eq('producto_id',prodId)
+    B.sinV015=!!(q.error&&sinCol(q.error))
+    if(q.error&&!B.sinV015)return
+    await bodegas()
+    const sug=await sugerida(prodId)
+    const filas=B.sinV015?[]:(q.data||[])
+    if(!document.body.contains(cont))return
+    if(B.sinV015&&!cont.querySelector('#nx80-bod-aviso')){
+      cont.insertAdjacentHTML('afterbegin',`<div id="nx80-bod-aviso" class="alert alert-amber" style="font-size:11.5px;margin-bottom:8px">🏭 Para guardar la <b>bodega</b> de cada ID falta correr en Supabase el <b>SQL v015</b> (NEXO_SQL_PRODUCTOS_v015).${sug?` Mientras tanto, la bodega sugerida para este producto es <b>${esc(sug.nombre||bodTxt(bodDe(sug.id))||'#'+sug.id)}</b> (${esc(sug.porque)}).`:''}</div>`)
+      return
+    }
+    for(const r of filas){
+      const inp=document.getElementById('hd-desde-'+r.id);if(!inp)continue
+      const fila=inp.closest('div[style*="align-items:flex-end"]');if(!fila||fila.parentElement.querySelector('.nx80-bod'))continue
+      const sel=r.bodega_dropi_id||''
+      const sugBtn=(!sel&&sug)?`<button type="button" class="btn-sm" style="font-size:10.5px;padding:3px 8px;border:1px dashed var(--accent);background:transparent;color:var(--text)" onclick="nx80BodegaGuardar('${idJS(prodId)}','${idJS(r.id)}','${idJS(sug.id)}')" title="${esc(sug.porque)}">💡 Usar la sugerida: ${esc(sug.nombre||bodTxt(bodDe(sug.id))||'#'+sug.id)}</button>`:''
+      fila.insertAdjacentHTML('afterend',`<div class="nx80-bod" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:7px;font-size:11.5px">
+        <span style="color:var(--muted)">🏭 Bodega:</span>
+        <select id="nx80-bod-${esc(r.id)}" data-prev="${esc(sel)}" style="font-size:11px;padding:3px 6px;max-width:280px" onchange="nx80BodegaCambio('${idJS(prodId)}','${idJS(r.id)}',this)">${opciones(sel)}</select>
+        ${sugBtn}<span id="nx80-bod-msg-${esc(r.id)}" style="color:var(--muted)"></span></div>
+        <div id="nx80-bod-nueva-${esc(r.id)}"></div>`)
+    }
+  }
+  window.nx80BodegaCambio=function(prodId,rowId,el){
+    if(el.value==='__nueva'){
+      el.value=el.dataset.prev||''
+      const box=document.getElementById('nx80-bod-nueva-'+rowId);if(!box)return
+      const inp='font-size:11px;padding:4px 6px'
+      box.innerHTML=`<div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin-top:6px;padding:8px;border:1px dashed var(--accent);border-radius:8px">
+        <div><div style="font-size:10px;color:var(--muted)">ID de la bodega en Dropi</div><input id="nx80-nb-id-${esc(rowId)}" inputmode="numeric" placeholder="Ej: 1234" style="${inp};width:90px;font-family:monospace"></div>
+        <div><div style="font-size:10px;color:var(--muted)">Nombre</div><input id="nx80-nb-nom-${esc(rowId)}" placeholder="Ej: Bodega Medellín" style="${inp};width:150px"></div>
+        <div><div style="font-size:10px;color:var(--muted)">Ciudad</div><input id="nx80-nb-ciu-${esc(rowId)}" style="${inp};width:110px"></div>
+        <div><div style="font-size:10px;color:var(--muted)">Departamento</div><input id="nx80-nb-dep-${esc(rowId)}" style="${inp};width:110px"></div>
+        <button type="button" class="btn-sm btn-primary" style="font-size:11px;padding:4px 9px" onclick="nx80BodegaNueva('${idJS(prodId)}','${idJS(rowId)}')">💾 Crear y usar</button>
+        <button type="button" class="btn-sm btn-outline" style="font-size:11px;padding:4px 9px" onclick="document.getElementById('nx80-bod-nueva-${idJS(rowId)}').innerHTML=''">Cancelar</button>
+        <div style="flex-basis:100%;font-size:10.5px;color:var(--muted)">El ID de la bodega sale en Dropi (Mis bodegas, o al editar un pedido de ese producto). Si no lo sabes, no la crees todavía.</div></div>`
+      return
+    }
+    window.nx80BodegaGuardar(prodId,rowId,el.value)
+  }
+  window.nx80BodegaNueva=async function(prodId,rowId){
+    const v=(k)=>{const e=document.getElementById('nx80-nb-'+k+'-'+rowId);return e?String(e.value||'').trim():''}
+    const id=v('id').replace(/\D/g,''),nom=v('nom'),msg=document.getElementById('nx80-bod-msg-'+rowId)
+    if(!id||!nom){if(msg)msg.innerHTML='<span style="color:var(--amber)">Pon el ID (solo números) y el nombre.</span>';return}
+    await bodegas(true)
+    const ya=bodDe(id)
+    if(!ya){ // si ya existe (la trajo la extensión de Dropi), NO se pisa: se usa la que ya estaba
+      const fila={dropi_id:Number(id),nombre:nom}
+      if(v('ciu'))fila.ciudad=v('ciu');if(v('dep'))fila.departamento=v('dep')
+      const{error}=await sb.from('dropi_bodegas').upsert(fila,{onConflict:'dropi_id',ignoreDuplicates:true})
+      if(error){if(msg)msg.innerHTML=`<span style="color:var(--red)">❌ No se pudo crear: ${esc(error.message)}</span>`;return}
+      try{logAction('bodega_creada',{dropi_id:id,nombre:nom,desde:'historial_ids'})}catch(_){}
+      await bodegas(true)
+    }
+    const box=document.getElementById('nx80-bod-nueva-'+rowId);if(box)box.innerHTML=''
+    const sel=document.getElementById('nx80-bod-'+rowId);if(sel)sel.innerHTML=opciones(id)
+    await window.nx80BodegaGuardar(prodId,rowId,id)
+    if(ya&&msg)msg.innerHTML=`<span style="color:var(--green)">✅ esa bodega ya existía (${esc(bodTxt(ya))}): se usó la que estaba</span>`
+  }
+  window.nx80BodegaGuardar=async function(prodId,rowId,val){
+    const msg=document.getElementById('nx80-bod-msg-'+rowId),sel=document.getElementById('nx80-bod-'+rowId)
+    if(msg)msg.textContent='⏳ guardando…'
+    const{error}=await sb.from('producto_dropi_ids').update({bodega_dropi_id:val?String(val):null}).eq('id',rowId)
+    if(error){if(msg)msg.innerHTML=sinCol(error)?'<span style="color:var(--amber)">falta el SQL v015 en Supabase</span>':`<span style="color:var(--red)">❌ ${esc(error.message)}</span>`;return}
+    if(sel){sel.value=val||'';sel.dataset.prev=val||''}
+    if(msg){msg.innerHTML='<span style="color:var(--green)">✅ guardada</span>';setTimeout(()=>{if(msg)msg.textContent=''},4000)}
+    try{logAction('bodega_de_id',{producto_id:prodId,fila:rowId,bodega:val||null})}catch(_){}
+    try{const b=document.querySelector('#nx80-bod-'+CSS.escape(rowId));if(b){const s=b.parentElement.querySelector('button[onclick^="nx80BodegaGuardar"]');if(s)s.remove()}}catch(_){}
+    try{etiqueta(prodId)}catch(_){}
+  }
+  // debajo del ID de Dropi en ⚙️ Configuración: de qué bodega sale el ID vigente
+  async function etiqueta(prodId){
+    const inp=document.getElementById('pdropi-'+prodId);if(!inp)return
+    const q=await sb.from('producto_dropi_ids').select('dropi_id,bodega_dropi_id,vigente_hasta').eq('producto_id',prodId).is('vigente_hasta',null).limit(1)
+    if(q.error)return // sin el SQL v015 no se dice nada
+    await bodegas()
+    const r=(q.data||[])[0]
+    let tag=document.getElementById('nx80-bodtag-'+prodId)
+    if(!tag){tag=document.createElement('div');tag.id='nx80-bodtag-'+prodId;tag.style.cssText='font-size:11px;color:var(--muted);margin-top:3px';inp.parentElement.appendChild(tag)}
+    if(!r){tag.textContent='';return}
+    const b=r.bodega_dropi_id?bodDe(r.bodega_dropi_id):null
+    tag.innerHTML=r.bodega_dropi_id?`🏭 Sale de: <b style="color:var(--text)">${esc(b?bodTxt(b):'Bodega #'+r.bodega_dropi_id)}</b>`:`🏭 Bodega: <span style="color:var(--amber)">sin definir</span> → <a style="cursor:pointer;text-decoration:underline" onclick="verHistorialDropiIds('${idJS(prodId)}')">ponla en 📜 Historial de IDs</a>`
+  }
+
+  // enganches: el historial de IDs y la tarjeta del producto se pintan igual que antes y DESPUÉS se agrega la bodega
+  const _histE79=_renderHistDropiBody
+  _renderHistDropiBody=async function(prodId){
+    const r=await _histE79.apply(this,arguments)
+    try{await enHistorial(prodId)}catch(e){console.warn('[E80 bodega]',e)}
+    return r
+  }
+  try{if(typeof window._renderHistDropiBody==='function')window._renderHistDropiBody=_renderHistDropiBody}catch(_){}
+  const _bodyE79=renderProdBody
+  renderProdBody=async function(id){
+    const r=await _bodyE79.apply(this,arguments)
+    try{await etiqueta(id)}catch(e){console.warn('[E80 bodega]',e)}
+    return r
+  }
+
+  // ───────────── 📊 Cruce Dropi: aviso de ID de producto NUEVO ─────────────
+  const LS='nx80_ids_callados'
+  const callados=()=>{try{return JSON.parse(localStorage.getItem(LS)||'[]')}catch(_){return []}}
+  function idsNuevos(rows){
+    const por={}
+    for(const r of (rows||[])){
+      const id=String(r['PRODUCTO ID']==null?'':r['PRODUCTO ID']).replace(/\D/g,'')
+      if(!id||id==='0')continue
+      const x=por[id]||(por[id]={id,n:0,nombre:String(r['PRODUCTO']||'').trim().slice(0,60),ordenes:new Set()})
+      x.ordenes.add(String(r['ID']||''))
+    }
+    const callar=new Set(callados())
+    const L=Object.values(por).filter(x=>!resolveProdByDropiId(x.id)&&!callar.has(x.id)).map(x=>({id:x.id,nombre:x.nombre,n:x.ordenes.size}))
+    window._nx80IdsNuevos={en:Date.now(),lista:L.sort((a,b)=>b.n-a.n)}
+  }
+  function pintarAviso(){
+    const A=window._nx80IdsNuevos,cont=document.getElementById('dropi-resultado')
+    if(!A||!cont||Date.now()-A.en>10*60000||!A.lista.length)return
+    const viejo=document.getElementById('nx80-ids-nuevos');if(viejo)viejo.remove()
+    const adm=esAdmin()
+    const div=document.createElement('div');div.id='nx80-ids-nuevos';div.className='dropi-health bad';div.style.marginBottom='10px'
+    div.innerHTML=`<b>🆔 ID de producto NUEVO en este Excel</b> — ningún producto de NEXO lo tiene, así que sus órdenes no se cuentan en ese producto:
+      <div style="margin:6px 0">${A.lista.slice(0,8).map(x=>`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:2px 0"><b style="font-family:monospace">${esc(x.id)}</b> · ${esc(x.nombre||'(sin nombre)')} · ${x.n} ${x.n===1?'orden':'órdenes'} <button type="button" class="btn-sm btn-outline" style="font-size:10.5px;padding:2px 7px" onclick="nx80IdCallar('${idJS(x.id)}',this)">🙈 No es mío, no avisar más</button></div>`).join('')}${A.lista.length>8?`<div>… y ${A.lista.length-8} más</div>`:''}</div>
+      👉 ${adm?'Si es un producto tuyo que cambió de ID (Neocell tuvo al menos 7 en 6 meses): Productos → ⚙️ el producto → <b>📜 Historial de IDs</b> → ➕ Agregar (con su 🏭 bodega). Después vuelve a procesar este Excel.':'Avísale a la dueña: ella lo registra en Productos → 📜 Historial de IDs.'}`
+    cont.insertBefore(div,cont.firstChild)
+  }
+  window.nx80IdCallar=function(id,btn){
+    try{const L=callados();if(!L.includes(id))L.push(id);localStorage.setItem(LS,JSON.stringify(L.slice(-200)))}catch(_){}
+    const fila=btn&&btn.parentElement;if(fila)fila.remove()
+    const A=window._nx80IdsNuevos;if(A)A.lista=A.lista.filter(x=>x.id!==id)
+    if(A&&!A.lista.length){const d=document.getElementById('nx80-ids-nuevos');if(d)d.remove()}
+  }
+  const _guardar=window.nxDropiOrdenesGuardar
+  if(typeof _guardar==='function'){
+    window.nxDropiOrdenesGuardar=function(rows,fuente){
+      try{if(fuente==='cruce')idsNuevos(rows)}catch(e){console.warn('[E80 ids]',e)}
+      return _guardar.apply(this,arguments)
+    }
+  }
+  const _proc=window.procesarDropi
+  if(typeof _proc==='function'){
+    window.procesarDropi=async function(){
+      window._nx80IdsNuevos=null
+      const r=await _proc.apply(this,arguments)
+      try{pintarAviso()}catch(e){console.warn('[E80 ids]',e)}
+      return r
+    }
+  }
+  window.nx80Bodega={sugerida,bodegas,idsNuevos,_B:B}
+})()
+// ═══ FIN (02oct26 · E80) ID DE DROPI + BODEGA · aviso de ID nuevo en el Cruce ═══
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// 🔄 (02oct26 · E80) "RECALCULAR AHORA" POR PRODUCTO Y UNO ARRIBA PARA TODOS (mejora 4)
+//  · Arriba en Productos: "🔄 Recalcular todos (🤖)" → el robot calcula YA y sale una tabla: cada producto con su
+//    devolución, costo de 1 devolución y confirmación ANTES → AHORA (lo que cambió en negrita) y la tienda.
+//  · En el 🤖 de cada producto, el "🔄 Recalcular ahora" de siempre ahora también dice cómo quedó ESE producto
+//    (antes → ahora).
+//  · No hizo falta una función nueva en Supabase: el robot (nx_econ_ahora) recalcula toda la tienda en un solo paso
+//    (la tienda es la base de la mezcla de cada producto) y tarda ~1 segundo; aquí solo se muestra mejor.
+//  · Solo la admin (igual que el robot).
+// Interruptor: window.NX_E80_OFF=true = la E79 exacta.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+;(function(){
+  if(window.NX_E80_OFF)return
+  const esc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
+  const esAdmin=()=>{try{return currentRol()==='admin'}catch(_){return false}}
+  const pct=(v)=>(v==null||v==='')?'—':(Number(v)*100).toFixed(1).replace('.',',')+' %'
+  const pesos=(v)=>(v==null||v==='')?'—':'$'+fmt(Number(v)||0)
+  const CAMPOS=[['dev_pct','Devolución',pct],['dev_costo','1 devolución cuesta',pesos],['pct_conf','Confirmación',pct]]
+  const snap=()=>{try{const S=window.nxEcon&&window.nxEcon._S;return JSON.parse(JSON.stringify((S&&S.prod)||{}))}catch(_){return {}}}
+  const snapT=()=>{try{const S=window.nxEcon&&window.nxEcon._S;return JSON.parse(JSON.stringify((S&&S.tienda)||{}))}catch(_){return {}}}
+  const igual=(x,y)=>(x==null&&y==null)||(x!=null&&y!=null&&Math.abs(Number(x)-Number(y))<1e-9)
+  const celda=(f,x,y)=>igual(x,y)?f(y):`<span style="color:var(--muted)">${f(x)}</span> → <b>${f(y)}</b>`
+  const nombre=(pid)=>(((typeof productos!=='undefined'&&productos)||[]).find(p=>String(p.id)===String(pid))||{}).nombre||null
+
+  // ── en el 🤖 de cada producto: el botón de siempre + cómo quedó ESE producto ──
+  const _rec=window.nxEconRecalcular
+  if(typeof _rec==='function'){
+    window.nxEconRecalcular=async function(btn,id){
+      try{if(window.nxEcon&&window.nxEcon.cargar)await window.nxEcon.cargar()}catch(_){}
+      const antes=snap()
+      const r=await _rec.apply(this,arguments)
+      try{
+        const k=String(id||''),a=antes[k],b=snap()[k],msg=document.getElementById('nx-econ-msg-'+k)
+        if(k&&b&&msg&&!/❌/.test(msg.textContent||'')){
+          const partes=CAMPOS.map(([c,lab,f])=>`${lab} ${celda(f,a&&a[c],b[c])}`)
+          msg.insertAdjacentHTML('beforeend',`<div class="nx80-rec" style="font-size:11.5px;margin-top:4px;line-height:1.5">📦 Este producto: ${partes.join(' · ')}${b.n_confirmados!=null?` · ${fmt(b.n_confirmados)} confirmados (90 días)`:''}</div>`)
+        }
+      }catch(_){}
+      return r
+    }
+  }
+
+  // ── arriba en Productos: 🔄 Recalcular todos ──
+  function botonTodos(){
+    if(!esAdmin()||!(window._nxE&&window._nxE()))return
+    if(document.getElementById('nx80-recalc-todos'))return
+    const ref=document.getElementById('btn-esc3-reparar')||document.getElementById('btn-rematch-nulls')||document.getElementById('btn-toggle-archivados')
+    if(!ref)return
+    ref.insertAdjacentHTML('afterend',`<button class="btn-sm btn-outline" id="nx80-recalc-todos" onclick="nx80RecalcTodos(this)" style="border-color:var(--green);color:var(--green)" title="El 🤖 vuelve a calcular YA los números reales de TODOS los productos (devolución, costo de 1 devolución y confirmación) con los datos de hoy. Solo lo hace cada noche a las 3:20 a. m.">🔄 Recalcular todos (🤖)</button>`)
+    ref.parentElement.insertAdjacentHTML('afterend','<div id="nx80-recalc-res"></div>')
+  }
+  window.nx80RecalcTodos=async function(btn){
+    const E=window.nxEcon,box=document.getElementById('nx80-recalc-res')
+    if(!E||!box)return
+    if(btn){btn.disabled=true;btn.dataset.t=btn.textContent;btn.textContent='⏳ Recalculando todos…'}
+    box.innerHTML='<div class="loading" style="padding:14px">🤖 Calculando con los datos de hoy…</div>'
+    try{if(E.cargar)await E.cargar()}catch(_){}
+    const antes=snap(),tA=snapT()
+    try{
+      const r=await E.recalcular()
+      const desp=snap(),tD=snapT()
+      const ids=Object.keys(desp).filter(k=>nombre(k)).sort((x,y)=>(Number(desp[y].n_confirmados)||0)-(Number(desp[x].n_confirmados)||0))
+      const nCamb=ids.filter(k=>CAMPOS.some(([c])=>!igual(antes[k]&&antes[k][c],desp[k][c]))).length
+      box.innerHTML=`<div class="card" style="padding:14px;margin-bottom:16px;border:1px solid var(--green)">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+          <div style="font-size:15px;font-weight:600">✅ Listo · ${fmt(r&&r.productos!=null?r.productos:ids.length)} productos recalculados · ${nCamb} cambiaron</div>
+          <button class="btn-sm btn-outline" style="font-size:11px;padding:3px 9px" onclick="document.getElementById('nx80-recalc-res').innerHTML=''">Cerrar</button></div>
+        <div style="font-size:12px;color:var(--muted);margin:4px 0 8px">🏪 Toda la tienda: devolución ${celda(pct,tA.dev_pct,tD.dev_pct)} · 1 devolución cuesta ${celda(pesos,tA.dev_costo,tD.dev_costo)} · confirmación ${celda(pct,tA.pct_conf,tD.pct_conf)}${r&&r.datos_de_dropi_al?' · datos de Dropi al '+esc(r.datos_de_dropi_al):''}</div>
+        <div class="table-wrap"><table><tr><th>Producto</th><th>Confirmados (90 días)</th><th>↩️ Devolución</th><th>💸 1 devolución cuesta</th><th>✅ Confirmación</th></tr>
+        ${ids.map(k=>{const a=antes[k]||{},b=desp[k]||{};return `<tr><td>${esc(nombre(k))}${b.manual&&Object.keys(b.manual).length?' <span title="tiene números puestos a mano (🔒): el robot no los toca">🔒</span>':''}</td><td style="text-align:center">${fmt(b.n_confirmados||0)}</td><td style="text-align:center">${celda(pct,a.dev_pct,b.dev_pct)}</td><td style="text-align:center">${celda(pesos,a.dev_costo,b.dev_costo)}</td><td style="text-align:center">${celda(pct,a.pct_conf,b.pct_conf)}</td></tr>`}).join('')}
+        </table></div>
+        <div style="font-size:10.5px;color:var(--muted);margin-top:6px">En gris lo de antes → en negrita lo de ahora. Los productos con pocos pedidos se mezclan con el promedio de la tienda (con 50 confirmados, mitad y mitad). Lo puesto a mano (🔒) no cambia.</div></div>`
+      try{logAction('econ_recalculado_todos',{productos:r&&r.productos,cambiaron:nCamb})}catch(_){}
+    }catch(e){box.innerHTML=`<div class="alert alert-red" style="margin-bottom:12px">❌ No se pudo recalcular: ${esc(String((e&&e.message)||e).slice(0,160))}</div>`}
+    finally{if(btn){btn.disabled=false;btn.textContent=btn.dataset.t||'🔄 Recalcular todos (🤖)'}}
+  }
+  const _pap=pageAdminProductos
+  pageAdminProductos=async function(c){
+    const r=await _pap.apply(this,arguments)
+    try{botonTodos()}catch(e){console.warn('[E80 recalcular]',e)}
+    return r
+  }
+})()
+// ═══ FIN (02oct26 · E80) RECALCULAR AHORA por producto + 🔄 Recalcular todos ═══
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// 📅 (02oct26 · E80) RECORDATORIO DE ENVÍO PROGRAMADO EN EL CRUCE DROPI (mejora 10)
+//  · Arriba del Cruce Dropi: "⏰ Mañana salen N envíos programados → reconfírmalos HOY" (por producto) + los de hoy +
+//    los de días pasados que siguen sin resolver, con el botón a 🔍 Confirmar y recuperar (ahí están las tarjetas).
+//  · 📊 ¿Cuántos se salvan? Por producto, de los envíos programados de los últimos 60 días: cuántos SALIERON, cuántos se
+//    cancelaron y cuántos siguen sin resolver. Solo cuenta si sale el MISMO producto de la venta programada (si la clienta
+//    compra otro producto, es otra venta y va aparte).
+//    Dato real (análisis v003, jul-sep): de los "confirmado" que NO salen el mismo día se pierden 54 de cada 100.
+//  · Solo LEE (programaciones_envio + mapeos + dropi_ordenes): no cambia nada de "Programar envío".
+// Interruptor: window.NX_E80_OFF=true = la E79 exacta.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+;(function(){
+  if(window.NX_E80_OFF)return
+  const esc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
+  const DIAS=['dom','lun','mar','mié','jue','vie','sáb'],MESES=['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic']
+  const dt=(s)=>new Date(s+'T12:00:00Z')
+  const sumar=(s,n)=>{const d=dt(s);d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10)}
+  const diaTxt=(s)=>{const d=dt(s);return `${DIAS[d.getUTCDay()]} ${d.getUTCDate()} ${MESES[d.getUTCMonth()]}`}
+  const hoyCO=()=>{try{return today()}catch(_){return new Date().toLocaleDateString('en-CA',{timeZone:'America/Bogota'})}}
+  const SALIO=new Set(['entregado','devuelto','abierto','perdido'])
+  const nombreProd=(m)=>{const p=((typeof productos!=='undefined'&&productos)||[]).find(x=>String(x.id)===String(m&&m.producto_id));return (p&&p.nombre)||(m&&m.producto)||'(sin producto)'}
+  // de a 100 y con páginas (Supabase devuelve máximo 1.000 filas por consulta: así nunca se pierde ninguna)
+  async function porLotes(tabla,cols,campo,ids,ordenPor){
+    const out=[]
+    for(let i=0;i<ids.length;i+=100){
+      const lote=ids.slice(i,i+100)
+      const r=await _sbFetchAll((a,b)=>sb.from(tabla).select(cols).in(campo,lote).order(ordenPor||campo,{ascending:true}).range(a,b))
+      if(r.error)return {error:r.error,data:out}
+      out.push(...(r.data||[]))
+    }
+    return {error:null,data:out}
+  }
+  async function datos(){
+    const hoy=window.NX80_HOY_PROG||hoyCO(),d60=sumar(hoy,-60),man=sumar(hoy,1)
+    const r=await _sbFetchAll((a,b)=>sb.from('programaciones_envio').select('mapeo_id')
+      .gte('fecha_envio_programada',d60).lte('fecha_envio_programada',man).order('id',{ascending:true}).range(a,b))
+    if(r.error)throw new Error(r.error.message||String(r.error))
+    const cand=[...new Set((r.data||[]).map(p=>String(p.mapeo_id||'')).filter(Boolean))]
+    // TODAS las programaciones de esas ventas (sin fecha) → la ÚLTIMA de cada una (una reprogramación reemplaza a la anterior);
+    // si la última se deshizo ("Deshacer agendar") o quedó fuera de las fechas, esa venta no entra
+    const pq=await porLotes('programaciones_envio','id,mapeo_id,fecha_envio_programada,estado,motivo,created_at','mapeo_id',cand,'id')
+    if(pq.error)throw new Error(pq.error.message||String(pq.error))
+    const ult={}
+    for(const p of pq.data){const k=String(p.mapeo_id||'');if(!k)continue;const x=ult[k];if(!x||String(p.created_at||'')>String(x.created_at||'')||(String(p.created_at||'')===String(x.created_at||'')&&Number(p.id)>Number(x.id)))ult[k]=p}
+    for(const k of Object.keys(ult)){const p=ult[k];if(/^deshacer agendar/i.test(String(p.motivo||''))||!(p.fecha_envio_programada>=d60&&p.fecha_envio_programada<=man))delete ult[k]}
+    const ids=Object.keys(ult)
+    const mq=await porLotes('mapeos','id,producto_id,producto,estado_final,dropi_order_id,fecha','id',ids,'id')
+    if(mq.error)throw new Error(mq.error.message||String(mq.error))
+    const mapeo={};for(const m of mq.data)mapeo[String(m.id)]=m
+    const oids=[...new Set(mq.data.map(m=>String(m.dropi_order_id||'').replace(/\D/g,'')).filter(Boolean))]
+    let ord={}
+    const oq=await porLotes('dropi_ordenes','orden_id,estatus,obs_cancelacion','orden_id',oids)
+    if(oq.error){const oq2=await porLotes('dropi_ordenes','orden_id,estatus','orden_id',oids);if(!oq2.error)for(const o of oq2.data)ord[String(o.orden_id)]=o}
+    else for(const o of oq.data)ord[String(o.orden_id)]=o
+    return {hoy,man,d60,ult,mapeo,ord}
+  }
+  function resultado(m,o){
+    if(!m)return 'sin_venta'
+    const P=window.nxProd
+    const cl=P?P.clase(m,o):''
+    if(SALIO.has(cl))return 'salio'
+    if(cl==='cancelado'){
+      const t=(o&&window.nx80)?window.nx80.cancelTipo(o.obs_cancelacion):null
+      return (t&&window.nx80.noCuenta(t))?'pendiente':'cancelado'
+    }
+    return 'pendiente'
+  }
+  function html(D){
+    const {hoy,man,ult,mapeo,ord}=D
+    const activos=Object.values(ult).filter(p=>p.estado==='programado')
+    const grupo=(lista)=>{const g={};for(const p of lista){const m=mapeo[String(p.mapeo_id)];const k=nombreProd(m);g[k]=(g[k]||0)+1}return Object.entries(g).sort((a,b)=>b[1]-a[1]).map(([k,n])=>`${esc(k)} ${n}`).join(' · ')}
+    // mañana / hoy / días pasados sin resolver (solo los que siguen "programado" y la venta NO ha salido ni se canceló)
+    const sigue=(p)=>{const m=mapeo[String(p.mapeo_id)];const o=m?ord[String(m.dropi_order_id||'').replace(/\D/g,'')]:null;return resultado(m,o)==='pendiente'}
+    const deMan=activos.filter(p=>p.fecha_envio_programada===man&&sigue(p))
+    const deHoy=activos.filter(p=>p.fecha_envio_programada===hoy&&sigue(p))
+    const vencidos=activos.filter(p=>p.fecha_envio_programada<hoy&&sigue(p))
+    const ir=`<button class="btn-sm btn-primary" style="font-size:11.5px;padding:4px 10px" onclick="navigate('aux-reservado')">🔍 Ir a Confirmar y recuperar →</button>`
+    let top=''
+    if(deMan.length)top+=`<div class="alert alert-amber" style="font-size:13px;margin:8px 0;line-height:1.6">⏰ <b>Mañana (${diaTxt(man)})</b> salen <b>${deMan.length}</b> envío${deMan.length===1?'':'s'} programado${deMan.length===1?'':'s'}: ${grupo(deMan)} → <b>reconfírmalos HOY</b> (si no contestan, mañana no salen). ${ir}</div>`
+    if(deHoy.length)top+=`<div style="font-size:12.5px;margin:6px 0">📦 <b>Hoy (${diaTxt(hoy)})</b> tocan ${deHoy.length}: ${grupo(deHoy)} — deben salir hoy.</div>`
+    if(vencidos.length)top+=`<div style="font-size:12.5px;margin:6px 0;color:var(--amber)">⚠️ ${vencidos.length} programado${vencidos.length===1?'':'s'} de días pasados ${vencidos.length===1?'sigue':'siguen'} sin salir ni cancelarse: ${grupo(vencidos)}. ${deMan.length?'':ir}</div>`
+    if(!top)top=`<div style="font-size:12.5px;color:var(--muted);margin:6px 0">✅ Nada programado para mañana (${diaTxt(man)}).</div>`
+    // ¿cuántos se salvan? (programados con fecha de ayer hacia atrás, 60 días)
+    const tabla={}
+    for(const p of Object.values(ult)){
+      if(!(p.fecha_envio_programada<hoy))continue
+      const m=mapeo[String(p.mapeo_id)];if(!m)continue
+      const o=ord[String(m.dropi_order_id||'').replace(/\D/g,'')]||null
+      const k=nombreProd(m),x=tabla[k]||(tabla[k]={n:0,salio:0,cancelado:0,pendiente:0})
+      x.n++;x[resultado(m,o)]++
+    }
+    const filas=Object.entries(tabla).sort((a,b)=>b[1].n-a[1].n)
+    const tot=filas.reduce((a,[,x])=>({n:a.n+x.n,salio:a.salio+x.salio,cancelado:a.cancelado+x.cancelado,pendiente:a.pendiente+x.pendiente}),{n:0,salio:0,cancelado:0,pendiente:0})
+    const pc=(x)=>(x.salio+x.cancelado)?Math.round(x.salio*100/(x.salio+x.cancelado))+' %':'—'
+    const fila=(k,x,b)=>`<tr style="${b?'font-weight:700':''}"><td>${esc(k)}</td><td style="text-align:center">${x.n}</td><td style="text-align:center">${x.salio}</td><td style="text-align:center">${x.cancelado}</td><td style="text-align:center;color:var(--muted)">${x.pendiente}</td><td style="text-align:center;font-weight:700">${pc(x)}</td></tr>`
+    const stats=filas.length?`<details style="margin-top:6px"><summary style="cursor:pointer;font-size:12.5px;font-weight:600">📊 ¿Cuántos se salvan? — envíos programados del ${diaTxt(D.d60)} a ayer, por producto (${tot.n})</summary>
+      <div class="table-wrap" style="margin-top:6px"><table><tr><th>Producto</th><th>Programados</th><th>✅ Salieron</th><th>❌ Se cancelaron</th><th>⏳ Sin resolver</th><th>% que se salva</th></tr>
+      ${filas.map(([k,x])=>fila(k,x)).join('')}${filas.length>1?fila('TOTAL',tot,true):''}</table></div>
+      <div style="font-size:10.5px;color:var(--muted);margin-top:4px;line-height:1.5">Salió = Dropi ya le generó guía a ESA venta (entregado, devuelto o en camino). Solo cuenta si sale el MISMO producto que se programó: si la clienta compra otro, es otra venta y va aparte. % que se salva = salieron ÷ (salieron + cancelados). Las pre-cargas y re-subidas no cuentan como canceladas.</div></details>`:''
+    return `<div style="font-size:15px;font-weight:600">📅 Envíos programados</div>${top}${stats}`
+  }
+  async function montar(c){
+    if(!c||!document.body.contains(c))return
+    let box=c.querySelector('#nx80-prog')
+    if(!box){
+      box=document.createElement('div');box.id='nx80-prog';box.className='card';box.style.cssText='padding:12px 14px;margin:0 0 14px;max-width:900px'
+      const ref=c.querySelector('.aux-upload');if(ref)ref.parentElement.insertBefore(box,ref);else c.insertBefore(box,c.firstChild)
+    }
+    box.innerHTML='<div class="loading" style="padding:10px">📅 Revisando los envíos programados…</div>'
+    try{
+      const D=await datos()
+      if(document.body.contains(box))box.innerHTML=html(D)
+    }catch(e){
+      if(document.body.contains(box))box.innerHTML=`<div style="font-size:12px;color:var(--muted)">📅 No se pudieron leer los envíos programados (${esc(String((e&&e.message)||e).slice(0,100))}).</div>`
+    }
+  }
+  const _pad=pageAuxDropi
+  pageAuxDropi=async function(c){
+    const r=await _pad.apply(this,arguments)
+    try{montar(c)}catch(e){console.warn('[E80 programados]',e)}
+    return r
+  }
+  window.nx80Prog={datos,resultado,html,montar}
+})()
+// ═══ FIN (02oct26 · E80) RECORDATORIO DE ENVÍO PROGRAMADO en el Cruce Dropi ═══
 
 </script>
 </body>
